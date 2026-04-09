@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { PhaseHeader, Step, type StepStatus } from '../components/Step.js';
+import { Select } from '../components/Select.js';
 import { P } from '../components/palette.js';
 import type { Platform, Config, Installed } from '../../lib/detect.js';
 import {
@@ -41,6 +42,8 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
   ];
 
   const [steps, setSteps] = useState<StepState[]>(initial);
+  const [finished, setFinished] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
 
   // Stable index offsets
   const IDX = {
@@ -58,6 +61,8 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
     setSteps(prev => prev.map((s, idx) => idx === i ? { ...s, ...patch } : s));
 
   useEffect(() => {
+    setFinished(false);
+    setSteps(initial);
     (async () => {
       // System deps
       update(IDX.sys, { status: 'running' });
@@ -105,11 +110,15 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
         update(IDX.blossom, { status: bl.ok ? 'done' : 'error', detail: bl.detail });
       }
 
-      setTimeout(onDone, 300);
+      setFinished(true);
     })();
-  }, []);
+  }, [retryCount]);
 
   const compiling = steps.slice(IDX.relay, IDX.nak + 1).some(s => s.status === 'running');
+  const hasError  = finished && steps.some(s => s.status === 'error');
+  const allOk     = finished && !hasError;
+
+  if (allOk) setTimeout(onDone, 300);
 
   return (
     <Box flexDirection="column">
@@ -122,6 +131,21 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
           <Text color={P.muted}>
             {'Rust compilation takes 5–15 min on first install. This is normal.'}
           </Text>
+        </Box>
+      )}
+      {hasError && (
+        <Box marginTop={1} flexDirection="column">
+          <Select
+            label="One or more steps failed — what would you like to do?"
+            options={[
+              { label: 'Retry (restart install from scratch)', value: 'retry'    },
+              { label: 'Continue anyway',                      value: 'continue' },
+            ]}
+            onSelect={item => {
+              if (item.value === 'retry') setRetryCount(c => c + 1);
+              else onDone();
+            }}
+          />
         </Box>
       )}
     </Box>

@@ -9,6 +9,7 @@ import {
   EDITOR_FILENAMES,
 } from '../../lib/services.js';
 import { installNostrVpn, setupNgitBunker, generateSshKey } from '../../lib/install.js';
+import { npubToHex } from '../../lib/detect.js';
 
 interface ServicesPhaseProps {
   platform: Platform;
@@ -53,10 +54,14 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
         up(1, { status: 'done', detail: kp.npub ? `npub: ${kp.npub.slice(0, 12)}…` : undefined });
       } catch (e: any) { up(1, { status: 'error', detail: e.message }); }
 
-      // Relay config
+      // Relay config — resolve hex pubkey now that nak is installed
       up(2, { status: 'running' });
-      try { writeRelayConfig(platform, cfg); up(2, { status: 'done' }); }
-      catch (e: any) { up(2, { status: 'error', detail: e.message }); }
+      try {
+        const hex = npubToHex(cfg.npub);
+        if (hex) cfg = { ...cfg, hexPubkey: hex };
+        writeRelayConfig(platform, cfg);
+        up(2, { status: 'done' });
+      } catch (e: any) { up(2, { status: 'error', detail: e.message }); }
 
       // Watchdog script
       up(3, { status: 'running' });

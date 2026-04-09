@@ -40,7 +40,7 @@ export const Update: React.FC<UpdateProps> = ({ dryRun, yes }) => {
 
         if (!dryRun) {
           try {
-            await execa('cargo', ['install', pkg, '--quiet'], { stdio: 'pipe' });
+            await execa('cargo', ['install', pkg, '--locked', '--quiet'], { stdio: 'pipe' });
             const after = await currentVersion(pkg);
             up(i, { status: 'done', to: after });
           } catch (e: any) {

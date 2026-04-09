@@ -82,7 +82,7 @@ switch (command) {
   case 'version':
   case '--version':
   case '-v':
-    console.log('nostr-station 0.1.0');
+    console.log('nostr-station 0.0.1');
     break;
 
   case 'help':

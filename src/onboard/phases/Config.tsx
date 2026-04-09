@@ -22,6 +22,7 @@ type Field =
   | 'ollamaModel' | 'ollamaBase'
   | 'lmstudioModel' | 'lmstudioBase'
   | 'customApiBase' | 'customApiKey' | 'customModel'
+  | 'opencodeZenCustomModel'
   | 'editor'
   | 'installStacks' | 'installBlossom' | 'installLlmWiki';
 
@@ -255,11 +256,17 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
             { label: 'Type a custom model ID →',                   value: '__custom__' },
           ]}
           onSelect={item => {
-            if (item.value === '__custom__') return; // handled by text input fallback
+            if (item.value === '__custom__') { advance('opencodeZenCustomModel'); return; }
             set('opencodeZenModel', item.value);
             advance('editor');
           }}
         />
+      )}
+
+      {field === 'opencodeZenCustomModel' && (
+        <Prompt label="Custom model ID" placeholder="opencode/my-model" value={input}
+          onChange={setInput}
+          onSubmit={v => { set('opencodeZenModel', v); advance('editor'); }} />
       )}
 
       {/* Maple Proxy — TEE-encrypted private inference */}
