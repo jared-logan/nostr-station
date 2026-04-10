@@ -46,6 +46,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Add cargo bin to PATH for all subsequent steps
+        # Each GitHub Actions step runs in a fresh shell — sourcing ~/.cargo/env
+        # in one step doesn't carry over. $GITHUB_PATH is the supported way to
+        # extend PATH across the whole job. `cargo install` drops binaries here,
+        # so onboard's cargo calls AND the verify steps all need it.
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       # Cache cargo registry + installed binaries keyed on pinned versions.
       # A cache hit means `cargo install` is a no-op for relay+ngit (minutes → seconds).
       - name: Cache cargo-installed binaries
@@ -100,14 +107,12 @@ jobs:
 
       - name: Verify — binaries on PATH
         run: |
-          source ~/.cargo/env 2>/dev/null || true
           which nostr-rs-relay && nostr-rs-relay --version
           which ngit && ngit --version
           which nak && nak --version
 
       - name: Verify — pinned versions match
         run: |
-          source ~/.cargo/env 2>/dev/null || true
           relay_v=$(nostr-rs-relay --version | awk '{print $NF}')
           ngit_v=$(ngit --version | awk '{print $NF}')
           echo "nostr-rs-relay: $relay_v (expected 0.8.12)"
