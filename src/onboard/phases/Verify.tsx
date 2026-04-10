@@ -16,7 +16,10 @@ export const VerifyPhase: React.FC<VerifyPhaseProps> = ({ config, sshPubKey, onD
   const [failures, setFailures] = useState(0);
 
   useEffect(() => {
-    const results = runChecks();
+    const needsClaude = config.aiProvider === 'anthropic' || config.editor === 'claude-code';
+    const results = runChecks().filter(r =>
+      r.label !== 'claude-code binary' || needsClaude
+    );
     const ip = getMeshIp();
     const failed = results.filter(r => !r.ok).length;
     setChecks(results);

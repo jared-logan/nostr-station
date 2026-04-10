@@ -24,6 +24,7 @@ export interface Platform {
 }
 
 export type Editor = 'claude-code' | 'cursor' | 'windsurf' | 'copilot' | 'aider' | 'codex' | 'other';
+export type VersionControl = 'ngit' | 'github' | 'both';
 
 export interface Config {
   npub: string;
@@ -49,10 +50,12 @@ export interface Config {
   customApiKey?: string;
   customModel?: string;
   editor: Editor;
+  versionControl: VersionControl;
   installStacks: boolean;
   installBlossom: boolean;
   installLlmWiki: boolean;
-  watchdogNsec?: string;
+  installNsyte: boolean;
+  whitelistExtra?: string;   // space-separated extra npubs to whitelist (onboard)
   watchdogNpub?: string;
 }
 
@@ -65,8 +68,10 @@ export interface Installed {
   ngit: boolean;
   nvpn: boolean;
   claude: boolean;
+  gh: boolean;
   stacks: boolean;
   blossom: boolean;
+  nsyte: boolean;
 }
 
 function cmd(c: string): string | null {
@@ -135,8 +140,10 @@ export function detectInstalled(): Installed {
     ngit:    has('ngit'),
     nvpn:    has('nvpn'),
     claude:  has('claude'),
+    gh:      has('gh'),
     stacks:  has('stacks'),
     blossom: fs.existsSync(`${os.homedir()}/blossom-server`),
+    nsyte:   has('nsyte'),
   };
 }
 

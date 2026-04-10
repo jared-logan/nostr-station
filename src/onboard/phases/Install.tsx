@@ -6,7 +6,7 @@ import { P } from '../components/palette.js';
 import type { Platform, Config, Installed } from '../../lib/detect.js';
 import {
   installSystemDeps, installRust, installCargoBin,
-  installClaudeCode, installStacks, installBlossom,
+  installClaudeCode, installGitHubCLI, installStacks, installBlossom, installNsyte,
 } from '../../lib/install.js';
 
 interface StepState {
@@ -36,9 +36,11 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
     { label: 'Rust toolchain',   status: 'pending' },
     // one row per cargo bin — label updates live during compile
     ...CARGO_BINS.map(b => ({ label: b.label, status: 'pending' as StepStatus })),
-    { label: 'Claude Code',      status: 'pending' },
+    { label: 'Claude Code',      status: (config.aiProvider === 'anthropic' || config.editor === 'claude-code') ? 'pending' : 'skip' as StepStatus },
+    { label: 'GitHub CLI',       status: config.versionControl !== 'ngit' ? 'pending' : 'skip' as StepStatus },
     { label: 'Stacks',           status: config.installStacks  ? 'pending' : 'skip' as StepStatus },
     { label: 'Blossom server',   status: config.installBlossom ? 'pending' : 'skip' as StepStatus },
+    { label: 'nsyte',            status: config.installNsyte   ? 'pending' : 'skip' as StepStatus },
   ];
 
   const [steps, setSteps] = useState<StepState[]>(initial);
@@ -53,8 +55,10 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
     ngit:   3,
     nak:    4,
     claude: 5,
-    stacks: 6,
-    blossom:7,
+    gh:     6,
+    stacks: 7,
+    blossom:8,
+    nsyte:  9,
   };
 
   const update = (i: number, patch: Partial<StepState>) =>
@@ -91,10 +95,22 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
         if (!r.ok) break;
       }
 
-      // Claude Code
-      update(IDX.claude, { status: 'running' });
-      const cc = await installClaudeCode();
-      update(IDX.claude, { status: cc.ok ? 'done' : 'error', detail: cc.detail });
+      // Claude Code — only if using Anthropic or Claude Code as editor
+      const shouldInstallClaudeCode = config.aiProvider === 'anthropic' || config.editor === 'claude-code';
+      if (shouldInstallClaudeCode) {
+        update(IDX.claude, { status: 'running' });
+        const cc = await installClaudeCode();
+        update(IDX.claude, { status: cc.ok ? 'done' : 'error', detail: cc.detail });
+      } else {
+        update(IDX.claude, { label: 'Claude Code   (not needed for your configuration)', status: 'skip' });
+      }
+
+      // GitHub CLI
+      if (config.versionControl !== 'ngit') {
+        update(IDX.gh, { status: 'running' });
+        const gh = await installGitHubCLI(platform);
+        update(IDX.gh, { status: gh.ok ? 'done' : 'error', detail: gh.detail });
+      }
 
       // Stacks
       if (config.installStacks) {
@@ -108,6 +124,13 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
         update(IDX.blossom, { status: 'running' });
         const bl = await installBlossom(platform.homeDir);
         update(IDX.blossom, { status: bl.ok ? 'done' : 'error', detail: bl.detail });
+      }
+
+      // nsyte
+      if (config.installNsyte) {
+        update(IDX.nsyte, { status: 'running' });
+        const ns = await installNsyte();
+        update(IDX.nsyte, { status: ns.ok ? 'done' : 'error', detail: ns.detail });
       }
 
       setFinished(true);

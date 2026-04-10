@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Box } from 'ink';
+import { Box, Text } from 'ink';
 import { PhaseHeader, Step, type StepStatus } from '../components/Step.js';
 import type { Platform, Config } from '../../lib/detect.js';
 import {
@@ -9,6 +9,7 @@ import {
   EDITOR_FILENAMES,
 } from '../../lib/services.js';
 import { installNostrVpn, setupNgitBunker, generateSshKey } from '../../lib/install.js';
+import { execa } from 'execa';
 import { npubToHex } from '../../lib/detect.js';
 
 interface ServicesPhaseProps {
@@ -20,6 +21,10 @@ interface ServicesPhaseProps {
 type S = { label: string; status: StepStatus; detail?: string };
 
 export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, onDone }) => {
+  const [showStacksNote, setShowStacksNote] = useState(false);
+  const [showGhNote, setShowGhNote] = useState(false);
+  const [showNsyteNote, setShowNsyteNote] = useState(false);
+
   const [steps, setSteps] = useState<S[]>([
     { label: 'Directories',        status: 'pending' },
     { label: 'Watchdog keypair',   status: 'pending' },
@@ -31,7 +36,9 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
     { label: 'ngit bunker',        status: config.bunker ? 'pending' : 'skip' },
     { label: 'SSH key',            status: 'pending' },
     { label: 'AI provider config', status: 'pending' },
-    { label: 'NOSTR_STATION.md',      status: 'pending' },
+    { label: 'NOSTR_STATION.md',   status: 'pending' },
+    { label: 'GitHub CLI auth',    status: config.versionControl !== 'ngit' ? 'pending' : 'skip' },
+    { label: 'nsyte bunker',       status: (config.installNsyte && !!config.bunker) ? 'pending' : 'skip' },
   ]);
 
   const up = (i: number, patch: Partial<S>) =>
@@ -46,12 +53,12 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
       try { setupDirs(platform); up(0, { status: 'done' }); }
       catch (e: any) { up(0, { status: 'error', detail: e.message }); }
 
-      // Watchdog keypair
+      // Watchdog keypair — nsec stored in keychain, not in script or config
       up(1, { status: 'running' });
       try {
-        const kp = generateWatchdogKeypair(platform.cargoBin);
-        cfg = { ...cfg, watchdogNsec: kp.nsec, watchdogNpub: kp.npub };
-        up(1, { status: 'done', detail: kp.npub ? `npub: ${kp.npub.slice(0, 12)}…` : undefined });
+        const kp = await generateWatchdogKeypair(platform.cargoBin);
+        cfg = { ...cfg, watchdogNpub: kp.npub };
+        up(1, { status: 'done', detail: kp.npub ? `npub: ${kp.npub.slice(0, 12)}… → ${kp.backend}` : undefined });
       } catch (e: any) { up(1, { status: 'error', detail: e.message }); }
 
       // Relay config — resolve hex pubkey now that nak is installed
@@ -98,10 +105,12 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
         up(8, { status: 'done' });
       } catch (e: any) { up(8, { status: 'error', detail: e.message }); }
 
-      // AI provider
+      // AI provider — key stored in keychain, loader script written to ~/.claude_env
       up(9, { status: 'running' });
-      try { writeClaudeEnv(platform.homeDir, cfg); up(9, { status: 'done' }); }
-      catch (e: any) { up(9, { status: 'error', detail: e.message }); }
+      try {
+        const backend = await writeClaudeEnv(platform.homeDir, cfg);
+        up(9, { status: 'done', detail: backend });
+      } catch (e: any) { up(9, { status: 'error', detail: e.message }); }
 
       // NOSTR_STATION.md + editor symlink
       up(10, { status: 'running' });
@@ -110,6 +119,36 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
         const linked = EDITOR_FILENAMES[cfg.editor] ?? 'AGENTS.md';
         up(10, { status: 'done', detail: `→ ${linked}` });
       } catch (e: any) { up(10, { status: 'error', detail: e.message }); }
+
+      if (cfg.installStacks) setShowStacksNote(true);
+
+      // GitHub CLI auth check
+      if (cfg.versionControl !== 'ngit') {
+        up(11, { status: 'running' });
+        try {
+          await execa('gh', ['auth', 'status'], { stdio: 'pipe' });
+          up(11, { status: 'done', detail: 'authenticated' });
+        } catch {
+          up(11, { status: 'skip', detail: 'run: gh auth login' });
+          setShowGhNote(true);
+        }
+      }
+
+      // nsyte bunker connect — reuse the bunker string from ngit setup
+      if (cfg.installNsyte) {
+        if (cfg.bunker) {
+          up(12, { status: 'running' });
+          try {
+            await execa('nsyte', ['bunker', 'connect', cfg.bunker], { stdio: 'pipe' });
+            up(12, { status: 'done' });
+          } catch {
+            up(12, { status: 'skip', detail: 'run: nsyte bunker connect <bunker-url>' });
+            setShowNsyteNote(true);
+          }
+        } else {
+          setShowNsyteNote(true);
+        }
+      }
 
       setTimeout(() => onDone(cfg, sshPubKey), 300);
     })();
@@ -121,6 +160,37 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
       {steps.map((s, i) => (
         <Step key={i} label={s.label} status={s.status} detail={s.detail} />
       ))}
+      {showStacksNote && (
+        <Box flexDirection="column" marginTop={1} marginLeft={2}>
+          <Text>{'  Stacks uses its own AI provider configuration, separate from your'}</Text>
+          <Text>{'  main coding tool. You\'ll set it up when you create your first project:'}</Text>
+          <Text> </Text>
+          <Text>{'    mkdir my-app && cd my-app'}</Text>
+          <Text>{'    stacks mkstack'}</Text>
+          <Text> </Text>
+          <Text>{'  Run stacks configure any time to change Dork\'s AI provider or API key.'}</Text>
+        </Box>
+      )}
+      {showGhNote && (
+        <Box flexDirection="column" marginTop={1} marginLeft={2}>
+          <Text>{'  GitHub CLI is installed but not yet authenticated. Run this when ready:'}</Text>
+          <Text> </Text>
+          <Text>{'    gh auth login'}</Text>
+          <Text> </Text>
+          <Text>{'  This opens a browser-based OAuth flow. Your token is stored securely'}</Text>
+          <Text>{'  by gh — never printed to the terminal.'}</Text>
+        </Box>
+      )}
+      {showNsyteNote && (
+        <Box flexDirection="column" marginTop={1} marginLeft={2}>
+          <Text>{'  nsyte is installed. Connect your Amber bunker to enable nsec-free publishing:'}</Text>
+          <Text> </Text>
+          <Text>{'    nsyte bunker connect <bunker-url>'}</Text>
+          <Text> </Text>
+          <Text>{'  Then deploy a site from any project directory:'}</Text>
+          <Text>{'    nsyte upload ./dist'}</Text>
+        </Box>
+      )}
     </Box>
   );
 };

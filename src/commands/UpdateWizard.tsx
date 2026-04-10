@@ -65,7 +65,8 @@ export const UpdateWizard: React.FC<UpdateWizardProps> = () => {
   };
 
   const runUpdates = async () => {
-    const steps = components.map(c => ({ label: c.name, status: 'pending' as StepStatus }));
+    const steps: { label: string; status: StepStatus; detail?: string }[] =
+      components.map(c => ({ label: c.name, status: 'pending' as StepStatus }));
     setUpdateSteps(steps);
     setStage('updating');
 

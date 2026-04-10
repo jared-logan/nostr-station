@@ -7,8 +7,14 @@ import path from 'path';
 // typing `nostr-station <TAB>` in your terminal shows available commands.
 // It's a standard CLI convention that makes the tool feel native.
 
-const COMMANDS = ['onboard', 'doctor', 'status', 'update', 'logs', 'relay', 'tui', 'setup-editor', 'uninstall', 'completion', 'version'];
-const RELAY_SUBCOMMANDS = ['start', 'stop', 'restart', 'status'];
+const COMMANDS = ['onboard', 'doctor', 'status', 'update', 'logs', 'relay', 'tui', 'push', 'keychain', 'nsite', 'setup-editor', 'uninstall', 'completion', 'version'];
+const KEYCHAIN_SUBCOMMANDS = ['list', 'get', 'set', 'delete', 'rotate', 'migrate'];
+const KEYCHAIN_KEYS = ['ai-api-key', 'watchdog-nsec'];
+const NSITE_SUBCOMMANDS = ['init', 'publish', 'deploy', 'status', 'open', 'help'];
+const PUSH_FLAGS = ['--github', '--ngit'];
+const RELAY_SUBCOMMANDS = ['start', 'stop', 'restart', 'status', 'config', 'whitelist'];
+const RELAY_CONFIG_FLAGS = ['--auth', '--dm-auth'];
+const RELAY_WHITELIST_FLAGS = ['--add', '--remove'];
 const UPDATE_FLAGS = ['--dry-run', '--yes', '--wizard'];
 const DOCTOR_FLAGS = ['--fix', '--repair', '--deep'];
 const LOGS_FLAGS = ['--follow', '-f', '--service'];
@@ -26,21 +32,57 @@ _nostr_station() {
     'logs:Tail relay or watchdog logs'
     'relay:Manage the nostr-rs-relay service'
     'tui:Live dashboard'
+    'keychain:Manage credentials in the OS keychain'
+    'push:Push to all configured remotes (git + ngit)'
+    'nsite:Manage nsite publishing (nsyte)'
     'setup-editor:Link NOSTR_STATION.md to your AI coding tool'
     'uninstall:Remove nostr-station'
     'completion:Generate shell completion'
     'version:Print version'
   )
 
-  local -a relay_cmds
-  relay_cmds=('start' 'stop' 'restart' 'status')
-
-  local -a log_services
+  local -a relay_cmds keychain_cmds keychain_keys nsite_cmds log_services
+  relay_cmds=('start' 'stop' 'restart' 'status' 'config' 'whitelist')
+  keychain_cmds=('list' 'get' 'set' 'delete' 'rotate' 'migrate')
+  keychain_keys=('ai-api-key' 'watchdog-nsec')
+  nsite_cmds=('init' 'publish' 'deploy' 'status' 'open' 'help')
   log_services=('relay' 'watchdog' 'all')
 
   case $words[2] in
     relay)
-      _describe 'relay subcommand' relay_cmds
+      case $words[3] in
+        config)
+          _arguments \\
+            '--auth[Toggle NIP-42 auth]:value:(on off)' \\
+            '--dm-auth[Toggle DM auth restriction]:value:(on off)'
+          ;;
+        whitelist)
+          _arguments \\
+            '--add[Add an npub to whitelist]:npub:' \\
+            '--remove[Remove an npub from whitelist]:npub:'
+          ;;
+        *)
+          _describe 'relay subcommand' relay_cmds
+          ;;
+      esac
+      ;;
+    keychain)
+      case $words[3] in
+        get|set|delete|rotate)
+          _describe 'credential key' keychain_keys
+          ;;
+        *)
+          _describe 'keychain subcommand' keychain_cmds
+          ;;
+      esac
+      ;;
+    nsite)
+      _describe 'nsite subcommand' nsite_cmds
+      ;;
+    push)
+      _arguments \\
+        '--github[Push to GitHub remote only]' \\
+        '--ngit[Push to ngit remote only]'
       ;;
     logs)
       _arguments \\
@@ -74,27 +116,56 @@ _nostr_station() {
   local cur prev words cword
   _init_completion || return
 
-  local commands="onboard doctor status update logs relay tui setup-editor uninstall completion version"
+  local commands="onboard doctor status update logs relay tui push keychain nsite setup-editor uninstall completion version"
 
   case $prev in
     nostr-station)
       COMPREPLY=($(compgen -W "$commands" -- "$cur"))
       return ;;
     relay)
-      COMPREPLY=($(compgen -W "start stop restart status" -- "$cur"))
+      COMPREPLY=($(compgen -W "start stop restart status config whitelist" -- "$cur"))
+      return ;;
+    config)
+      if [[ \${words[2]} == "relay" ]]; then
+        COMPREPLY=($(compgen -W "--auth --dm-auth" -- "$cur"))
+        return
+      fi ;;
+    whitelist)
+      if [[ \${words[2]} == "relay" ]]; then
+        COMPREPLY=($(compgen -W "--add --remove" -- "$cur"))
+        return
+      fi ;;
+    keychain)
+      COMPREPLY=($(compgen -W "list get set delete rotate migrate" -- "$cur"))
+      return ;;
+    get|set|delete|rotate)
+      if [[ \${words[1]} == "keychain" ]]; then
+        COMPREPLY=($(compgen -W "ai-api-key watchdog-nsec" -- "$cur"))
+        return
+      fi ;;
+    push)
+      COMPREPLY=($(compgen -W "--github --ngit" -- "$cur"))
+      return ;;
+    nsite)
+      COMPREPLY=($(compgen -W "init publish deploy status open help" -- "$cur"))
       return ;;
     --service)
       COMPREPLY=($(compgen -W "relay watchdog all" -- "$cur"))
       return ;;
+    --auth|--dm-auth)
+      COMPREPLY=($(compgen -W "on off" -- "$cur"))
+      return ;;
   esac
 
-  case ${words[1]} in
+  case \${words[1]} in
     doctor)
       COMPREPLY=($(compgen -W "--fix --repair --deep" -- "$cur")) ;;
     update)
       COMPREPLY=($(compgen -W "--dry-run --yes --wizard" -- "$cur")) ;;
     logs)
       COMPREPLY=($(compgen -W "--follow -f --service" -- "$cur")) ;;
+    push)
+      COMPREPLY=($(compgen -W "--github --ngit" -- "$cur")) ;;
     status)
       COMPREPLY=($(compgen -W "--json" -- "$cur")) ;;
   esac

@@ -4,7 +4,7 @@ import { PhaseHeader } from '../components/Step.js';
 import { Prompt } from '../components/Prompt.js';
 import { Select, type SelectOption } from '../components/Select.js';
 import { P } from '../components/palette.js';
-import type { Config } from '../../lib/detect.js';
+import type { Config, VersionControl } from '../../lib/detect.js';
 import { probeOllama, probeLmStudio } from '../../lib/detect.js';
 
 interface ConfigPhaseProps {
@@ -13,6 +13,8 @@ interface ConfigPhaseProps {
 
 type Field =
   | 'npub' | 'bunker' | 'relayName' | 'fallbackRelays'
+  | 'whitelistExtra'
+  | 'versionControl'
   | 'aiProvider'
   | 'openrouterKey' | 'openrouterModel'
   | 'routstrCashuToken' | 'routstrServer'
@@ -24,7 +26,13 @@ type Field =
   | 'customApiBase' | 'customApiKey' | 'customModel'
   | 'opencodeZenCustomModel'
   | 'editor'
-  | 'installStacks' | 'installBlossom' | 'installLlmWiki';
+  | 'installStacks' | 'installBlossom' | 'installLlmWiki' | 'installNsyte';
+
+const VERSION_CONTROL: SelectOption[] = [
+  { label: 'ngit only          Nostr-native — push signed by Amber, no GitHub needed', value: 'ngit'   },
+  { label: 'GitHub CLI only    standard git + gh CLI — familiar workflow',              value: 'github' },
+  { label: 'Both               ngit for Nostr repos, gh for GitHub — recommended',     value: 'both'   },
+];
 
 const AI_PROVIDERS: SelectOption[] = [
   { label: 'Anthropic (Claude)          standard API key',        value: 'anthropic'     },
@@ -118,9 +126,12 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
       customApiKey:      config.customApiKey,
       customModel:       config.customModel,
       editor:            (config.editor as Config['editor']) ?? 'claude-code',
+      versionControl:    (config.versionControl as VersionControl) ?? 'both',
       installStacks:     config.installStacks !== 'false',
       installBlossom:    config.installBlossom === 'true',
       installLlmWiki:    config.installLlmWiki !== 'false',
+      installNsyte:      config.installNsyte === 'true',
+      whitelistExtra:    config.whitelistExtra?.trim() || undefined,
     });
   };
 
@@ -140,8 +151,10 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
       {values.npub           !== undefined && field !== 'npub'           && <Confirmed label="npub"            value={values.npub!} />}
       {values.bunker         !== undefined && field !== 'bunker'         && <Confirmed label="bunker"          value={values.bunker ? '••••••••' : '(later)'} />}
       {values.relayName      !== undefined && field !== 'relayName'      && <Confirmed label="relay name"      value={values.relayName!} />}
-      {values.fallbackRelays !== undefined && field !== 'fallbackRelays' && <Confirmed label="fallback relays" value={values.fallbackRelays!} />}
-      {values.aiProvider     !== undefined && field !== 'aiProvider'     && <Confirmed label="AI provider"     value={values.aiProvider!} />}
+      {values.fallbackRelays  !== undefined && field !== 'fallbackRelays'  && <Confirmed label="fallback relays"  value={values.fallbackRelays!} />}
+      {values.whitelistExtra  !== undefined && field !== 'whitelistExtra'  && <Confirmed label="extra whitelist"   value={values.whitelistExtra || '(none)'} />}
+      {values.versionControl  !== undefined && field !== 'versionControl'  && <Confirmed label="version control"  value={values.versionControl!} />}
+      {values.aiProvider      !== undefined && field !== 'aiProvider'      && <Confirmed label="AI provider"      value={values.aiProvider!} />}
       {values.editor         !== undefined && field !== 'editor'         && <Confirmed label="AI coding tool"  value={values.editor!} />}
 
       {/* npub */}
@@ -169,7 +182,44 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
       {field === 'fallbackRelays' && (
         <Prompt label="Fallback relay URLs (space-separated)" placeholder="wss://relay.damus.io wss://nos.lol"
           value={input} onChange={setInput}
-          onSubmit={v => { set('fallbackRelays', v || 'wss://relay.damus.io wss://nos.lol'); advance('aiProvider'); }} />
+          onSubmit={v => { set('fallbackRelays', v || 'wss://relay.damus.io wss://nos.lol'); advance('whitelistExtra'); }} />
+      )}
+
+      {/* Whitelist — extra npubs */}
+      {field === 'whitelistExtra' && (
+        <Box flexDirection="column">
+          <Box marginLeft={2} marginBottom={1} flexDirection="column">
+            <Text color={P.muted}>Your relay is private — only whitelisted npubs can publish.</Text>
+            <Text> </Text>
+            <Box marginLeft={2}>
+              <Text color={P.success}>✓ </Text>
+              <Text color={P.muted}>your main npub — added automatically</Text>
+            </Box>
+            <Box marginLeft={2}>
+              <Text color={P.success}>✓ </Text>
+              <Text color={P.muted}>watchdog npub — added automatically</Text>
+            </Box>
+            <Text> </Text>
+            <Text color={P.muted}>Add more later: </Text>
+            <Text color={P.accentBright}>nostr-station relay whitelist --add {'<npub>'}</Text>
+          </Box>
+          <Prompt
+            label="Additional npubs to whitelist (space-separated, blank to skip)"
+            placeholder="npub1... npub1..."
+            value={input}
+            onChange={setInput}
+            onSubmit={v => { set('whitelistExtra', v.trim()); advance('versionControl'); }}
+          />
+        </Box>
+      )}
+
+      {/* Version control */}
+      {field === 'versionControl' && (
+        <Select
+          label="Version control"
+          options={VERSION_CONTROL}
+          onSelect={item => { set('versionControl', item.value); advance('aiProvider'); }}
+        />
       )}
 
       {/* AI provider selection */}
@@ -437,10 +487,20 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
 
       {field === 'installLlmWiki' && (
         <Select label="Install llm-wiki Claude Code plugin?" options={YES_NO}
-          onSelect={item => {
-            set('installLlmWiki', item.value);
-            done({ ...values, installLlmWiki: item.value });
-          }} />
+          onSelect={item => { set('installLlmWiki', item.value); advance('installNsyte'); }} />
+      )}
+
+      {field === 'installNsyte' && (
+        <Box flexDirection="column">
+          <Box marginLeft={2} marginBottom={1}>
+            <Text color={P.muted}>{'Publish static Nostr apps to nsite — Amber-signed, no nsec on machine.'}</Text>
+          </Box>
+          <Select label="Install nsyte for nsite publishing?" options={YES_NO}
+            onSelect={item => {
+              set('installNsyte', item.value);
+              done({ ...values, installNsyte: item.value });
+            }} />
+        </Box>
       )}
     </Box>
   );

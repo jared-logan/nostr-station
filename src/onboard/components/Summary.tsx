@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { P } from './palette.js';
 import type { Config } from '../../lib/detect.js';
+import { EDITOR_START_COMMANDS } from '../../lib/services.js';
 
 interface SummaryProps {
   config: Config;
@@ -25,7 +26,7 @@ export const Summary: React.FC<SummaryProps> = ({ config, meshIp }) => (
 
     <Box marginTop={1} flexDirection="column" marginLeft={2}>
       <Text bold>Start a dev session:</Text>
-      <Text dimColor>  cd ~/projects && claude</Text>
+      <Text dimColor>  cd ~/projects && {EDITOR_START_COMMANDS[config.editor] ?? 'claude'}</Text>
     </Box>
 
     <Box marginTop={1} flexDirection="column" marginLeft={2}>

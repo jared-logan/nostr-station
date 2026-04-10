@@ -21,7 +21,9 @@ export async function installSystemDeps(p: Platform): Promise<InstallResult> {
       await run('sudo', ['apt-get', 'update', '-qq']);
       return run('sudo', ['apt-get', 'install', '-y',
         'build-essential', 'curl', 'git', 'pkg-config',
-        'libssl-dev', 'netcat-openbsd']);
+        'libssl-dev', 'netcat-openbsd',
+        'libsecret-tools',   // provides secret-tool for GNOME Keyring access
+      ]);
     case 'dnf':
       return run('sudo', ['dnf', 'install', '-y',
         'gcc', 'curl', 'git', 'openssl-devel', 'pkgconfig', 'nmap-ncat']);
@@ -77,6 +79,33 @@ export async function installCargoBin(
   }
 }
 
+export async function installGitHubCLI(p: Platform): Promise<InstallResult> {
+  switch (p.pkgMgr) {
+    case 'brew':
+      return run('brew', ['install', 'gh']);
+    case 'apt': {
+      // Try native apt first (gh is in Ubuntu 22.04+ universe)
+      const native = await run('sudo', ['apt-get', 'install', '-y', 'gh']);
+      if (native.ok) return native;
+      // Fallback: add GitHub's official apt repo
+      const setup = await run('sh', ['-c', [
+        'curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg',
+        '| sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg',
+        '&& sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg',
+        '&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main"',
+        '| sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null',
+        '&& sudo apt-get update -qq',
+        '&& sudo apt-get install -y gh',
+      ].join(' ')]);
+      return setup;
+    }
+    case 'dnf':
+      return run('sudo', ['dnf', 'install', '-y', 'gh']);
+    case 'pacman':
+      return run('sudo', ['pacman', '-S', '--noconfirm', 'github-cli']);
+  }
+}
+
 export async function installClaudeCode(): Promise<InstallResult> {
   return run('npm', ['install', '-g', '@anthropic-ai/claude-code', '--quiet']);
 }
@@ -85,6 +114,13 @@ export async function installClaudeCode(): Promise<InstallResult> {
 // Docs: getstacks.dev  |  Usage after install: stacks mkstack (per project)
 export async function installStacks(): Promise<InstallResult> {
   return run('npm', ['install', '-g', '@getstacks/stacks', '--quiet']);
+}
+
+// nsyte — Deno rewrite of nsite-cli with first-class NIP-46 bunker support
+// Installs to ~/.deno/bin/nsyte via the official install script
+// Docs: nsyte.run  |  Usage: nsyte upload <dir>  |  Bunker: nsyte bunker connect <url>
+export async function installNsyte(): Promise<InstallResult> {
+  return run('sh', ['-c', 'curl -fsSL https://nsyte.run/get/install.sh | bash']);
 }
 
 export async function installBlossom(homeDir: string): Promise<InstallResult> {
