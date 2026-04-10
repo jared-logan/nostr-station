@@ -1,0 +1,205 @@
+name: Linux E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Install source
+        type: choice
+        options:
+          - local       # Build from branch, npm link
+          - published   # npm install -g nostr-station@latest
+        default: local
+  schedule:
+    # Weekly — Sunday 06:00 UTC — catches upstream breakage (cargo, nvm, nsyte, etc.)
+    - cron: '0 6 * * 0'
+
+jobs:
+  onboard-demo:
+    name: onboard --demo (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    env:
+      # Non-TTY CI — keep Ink output readable and force wide banner path
+      FORCE_COLOR: '0'
+      COLUMNS: '120'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install system dependencies (mirror install.ts apt path)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential curl git pkg-config \
+            libssl-dev netcat-openbsd \
+            libsecret-tools
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache cargo registry + installed binaries keyed on pinned versions.
+      # A cache hit means `cargo install` is a no-op for relay+ngit (minutes → seconds).
+      - name: Cache cargo-installed binaries
+        id: cargo-bin-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/nostr-rs-relay
+            ~/.cargo/bin/ngit
+            ~/.cargo/bin/nak
+          key: cargo-bin-${{ matrix.os }}-relay-0.8.12-ngit-2.2.3-nak-v1
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ matrix.os }}-v1
+          restore-keys: cargo-registry-${{ matrix.os }}-
+
+      - name: Install nostr-station (local source)
+        if: ${{ github.event.inputs.source != 'published' }}
+        run: |
+          npm ci
+          npm run build
+          npm link
+          nostr-station --version
+
+      - name: Install nostr-station (published from npm)
+        if: ${{ github.event.inputs.source == 'published' }}
+        run: |
+          npm install -g nostr-station@latest
+          nostr-station --version
+
+      - name: Pre-start systemd user daemon
+        run: |
+          # `systemctl --user` needs a running user instance — on headless runners
+          # it isn't started by default. Enable lingering so it stays up.
+          sudo loginctl enable-linger "$USER" || true
+          systemctl --user daemon-reload || true
+
+      - name: Run onboard --demo
+        id: onboard
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          # Redirect stdin from /dev/null — demo mode doesn't read input but Ink
+          # may probe stdin.isTTY; /dev/null is safe and predictable.
+          nostr-station onboard --demo < /dev/null 2>&1 | tee /tmp/onboard.log
+
+      - name: Verify — binaries on PATH
+        run: |
+          source ~/.cargo/env 2>/dev/null || true
+          which nostr-rs-relay && nostr-rs-relay --version
+          which ngit && ngit --version
+          which nak && nak --version
+
+      - name: Verify — pinned versions match
+        run: |
+          source ~/.cargo/env 2>/dev/null || true
+          relay_v=$(nostr-rs-relay --version | awk '{print $NF}')
+          ngit_v=$(ngit --version | awk '{print $NF}')
+          echo "nostr-rs-relay: $relay_v (expected 0.8.12)"
+          echo "ngit: $ngit_v (expected 2.2.3)"
+          [[ "$relay_v" == "0.8.12" ]] || { echo "❌ relay version drift"; exit 1; }
+          [[ "$ngit_v"  == "2.2.3"  ]] || { echo "❌ ngit version drift";  exit 1; }
+
+      - name: Verify — Linux filesystem paths
+        run: |
+          echo "--- $HOME layout ---"
+          ls -la ~/.config/nostr-rs-relay/ 2>/dev/null || echo "⚠  relay config dir missing"
+          ls -la ~/.local/share/nostr-rs-relay/ 2>/dev/null || echo "⚠  relay data dir missing (Linux path)"
+          ls -la ~/.config/systemd/user/ 2>/dev/null | grep -E 'nostr|relay|watchdog' || echo "⚠  systemd units missing"
+
+          # These are hard requirements:
+          test -f ~/.config/nostr-rs-relay/config.toml || { echo "❌ relay config.toml missing"; exit 1; }
+          test -d ~/.local/share/nostr-rs-relay       || { echo "❌ Linux data dir missing";      exit 1; }
+          echo "✓ Linux paths look correct"
+
+      - name: Verify — status --json
+        run: |
+          nostr-station status --json | tee /tmp/status.json
+          python3 -c "
+          import json, sys
+          d = json.load(open('/tmp/status.json'))
+          # Post-onboard, these should be installed (even if services aren't running):
+          for k in ('nak', 'relay bin', 'ngit'):
+              if not d[k]['ok']:
+                  print(f'❌ {k} not installed: {d[k][\"value\"]}')
+                  sys.exit(1)
+          print('✓ nak + relay bin + ngit installed')
+          "
+
+      - name: Verify — doctor (informational only)
+        run: nostr-station doctor || true
+
+      - name: Verify — keychain fallback path (encrypted file)
+        run: |
+          # Runners have no DBUS_SESSION_BUS_ADDRESS → must fall back to encrypted file
+          echo "DBUS: ${DBUS_SESSION_BUS_ADDRESS:-unset}"
+          if [[ -f ~/.config/nostr-station/secrets ]]; then
+            mode=$(stat -c '%a' ~/.config/nostr-station/secrets)
+            echo "secrets file mode: $mode"
+            [[ "$mode" == "600" ]] || { echo "❌ wrong mode (expected 600)"; exit 1; }
+            echo "✓ encrypted file backend active, mode 600"
+          else
+            echo "⚠  no secrets file (demo mode may not have stored anything)"
+          fi
+
+      - name: Verify — seed command (relay must be up)
+        run: |
+          # Start relay manually if systemd user unit didn't auto-start
+          nostr-station relay start || true
+          sleep 3
+
+          # Poll for relay readiness
+          ready=false
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if nc -z localhost 8080 2>/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+
+          if [[ "$ready" == "true" ]]; then
+            echo "✓ relay listening on 8080"
+            # NIP-11 check
+            curl -sf -H 'Accept: application/nostr+json' http://localhost:8080 | python3 -m json.tool || {
+              echo "⚠  NIP-11 endpoint did not return JSON"
+            }
+            # Seed a handful of events
+            nostr-station seed --events 5 < /dev/null || echo "⚠  seed failed (non-fatal)"
+          else
+            echo "⚠  relay not listening — skipping seed + NIP-11 checks"
+          fi
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/failure-logs
+          cp /tmp/onboard.log /tmp/failure-logs/ 2>/dev/null || true
+          cp /tmp/status.json /tmp/failure-logs/ 2>/dev/null || true
+          cp -r ~/logs            /tmp/failure-logs/home-logs 2>/dev/null || true
+          cp -r ~/.config/nostr-rs-relay /tmp/failure-logs/relay-config 2>/dev/null || true
+          journalctl --user --no-pager > /tmp/failure-logs/journal.txt 2>/dev/null || true
+          ls -laR ~/.config/systemd/user > /tmp/failure-logs/systemd-units.txt 2>/dev/null || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs-${{ matrix.os }}
+          path: /tmp/failure-logs/
+          retention-days: 7

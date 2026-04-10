@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke:
+    name: Build + CLI smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript build
+        run: npm run build
+
+      - name: Verify dist output exists
+        run: |
+          test -f dist/cli.js || { echo "❌ dist/cli.js missing after build"; exit 1; }
+          echo "✓ dist/cli.js present"
+
+      - name: Link globally as `nostr-station`
+        run: npm link
+
+      - name: --version prints 0.0.3
+        run: |
+          out=$(nostr-station --version)
+          echo "$out"
+          [[ "$out" == "nostr-station 0.0.3" ]] || { echo "❌ unexpected version string"; exit 1; }
+
+      - name: Help text lists every command
+        run: |
+          output=$(nostr-station help)
+          echo "$output"
+          for cmd in onboard doctor status update logs relay tui seed push keychain nsite setup-editor completion uninstall; do
+            echo "$output" | grep -qw "$cmd" || { echo "❌ Missing from help: $cmd"; exit 1; }
+          done
+          echo "✓ All commands listed in help"
+
+      - name: Unknown command falls through to help
+        run: |
+          nostr-station nonexistent-command 2>&1 | grep -q "USAGE" || {
+            echo "❌ unknown command did not fall through to help"; exit 1;
+          }
+
+      - name: status --json emits valid JSON
+        run: |
+          nostr-station status --json > /tmp/status.json
+          cat /tmp/status.json
+          python3 -c "
+          import json, sys
+          d = json.load(open('/tmp/status.json'))
+          required = {'Relay', 'nostr-vpn', 'ngit', 'claude-code', 'nak', 'relay bin'}
+          missing = required - set(d.keys())
+          if missing:
+              print(f'❌ missing keys: {missing}')
+              sys.exit(1)
+          print('✓ status --json schema valid')
+          "
+
+      - name: Banner narrow-fallback logic present
+        run: |
+          grep -q "isNarrow = cols < 100" src/onboard/components/Banner.tsx \
+            || { echo "❌ narrow banner fallback missing"; exit 1; }
+          echo "✓ narrow banner fallback wired"
+
+      - name: Select double-arrow fix present
+        run: |
+          grep -q "indicatorComponent" src/onboard/components/Select.tsx \
+            || { echo "❌ Select indicator override missing"; exit 1; }
+          echo "✓ Select indicator override wired"
+
+      - name: Version pinning constants present
+        run: |
+          grep -q "nostr-rs-relay" src/lib/versions.ts
+          grep -q "ngit" src/lib/versions.ts
+          echo "✓ pinned versions declared"
+
+  shellcheck:
+    name: install.sh lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
+
+      - name: bash syntax check
+        run: bash -n install.sh
+
+      - name: ShellCheck
+        run: shellcheck install.sh
