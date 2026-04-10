@@ -1,5 +1,8 @@
 # nostr-station
 
+[![npm version](https://badge.fury.io/js/nostr-station.svg)](https://www.npmjs.com/package/nostr-station)
+[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
+
 **One-command Nostr dev environment.**
 
 Sets up a local relay, mesh VPN, Nostr-native git with Amber signing, and your AI coding tool of choice — on macOS or Linux — in a single terminal session.
@@ -8,7 +11,7 @@ Sets up a local relay, mesh VPN, Nostr-native git with Amber signing, and your A
 curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/install.sh | bash
 ```
 
-> v0.0.2 — macOS (Apple Silicon + Intel) and Linux (apt / dnf / pacman).
+> v0.0.3 — macOS (Apple Silicon + Intel) and Linux (apt / dnf / pacman).
 
 ---
 
@@ -23,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/inst
 | [Claude Code](https://claude.ai/code) | AI coding agent — conditional, only installed if your config needs it |
 | [GitHub CLI](https://cli.github.com) *(optional)* | `gh` — standard GitHub workflows alongside ngit |
 | [nsyte](https://nsyte.run) *(optional)* | Deploy static apps to Nostr/Blossom — Amber-signed, nsec-free |
-| [Stacks](https://getstacks.dev) *(optional)* | Nostr app scaffolding with Dork AI agent |
+| [Stacks](https://getstacks.dev) *(optional)* | Nostr app scaffolding — `stacks mkstack` + stacks agent |
 | [Blossom](https://github.com/hzrd149/blossom-server) *(optional)* | Local media server for Nostr dev |
 
 All Rust binaries compile from source. First install takes 10–15 minutes.
@@ -99,6 +102,10 @@ nostr-station keychain set <key>   Store a credential
 nostr-station keychain rotate <key>  Hot-swap with 60s rollback window
 nostr-station keychain migrate     Convert plaintext ~/.claude_env to keychain loader
 nostr-station tui                  Live dashboard — events, logs, mesh status
+nostr-station seed                 Seed relay with dummy events for dev/testing
+nostr-station seed --events 100    Specify event count
+nostr-station seed --full          Profiles + notes + follows + reactions
+nostr-station onboard --demo       Quick setup with throwaway keypair
 nostr-station setup-editor         Relink context file to a different AI tool
 nostr-station completion --shell zsh|bash --install
 nostr-station uninstall            Clean removal (relay data is preserved)
@@ -246,6 +253,9 @@ Removes services, configs, logs, and the npm package. **Does not remove** your r
 | macOS | Intel (x86_64) | launchd | Homebrew |
 | Linux | aarch64 | systemd | apt / dnf / pacman |
 | Linux | x86_64 | systemd | apt / dnf / pacman |
+
+**Not supported:**
+Windows is not a supported platform. WSL2 on Windows may work but is not tested or officially supported. Contributions welcome.
 
 ---
 

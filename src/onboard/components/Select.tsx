@@ -26,6 +26,10 @@ export const Select: React.FC<SelectProps> = ({ label, options, onSelect }) => (
       <SelectInput
         items={options}
         onSelect={onSelect}
+        // Suppress the library's built-in indicator — our itemComponent
+        // renders '▸ ' itself. Without this, Linux terminals show '▸ ▸ label'
+        // because ink-select-input renders its indicator before itemComponent.
+        indicatorComponent={() => <Text>{''}</Text>}
         itemComponent={({ isSelected, label }) => (
           <Text color={isSelected ? P.accentBright : 'white'}>
             {isSelected ? '▸ ' : '  '}{label}

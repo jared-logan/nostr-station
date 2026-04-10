@@ -2,6 +2,7 @@
 import React from 'react';
 import { render } from 'ink';
 import { Onboard }       from './onboard/index.js';
+import { Seed }          from './commands/Seed.js';
 import { Doctor }        from './commands/Doctor.js';
 import { Status }        from './commands/Status.js';
 import { Update }        from './commands/Update.js';
@@ -26,7 +27,14 @@ const arg  = (f: string) => { const i = args.indexOf(f); return i >= 0 ? args[i 
 switch (command) {
 
   case 'onboard':
-    render(React.createElement(Onboard, null));
+    render(React.createElement(Onboard, { demoMode: flag('--demo') }));
+    break;
+
+  case 'seed':
+    render(React.createElement(Seed, {
+      eventCount: arg('--events') ? parseInt(arg('--events')!, 10) : 50,
+      full: flag('--full'),
+    }));
     break;
 
   case 'doctor':
@@ -135,7 +143,7 @@ switch (command) {
   case 'version':
   case '--version':
   case '-v':
-    console.log('nostr-station 0.0.2');
+    console.log('nostr-station 0.0.3');
     break;
 
   case 'help':
@@ -162,6 +170,7 @@ function printHelp() {
     logs                 Tail relay or watchdog logs
     relay                Manage the nostr-rs-relay service
     tui                  Live dashboard — events, logs, mesh status
+    seed                 Seed relay with dummy events for dev/testing
     push                 Push to all configured remotes (git + ngit)
     keychain             Manage credentials stored in the OS keychain
     nsite                Manage nsite publishing (nsyte)
@@ -179,17 +188,23 @@ function printHelp() {
     relay whitelist --remove <npub>    Remove an npub (with confirmation)
 
   FLAGS
+    onboard --demo
     doctor  --fix --repair --deep
     status  --json
     update  --dry-run --yes --wizard
     logs    --follow (-f)  --service relay|watchdog|all
     push    --github  --ngit
     nsite   --titan
+    seed    --events <n>  --full
     completion  --shell zsh|bash  --install  --print
     uninstall   --yes
 
   EXAMPLES
     nostr-station onboard
+    nostr-station onboard --demo
+    nostr-station seed
+    nostr-station seed --events 100
+    nostr-station seed --full
     nostr-station doctor --fix
     nostr-station logs --follow
     nostr-station relay restart

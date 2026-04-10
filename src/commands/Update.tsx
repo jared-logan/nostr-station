@@ -3,10 +3,11 @@ import { Box, Text } from 'ink';
 import { Step, type StepStatus } from '../onboard/components/Step.js';
 import { P } from '../onboard/components/palette.js';
 import { execa } from 'execa';
+import { COMPONENT_VERSIONS } from '../lib/versions.js';
 
 interface UpdateProps { dryRun: boolean; yes: boolean; }
 
-type S = { label: string; status: StepStatus; from?: string; to?: string; detail?: string };
+type S = { label: string; status: StepStatus; from?: string; to?: string; detail?: string; pinned?: string };
 
 const CARGO_BINS = ['nostr-rs-relay', 'ngit', 'nak'];
 const NPM_GLOBALS = ['@anthropic-ai/claude-code'];
@@ -38,16 +39,22 @@ export const Update: React.FC<UpdateProps> = ({ dryRun, yes }) => {
         const before = await currentVersion(pkg);
         up(i, { status: 'running', from: before });
 
+        const pinnedVersion = COMPONENT_VERSIONS[pkg as keyof typeof COMPONENT_VERSIONS];
+        const cargoArgs = pinnedVersion
+          ? ['install', pkg, '--version', pinnedVersion, '--locked', '--quiet']
+          : ['install', pkg, '--locked', '--quiet'];
+
         if (!dryRun) {
           try {
-            await execa('cargo', ['install', pkg, '--locked', '--quiet'], { stdio: 'pipe' });
+            await execa('cargo', cargoArgs, { stdio: 'pipe' });
             const after = await currentVersion(pkg);
             up(i, { status: 'done', to: after });
           } catch (e: any) {
             up(i, { status: 'error', detail: e.message?.slice(0, 80) });
           }
         } else {
-          up(i, { status: 'skip', detail: 'dry-run' });
+          const hint = pinnedVersion ? `pinned → ${pinnedVersion}` : 'latest';
+          up(i, { status: 'skip', detail: `dry-run (${hint})` });
         }
       }
 

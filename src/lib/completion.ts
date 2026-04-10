@@ -7,7 +7,7 @@ import path from 'path';
 // typing `nostr-station <TAB>` in your terminal shows available commands.
 // It's a standard CLI convention that makes the tool feel native.
 
-const COMMANDS = ['onboard', 'doctor', 'status', 'update', 'logs', 'relay', 'tui', 'push', 'keychain', 'nsite', 'setup-editor', 'uninstall', 'completion', 'version'];
+const COMMANDS = ['onboard', 'doctor', 'status', 'update', 'logs', 'relay', 'tui', 'seed', 'push', 'keychain', 'nsite', 'setup-editor', 'uninstall', 'completion', 'version'];
 const KEYCHAIN_SUBCOMMANDS = ['list', 'get', 'set', 'delete', 'rotate', 'migrate'];
 const KEYCHAIN_KEYS = ['ai-api-key', 'watchdog-nsec'];
 const NSITE_SUBCOMMANDS = ['init', 'publish', 'deploy', 'status', 'open', 'help'];
@@ -15,23 +15,26 @@ const PUSH_FLAGS = ['--github', '--ngit'];
 const RELAY_SUBCOMMANDS = ['start', 'stop', 'restart', 'status', 'config', 'whitelist'];
 const RELAY_CONFIG_FLAGS = ['--auth', '--dm-auth'];
 const RELAY_WHITELIST_FLAGS = ['--add', '--remove'];
+const ONBOARD_FLAGS = ['--demo'];
 const UPDATE_FLAGS = ['--dry-run', '--yes', '--wizard'];
 const DOCTOR_FLAGS = ['--fix', '--repair', '--deep'];
 const LOGS_FLAGS = ['--follow', '-f', '--service'];
 const LOGS_SERVICES = ['relay', 'watchdog', 'all'];
+const SEED_FLAGS = ['--events', '--full'];
 
 const ZSH_COMPLETION = `#compdef nostr-station
 
 _nostr_station() {
   local -a commands
   commands=(
-    'onboard:Interactive setup wizard'
+    'onboard:Interactive setup wizard (--demo for throwaway keypair)'
     'doctor:Health checks and quick fixes'
     'status:Show relay and service status'
     'update:Update all installed components'
     'logs:Tail relay or watchdog logs'
     'relay:Manage the nostr-rs-relay service'
     'tui:Live dashboard'
+    'seed:Seed relay with dummy events for testing'
     'keychain:Manage credentials in the OS keychain'
     'push:Push to all configured remotes (git + ngit)'
     'nsite:Manage nsite publishing (nsyte)'
@@ -49,6 +52,15 @@ _nostr_station() {
   log_services=('relay' 'watchdog' 'all')
 
   case $words[2] in
+    onboard)
+      _arguments \\
+        '--demo[Use throwaway keypair — skip npub/bunker prompts]'
+      ;;
+    seed)
+      _arguments \\
+        '--events[Number of events to publish]:count:' \\
+        '--full[Also publish profile, contact list, and reactions]'
+      ;;
     relay)
       case $words[3] in
         config)
@@ -116,7 +128,7 @@ _nostr_station() {
   local cur prev words cword
   _init_completion || return
 
-  local commands="onboard doctor status update logs relay tui push keychain nsite setup-editor uninstall completion version"
+  local commands="onboard doctor status update logs relay tui seed push keychain nsite setup-editor uninstall completion version"
 
   case $prev in
     nostr-station)
@@ -143,6 +155,12 @@ _nostr_station() {
         COMPREPLY=($(compgen -W "ai-api-key watchdog-nsec" -- "$cur"))
         return
       fi ;;
+    onboard)
+      COMPREPLY=($(compgen -W "--demo" -- "$cur"))
+      return ;;
+    seed)
+      COMPREPLY=($(compgen -W "--events --full" -- "$cur"))
+      return ;;
     push)
       COMPREPLY=($(compgen -W "--github --ngit" -- "$cur"))
       return ;;

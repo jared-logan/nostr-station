@@ -17,7 +17,11 @@ type Stage =
   | 'verify'
   | 'done';
 
-export const Onboard: React.FC = () => {
+interface OnboardProps {
+  demoMode?: boolean;
+}
+
+export const Onboard: React.FC<OnboardProps> = ({ demoMode = false }) => {
   const [stage, setStage] = useState<Stage>('detect');
   const [platform, setPlatform] = useState<Platform | null>(null);
   const [installed, setInstalled] = useState<Installed | null>(null);
@@ -47,6 +51,7 @@ export const Onboard: React.FC = () => {
       {/* Phase 2 */}
       {stage === 'config' && (
         <ConfigPhase
+          demoMode={demoMode}
           onDone={cfg => {
             setConfig(cfg);
             setStage('install');
@@ -95,7 +100,7 @@ export const Onboard: React.FC = () => {
 
       {/* Summary */}
       {stage === 'done' && config && (
-        <Summary config={config} meshIp={meshIp} />
+        <Summary config={config} meshIp={meshIp} demoMode={demoMode} />
       )}
     </Box>
   );

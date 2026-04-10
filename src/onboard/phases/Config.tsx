@@ -1,14 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
+import { execSync } from 'child_process';
 import { PhaseHeader } from '../components/Step.js';
 import { Prompt } from '../components/Prompt.js';
 import { Select, type SelectOption } from '../components/Select.js';
 import { P } from '../components/palette.js';
 import type { Config, VersionControl } from '../../lib/detect.js';
 import { probeOllama, probeLmStudio } from '../../lib/detect.js';
+import { getKeychain } from '../../lib/keychain.js';
 
 interface ConfigPhaseProps {
   onDone: (config: Config) => void;
+  demoMode?: boolean;
 }
 
 type Field =
@@ -61,7 +64,7 @@ const YES_NO: SelectOption[] = [
   { label: 'No',  value: 'false' },
 ];
 
-export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
+export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone, demoMode = false }) => {
   const [field, setField] = useState<Field>('npub');
   const [values, setValues] = useState<Partial<Record<Field, string>>>({
     relayName:     'nostr-dev-relay',
@@ -83,6 +86,36 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
   };
 
   const advance = (next: Field) => setField(next);
+
+  // Demo mode — generate throwaway keypair and skip all interactive prompts
+  useEffect(() => {
+    if (!demoMode) return;
+    (async () => {
+      let demoPub = 'demo-npub';
+      try {
+        const out = execSync('nak keygen', { stdio: 'pipe' }).toString();
+        const nsec = out.match(/nsec[a-z0-9]+/)?.[0] ?? '';
+        demoPub = out.match(/npub[a-z0-9]+/)?.[0] ?? 'demo-npub';
+        // Store in keychain even in demo mode — never plaintext on disk
+        if (nsec) await getKeychain().store('demo-nsec', nsec);
+      } catch {}
+
+      done({
+        npub:           demoPub,
+        bunker:         '',
+        relayName:      'nostr-dev-relay-demo',
+        fallbackRelays: 'wss://relay.damus.io wss://nos.lol',
+        whitelistExtra: '',
+        versionControl: 'both',
+        aiProvider:     'anthropic',
+        editor:         'claude-code',
+        installStacks:  'false',
+        installBlossom: 'false',
+        installLlmWiki: 'false',
+        installNsyte:   'false',
+      });
+    })();
+  }, [demoMode]);
 
   // Probe local servers when provider is selected
   useEffect(() => {
@@ -142,6 +175,17 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
       <Text>{value || '(skipped)'}</Text>
     </Box>
   );
+
+  if (demoMode) {
+    return (
+      <Box flexDirection="column">
+        <PhaseHeader number={2} title="Configuration" />
+        <Box marginLeft={2} marginBottom={1}>
+          <Text color={P.warn}>⚠  DEMO MODE — generating throwaway keypair…</Text>
+        </Box>
+      </Box>
+    );
+  }
 
   return (
     <Box flexDirection="column">
@@ -449,15 +493,16 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
       {/* AI coding tool — determines which filename the context file is symlinked to */}
       {field === 'editor' && (
         <Box flexDirection="column">
-          <Box marginLeft={2} marginBottom={1}>
-            <Text color={P.muted}>
-              {'Nostr Station writes a '}
-            </Text>
-            <Text color={P.accentBright}>NOSTR_STATION.md</Text>
-            <Text color={P.muted}>
-              {' context file and symlinks it\n  to your tool\'s convention. Switch any time: '}
-            </Text>
-            <Text color={P.accentBright}>nostr-station setup-editor</Text>
+          <Box marginLeft={2} marginBottom={1} flexDirection="column">
+            <Box>
+              <Text color={P.muted}>{'Nostr Station writes a '}</Text>
+              <Text color={P.accentBright}>NOSTR_STATION.md</Text>
+              <Text color={P.muted}>{' context file for your AI coding tool.'}</Text>
+            </Box>
+            <Box>
+              <Text color={P.muted}>{'Switch editors any time: '}</Text>
+              <Text color={P.accentBright}>nostr-station setup-editor</Text>
+            </Box>
           </Box>
           <Select
             label="AI coding tool"
@@ -471,9 +516,8 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
       {field === 'installStacks' && (
         <Box flexDirection="column">
           <Box marginLeft={2} marginBottom={1}>
-            <Text color={P.muted}>Stacks by Soapbox — scaffold Nostr apps with </Text>
+            <Text color={P.muted}>Stacks by Soapbox — scaffold Nostr apps quickly with </Text>
             <Text color={P.accentBright}>stacks mkstack</Text>
-            <Text color={P.muted}> + Dork AI agent</Text>
           </Box>
           <Select label="Install Stacks? (@getstacks/stacks)" options={YES_NO}
             onSelect={item => { set('installStacks', item.value); advance('installBlossom'); }} />
@@ -482,7 +526,16 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone }) => {
 
       {field === 'installBlossom' && (
         <Select label="Install Blossom media server (dev only)?" options={YES_NO}
-          onSelect={item => { set('installBlossom', item.value); advance('installLlmWiki'); }} />
+          onSelect={item => {
+            set('installBlossom', item.value);
+            // llm-wiki is only relevant when using Anthropic + Claude Code
+            if (values.aiProvider === 'anthropic' && values.editor === 'claude-code') {
+              advance('installLlmWiki');
+            } else {
+              set('installLlmWiki', 'false');
+              advance('installNsyte');
+            }
+          }} />
       )}
 
       {field === 'installLlmWiki' && (

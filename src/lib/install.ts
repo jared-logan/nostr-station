@@ -1,5 +1,6 @@
 import { execa, type ExecaError } from 'execa';
 import type { Platform, Config } from './detect.js';
+import { COMPONENT_VERSIONS } from './versions.js';
 
 export type InstallResult = { ok: boolean; detail?: string };
 
@@ -46,11 +47,13 @@ export async function installRust(): Promise<InstallResult> {
 
 // Cargo bins compile from source — can take 10-15 min on a cold machine.
 // We stream stderr and tick elapsed time so the UI shows progress, not silence.
+// Installs a pinned version from COMPONENT_VERSIONS if available, otherwise latest.
 export async function installCargoBin(
   pkg: string,
   onProgress: (detail: string) => void,
 ): Promise<InstallResult> {
   const start = Date.now();
+  const pinnedVersion = COMPONENT_VERSIONS[pkg as keyof typeof COMPONENT_VERSIONS];
 
   const ticker = setInterval(() => {
     const secs = Math.floor((Date.now() - start) / 1000);
@@ -58,8 +61,12 @@ export async function installCargoBin(
     onProgress(`compiling… ${mins > 0 ? `${mins}m ${secs % 60}s` : `${secs}s`}`);
   }, 5000);
 
+  const cargoArgs = pinnedVersion
+    ? ['install', pkg, '--version', pinnedVersion, '--locked']
+    : ['install', pkg, '--locked'];
+
   try {
-    const proc = execa('cargo', ['install', pkg, '--locked'], {
+    const proc = execa('cargo', cargoArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, CARGO_TERM_COLOR: 'never' },
     });
@@ -110,7 +117,7 @@ export async function installClaudeCode(): Promise<InstallResult> {
   return run('npm', ['install', '-g', '@anthropic-ai/claude-code', '--quiet']);
 }
 
-// Stacks by Soapbox — @getstacks/stacks — Nostr app scaffolding via MKStack + Dork AI agent
+// Stacks by Soapbox — @getstacks/stacks — Nostr app scaffolding via MKStack
 // Docs: getstacks.dev  |  Usage after install: stacks mkstack (per project)
 export async function installStacks(): Promise<InstallResult> {
   return run('npm', ['install', '-g', '@getstacks/stacks', '--quiet']);

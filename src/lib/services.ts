@@ -365,16 +365,34 @@ Deploy built web apps to Nostr/Blossom. Each project has its own config.
     Without a registered name, nsite:// resolves by full npub only.
 
 ` : ''}${c.installStacks ? `### Stacks / NostrDeploy — rapid Nostr app prototyping
-Soapbox's MKStack template with Dork AI agent. Separate from this environment —
+Soapbox's MKStack template — rapid Nostr app scaffolding. Separate from this environment —
 has its own AI provider config and deploys to NostrDeploy.com, not nsite.
 
   New project:        mkdir my-app && cd my-app && stacks mkstack
   Run locally:        npm run dev          (localhost:5173)
   Deploy:             npm run deploy       (→ NostrDeploy.com)
-  Dork AI agent:      stacks agent
+  Stacks agent:       stacks agent
   Change AI config:   stacks configure     (separate from nostr-station's AI setup)
 
 ` : ''}
+## Relay NIP support (nostr-rs-relay)
+### Supported
+NIP-01 basic protocol, NIP-02 contact lists, NIP-04 encrypted DMs,
+NIP-09 event deletion, NIP-11 relay info, NIP-12 generic tag queries,
+NIP-15 end of stored events, NIP-16 event treatment, NIP-20 command results,
+NIP-22 event created_at limits, NIP-26 delegated event signing,
+NIP-28 public chat, NIP-33 parameterized replaceable events,
+NIP-40 expiration timestamp, NIP-42 authentication (ENABLED — required),
+NIP-45 count results, NIP-50 search, NIP-65 relay list metadata
+
+### Not supported by local relay
+NIP-05 DNS mapping (requires external DNS), NIP-57 zaps (requires lightning node)
+
+### Auth
+NIP-42 is enabled and required on this relay.
+Clients must authenticate before publishing.
+Add test keypairs to whitelist: \`nostr-station relay whitelist --add <npub>\`
+
 ## Testing the relay
 \`\`\`bash
 # Publish a test note

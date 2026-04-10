@@ -5,7 +5,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 
-export type KeychainKey = 'ai-api-key' | 'watchdog-nsec';
+export type KeychainKey = 'ai-api-key' | 'watchdog-nsec' | 'demo-nsec';
 
 export interface KeychainBackend {
   store(key: KeychainKey, value: string): Promise<void>;

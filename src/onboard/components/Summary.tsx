@@ -7,9 +7,10 @@ import { EDITOR_START_COMMANDS } from '../../lib/services.js';
 interface SummaryProps {
   config: Config;
   meshIp?: string;
+  demoMode?: boolean;
 }
 
-export const Summary: React.FC<SummaryProps> = ({ config, meshIp }) => (
+export const Summary: React.FC<SummaryProps> = ({ config, meshIp, demoMode = false }) => (
   <Box flexDirection="column" marginTop={1}>
     <Text color={P.accentDim}>{'  ─────────────────────────────────────────────'}</Text>
     <Box marginTop={1} marginBottom={1}>
@@ -54,10 +55,10 @@ export const Summary: React.FC<SummaryProps> = ({ config, meshIp }) => (
 
     {config.installStacks && (
       <Box marginTop={1} flexDirection="column" marginLeft={2}>
-        <Text bold>Start a Nostr app with Stacks + Dork:</Text>
+        <Text bold>Start a Nostr app with Stacks:</Text>
         <Text dimColor>  mkdir my-app && cd my-app</Text>
         <Text dimColor>  stacks mkstack</Text>
-        <Text color={P.muted}>  getstacks.dev  ·  AI agent scaffolding for Nostr</Text>
+        <Text color={P.muted}>  getstacks.dev  ·  Nostr app scaffolding</Text>
       </Box>
     )}
     {config.installLlmWiki && (
@@ -73,6 +74,18 @@ export const Summary: React.FC<SummaryProps> = ({ config, meshIp }) => (
         <Text dimColor>  /wiki:research "nostr relay architecture NIP specifications" --wiki nostr-protocol</Text>
         <Text dimColor>  /wiki:research "nostr app development patterns" --wiki nostr-apps</Text>
         <Text dimColor>  /wiki:assess ./ --wiki nostr-apps</Text>
+      </Box>
+    )}
+
+    {demoMode && (
+      <Box marginTop={1} flexDirection="column" marginLeft={2}>
+        <Text color={P.warn}>⚠  Demo mode — this install used a throwaway keypair.</Text>
+        <Text color={P.warn}>   Your nsec is NOT in Amber. Do not use this for real development.</Text>
+        <Box marginTop={1}>
+          <Text color={P.muted}>   To set up with your real identity:</Text>
+        </Box>
+        <Text dimColor>     nostr-station uninstall</Text>
+        <Text dimColor>     nostr-station onboard</Text>
       </Box>
     )}
 

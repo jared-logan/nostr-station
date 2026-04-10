@@ -4,6 +4,7 @@ import { Step, type StepStatus } from '../onboard/components/Step.js';
 import { Select, type SelectOption } from '../onboard/components/Select.js';
 import { P } from '../onboard/components/palette.js';
 import { execa } from 'execa';
+import { COMPONENT_VERSIONS } from '../lib/versions.js';
 
 interface UpdateWizardProps {}
 
@@ -50,10 +51,25 @@ export const UpdateWizard: React.FC<UpdateWizardProps> = () => {
       const cc    = await getNpmVersion('@anthropic-ai/claude-code');
 
       setComponents([
-        { name: 'nostr-rs-relay', current: relay,      latest: undefined, updateAvailable: true },
-        { name: 'ngit',           current: ngit,       latest: undefined, updateAvailable: true },
-        { name: 'nak',            current: nak,        latest: undefined, updateAvailable: true },
-        { name: 'claude-code',    current: cc.current, latest: cc.latest, updateAvailable: cc.current !== cc.latest },
+        {
+          name: 'nostr-rs-relay',
+          current: relay,
+          latest: COMPONENT_VERSIONS['nostr-rs-relay'],
+          updateAvailable: relay !== COMPONENT_VERSIONS['nostr-rs-relay'],
+        },
+        {
+          name: 'ngit',
+          current: ngit,
+          latest: COMPONENT_VERSIONS['ngit'],
+          updateAvailable: ngit !== COMPONENT_VERSIONS['ngit'],
+        },
+        {
+          name: 'nak',
+          current: nak,
+          latest: COMPONENT_VERSIONS['nak'],
+          updateAvailable: nak !== COMPONENT_VERSIONS['nak'],
+        },
+        { name: 'claude-code', current: cc.current, latest: cc.latest, updateAvailable: cc.current !== cc.latest },
       ]);
       setStage('confirm');
     })();
@@ -85,7 +101,11 @@ export const UpdateWizard: React.FC<UpdateWizardProps> = () => {
       }, 5000);
 
       try {
-        const proc = execa('cargo', ['install', pkg, '--locked'], { stdio: 'pipe' });
+        const pinnedVersion = COMPONENT_VERSIONS[pkg as keyof typeof COMPONENT_VERSIONS];
+      const cargoArgs = pinnedVersion
+        ? ['install', pkg, '--version', pinnedVersion, '--locked']
+        : ['install', pkg, '--locked'];
+      const proc = execa('cargo', cargoArgs, { stdio: 'pipe' });
         proc.stderr?.on('data', (chunk: Buffer) => {
           const line = chunk.toString().trim().split('\n').pop() ?? '';
           if (line) up(i, { detail: line.slice(0, 55) });

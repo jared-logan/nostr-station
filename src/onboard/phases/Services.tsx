@@ -168,7 +168,7 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
           <Text>{'    mkdir my-app && cd my-app'}</Text>
           <Text>{'    stacks mkstack'}</Text>
           <Text> </Text>
-          <Text>{'  Run stacks configure any time to change Dork\'s AI provider or API key.'}</Text>
+          <Text>{'  Run stacks configure any time to change the stacks agent AI provider or API key.'}</Text>
         </Box>
       )}
       {showGhNote && (

@@ -31,7 +31,14 @@ node_version() {
 
 if [[ "$(node_version)" -lt "$REQUIRED_NODE" ]]; then
   log "Node ${REQUIRED_NODE}+ not found — installing via nvm..."
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+  NVM_FALLBACK="v0.40.3"
+  NVM_LATEST=$(curl -fsSL --max-time 5 https://api.github.com/repos/nvm-sh/nvm/releases/latest \
+    | grep '"tag_name"' | cut -d'"' -f4 2>/dev/null) || true
+  if [[ -z "${NVM_LATEST:-}" ]]; then
+    warn "Could not fetch latest nvm version — using fallback ${NVM_FALLBACK}"
+    NVM_LATEST="$NVM_FALLBACK"
+  fi
+  curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_LATEST}/install.sh" | bash
   # Source immediately — curl script wrote to .bashrc/.zshrc but we need
   # nvm active in this session right now, not after a shell restart
   [ -s "${NVM_DIR}/nvm.sh" ] && source "${NVM_DIR}/nvm.sh"
@@ -62,9 +69,54 @@ else
   STATION_CMD="nostr-station"
 fi
 
-# ── 6. Hand off to Ink wizard ─────────────────────────────────────────────────
-log "Launching onboard wizard..."
-echo ""
+# ── 6. SSH + tmux safety check ────────────────────────────────────────────────
+if [[ -n "${SSH_CLIENT:-}" ]] || [[ -n "${SSH_TTY:-}" ]]; then
+  if [[ -z "${TMUX:-}" ]]; then
+    echo ""
+    warn "Running over SSH. If your connection drops, the install will stop."
+    echo "     For long Rust compiles we recommend running inside tmux:"
+    echo ""
+    if command -v tmux &>/dev/null; then
+      echo "       tmux"
+      echo "       nostr-station onboard"
+      echo ""
+      echo "       # If disconnected, reconnect and run:"
+      echo "       tmux attach"
+    else
+      echo "       # Install tmux first:"
+      if [[ "$OS" == "macos" ]]; then
+        echo "       brew install tmux"
+      else
+        echo "       sudo apt install tmux   (or brew install tmux)"
+      fi
+      echo ""
+      echo "       tmux"
+      echo "       nostr-station onboard"
+      echo ""
+      echo "       # If disconnected, reconnect and run:"
+      echo "       tmux attach"
+    fi
+    echo ""
+    read -r -p "  Press Enter to continue anyway, or Ctrl+C to exit and use tmux. "
+  fi
+fi
 
-# Pass any pre-set env vars through — wizard reads process.env
-"${STATION_CMD}" onboard
+# ── 7. Hand off to Ink wizard ─────────────────────────────────────────────────
+if [ -t 0 ]; then
+  log "Launching onboard wizard..."
+  echo ""
+  # Pass any pre-set env vars through — wizard reads process.env
+  "${STATION_CMD}" onboard
+else
+  echo ""
+  ok "nostr-station installed"
+  echo ""
+  echo "  No interactive terminal detected."
+  echo "  To run the setup wizard, open a new terminal and run:"
+  echo "    nostr-station onboard"
+  echo ""
+  echo "  Or if connecting via SSH:"
+  echo "    ssh -t user@host"
+  echo "    nostr-station onboard"
+  echo ""
+fi
