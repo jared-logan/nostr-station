@@ -54,20 +54,45 @@ jobs:
             echo "❌ unknown command did not fall through to help"; exit 1;
           }
 
-      - name: status --json emits valid JSON
+      - name: status --json emits valid JSON (schema-only check)
         run: |
+          # Capture stdout only — nothing else should leak here now that
+          # cli.tsx short-circuits --json before mounting Ink.
           nostr-station status --json > /tmp/status.json
+          echo "--- raw output ---"
           cat /tmp/status.json
-          python3 -c "
+          echo "--- schema check ---"
+          python3 <<'PY'
           import json, sys
-          d = json.load(open('/tmp/status.json'))
+          with open('/tmp/status.json') as f:
+              d = json.load(f)
+
+          # Schema contract — every status row MUST be present as a key,
+          # regardless of whether the underlying service is installed/running.
+          # In CI nothing is installed, so ok=False is expected and acceptable.
+          # This test ONLY validates structure, not values.
           required = {'Relay', 'nostr-vpn', 'ngit', 'claude-code', 'nak', 'relay bin'}
           missing = required - set(d.keys())
           if missing:
-              print(f'❌ missing keys: {missing}')
+              print(f'FAIL: missing keys: {missing}')
               sys.exit(1)
-          print('✓ status --json schema valid')
-          "
+
+          # Every row must have {ok: bool, value: str}
+          for k, v in d.items():
+              if not isinstance(v, dict):
+                  print(f'FAIL: {k} is not an object')
+                  sys.exit(1)
+              if 'ok' not in v or not isinstance(v['ok'], bool):
+                  print(f'FAIL: {k}.ok missing or not a bool')
+                  sys.exit(1)
+              if 'value' not in v or not isinstance(v['value'], str):
+                  print(f'FAIL: {k}.value missing or not a string')
+                  sys.exit(1)
+
+          ok_count = sum(1 for v in d.values() if v['ok'])
+          print(f'OK: all {len(d)} keys present, all rows well-formed')
+          print(f'info: {ok_count}/{len(d)} services healthy (not asserted in CI)')
+          PY
 
       - name: Banner narrow-fallback logic present
         run: |

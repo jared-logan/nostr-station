@@ -41,6 +41,7 @@ if [[ "$(node_version)" -lt "$REQUIRED_NODE" ]]; then
   curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_LATEST}/install.sh" | bash
   # Source immediately — curl script wrote to .bashrc/.zshrc but we need
   # nvm active in this session right now, not after a shell restart
+  # shellcheck disable=SC1091
   [ -s "${NVM_DIR}/nvm.sh" ] && source "${NVM_DIR}/nvm.sh"
   nvm install --lts
   nvm use --lts

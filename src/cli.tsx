@@ -4,7 +4,7 @@ import { render } from 'ink';
 import { Onboard }       from './onboard/index.js';
 import { Seed }          from './commands/Seed.js';
 import { Doctor }        from './commands/Doctor.js';
-import { Status }        from './commands/Status.js';
+import { Status, gatherStatus, formatStatusJson } from './commands/Status.js';
 import { Update }        from './commands/Update.js';
 import { UpdateWizard }  from './commands/UpdateWizard.js';
 import { Logs }          from './commands/Logs.js';
@@ -45,7 +45,14 @@ switch (command) {
     break;
 
   case 'status':
-    render(React.createElement(Status, { json: flag('--json') }));
+    // --json bypasses Ink entirely so nothing but JSON hits stdout.
+    // Mounting the Ink component would render UI frames that corrupt the
+    // payload for downstream parsers (jq, python -m json.tool, CI checks).
+    if (flag('--json')) {
+      console.log(formatStatusJson(gatherStatus()));
+      process.exit(0);
+    }
+    render(React.createElement(Status, { json: false }));
     break;
 
   case 'update':

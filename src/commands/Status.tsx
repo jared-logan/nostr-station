@@ -5,7 +5,7 @@ import { execSync } from 'child_process';
 
 interface StatusProps { json: boolean; }
 
-interface ServiceStatus {
+export interface ServiceStatus {
   label: string;
   value: string;
   ok: boolean;
@@ -16,7 +16,10 @@ function cmd(c: string): string | null {
   catch { return null; }
 }
 
-function gather(): ServiceStatus[] {
+// Exported so cli.tsx can call it directly for --json mode, bypassing Ink.
+// Ink would otherwise write UI frames to stdout alongside the JSON payload,
+// corrupting any programmatic consumer piping stdout into a parser.
+export function gatherStatus(): ServiceStatus[] {
   const relayUp  = cmd('nc -z localhost 8080') !== null;
   const meshIp   = (() => {
     try {
@@ -39,17 +42,22 @@ function gather(): ServiceStatus[] {
   ];
 }
 
+// Pure JSON serializer — also reused by cli.tsx for --json so Ink never mounts.
+export function formatStatusJson(rows: ServiceStatus[]): string {
+  return JSON.stringify(
+    Object.fromEntries(rows.map(x => [x.label, { ok: x.ok, value: x.value }])),
+    null, 2,
+  );
+}
+
 export const Status: React.FC<StatusProps> = ({ json }) => {
   const [rows, setRows] = useState<ServiceStatus[]>([]);
 
   useEffect(() => {
-    const r = gather();
+    const r = gatherStatus();
     setRows(r);
     if (json) {
-      console.log(JSON.stringify(
-        Object.fromEntries(r.map(x => [x.label, { ok: x.ok, value: x.value }])),
-        null, 2,
-      ));
+      console.log(formatStatusJson(r));
       process.exit(0);
     }
   }, []);
