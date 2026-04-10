@@ -12,6 +12,11 @@ import { Tui }           from './commands/Tui.js';
 import { Completion }    from './commands/Completion.js';
 import { Uninstall }     from './commands/Uninstall.js';
 import { SetupEditor }   from './commands/SetupEditor.js';
+import { Nsite }         from './commands/Nsite.js';
+import { Keychain }      from './commands/Keychain.js';
+import { Push }          from './commands/Push.js';
+import { RelayConfigView, RelayWhitelist } from './commands/RelayConfig.js';
+import { getKeychain }   from './lib/keychain.js';
 
 const [,, command = 'help', ...args] = process.argv;
 
@@ -53,11 +58,26 @@ switch (command) {
     }));
     break;
 
-  case 'relay':
-    render(React.createElement(Relay, {
-      action: (args[0] ?? 'status') as 'start' | 'stop' | 'restart' | 'status',
-    }));
+  case 'relay': {
+    const relayAction = args[0] ?? 'status';
+
+    if (relayAction === 'config') {
+      const authStr   = arg('--auth');
+      const dmAuthStr = arg('--dm-auth');
+      const authToggle   = authStr   === 'on' ? true : authStr   === 'off' ? false : undefined;
+      const dmAuthToggle = dmAuthStr === 'on' ? true : dmAuthStr === 'off' ? false : undefined;
+      render(React.createElement(RelayConfigView, { authToggle, dmAuthToggle }));
+    } else if (relayAction === 'whitelist') {
+      const addNpub    = arg('--add');
+      const removeNpub = arg('--remove');
+      render(React.createElement(RelayWhitelist, { add: addNpub, remove: removeNpub }));
+    } else {
+      render(React.createElement(Relay, {
+        action: relayAction as 'start' | 'stop' | 'restart' | 'status',
+      }));
+    }
     break;
+  }
 
   case 'tui':
     render(React.createElement(Tui, null));
@@ -75,6 +95,39 @@ switch (command) {
     render(React.createElement(SetupEditor, null));
     break;
 
+  case 'keychain': {
+    const kcAction = (args[0] ?? 'list') as 'list' | 'get' | 'set' | 'delete' | 'rotate' | 'migrate';
+    const kcKey = args[1];
+
+    // --raw: non-interactive stdout output for use in scripts (.claude_env, watchdog)
+    if (kcAction === 'get' && flag('--raw')) {
+      getKeychain().retrieve(kcKey as any ?? 'ai-api-key').then(val => {
+        if (val) { process.stdout.write(val); process.exit(0); }
+        else { process.exit(1); }
+      });
+      break;
+    }
+
+    render(React.createElement(Keychain, { action: kcAction, key: kcKey }));
+    break;
+  }
+
+  case 'push':
+    render(React.createElement(Push, {
+      githubOnly: flag('--github'),
+      ngitOnly:   flag('--ngit'),
+    }));
+    break;
+
+  case 'nsite': {
+    const nsiteAction = (args[0] ?? 'status') as 'init' | 'publish' | 'deploy' | 'status' | 'open' | 'help';
+    render(React.createElement(Nsite, {
+      action: nsiteAction,
+      titan:  flag('--titan'),
+    }));
+    break;
+  }
+
   case 'uninstall':
     render(React.createElement(Uninstall, { yes: flag('--yes') }));
     break;
@@ -82,7 +135,7 @@ switch (command) {
   case 'version':
   case '--version':
   case '-v':
-    console.log('nostr-station 0.0.1');
+    console.log('nostr-station 0.0.2');
     break;
 
   case 'help':
@@ -109,18 +162,29 @@ function printHelp() {
     logs                 Tail relay or watchdog logs
     relay                Manage the nostr-rs-relay service
     tui                  Live dashboard — events, logs, mesh status
+    push                 Push to all configured remotes (git + ngit)
+    keychain             Manage credentials stored in the OS keychain
+    nsite                Manage nsite publishing (nsyte)
     setup-editor         Link NOSTR_STATION.md to your AI coding tool
     completion           Generate shell tab-completion
     uninstall            Clean removal
 
   RELAY SUBCOMMANDS
     relay start / stop / restart / status
+    relay config                       Show relay configuration
+    relay config --auth on|off         Toggle NIP-42 auth
+    relay config --dm-auth on|off      Toggle DM auth restriction
+    relay whitelist                    List whitelisted npubs
+    relay whitelist --add <npub>       Add an npub
+    relay whitelist --remove <npub>    Remove an npub (with confirmation)
 
   FLAGS
     doctor  --fix --repair --deep
     status  --json
     update  --dry-run --yes --wizard
     logs    --follow (-f)  --service relay|watchdog|all
+    push    --github  --ngit
+    nsite   --titan
     completion  --shell zsh|bash  --install  --print
     uninstall   --yes
 
@@ -131,6 +195,15 @@ function printHelp() {
     nostr-station relay restart
     nostr-station update --wizard
     nostr-station tui
+    nostr-station push
+    nostr-station push --github
+    nostr-station push --ngit
     nostr-station completion --shell zsh --install
+    nostr-station nsite init
+    nostr-station nsite publish
+    nostr-station nsite publish --dir ./dist
+    nostr-station nsite open --titan
+    nostr-station keychain list
+    nostr-station keychain rotate
   `);
 }

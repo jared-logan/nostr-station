@@ -56,7 +56,7 @@ export const Banner: React.FC = () => (
         <Text color={P.accentBright} bold>{'███████║   ██║   ██║  ██║   ██║   ██║╚██████╔╝██║ ╚████║'}</Text>
         <Text color={P.accentBright} bold>{'╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝'}</Text>
         <Box marginTop={1}>
-          <Text color={P.muted}>Nostr-native dev environment  ·  v0.0.1</Text>
+          <Text color={P.muted}>Nostr-native dev environment  ·  v0.0.2</Text>
         </Box>
         <Text color={P.muted}>relay · vpn mesh · ngit · claude code · stacks</Text>
       </Box>

@@ -8,7 +8,7 @@ Sets up a local relay, mesh VPN, Nostr-native git with Amber signing, and your A
 curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/install.sh | bash
 ```
 
-> v0.0.1 — early release. Works on macOS (Apple Silicon + Intel) and Linux (apt / dnf / pacman).
+> v0.0.2 — macOS (Apple Silicon + Intel) and Linux (apt / dnf / pacman).
 
 ---
 
@@ -16,11 +16,13 @@ curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/inst
 
 | Component | What it is |
 |-----------|-----------|
-| [nostr-rs-relay](https://github.com/scsibug/nostr-rs-relay) | Local Nostr relay on `ws://localhost:8080`, NIP-42 auth enabled |
+| [nostr-rs-relay](https://github.com/scsibug/nostr-rs-relay) | Local private relay on `ws://localhost:8080`, NIP-42 auth, whitelist-only |
 | [ngit](https://github.com/DanConwayDev/ngit-cli) | Nostr-native git — clone, push, and sign commits via Amber |
 | [nak](https://github.com/fiatjaf/nak) | Nostr event Swiss army knife — publish, query, decode |
 | [nostr-vpn](https://github.com/mmalmi/nostr-vpn) | Mesh VPN over Nostr — connect dev machines without port forwarding |
-| [Claude Code](https://claude.ai/code) | AI coding agent, wired to your chosen AI provider |
+| [Claude Code](https://claude.ai/code) | AI coding agent — conditional, only installed if your config needs it |
+| [GitHub CLI](https://cli.github.com) *(optional)* | `gh` — standard GitHub workflows alongside ngit |
+| [nsyte](https://nsyte.run) *(optional)* | Deploy static apps to Nostr/Blossom — Amber-signed, nsec-free |
 | [Stacks](https://getstacks.dev) *(optional)* | Nostr app scaffolding with Dork AI agent |
 | [Blossom](https://github.com/hzrd149/blossom-server) *(optional)* | Local media server for Nostr dev |
 
@@ -33,18 +35,18 @@ All Rust binaries compile from source. First install takes 10–15 minutes.
 The installer runs an interactive Ink TUI wizard with five phases:
 
 1. **Detect** — reads your OS, arch, package manager, and what's already installed
-2. **Config** — collects your npub, Amber bunker string, relay name, AI provider, and editor
+2. **Config** — collects your npub, Amber bunker string, relay name, version control preference, AI provider, and editor
 3. **Install** — compiles and installs all components, streams live progress
-4. **Services** — writes configs, registers relay and watchdog as system services, generates SSH key
+4. **Services** — writes configs, registers relay and watchdog as system services, seeds relay whitelist, stores credentials in OS keychain
 5. **Verify** — checks every component is running and reachable
 
-After setup, a `NOSTR_STATION.md` context file is written to `~/projects/` and symlinked to whatever filename your AI coding tool reads (e.g. `CLAUDE.md`, `.cursorrules`, `.windsurfrules`). Switch tools any time with `nostr-station setup-editor`.
+After setup, a `NOSTR_STATION.md` context file is written to `~/projects/` and symlinked to whatever filename your AI coding tool reads (`CLAUDE.md`, `.cursorrules`, `.windsurfrules`, etc.). Switch tools any time with `nostr-station setup-editor`.
 
 ---
 
 ## AI provider options
 
-nostr-station configures Claude Code to route through any OpenAI-compatible endpoint. You are not locked in to Anthropic's API.
+nostr-station configures your AI coding tool to route through any OpenAI-compatible endpoint.
 
 | Provider | Description |
 |----------|-------------|
@@ -57,6 +59,8 @@ nostr-station configures Claude Code to route through any OpenAI-compatible endp
 | **LM Studio** | Local models, no key required — auto-detected |
 | **Maple Proxy** | TEE-encrypted inference, end-to-end private |
 | **Custom** | Any OpenAI-compatible endpoint |
+
+API keys are stored in the OS keychain (macOS Keychain, GNOME Keyring, or AES-256-GCM encrypted file on headless Linux). They are never written to disk in plaintext.
 
 ---
 
@@ -75,6 +79,25 @@ nostr-station logs                 Tail relay log
 nostr-station logs --follow        Follow log in real time (-f also works)
 nostr-station logs --service watchdog|relay|all
 nostr-station relay start|stop|restart|status
+nostr-station relay config                     Show relay settings
+nostr-station relay config --auth on|off       Toggle NIP-42 auth
+nostr-station relay config --dm-auth on|off    Toggle DM auth restriction
+nostr-station relay whitelist                  List whitelisted npubs
+nostr-station relay whitelist --add <npub>     Add an npub
+nostr-station relay whitelist --remove <npub>  Remove an npub
+nostr-station push                 Push to all configured remotes (git + ngit)
+nostr-station push --github        Push to GitHub only
+nostr-station push --ngit          Push to ngit only
+nostr-station nsite init           Configure nsite for a project
+nostr-station nsite publish        Publish to Nostr/Blossom via Amber
+nostr-station nsite status         Compare local build vs published
+nostr-station nsite open           Open site in browser
+nostr-station nsite open --titan   Copy nsite:// URL for Titan browser
+nostr-station keychain list        Show stored credentials and backend
+nostr-station keychain get <key>   Display a credential (confirmation required)
+nostr-station keychain set <key>   Store a credential
+nostr-station keychain rotate <key>  Hot-swap with 60s rollback window
+nostr-station keychain migrate     Convert plaintext ~/.claude_env to keychain loader
 nostr-station tui                  Live dashboard — events, logs, mesh status
 nostr-station setup-editor         Relink context file to a different AI tool
 nostr-station completion --shell zsh|bash --install
@@ -87,12 +110,13 @@ nostr-station uninstall            Clean removal (relay data is preserved)
 
 nostr-station is designed for **nsec-free development**. Your private key stays on your phone in [Amber](https://github.com/greenart7c3/Amber); the dev machine never sees it.
 
+- `ngit push` — Amber prompts on your phone to approve each push
+- `nsite publish` — Amber approves each publish event via bunker
+- The watchdog keypair is auto-generated and stored in the OS keychain
+
 ```bash
 # During onboard, paste your Amber bunker string when prompted
 # bunker://...
-
-# After setup, push a repo
-ngit push   # Amber prompts on your phone → approve → done
 
 # Or connect later
 ngit login --bunker <bunker-string>
@@ -102,21 +126,86 @@ ngit login --bunker <bunker-string>
 
 ## Relay
 
-The local relay runs on `ws://localhost:8080` with NIP-42 auth enabled. A watchdog script monitors it every 5 minutes and sends you a Nostr DM if it goes down.
+The local relay is **private by default** — NIP-42 auth enabled, whitelist-only, not listed on relay directories. It is a personal dev relay, not a public relay.
+
+Your main npub and watchdog npub are added to the whitelist automatically during setup. Add test keypairs as needed:
 
 ```bash
+nostr-station relay whitelist --add <npub>
+nostr-station relay whitelist
+
 # Test it
 nak event -k 1 --sec <test-nsec> "hello" ws://localhost:8080
-nak req -k 1 -l 5 ws://localhost:8080
-
-# Manage
-nostr-station relay restart
-nostr-station logs --follow
+nak req -k 1 --auth <nsec> ws://localhost:8080
 ```
 
 Config: `~/.config/nostr-rs-relay/config.toml`  
 Data: `~/Library/Application Support/nostr-rs-relay/` (macOS) or `~/.local/share/nostr-rs-relay/` (Linux)  
 Logs: `~/logs/nostr-rs-relay.log`
+
+---
+
+## Publishing
+
+### ngit — Nostr-native source repos
+
+```bash
+ngit clone <naddr>        # clone a repo from Nostr
+ngit push                 # push + sign via Amber
+```
+
+### GitHub — standard repos (if version control = github or both)
+
+```bash
+gh repo clone <owner>/<repo>
+gh pr create
+nostr-station push        # push to all configured remotes at once
+```
+
+### nsite — static app publishing
+
+Deploy built web apps to Nostr/Blossom. nsec never on machine — all signing via Amber bunker.
+
+```bash
+nostr-station nsite init        # one-time project setup
+nostr-station nsite publish     # Amber approves, files uploaded
+nostr-station nsite status      # compare local build vs live
+
+# Access
+https://<npub>.nsite.lol        # any browser, immediate
+nsite://<npub>                  # Titan browser
+```
+
+For human-readable `nsite://<name>` addresses, see [Titan](https://github.com/btcjt/titan) — requires a Bitcoin OP_RETURN registration (external to nostr-station).
+
+---
+
+## Security model
+
+| Operation | How credentials are handled |
+|-----------|----------------------------|
+| `push --github` | Uses gh OAuth token stored in system keychain by `gh`, never printed |
+| `push --ngit` | Signing request to Amber via relay — nsec never on machine |
+| `nsite publish` | Signing request to Amber via bunker — nsec never on machine |
+| `gh auth login` | Browser-based OAuth — token stored by `gh` in system keychain |
+| AI provider API key | Stored in OS keychain; `~/.claude_env` is a loader script, not a secret store |
+| Watchdog nsec | Stored in OS keychain — never written to the watchdog script file |
+
+`~/.claude_env` contains no secrets — it calls `nostr-station keychain get ai-api-key --raw` at shell load time to retrieve the key into memory.
+
+Keychain backends in priority order: macOS Keychain → GNOME Keyring → AES-256-GCM encrypted file (`~/.config/nostr-station/secrets`, mode 0600). Run `nostr-station keychain list` to see which backend is active.
+
+---
+
+## Version control options
+
+Choose during onboard — or mix and match:
+
+| Option | What it does |
+|--------|-------------|
+| **ngit only** | Nostr-native repos, Amber-signed pushes, no GitHub required |
+| **GitHub only** | Standard git + `gh` CLI — familiar workflow |
+| **Both** | ngit for Nostr repos, gh for GitHub — `nostr-station push` handles both |
 
 ---
 
