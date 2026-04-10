@@ -4,7 +4,7 @@
   "description": "One-command Nostr dev environment — relay, mesh VPN, ngit, Claude Code, Stacks",
   "type": "module",
   "bin": {
-    "nostr-station": "./dist/cli.js"
+    "nostr-station": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -34,6 +34,13 @@
   "engines": {
     "node": ">=22"
   },
-  "keywords": ["nostr", "relay", "ngit", "claude-code", "stacks", "dev-environment"],
+  "keywords": [
+    "nostr",
+    "relay",
+    "ngit",
+    "claude-code",
+    "stacks",
+    "dev-environment"
+  ],
   "license": "MIT"
 }
