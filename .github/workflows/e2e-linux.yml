@@ -75,6 +75,40 @@ jobs:
           key: cargo-registry-${{ matrix.os }}-v1
           restore-keys: cargo-registry-${{ matrix.os }}-
 
+      # Pre-install cargo binaries explicitly rather than relying on
+      # `onboard --demo` to do it. Two wins:
+      #   1. Deterministic — we see cargo install output + exit code directly
+      #      in the step log, separated from Ink UI noise.
+      #   2. Idempotent — `onboard --demo`'s Install phase will re-run
+      #      `cargo install` but cargo is a no-op when the exact pinned version
+      #      is already present, so the flow is still exercised end-to-end.
+      # Skipped when the cache-bin-cache step hit.
+      - name: Pre-install cargo binaries (cache miss only)
+        if: steps.cargo-bin-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "::group::nostr-rs-relay 0.8.12"
+          cargo install nostr-rs-relay --version 0.8.12 --locked
+          echo "::endgroup::"
+          echo "::group::ngit 2.2.3"
+          cargo install ngit --version 2.2.3 --locked
+          echo "::endgroup::"
+          echo "::group::nak (latest)"
+          cargo install nak --locked
+          echo "::endgroup::"
+
+      - name: Confirm cargo binaries present after install/restore
+        run: |
+          echo "cache-hit output: ${{ steps.cargo-bin-cache.outputs.cache-hit }}"
+          ls -la "$HOME/.cargo/bin/" || echo "(no .cargo/bin dir)"
+          for bin in nostr-rs-relay ngit nak; do
+            if [[ -x "$HOME/.cargo/bin/$bin" ]]; then
+              echo "OK: $bin → $("$HOME/.cargo/bin/$bin" --version 2>&1 | head -1)"
+            else
+              echo "FAIL: $bin not present at \$HOME/.cargo/bin/$bin"
+              exit 1
+            fi
+          done
+
       - name: Install nostr-station (local source)
         if: ${{ github.event.inputs.source != 'published' }}
         run: |
@@ -104,6 +138,30 @@ jobs:
           # Redirect stdin from /dev/null — demo mode doesn't read input but Ink
           # may probe stdin.isTTY; /dev/null is safe and predictable.
           nostr-station onboard --demo < /dev/null 2>&1 | tee /tmp/onboard.log
+
+      - name: Debug — post-onboard state
+        if: always()
+        run: |
+          echo "=== PATH ==="
+          echo "$PATH" | tr ':' '\n'
+          echo
+          echo "=== \$HOME/.cargo/bin ==="
+          ls -la "$HOME/.cargo/bin/" 2>&1 || echo "(missing)"
+          echo
+          echo "=== cargo / rustc versions ==="
+          cargo --version 2>&1 || echo "cargo not found"
+          rustc --version 2>&1 || echo "rustc not found"
+          echo
+          echo "=== which (may fail — that's OK, verify step is next) ==="
+          which nostr-rs-relay 2>&1 || true
+          which ngit 2>&1 || true
+          which nak 2>&1 || true
+          echo
+          echo "=== last 100 lines of /tmp/onboard.log ==="
+          tail -100 /tmp/onboard.log 2>&1 || echo "(no log)"
+          echo
+          echo "=== $HOME/logs (relay/watchdog output, if any) ==="
+          ls -la "$HOME/logs/" 2>&1 || echo "(none)"
 
       - name: Verify — binaries on PATH
         run: |
