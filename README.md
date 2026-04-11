@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/inst
 | [Stacks](https://getstacks.dev) *(optional)* | Nostr app scaffolding — `stacks mkstack` + stacks agent |
 | [Blossom](https://github.com/hzrd149/blossom-server) *(optional)* | Local media server for Nostr dev |
 
-All Rust binaries compile from source. First install takes 10–15 minutes.
+`nostr-rs-relay` is downloaded as a prebuilt binary when one is available for your OS/arch (falls back to `cargo install` on older platforms). `ngit` always compiles from source. `nak` is a prebuilt Go binary from GitHub Releases. First install on a platform without relay prebuilts takes 10–15 minutes; with prebuilts, ~2 minutes.
 
 ---
 
@@ -98,8 +98,11 @@ nostr-station nsite open           Open site in browser
 nostr-station nsite open --titan   Copy nsite:// URL for Titan browser
 nostr-station keychain list        Show stored credentials and backend
 nostr-station keychain get <key>   Display a credential (confirmation required)
+nostr-station keychain get <key> --raw  Print value to stdout (for scripts)
 nostr-station keychain set <key>   Store a credential
-nostr-station keychain rotate <key>  Hot-swap with 60s rollback window
+nostr-station keychain delete <key>  Remove a credential (confirmation required)
+nostr-station keychain rotate      Hot-swap ai-api-key with 60s rollback window
+nostr-station keychain rotate --rollback  Restore previous value (within 60s)
 nostr-station keychain migrate     Convert plaintext ~/.claude_env to keychain loader
 nostr-station tui                  Live dashboard — events, logs, mesh status
 nostr-station seed                 Seed relay with dummy events for dev/testing
@@ -228,10 +231,16 @@ Choose during onboard — or mix and match:
 ## Updating
 
 ```bash
-nostr-station update
+nostr-station update                 # update everything to the pinned version
+nostr-station update --dry-run       # preview what would change
+nostr-station update --wizard        # interactive picker with current → latest diff
 ```
 
-Updates nostr-rs-relay, ngit, nak (via `cargo install --locked`), and Claude Code (via npm). Run `--wizard` to preview version changes before applying.
+- `nostr-rs-relay` and `ngit` are updated via `cargo install` to the versions pinned in `src/lib/versions.ts`. The `--locked` flag is intentionally omitted — upstream `Cargo.lock` entries occasionally break on newer `rustc`, and pinning the top-level crate version is enough to keep builds reproducible.
+- `nak` is pulled from the latest [fiatjaf/nak](https://github.com/fiatjaf/nak) GitHub release (Go binary, not a cargo install).
+- `claude-code` is updated via `npm update -g @anthropic-ai/claude-code`.
+
+A partial failure (e.g. one crate fails to build) exits with a non-zero code and prints which components succeeded — so `nostr-station update && nostr-station push` short-circuits on a broken update.
 
 ---
 
