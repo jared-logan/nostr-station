@@ -16,21 +16,26 @@ async function run(cmd: string, args: string[]): Promise<InstallResult> {
 
 export async function installSystemDeps(p: Platform): Promise<InstallResult> {
   switch (p.pkgMgr) {
+    // protobuf-compiler / protoc is required by nostr-rs-relay's build.rs —
+    // prost-build invokes `protoc` to compile proto/nauthz.proto and the
+    // `cargo install` fails with "Could not find `protoc` installation" without it.
     case 'brew':
-      return run('brew', ['install', 'git', 'curl']);
+      return run('brew', ['install', 'git', 'curl', 'protobuf']);
     case 'apt':
       await run('sudo', ['apt-get', 'update', '-qq']);
       return run('sudo', ['apt-get', 'install', '-y',
         'build-essential', 'curl', 'git', 'pkg-config',
         'libssl-dev', 'netcat-openbsd',
         'libsecret-tools',   // provides secret-tool for GNOME Keyring access
+        'protobuf-compiler', // provides protoc for nostr-rs-relay build.rs
       ]);
     case 'dnf':
       return run('sudo', ['dnf', 'install', '-y',
-        'gcc', 'curl', 'git', 'openssl-devel', 'pkgconfig', 'nmap-ncat']);
+        'gcc', 'curl', 'git', 'openssl-devel', 'pkgconfig', 'nmap-ncat',
+        'protobuf-compiler']);
     case 'pacman':
       return run('sudo', ['pacman', '-Sy', '--noconfirm',
-        'base-devel', 'curl', 'git', 'openssl']);
+        'base-devel', 'curl', 'git', 'openssl', 'protobuf']);
   }
 }
 
