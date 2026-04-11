@@ -215,12 +215,16 @@ jobs:
           python3 -c "
           import json, sys
           d = json.load(open('/tmp/status.json'))
-          # Post-onboard, these should be installed (even if services aren't running):
-          for k in ('nak', 'relay bin', 'ngit'):
+          # Post-onboard presence checks. NOTE: the 'ngit' row in status is an
+          # AUTH check (runs 'ngit status'), not a binary-presence check, so
+          # in demo mode it correctly reports 'not configured' — do not assert
+          # it here. The 'Verify — binaries on PATH' step above already proves
+          # the ngit binary is installed.
+          for k in ('nak', 'relay bin'):
               if not d[k]['ok']:
                   print(f'❌ {k} not installed: {d[k][\"value\"]}')
                   sys.exit(1)
-          print('✓ nak + relay bin + ngit installed')
+          print('✓ nak + relay bin installed')
           "
 
       - name: Verify — doctor (informational only)
