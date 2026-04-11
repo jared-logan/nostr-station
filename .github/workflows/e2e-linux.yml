@@ -64,7 +64,7 @@ jobs:
             ~/.cargo/bin/nostr-rs-relay
             ~/.cargo/bin/ngit
             ~/.cargo/bin/nak
-          key: cargo-bin-${{ matrix.os }}-relay-0.8.12-ngit-2.2.3-nak-v1
+          key: cargo-bin-${{ matrix.os }}-relay-0.8.12-ngit-2.2.3-nak-prebuilt-v2
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -98,8 +98,21 @@ jobs:
           echo "::group::ngit 2.2.3"
           cargo install ngit --version 2.2.3
           echo "::endgroup::"
-          echo "::group::nak (latest)"
-          cargo install nak
+          # nak is a Go binary, NOT a Rust crate — there is no `nak` on
+          # crates.io. Mirror installNak() from src/lib/install.ts: fetch the
+          # matching prebuilt from fiatjaf/nak GitHub releases.
+          echo "::group::nak (latest prebuilt)"
+          tag=$(curl -fsSL https://api.github.com/repos/fiatjaf/nak/releases/latest | jq -r .tag_name)
+          if [[ -z "$tag" || "$tag" == "null" ]]; then
+            echo "failed to resolve nak latest tag"; exit 1
+          fi
+          asset="nak-${tag}-linux-amd64"
+          url="https://github.com/fiatjaf/nak/releases/download/${tag}/${asset}"
+          echo "downloading $url"
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL "$url" -o "$HOME/.cargo/bin/nak"
+          chmod +x "$HOME/.cargo/bin/nak"
+          "$HOME/.cargo/bin/nak" --version || "$HOME/.cargo/bin/nak" version || true
           echo "::endgroup::"
 
       - name: Confirm cargo binaries present after install/restore

@@ -5,7 +5,7 @@ import { Select } from '../components/Select.js';
 import { P } from '../components/palette.js';
 import type { Platform, Config, Installed } from '../../lib/detect.js';
 import {
-  installSystemDeps, installRust, installCargoBin,
+  installSystemDeps, installRust, installCargoBin, installNak,
   installClaudeCode, installGitHubCLI, installStacks, installBlossom, installNsyte,
 } from '../../lib/install.js';
 
@@ -22,10 +22,11 @@ interface InstallPhaseProps {
   onDone: () => void;
 }
 
+// Compiled-from-source bins. nak is NOT here — it is a Go binary distributed
+// as a prebuilt on GitHub Releases; see installNak in src/lib/install.ts.
 const CARGO_BINS = [
   { pkg: 'nostr-rs-relay', label: 'nostr-rs-relay  (compiling…)' },
   { pkg: 'ngit',           label: 'ngit  (compiling…)' },
-  { pkg: 'nak',            label: 'nak' },
 ];
 
 export const InstallPhase: React.FC<InstallPhaseProps> = ({
@@ -36,6 +37,7 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
     { label: 'Rust toolchain',   status: 'pending' },
     // one row per cargo bin — label updates live during compile
     ...CARGO_BINS.map(b => ({ label: b.label, status: 'pending' as StepStatus })),
+    { label: 'nak',              status: 'pending' },
     { label: 'Claude Code',      status: (config.aiProvider === 'anthropic' || config.editor === 'claude-code') ? 'pending' : 'skip' as StepStatus },
     { label: 'GitHub CLI',       status: config.versionControl !== 'ngit' ? 'pending' : 'skip' as StepStatus },
     { label: 'Stacks',           status: config.installStacks  ? 'pending' : 'skip' as StepStatus },
@@ -80,7 +82,7 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
 
       // Cargo bins — each streams live compiler progress into the step detail
       for (const { pkg, label } of CARGO_BINS) {
-        const idx = IDX[pkg === 'nostr-rs-relay' ? 'relay' : pkg === 'ngit' ? 'ngit' : 'nak'];
+        const idx = IDX[pkg === 'nostr-rs-relay' ? 'relay' : 'ngit'];
         update(idx, { status: 'running', label, detail: 'starting…' });
 
         const r = await installCargoBin(pkg, (detail) => {
@@ -94,6 +96,13 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
         });
         if (!r.ok) break;
       }
+
+      // nak — prebuilt Go binary from GitHub Releases (NOT a cargo install).
+      // Runs independently of the cargo loop above: even if relay/ngit failed
+      // to compile, we can still lay down nak.
+      update(IDX.nak, { status: 'running', detail: 'downloading…' });
+      const nak = await installNak(platform.cargoBin);
+      update(IDX.nak, { status: nak.ok ? 'done' : 'error', detail: nak.detail });
 
       // Claude Code — only if using Anthropic or Claude Code as editor
       const shouldInstallClaudeCode = config.aiProvider === 'anthropic' || config.editor === 'claude-code';
@@ -137,7 +146,8 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
     })();
   }, [retryCount]);
 
-  const compiling = steps.slice(IDX.relay, IDX.nak + 1).some(s => s.status === 'running');
+  // Only relay + ngit compile from source — nak is a prebuilt download.
+  const compiling = steps.slice(IDX.relay, IDX.ngit + 1).some(s => s.status === 'running');
   const hasError  = finished && steps.some(s => s.status === 'error');
   const allOk     = finished && !hasError;
 

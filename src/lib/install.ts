@@ -99,6 +99,62 @@ export async function installCargoBin(
   }
 }
 
+// nak is fiatjaf's Nostr CLI. It is written in Go and is NOT published to
+// crates.io — `cargo install nak` will always fail with "could not find nak
+// in registry". Instead, we download the matching platform binary from the
+// GitHub Releases page and drop it into cargoBin so it lives alongside the
+// other Nostr tooling (relay, ngit) for a consistent $PATH story.
+//
+// Asset naming as of v0.19.x: nak-v{tag}-{os}-{arch}
+//   os:   darwin | linux
+//   arch: amd64  | arm64
+export async function installNak(cargoBin: string): Promise<InstallResult> {
+  const osMap: Record<string, string>   = { darwin: 'darwin', linux: 'linux' };
+  const archMap: Record<string, string> = { x64: 'amd64', arm64: 'arm64' };
+  const os   = osMap[process.platform];
+  const arch = archMap[process.arch];
+  if (!os || !arch) {
+    return { ok: false, detail: `unsupported platform for nak: ${process.platform}/${process.arch}` };
+  }
+
+  // Resolve latest release tag from the GitHub API.
+  // We use /releases/latest (not a fixed /download/latest URL) because the
+  // asset filenames embed the version, so we have to read the tag first.
+  let tag: string;
+  try {
+    const res = await fetch('https://api.github.com/repos/fiatjaf/nak/releases/latest', {
+      headers: { 'User-Agent': 'nostr-station' },
+    });
+    if (!res.ok) return { ok: false, detail: `github api ${res.status}` };
+    const data = await res.json() as { tag_name?: string };
+    if (!data.tag_name) return { ok: false, detail: 'no tag_name in release response' };
+    tag = data.tag_name;
+  } catch (e) {
+    const msg = (e as Error).message ?? 'fetch failed';
+    return { ok: false, detail: `github api fetch failed: ${msg.slice(0, 80)}` };
+  }
+
+  const assetName = `nak-${tag}-${os}-${arch}`;
+  const url  = `https://github.com/fiatjaf/nak/releases/download/${tag}/${assetName}`;
+  const dest = `${cargoBin}/nak`;
+
+  // cargoBin may not exist yet on a fresh machine where only rustup ran —
+  // cargo only creates it when it first installs a bin.
+  const fs = await import('fs');
+  fs.mkdirSync(cargoBin, { recursive: true });
+
+  const dl = await run('curl', ['-fsSL', url, '-o', dest]);
+  if (!dl.ok) return { ok: false, detail: `download failed: ${dl.detail}` };
+
+  try {
+    fs.chmodSync(dest, 0o755);
+  } catch (e) {
+    return { ok: false, detail: `chmod failed: ${(e as Error).message?.slice(0, 80)}` };
+  }
+
+  return { ok: true, detail: tag };
+}
+
 export async function installGitHubCLI(p: Platform): Promise<InstallResult> {
   switch (p.pkgMgr) {
     case 'brew':
