@@ -109,14 +109,18 @@ jobs:
         run: |
           version="${{ github.event.inputs.version }}"
           tag="relay-prebuilts-v${version}"
+          # --repo is required here because the publish job does not check
+          # the source repo out (it only downloads artifacts), so gh has no
+          # git remote to infer from.
+          repo="${{ github.repository }}"
           # If the tag already exists, delete it so this workflow is rerunnable
           # (e.g. to fix a botched upload). The prebuilts are deterministic for
           # a pinned version, so replacing them is safe.
-          if gh release view "$tag" >/dev/null 2>&1; then
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
             echo "Release $tag already exists — deleting before recreate"
-            gh release delete "$tag" --yes --cleanup-tag
+            gh release delete "$tag" --repo "$repo" --yes --cleanup-tag
           fi
-          gh release create "$tag" \
+          gh release create "$tag" --repo "$repo" \
             --title "nostr-rs-relay $version prebuilts" \
             --notes "Prebuilt nostr-rs-relay ${version} binaries consumed by nostr-station's installRelayPrebuilt(). See .github/workflows/release-relay-prebuilts.yml." \
             nostr-rs-relay-* SHA256SUMS
