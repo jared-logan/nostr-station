@@ -48,7 +48,20 @@ async function runApt(
   onProgress?: (detail: string) => void,
 ): Promise<InstallResult> {
   try {
-    const proc = execa('sudo', ['-n', ...args], {
+    // `sudo --preserve-env=VAR,VAR` is the ONLY reliable way to get env
+    // vars through sudo — by default sudo strips almost everything for
+    // security. Without this, DEBIAN_FRONTEND=noninteractive set in Node's
+    // env never reaches apt-get, and the postinst script prompts us
+    // interactively (deadlocking with stdio: 'pipe').
+    //
+    // We also set the env vars on the sudo process itself so they exist
+    // to be preserved in the first place — Node's execa inherits the
+    // parent's env for the spawn but we override to be explicit.
+    const proc = execa('sudo', [
+      '-n',
+      '--preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE,NEEDRESTART_SUSPEND',
+      ...args,
+    ], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: timeoutMs,
       env: {

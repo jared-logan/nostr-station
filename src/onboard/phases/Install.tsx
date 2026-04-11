@@ -174,6 +174,29 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
   const hasError  = finished && steps.some(s => s.status === 'error');
   const allOk     = finished && !hasError;
 
+  // Ink's <Select> uses useInput, which calls stdin.setRawMode(true) on
+  // mount and hard-throws "Raw mode is not supported" if stdin isn't a
+  // TTY (CI with `< /dev/null`, piped input, etc.). Without this guard
+  // the error crashes the whole UI and clobbers prior step output via
+  // Ink's screen-rewrite, making diagnosis of the ORIGINAL failure
+  // nearly impossible. When we can't render the interactive recovery
+  // menu, we (a) print the failing step details to stderr so they
+  // survive the screen rewrite, and (b) fall through the recovery by
+  // calling onDone() — the downstream Verify phase will report the
+  // missing artifacts.
+  const canPrompt = !!process.stdin.isTTY;
+  useEffect(() => {
+    if (!hasError || canPrompt) return;
+    const failures = steps
+      .filter(s => s.status === 'error')
+      .map(s => `  - ${s.label}${s.detail ? `: ${s.detail}` : ''}`)
+      .join('\n');
+    process.stderr.write(
+      `\n[install] one or more steps failed (non-interactive, skipping recovery prompt):\n${failures}\n`,
+    );
+    onDone();
+  }, [hasError, canPrompt]);
+
   if (allOk) setTimeout(onDone, 300);
 
   return (
@@ -189,7 +212,7 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
           </Text>
         </Box>
       )}
-      {hasError && (
+      {hasError && canPrompt && (
         <Box marginTop={1} flexDirection="column">
           <Select
             label="One or more steps failed — what would you like to do?"
@@ -202,6 +225,13 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
               else onDone();
             }}
           />
+        </Box>
+      )}
+      {hasError && !canPrompt && (
+        <Box marginTop={1} marginLeft={2}>
+          <Text color={P.error}>
+            Non-interactive mode — one or more steps failed (see stderr). Continuing.
+          </Text>
         </Box>
       )}
     </Box>
