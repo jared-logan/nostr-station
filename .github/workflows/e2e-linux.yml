@@ -64,7 +64,7 @@ jobs:
             ~/.cargo/bin/nostr-rs-relay
             ~/.cargo/bin/ngit
             ~/.cargo/bin/nak
-          key: cargo-bin-${{ matrix.os }}-relay-0.8.12-ngit-2.2.3-nak-prebuilt-v2
+          key: cargo-bin-${{ matrix.os }}-relay-prebuilt-0.8.12-ngit-2.2.3-nak-prebuilt-v3
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -92,9 +92,11 @@ jobs:
       - name: Pre-install cargo binaries (cache miss only)
         if: steps.cargo-bin-cache.outputs.cache-hit != 'true'
         run: |
-          echo "::group::nostr-rs-relay 0.8.12"
-          cargo install nostr-rs-relay --version 0.8.12
-          echo "::endgroup::"
+          # NOTE: nostr-rs-relay is intentionally NOT pre-installed here.
+          # onboard --demo now exercises installRelayPrebuilt, which downloads
+          # a prebuilt from this repo's relay-prebuilts-v{version} release.
+          # Pre-installing via `cargo install` would mask that path and
+          # re-add 5min of compile to every CI run.
           echo "::group::ngit 2.2.3"
           cargo install ngit --version 2.2.3
           echo "::endgroup::"
@@ -115,11 +117,16 @@ jobs:
           "$HOME/.cargo/bin/nak" --version || "$HOME/.cargo/bin/nak" version || true
           echo "::endgroup::"
 
-      - name: Confirm cargo binaries present after install/restore
+      - name: Confirm pre-installed binaries present
         run: |
+          # NOTE: nostr-rs-relay is deliberately NOT in this list. It is
+          # installed by `onboard --demo` (downstream step) via
+          # installRelayPrebuilt, so it won't exist on disk yet unless a
+          # previous run cached it. We assert its presence in the later
+          # `Verify — binaries on PATH` step instead.
           echo "cache-hit output: ${{ steps.cargo-bin-cache.outputs.cache-hit }}"
           ls -la "$HOME/.cargo/bin/" || echo "(no .cargo/bin dir)"
-          for bin in nostr-rs-relay ngit nak; do
+          for bin in ngit nak; do
             if [[ -x "$HOME/.cargo/bin/$bin" ]]; then
               echo "OK: $bin → $("$HOME/.cargo/bin/$bin" --version 2>&1 | head -1)"
             else

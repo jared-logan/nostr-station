@@ -5,7 +5,7 @@ import { Select } from '../components/Select.js';
 import { P } from '../components/palette.js';
 import type { Platform, Config, Installed } from '../../lib/detect.js';
 import {
-  installSystemDeps, installRust, installCargoBin, installNak,
+  installSystemDeps, installRust, installCargoBin, installNak, installRelayPrebuilt,
   installClaudeCode, installGitHubCLI, installStacks, installBlossom, installNsyte,
 } from '../../lib/install.js';
 
@@ -22,11 +22,14 @@ interface InstallPhaseProps {
   onDone: () => void;
 }
 
-// Compiled-from-source bins. nak is NOT here — it is a Go binary distributed
-// as a prebuilt on GitHub Releases; see installNak in src/lib/install.ts.
+// Compiled-from-source bins.
+//   - nak is NOT here — Go binary distributed as prebuilt on GitHub Releases;
+//     see installNak in src/lib/install.ts.
+//   - nostr-rs-relay is NOT here — tries a prebuilt download first (hosted on
+//     this repo's releases) and falls back to `cargo install` on failure;
+//     see installRelayPrebuilt in src/lib/install.ts.
 const CARGO_BINS = [
-  { pkg: 'nostr-rs-relay', label: 'nostr-rs-relay  (compiling…)' },
-  { pkg: 'ngit',           label: 'ngit  (compiling…)' },
+  { pkg: 'ngit', label: 'ngit  (compiling…)' },
 ];
 
 export const InstallPhase: React.FC<InstallPhaseProps> = ({
@@ -35,6 +38,8 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
   const initial: StepState[] = [
     { label: 'System packages',  status: 'pending' },
     { label: 'Rust toolchain',   status: 'pending' },
+    // Relay: prebuilt-first, compile fallback. Row ordering matches IDX below.
+    { label: 'nostr-rs-relay',   status: 'pending' },
     // one row per cargo bin — label updates live during compile
     ...CARGO_BINS.map(b => ({ label: b.label, status: 'pending' as StepStatus })),
     { label: 'nak',              status: 'pending' },
@@ -80,9 +85,22 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
       const rust = await installRust();
       update(IDX.rust, { status: rust.ok ? 'done' : 'error', detail: rust.detail });
 
-      // Cargo bins — each streams live compiler progress into the step detail
+      // nostr-rs-relay — try the prebuilt from this repo's releases, fall
+      // back to cargo compile on any failure. installRelayPrebuilt owns the
+      // decision; we just render whatever detail it reports (which will
+      // flip to "compiling…" with live cargo output during fallback).
+      update(IDX.relay, { status: 'running', detail: 'resolving…' });
+      const relay = await installRelayPrebuilt(platform.cargoBin, (detail) => {
+        update(IDX.relay, { detail });
+      });
+      update(IDX.relay, {
+        status: relay.ok ? 'done' : 'error',
+        detail: relay.detail,
+      });
+
+      // Cargo bins (just ngit now) — streams live compiler progress.
       for (const { pkg, label } of CARGO_BINS) {
-        const idx = IDX[pkg === 'nostr-rs-relay' ? 'relay' : 'ngit'];
+        const idx = IDX.ngit;
         update(idx, { status: 'running', label, detail: 'starting…' });
 
         const r = await installCargoBin(pkg, (detail) => {
