@@ -20,9 +20,33 @@ function serviceCmd(action: 'start' | 'stop'): string {
   return `systemctl --user ${svcAction} nostr-relay.service`;
 }
 
+// Turn opaque launchctl/systemctl errors into an actionable hint when
+// the most likely cause is "the service was never installed". Users
+// running `relay start` before `onboard` get a cryptic "Input/output
+// error" from launchctl or "Unit nostr-relay.service not found" from
+// systemctl — both resolve to the same fix: run onboard.
+function humanizeServiceError(raw: string, action: string): string {
+  const lower = raw.toLowerCase();
+  const looksMissing =
+    lower.includes('not found')
+    || lower.includes('no such')
+    || lower.includes('could not find')
+    || lower.includes('input/output error'); // launchctl's generic "not loaded"
+  if (looksMissing) {
+    return `relay service not installed — run: nostr-station onboard`;
+  }
+  return `relay ${action} failed — ${raw.slice(0, 100)}`;
+}
+
 export const Relay: React.FC<RelayProps> = ({ action }) => {
   const [result, setResult] = useState<string | null>(null);
   const [ok, setOk] = useState(true);
+
+  // Propagate failure as exit 1 — `relay status` piped into a monitor,
+  // or `relay start && nostr-station logs -f`, should stop on failure.
+  useEffect(() => {
+    if (result !== null && !ok) process.exitCode = 1;
+  }, [result, ok]);
 
   useEffect(() => {
     try {
@@ -65,7 +89,7 @@ export const Relay: React.FC<RelayProps> = ({ action }) => {
       }
     } catch (e: any) {
       setOk(false);
-      setResult(e.message?.slice(0, 120) ?? 'command failed');
+      setResult(humanizeServiceError(e.message ?? '', action));
     }
   }, []);
 

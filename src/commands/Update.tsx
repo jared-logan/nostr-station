@@ -82,6 +82,18 @@ export const Update: React.FC<UpdateProps> = ({ dryRun, yes }) => {
     })();
   }, []);
 
+  const failures = steps.filter(s => s.status === 'error').length;
+  const successes = steps.filter(s => s.status === 'done').length;
+
+  // Exit 1 when any component failed to update. Previously the command
+  // always printed "✓ Update complete" at the end of its effect loop
+  // even with half the steps in the error state, and exit code was 0
+  // — so scripts chaining `nostr-station update && nostr-station doctor`
+  // couldn't tell a partial-failure apart from a clean run.
+  useEffect(() => {
+    if (done && failures > 0) process.exitCode = 1;
+  }, [done, failures]);
+
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>
@@ -108,8 +120,18 @@ export const Update: React.FC<UpdateProps> = ({ dryRun, yes }) => {
           <Text color={P.accentDim}>{'─────────────────────────────'}</Text>
         </Box>
       )}
-      {done && !dryRun && (
+      {done && !dryRun && failures === 0 && (
         <Text color={P.success}>✓ Update complete</Text>
+      )}
+      {done && !dryRun && failures > 0 && (
+        <Box flexDirection="column">
+          <Text color={P.error}>
+            {`✗ ${failures} of ${steps.length} failed to update — ${successes} succeeded`}
+          </Text>
+          <Text color={P.muted}>
+            {'  Re-run `nostr-station doctor --deep` to diagnose, then retry.'}
+          </Text>
+        </Box>
       )}
       {done && dryRun && (
         <Text color={P.muted}>Dry run — no changes made. Re-run without --dry-run to apply.</Text>

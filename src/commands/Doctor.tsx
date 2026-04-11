@@ -62,6 +62,13 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
 
   const failures = checks.filter(c => c.status === 'error').length;
 
+  // Exit 1 if any checks are still failing after --fix (or without it).
+  // Lets `nostr-station doctor && nostr-station push` short-circuit on
+  // a broken environment instead of pushing into a half-configured box.
+  useEffect(() => {
+    if (done && failures > 0) process.exitCode = 1;
+  }, [done, failures]);
+
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>

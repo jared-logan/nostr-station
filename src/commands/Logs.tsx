@@ -28,6 +28,11 @@ export const Logs: React.FC<LogsProps> = ({ follow, service }) => {
   const [lines, setLines] = useState<{ text: string; color: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  // Exit 1 on error so `nostr-station logs || alert` scripts work.
+  useEffect(() => {
+    if (error) process.exitCode = 1;
+  }, [error]);
+
   useEffect(() => {
     const files = service === 'all'
       ? Object.values(LOG_FILES)
@@ -35,7 +40,11 @@ export const Logs: React.FC<LogsProps> = ({ follow, service }) => {
 
     for (const file of files) {
       if (!fs.existsSync(file)) {
-        setError(`Log file not found: ${file}`);
+        setError(
+          `Log file not found: ${file}\n`
+          + `  This usually means the ${service === 'relay' ? 'relay' : 'service'} hasn't started yet.\n`
+          + `  Try: nostr-station relay start — or run nostr-station onboard first.`,
+        );
         return;
       }
     }
@@ -67,7 +76,9 @@ export const Logs: React.FC<LogsProps> = ({ follow, service }) => {
       </Box>
       <Text color={P.accentDim}>{'─────────────────────────────'}</Text>
 
-      {error && <Text color={P.error}>{error}</Text>}
+      {error && error.split('\n').map((l, i) => (
+        <Text key={i} color={P.error}>{l}</Text>
+      ))}
 
       {lines.map((l, i) => (
         <Text key={i} color={l.color}>{l.text}</Text>
