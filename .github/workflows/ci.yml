@@ -94,11 +94,18 @@ jobs:
           print(f'info: {ok_count}/{len(d)} services healthy (not asserted in CI)')
           PY
 
-      - name: Banner narrow-fallback logic present
+      - name: Banner tier detection present
         run: |
-          grep -q "isNarrow = cols < 100" src/onboard/components/Banner.tsx \
-            || { echo "❌ narrow banner fallback missing"; exit 1; }
-          echo "✓ narrow banner fallback wired"
+          # Banner uses a three-tier capability detector — plain / safe / full —
+          # so unknown terminals fall back to plain-text rather than rendering
+          # double-width box-drawing chars. Guard all three tiers + the
+          # NOSTR_STATION_BANNER escape hatch so a future refactor can't
+          # silently revert to an unconditional full banner.
+          f=src/onboard/components/Banner.tsx
+          for token in 'detectTier' "'plain'" "'safe'" "'full'" 'NOSTR_STATION_BANNER'; do
+            grep -q "$token" "$f" || { echo "❌ Banner tier check missing: $token"; exit 1; }
+          done
+          echo "✓ Banner tier detection wired (plain/safe/full + env override)"
 
       - name: Select double-arrow fix present
         run: |
