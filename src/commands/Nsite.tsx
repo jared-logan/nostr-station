@@ -305,6 +305,17 @@ const NsitePublish: React.FC = () => {
     setPhase('confirm');
   }, []);
 
+  // blocked = pre-flight error (missing config, empty build, …). A
+  // published-with-errors 'done' phase also needs a non-zero exit so CI
+  // pipelines that chain `nsite publish && nsite open` surface the
+  // failure instead of silently opening a stale site.
+  useEffect(() => {
+    if (phase === 'blocked') process.exitCode = 1;
+    if (phase === 'done' && output.some(l => l.toLowerCase().includes('error'))) {
+      process.exitCode = 1;
+    }
+  }, [phase, output]);
+
   useInput((input) => {
     if (phase !== 'confirm') return;
     if (input.toLowerCase() === 'y') executePublish();

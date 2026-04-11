@@ -67,6 +67,13 @@ const KeychainGet: React.FC<{ credKey: string }> = ({ credKey }) => {
     })();
   }, []);
 
+  // Missing credential is a non-zero exit — matches `keychain get --raw`
+  // so scripts get a consistent signal regardless of which variant they
+  // use.
+  useEffect(() => {
+    if (value === null) process.exitCode = 1;
+  }, [value]);
+
   useInput((input) => {
     if (value !== undefined && !confirmed) {
       if (input === 'y' || input === 'Y') setConfirmed(true);

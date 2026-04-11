@@ -65,6 +65,19 @@ export const Push: React.FC<PushProps> = ({ githubOnly, ngitOnly }) => {
     setPhase('summary');
   }, []);
 
+  // Propagate error/partial-failure phases as a non-zero exit code so
+  // shell chains (`nostr-station push && make deploy`) don't silently
+  // continue after a failed push. process.exitCode lets Ink finish
+  // rendering the red error message before the process tears down —
+  // a hard process.exit(1) would race the final render.
+  useEffect(() => {
+    if (phase === 'error') {
+      process.exitCode = 1;
+    } else if (phase === 'done' && results.some(r => !r.ok)) {
+      process.exitCode = 1;
+    }
+  }, [phase, results]);
+
   useInput((input, key) => {
     if (phase !== 'summary') return;
 

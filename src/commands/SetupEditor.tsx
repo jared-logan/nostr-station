@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { Select } from '../onboard/components/Select.js';
 import { P } from '../onboard/components/palette.js';
@@ -30,6 +30,12 @@ export const SetupEditor: React.FC<SetupEditorProps> = () => {
       setDone(true);
     }
   };
+
+  // Propagate symlink failure as non-zero exit — so a shell pipeline
+  // that runs `setup-editor && doctor` doesn't continue on a broken link.
+  useEffect(() => {
+    if (error) process.exitCode = 1;
+  }, [error]);
 
   return (
     <Box flexDirection="column" paddingX={1}>

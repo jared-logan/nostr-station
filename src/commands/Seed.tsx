@@ -82,6 +82,14 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
     }
   }, [phase, existingCount]);
 
+  // Propagate error phase as non-zero exit — runSeed hits 'error' when
+  // nak is missing or the keypair can't be generated, and users running
+  // `nostr-station seed && nostr-station tui` need that failure to stop
+  // the chain.
+  useEffect(() => {
+    if (phase === 'error') process.exitCode = 1;
+  }, [phase]);
+
   // Non-TTY safety: the <Select> confirmation prompt below uses useInput,
   // which needs raw-mode stdin and hard-crashes on piped/redirected input.
   // When we'd have to prompt but can't, abort with a clear stderr message

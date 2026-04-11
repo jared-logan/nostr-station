@@ -272,6 +272,22 @@ function printHelp() {
     relay whitelist --add <npub>       Add an npub
     relay whitelist --remove <npub>    Remove an npub (with confirmation)
 
+  KEYCHAIN SUBCOMMANDS
+    keychain list                      List credential slots and whether set
+    keychain get <key>                 Reveal a credential (y/N confirm)
+    keychain get <key> --raw           Print value to stdout (for scripts)
+    keychain set <key>                 Store/update a credential
+    keychain delete <key>              Remove a credential (y/N confirm)
+    keychain rotate                    Rotate the AI API key
+    keychain migrate                   Migrate from ~/.claude_env into keychain
+
+  NSITE SUBCOMMANDS
+    nsite init                         Interactive project setup
+    nsite publish                      Build check + confirm + upload
+    nsite status                       Compare live site with local build
+    nsite open [--titan]               Open gateway URL (or copy nsite:// URL)
+    nsite help                         Full reference
+
   FLAGS
     onboard --demo
     doctor  --fix --repair --deep
@@ -281,6 +297,7 @@ function printHelp() {
     push    --github  --ngit
     nsite   --titan
     seed    --events <n>  --full
+    keychain get --raw
     completion  --shell zsh|bash  --install  --print
     uninstall   --yes
 

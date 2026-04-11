@@ -66,6 +66,14 @@ export const RelayConfigView: React.FC<RelayConfigViewProps> = ({ authToggle, dm
     }
   }, []);
 
+  // Non-zero exit for error paths so scripts composing nostr-station
+  // commands (`... relay config --auth on && ... relay restart`) can
+  // tell the difference between "config updated" and "config not found".
+  useEffect(() => {
+    if (phase === 'error') process.exitCode = 1;
+    if (phase === 'done' && resultMsg.startsWith('✗')) process.exitCode = 1;
+  }, [phase, resultMsg]);
+
   // isActive gates Ink's raw-mode setup — critical so `relay config` in
   // view-only mode (no --auth/--dm-auth flags) doesn't crash on non-TTY
   // stdin. Without it, useInput's effect calls setRawMode(true) on mount
@@ -193,6 +201,12 @@ export const RelayWhitelist: React.FC<RelayWhitelistProps> = ({ add, remove }) =
       setPhase('list');
     }
   }, []);
+
+  // Non-zero exit for add failures and error phases — see note above.
+  useEffect(() => {
+    if (phase === 'error') process.exitCode = 1;
+    if (phase === 'done' && !resultOk) process.exitCode = 1;
+  }, [phase, resultOk]);
 
   // isActive gates raw-mode setup — `relay whitelist` (list mode) and
   // `relay whitelist --add <npub>` must not try to grab stdin. Only the
