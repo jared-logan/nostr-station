@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import React from 'react';
+import { spawnSync } from 'child_process';
 import { render } from 'ink';
 import { Onboard }       from './onboard/index.js';
 import { Seed }          from './commands/Seed.js';
@@ -27,6 +28,39 @@ const arg  = (f: string) => { const i = args.indexOf(f); return i >= 0 ? args[i 
 switch (command) {
 
   case 'onboard':
+    // Pre-authenticate sudo BEFORE Ink mounts.
+    //
+    // The Install phase runs `sudo apt-get update && sudo apt-get install …`
+    // with stdio: 'pipe'. If sudo's credential cache is empty, sudo writes
+    // `[sudo] password for <user>:` to the child's stderr and blocks waiting
+    // on stdin — which the pipe never drains, so the UI appears to freeze
+    // forever. The cleanest fix is to prompt for the password interactively,
+    // up-front, in a normal terminal BEFORE Ink takes over the screen and
+    // eats user input. `sudo -v` does exactly that: validate + refresh the
+    // cache, no command executed.
+    //
+    // We scope this to Linux only — macOS brew runs unprivileged. All
+    // Linux package managers (apt/dnf/pacman) need sudo and all hang the
+    // same way if sudo ends up prompting mid-pipe. `--demo` still needs it:
+    // demo mode executes the install path in addition to the UI flow.
+    //
+    // In CI (GitHub Actions), the `runner` user has passwordless sudo, so
+    // `sudo -v` returns 0 without touching stdin — this is safe for the
+    // e2e workflow that feeds /dev/null as stdin.
+    if (process.platform === 'linux') {
+      process.stderr.write(
+        'nostr-station needs sudo to install system packages.\n'
+        + 'You may be prompted for your password once.\n',
+      );
+      const preAuth = spawnSync('sudo', ['-v'], { stdio: 'inherit' });
+      if (preAuth.status !== 0) {
+        process.stderr.write(
+          '\nsudo authentication failed or was cancelled — aborting.\n'
+          + 'Retry: nostr-station onboard\n',
+        );
+        process.exit(1);
+      }
+    }
     render(React.createElement(Onboard, { demoMode: flag('--demo') }));
     break;
 

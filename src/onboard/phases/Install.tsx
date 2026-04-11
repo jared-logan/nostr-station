@@ -75,9 +75,14 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
     setFinished(false);
     setSteps(initial);
     (async () => {
-      // System deps
-      update(IDX.sys, { status: 'running' });
-      const sys = await installSystemDeps(platform);
+      // System deps — stream apt/brew progress so the user sees
+      // "Reading package lists…" / "Unpacking libssl-dev…" instead of a
+      // frozen spinner. Without streaming, a healthy apt run on a cold
+      // runner looks indistinguishable from a hang.
+      update(IDX.sys, { status: 'running', detail: 'starting…' });
+      const sys = await installSystemDeps(platform, (detail) => {
+        update(IDX.sys, { detail });
+      });
       update(IDX.sys, { status: sys.ok ? 'done' : 'error', detail: sys.detail });
 
       // Rust

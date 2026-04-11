@@ -14,26 +14,130 @@ async function run(cmd: string, args: string[]): Promise<InstallResult> {
   }
 }
 
-export async function installSystemDeps(p: Platform): Promise<InstallResult> {
+// apt-specific runner.
+//
+// Three problems this helper addresses that a naive `run('sudo', ['apt-get',
+// ...])` hits in the wild:
+//
+//   1. **Password prompt deadlock.** With `stdio: 'pipe'`, if sudo's cred
+//      cache has expired, it writes `[sudo] password for <user>:` to the
+//      child's stderr and waits on its stdin — which we never drain. The
+//      Install phase appears to hang forever with no indication why. We
+//      pre-authenticate sudo in `src/cli.tsx` before Ink mounts, so by the
+//      time this runs the cache is fresh. But as defence-in-depth we pass
+//      `-n` (non-interactive) so sudo fails fast instead of hanging if the
+//      cache somehow isn't warm.
+//
+//   2. **Interactive prompts from apt itself.** `apt-get install` can ask
+//      about config-file conflicts, service restarts, kernel updates, etc.
+//      Each prompt deadlocks the same way. `DEBIAN_FRONTEND=noninteractive`
+//      + `-o Dpkg::Options::=--force-confdef/--force-confold` tells dpkg to
+//      pick the sensible default and keep moving.
+//
+//   3. **Silent lock contention.** If another apt process holds
+//      /var/lib/dpkg/lock-frontend, our call blocks indefinitely. We cap
+//      each invocation at a hard wall-clock timeout (5min update, 10min
+//      install) and report an actionable error that mentions the lock.
+//
+// Progress streaming: we tee stderr's last line into onProgress so the UI
+// shows "Reading package lists…", "Unpacking build-essential…", etc.
+// instead of a frozen spinner.
+async function runApt(
+  args: string[],
+  timeoutMs: number,
+  onProgress?: (detail: string) => void,
+): Promise<InstallResult> {
+  try {
+    const proc = execa('sudo', ['-n', ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+      env: {
+        ...process.env,
+        DEBIAN_FRONTEND: 'noninteractive',
+        // Even with DEBIAN_FRONTEND, some post-install scripts read these
+        // to decide whether to prompt.
+        NEEDRESTART_MODE: 'a',
+        NEEDRESTART_SUSPEND: '1',
+      },
+    });
+
+    if (onProgress) {
+      const tail = (chunk: Buffer) => {
+        const line = chunk.toString().trim().split('\n').pop() ?? '';
+        if (line) onProgress(line.slice(0, 60));
+      };
+      proc.stdout?.on('data', tail);
+      proc.stderr?.on('data', tail);
+    }
+
+    await proc;
+    return { ok: true };
+  } catch (e) {
+    const err = e as ExecaError;
+    // Timed out — almost always lock contention or a stuck mirror.
+    if (err.timedOut) {
+      return {
+        ok: false,
+        detail: `apt timed out after ${Math.floor(timeoutMs / 1000)}s — another package manager may be running (check: fuser /var/lib/dpkg/lock-frontend)`,
+      };
+    }
+    // sudo -n failed — cred cache expired between pre-auth and here.
+    const stderr = err.stderr?.toString() ?? '';
+    if (stderr.includes('a password is required') || stderr.includes('sudo:')) {
+      return {
+        ok: false,
+        detail: 'sudo credentials expired — rerun `sudo -v` and retry',
+      };
+    }
+    return { ok: false, detail: stderr.slice(0, 120) || err.shortMessage?.slice(0, 120) };
+  }
+}
+
+export async function installSystemDeps(
+  p: Platform,
+  onProgress?: (detail: string) => void,
+): Promise<InstallResult> {
   switch (p.pkgMgr) {
     // protobuf-compiler / protoc is required by nostr-rs-relay's build.rs —
     // prost-build invokes `protoc` to compile proto/nauthz.proto and the
     // `cargo install` fails with "Could not find `protoc` installation" without it.
     case 'brew':
+      onProgress?.('brew install…');
       return run('brew', ['install', 'git', 'curl', 'protobuf']);
-    case 'apt':
-      await run('sudo', ['apt-get', 'update', '-qq']);
-      return run('sudo', ['apt-get', 'install', '-y',
-        'build-essential', 'curl', 'git', 'pkg-config',
-        'libssl-dev', 'netcat-openbsd',
-        'libsecret-tools',   // provides secret-tool for GNOME Keyring access
-        'protobuf-compiler', // provides protoc for nostr-rs-relay build.rs
-      ]);
+    case 'apt': {
+      // Split into two apt invocations so we can stream distinct progress
+      // and give each its own timeout. Update can hang on a slow mirror;
+      // install can hang on a kernel post-install script.
+      onProgress?.('apt-get update…');
+      const upd = await runApt(
+        ['apt-get', 'update', '-qq'],
+        5 * 60 * 1000,
+        onProgress,
+      );
+      if (!upd.ok) return upd;
+
+      onProgress?.('apt-get install…');
+      return runApt(
+        [
+          'apt-get', 'install', '-y',
+          '-o', 'Dpkg::Options::=--force-confdef',
+          '-o', 'Dpkg::Options::=--force-confold',
+          'build-essential', 'curl', 'git', 'pkg-config',
+          'libssl-dev', 'netcat-openbsd',
+          'libsecret-tools',   // provides secret-tool for GNOME Keyring access
+          'protobuf-compiler', // provides protoc for nostr-rs-relay build.rs
+        ],
+        10 * 60 * 1000,
+        onProgress,
+      );
+    }
     case 'dnf':
+      onProgress?.('dnf install…');
       return run('sudo', ['dnf', 'install', '-y',
         'gcc', 'curl', 'git', 'openssl-devel', 'pkgconfig', 'nmap-ncat',
         'protobuf-compiler']);
     case 'pacman':
+      onProgress?.('pacman -Sy…');
       return run('sudo', ['pacman', '-Sy', '--noconfirm',
         'base-devel', 'curl', 'git', 'openssl', 'protobuf']);
   }
