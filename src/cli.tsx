@@ -39,15 +39,22 @@ switch (command) {
     // eats user input. `sudo -v` does exactly that: validate + refresh the
     // cache, no command executed.
     //
-    // We scope this to Linux only — macOS brew runs unprivileged. All
-    // Linux package managers (apt/dnf/pacman) need sudo and all hang the
-    // same way if sudo ends up prompting mid-pipe. `--demo` still needs it:
-    // demo mode executes the install path in addition to the UI flow.
+    // Gate pre-auth on Linux AND an interactive TTY stdin. Two reasons:
     //
-    // In CI (GitHub Actions), the `runner` user has passwordless sudo, so
-    // `sudo -v` returns 0 without touching stdin — this is safe for the
-    // e2e workflow that feeds /dev/null as stdin.
-    if (process.platform === 'linux') {
+    //   1. If stdin isn't a TTY (CI feeding /dev/null, `yes | nostr-station
+    //      onboard`, etc.), sudo can't prompt the user for a password
+    //      anyway — so pre-auth is either unnecessary (passwordless sudo
+    //      in CI) or doomed (will fail with "a password is required" and
+    //      never recover). Either way, skipping it is correct.
+    //
+    //   2. `spawnSync` with `stdio: 'inherit'` on a non-TTY stdin leaves
+    //      Node's stdin handle in a state that breaks Ink's raw-mode
+    //      detection on subsequent mount, causing every subsequent
+    //      render to crash with "Raw mode is not supported." This
+    //      reproduces reliably in CI with `< /dev/null`.
+    //
+    // macOS brew runs unprivileged, so no pre-auth needed there.
+    if (process.platform === 'linux' && process.stdin.isTTY) {
       process.stderr.write(
         'nostr-station needs sudo to install system packages.\n'
         + 'You may be prompted for your password once.\n',
