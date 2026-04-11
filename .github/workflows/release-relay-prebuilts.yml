@@ -1,0 +1,122 @@
+name: Relay Prebuilts
+
+# Build nostr-rs-relay from source for each supported target and publish the
+# resulting binaries as a GitHub release. nostr-station's installRelayPrebuilt
+# then downloads these at onboard time instead of forcing every user through a
+# 5–15 minute cold compile.
+#
+# Upstream (scsibug/nostr-rs-relay) does not ship prebuilts, so we host them.
+# Run this workflow manually whenever COMPONENT_VERSIONS['nostr-rs-relay'] in
+# src/lib/versions.ts is bumped. The install path falls back to `cargo install`
+# for any target/version combo that doesn't have a prebuilt, so this workflow
+# is strictly an optimization.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "nostr-rs-relay version to build (must match crates.io)"
+        required: true
+        default: "0.8.12"
+
+permissions:
+  contents: write  # needed to create the GitHub release in the publish job
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset-suffix }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 = glibc 2.35, wide compat with 22.04+ distros
+          - runner: ubuntu-22.04
+            asset-suffix: linux-x86_64
+            os: linux
+          # macos-14 = M1, native arm64 build, no cross-compile weirdness
+          - runner: macos-14
+            asset-suffix: darwin-arm64
+            os: macos
+    steps:
+      - name: Install system deps (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev protobuf-compiler
+
+      - name: Install system deps (macOS)
+        if: matrix.os == 'macos'
+        run: brew install protobuf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # No --locked. nostr-rs-relay 0.8.12 ships a Cargo.lock pinning
+      # time 0.3.25 which fails on modern rustc (E0282). Without --locked,
+      # cargo picks a semver-compatible newer patch that builds.
+      # See src/lib/install.ts for the full backstory.
+      - name: Build nostr-rs-relay ${{ github.event.inputs.version }}
+        run: |
+          cargo install nostr-rs-relay \
+            --version "${{ github.event.inputs.version }}" \
+            --root "$HOME/install-root"
+
+      - name: Rename binary for upload
+        run: |
+          version="${{ github.event.inputs.version }}"
+          suffix="${{ matrix.asset-suffix }}"
+          src="$HOME/install-root/bin/nostr-rs-relay"
+          dest="nostr-rs-relay-${version}-${suffix}"
+          cp "$src" "$dest"
+          ls -la "$dest"
+          file "$dest" || true
+          # Smoke test: the binary we're about to ship must at least run
+          ./"$dest" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-${{ matrix.asset-suffix }}
+          path: nostr-rs-relay-${{ github.event.inputs.version }}-${{ matrix.asset-suffix }}
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la artifacts/
+
+      - name: Compute SHA256SUMS
+        working-directory: artifacts
+        run: |
+          sha256sum nostr-rs-relay-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: artifacts
+        run: |
+          version="${{ github.event.inputs.version }}"
+          tag="relay-prebuilts-v${version}"
+          # If the tag already exists, delete it so this workflow is rerunnable
+          # (e.g. to fix a botched upload). The prebuilts are deterministic for
+          # a pinned version, so replacing them is safe.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists — deleting before recreate"
+            gh release delete "$tag" --yes --cleanup-tag
+          fi
+          gh release create "$tag" \
+            --title "nostr-rs-relay $version prebuilts" \
+            --notes "Prebuilt nostr-rs-relay ${version} binaries consumed by nostr-station's installRelayPrebuilt(). See .github/workflows/release-relay-prebuilts.yml." \
+            nostr-rs-relay-* SHA256SUMS
