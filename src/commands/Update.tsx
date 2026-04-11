@@ -4,12 +4,18 @@ import { Step, type StepStatus } from '../onboard/components/Step.js';
 import { P } from '../onboard/components/palette.js';
 import { execa } from 'execa';
 import { COMPONENT_VERSIONS } from '../lib/versions.js';
+import { installNak } from '../lib/install.js';
+import { detectPlatform } from '../lib/detect.js';
 
 interface UpdateProps { dryRun: boolean; yes: boolean; }
 
 type S = { label: string; status: StepStatus; from?: string; to?: string; detail?: string; pinned?: string };
 
-const CARGO_BINS = ['nostr-rs-relay', 'ngit', 'nak'];
+// Order matters — labels are index-addressed by the update loop below.
+// nak is NOT a crate on crates.io despite living next to the other Rust
+// bins; it's a Go binary from fiatjaf/nak releases. Keep it out of
+// CARGO_BINS and update it via installNak() further down.
+const CARGO_BINS = ['nostr-rs-relay', 'ngit'];
 const NPM_GLOBALS = ['@anthropic-ai/claude-code'];
 
 async function currentVersion(bin: string): Promise<string> {
@@ -20,12 +26,16 @@ async function currentVersion(bin: string): Promise<string> {
 }
 
 export const Update: React.FC<UpdateProps> = ({ dryRun, yes }) => {
+  // Row layout matches the update loop: cargo bins first, then nak
+  // (prebuilt), then npm globals. Keep in sync with CARGO_BINS / NPM_GLOBALS.
   const [steps, setSteps] = useState<S[]>([
     { label: 'nostr-rs-relay', status: 'pending' },
     { label: 'ngit',           status: 'pending' },
     { label: 'nak',            status: 'pending' },
     { label: 'claude-code',    status: 'pending' },
   ]);
+  const NAK_IDX = CARGO_BINS.length;
+  const NPM_START_IDX = NAK_IDX + 1;
   const [done, setDone] = useState(false);
 
   const up = (i: number, patch: Partial<S>) =>
@@ -60,10 +70,36 @@ export const Update: React.FC<UpdateProps> = ({ dryRun, yes }) => {
         }
       }
 
+      // nak — Go binary from fiatjaf/nak releases, NOT a cargo install.
+      // installNak hits GitHub's /releases/latest and pulls the right
+      // asset for the current OS/arch. Share code with the onboard
+      // install path rather than duplicating the download logic here.
+      {
+        const before = await currentVersion('nak');
+        up(NAK_IDX, { status: 'running', from: before });
+
+        if (!dryRun) {
+          try {
+            const platform = detectPlatform();
+            const r = await installNak(platform.cargoBin);
+            if (r.ok) {
+              const after = await currentVersion('nak');
+              up(NAK_IDX, { status: 'done', to: after });
+            } else {
+              up(NAK_IDX, { status: 'error', detail: r.detail?.slice(0, 80) });
+            }
+          } catch (e: any) {
+            up(NAK_IDX, { status: 'error', detail: e.message?.slice(0, 80) });
+          }
+        } else {
+          up(NAK_IDX, { status: 'skip', detail: 'dry-run (latest from releases)' });
+        }
+      }
+
       // npm globals
       for (let i = 0; i < NPM_GLOBALS.length; i++) {
         const pkg = NPM_GLOBALS[i];
-        const idx = CARGO_BINS.length + i;
+        const idx = NPM_START_IDX + i;
         up(idx, { status: 'running' });
 
         if (!dryRun) {

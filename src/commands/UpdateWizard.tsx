@@ -5,6 +5,8 @@ import { Select, type SelectOption } from '../onboard/components/Select.js';
 import { P } from '../onboard/components/palette.js';
 import { execa } from 'execa';
 import { COMPONENT_VERSIONS } from '../lib/versions.js';
+import { installNak } from '../lib/install.js';
+import { detectPlatform } from '../lib/detect.js';
 
 interface UpdateWizardProps {}
 
@@ -89,8 +91,11 @@ export const UpdateWizard: React.FC<UpdateWizardProps> = () => {
     const up = (i: number, patch: Partial<typeof steps[0]>) =>
       setUpdateSteps(prev => prev.map((s, idx) => idx === i ? { ...s, ...patch } : s));
 
-    // Cargo bins
-    for (let i = 0; i < 3; i++) {
+    // Only the first two slots (relay, ngit) are cargo installs.
+    // Slot 2 is nak (Go binary, prebuilt), slot 3 is claude-code (npm global).
+    // `components` preserves the order from the check phase above.
+    const CARGO_SLOT_COUNT = 2;
+    for (let i = 0; i < CARGO_SLOT_COUNT; i++) {
       const pkg = components[i].name;
       up(i, { status: 'running', detail: 'compiling…' });
       const start = Date.now();
@@ -121,7 +126,20 @@ export const UpdateWizard: React.FC<UpdateWizardProps> = () => {
       }
     }
 
-    // npm
+    // nak — Go binary from fiatjaf/nak releases, NOT on crates.io.
+    // Previously this wizard ran `cargo install nak` which failed 100% of
+    // the time; funneling through installNak() reuses the GitHub-releases
+    // download path already used by onboard's install phase.
+    up(2, { status: 'running', detail: 'downloading…' });
+    try {
+      const platform = detectPlatform();
+      const r = await installNak(platform.cargoBin);
+      up(2, { status: r.ok ? 'done' : 'error', detail: r.detail?.slice(0, 55) });
+    } catch (e: any) {
+      up(2, { status: 'error', detail: e.message?.slice(0, 55) });
+    }
+
+    // npm — claude-code
     up(3, { status: 'running' });
     try {
       await execa('npm', ['update', '-g', '@anthropic-ai/claude-code', '--quiet'], { stdio: 'pipe' });
