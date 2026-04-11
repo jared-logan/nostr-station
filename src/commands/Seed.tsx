@@ -82,6 +82,24 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
     }
   }, [phase, existingCount]);
 
+  // Non-TTY safety: the <Select> confirmation prompt below uses useInput,
+  // which needs raw-mode stdin and hard-crashes on piped/redirected input.
+  // When we'd have to prompt but can't, abort with a clear stderr message
+  // rather than letting Ink's error overlay eat the output. Dispatcher-level
+  // gates can't handle this case — we don't know existingCount until we've
+  // queried the running relay.
+  useEffect(() => {
+    if (phase !== 'confirm' || existingCount === 0) return;
+    if (process.stdin.isTTY) return;
+    process.stderr.write(
+      `\nnostr-station seed: relay already has ${existingCount} event(s).\n`
+      + `  Aborting — this command needs an interactive terminal to confirm\n`
+      + `  that you want to add seed data on top of existing events.\n`
+      + `  Run from a real terminal, or clear the relay first.\n\n`,
+    );
+    process.exit(1);
+  }, [phase, existingCount]);
+
   const runSeed = async () => {
     const { nsec, npub } = await generateSeedKeypair();
     if (!nsec) {

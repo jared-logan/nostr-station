@@ -66,12 +66,16 @@ export const RelayConfigView: React.FC<RelayConfigViewProps> = ({ authToggle, dm
     }
   }, []);
 
+  // isActive gates Ink's raw-mode setup — critical so `relay config` in
+  // view-only mode (no --auth/--dm-auth flags) doesn't crash on non-TTY
+  // stdin. Without it, useInput's effect calls setRawMode(true) on mount
+  // unconditionally, which throws on piped input even though we never
+  // actually handle a keystroke in view mode.
   useInput((input, key) => {
-    if (phase !== 'confirm') return;
     const answer = input.toLowerCase();
     if (key.return || answer === 'y') applyToggle();
     else if (answer === 'n' || key.escape) process.exit(0);
-  });
+  }, { isActive: phase === 'confirm' });
 
   function applyToggle() {
     setPhase('applying');
@@ -190,12 +194,14 @@ export const RelayWhitelist: React.FC<RelayWhitelistProps> = ({ add, remove }) =
     }
   }, []);
 
+  // isActive gates raw-mode setup — `relay whitelist` (list mode) and
+  // `relay whitelist --add <npub>` must not try to grab stdin. Only the
+  // --remove path actually prompts for confirmation.
   useInput((input, key) => {
-    if (phase !== 'confirm-remove') return;
     const answer = input.toLowerCase();
     if (key.return || answer === 'y') executeRemove();
     else if (answer === 'n' || key.escape) process.exit(0);
-  });
+  }, { isActive: phase === 'confirm-remove' });
 
   function executeRemove() {
     setPhase('working');

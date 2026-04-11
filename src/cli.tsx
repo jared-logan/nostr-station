@@ -19,6 +19,7 @@ import { Keychain }      from './commands/Keychain.js';
 import { Push }          from './commands/Push.js';
 import { RelayConfigView, RelayWhitelist } from './commands/RelayConfig.js';
 import { getKeychain }   from './lib/keychain.js';
+import { requireInteractive } from './lib/tty.js';
 
 const [,, command = 'help', ...args] = process.argv;
 
@@ -28,6 +29,7 @@ const arg  = (f: string) => { const i = args.indexOf(f); return i >= 0 ? args[i 
 switch (command) {
 
   case 'onboard':
+    requireInteractive('onboard');
     // Pre-authenticate sudo BEFORE Ink mounts.
     //
     // The Install phase runs `sudo apt-get update && sudo apt-get install …`
@@ -98,6 +100,7 @@ switch (command) {
 
   case 'update':
     if (flag('--wizard')) {
+      requireInteractive('update --wizard', 'Use `nostr-station update --yes` for non-interactive updates.');
       render(React.createElement(UpdateWizard, null));
     } else {
       render(React.createElement(Update, {
@@ -122,10 +125,18 @@ switch (command) {
       const dmAuthStr = arg('--dm-auth');
       const authToggle   = authStr   === 'on' ? true : authStr   === 'off' ? false : undefined;
       const dmAuthToggle = dmAuthStr === 'on' ? true : dmAuthStr === 'off' ? false : undefined;
+      // Toggling a flag triggers a y/N confirmation; view-only mode is non-interactive.
+      if (authToggle !== undefined || dmAuthToggle !== undefined) {
+        requireInteractive('relay config', 'Confirmation prompt — run from a terminal.');
+      }
       render(React.createElement(RelayConfigView, { authToggle, dmAuthToggle }));
     } else if (relayAction === 'whitelist') {
       const addNpub    = arg('--add');
       const removeNpub = arg('--remove');
+      // --remove has a y/N confirmation; list and --add are non-interactive.
+      if (removeNpub) {
+        requireInteractive('relay whitelist --remove', 'Confirmation prompt — run from a terminal.');
+      }
       render(React.createElement(RelayWhitelist, { add: addNpub, remove: removeNpub }));
     } else {
       render(React.createElement(Relay, {
@@ -136,10 +147,15 @@ switch (command) {
   }
 
   case 'tui':
+    requireInteractive('tui', 'Use `nostr-station status` for a non-interactive snapshot.');
     render(React.createElement(Tui, null));
     break;
 
   case 'completion':
+    // With --shell, the picker is skipped and the command is non-interactive.
+    if (!arg('--shell')) {
+      requireInteractive('completion', 'Pass --shell zsh|bash to skip the picker.');
+    }
     render(React.createElement(Completion, {
       shell:   arg('--shell'),
       install: flag('--install'),
@@ -148,6 +164,7 @@ switch (command) {
     break;
 
   case 'setup-editor':
+    requireInteractive('setup-editor');
     render(React.createElement(SetupEditor, null));
     break;
 
@@ -164,11 +181,22 @@ switch (command) {
       break;
     }
 
+    // list / migrate are display-only; the rest prompt for input or y/N.
+    if (kcAction !== 'list' && kcAction !== 'migrate') {
+      const hint = kcAction === 'get'
+        ? 'For scripts, use: nostr-station keychain get <key> --raw'
+        : undefined;
+      requireInteractive(`keychain ${kcAction}`, hint);
+    }
+
     render(React.createElement(Keychain, { action: kcAction, key: kcKey }));
     break;
   }
 
   case 'push':
+    // Always shows a y/N confirmation before pushing. No --yes flag exists;
+    // adding one would be scope creep. Just fail fast in non-interactive use.
+    requireInteractive('push', 'Push always confirms before sending — run from a terminal.');
     render(React.createElement(Push, {
       githubOnly: flag('--github'),
       ngitOnly:   flag('--ngit'),
@@ -177,6 +205,11 @@ switch (command) {
 
   case 'nsite': {
     const nsiteAction = (args[0] ?? 'status') as 'init' | 'publish' | 'deploy' | 'status' | 'open' | 'help';
+    // init is a full wizard; publish/deploy ask y/N before uploading. The
+    // rest (status, open, help) are read-only.
+    if (nsiteAction === 'init' || nsiteAction === 'publish' || nsiteAction === 'deploy') {
+      requireInteractive(`nsite ${nsiteAction}`);
+    }
     render(React.createElement(Nsite, {
       action: nsiteAction,
       titan:  flag('--titan'),
@@ -185,6 +218,10 @@ switch (command) {
   }
 
   case 'uninstall':
+    // --yes skips the confirmation Select; otherwise the picker needs a TTY.
+    if (!flag('--yes')) {
+      requireInteractive('uninstall', 'Pass --yes to skip the confirmation.');
+    }
     render(React.createElement(Uninstall, { yes: flag('--yes') }));
     break;
 
