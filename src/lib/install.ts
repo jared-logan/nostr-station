@@ -48,6 +48,14 @@ export async function installRust(): Promise<InstallResult> {
 // Cargo bins compile from source — can take 10-15 min on a cold machine.
 // We stream stderr and tick elapsed time so the UI shows progress, not silence.
 // Installs a pinned version from COMPONENT_VERSIONS if available, otherwise latest.
+//
+// NOTE: we intentionally do NOT pass --locked. --locked forces cargo to use
+// the exact Cargo.lock that shipped with the crate, and older published
+// versions (e.g. nostr-rs-relay 0.8.12) ship with dep pins like
+// `time 0.3.25` that fail to compile on modern rustc with
+// `error[E0282]: type annotations needed for Box<_>`. Dropping --locked lets
+// cargo pick semver-compatible newer patch versions that include the fix.
+// Tradeoff: slightly less reproducible across machines, but actually builds.
 export async function installCargoBin(
   pkg: string,
   onProgress: (detail: string) => void,
@@ -62,8 +70,8 @@ export async function installCargoBin(
   }, 5000);
 
   const cargoArgs = pinnedVersion
-    ? ['install', pkg, '--version', pinnedVersion, '--locked']
-    : ['install', pkg, '--locked'];
+    ? ['install', pkg, '--version', pinnedVersion]
+    : ['install', pkg];
 
   try {
     const proc = execa('cargo', cargoArgs, {

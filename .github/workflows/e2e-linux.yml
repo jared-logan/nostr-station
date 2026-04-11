@@ -83,17 +83,22 @@ jobs:
       #      `cargo install` but cargo is a no-op when the exact pinned version
       #      is already present, so the flow is still exercised end-to-end.
       # Skipped when the cache-bin-cache step hit.
+      #
+      # NOTE: no --locked. nostr-rs-relay 0.8.12 ships a Cargo.lock pinning
+      # time 0.3.25, which fails on modern rustc with E0282 type-inference
+      # errors. Without --locked, cargo picks a semver-compatible time 0.3.36+
+      # that builds. See src/lib/install.ts for the full explanation.
       - name: Pre-install cargo binaries (cache miss only)
         if: steps.cargo-bin-cache.outputs.cache-hit != 'true'
         run: |
           echo "::group::nostr-rs-relay 0.8.12"
-          cargo install nostr-rs-relay --version 0.8.12 --locked
+          cargo install nostr-rs-relay --version 0.8.12
           echo "::endgroup::"
           echo "::group::ngit 2.2.3"
-          cargo install ngit --version 2.2.3 --locked
+          cargo install ngit --version 2.2.3
           echo "::endgroup::"
           echo "::group::nak (latest)"
-          cargo install nak --locked
+          cargo install nak
           echo "::endgroup::"
 
       - name: Confirm cargo binaries present after install/restore

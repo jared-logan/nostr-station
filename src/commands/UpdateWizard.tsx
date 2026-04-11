@@ -101,10 +101,12 @@ export const UpdateWizard: React.FC<UpdateWizardProps> = () => {
       }, 5000);
 
       try {
+        // No --locked: older crates ship Cargo.lock entries that break on
+        // modern rustc (e.g. time 0.3.25 → E0282). See lib/install.ts.
         const pinnedVersion = COMPONENT_VERSIONS[pkg as keyof typeof COMPONENT_VERSIONS];
       const cargoArgs = pinnedVersion
-        ? ['install', pkg, '--version', pinnedVersion, '--locked']
-        : ['install', pkg, '--locked'];
+        ? ['install', pkg, '--version', pinnedVersion]
+        : ['install', pkg];
       const proc = execa('cargo', cargoArgs, { stdio: 'pipe' });
         proc.stderr?.on('data', (chunk: Buffer) => {
           const line = chunk.toString().trim().split('\n').pop() ?? '';

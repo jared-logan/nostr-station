@@ -39,10 +39,12 @@ export const Update: React.FC<UpdateProps> = ({ dryRun, yes }) => {
         const before = await currentVersion(pkg);
         up(i, { status: 'running', from: before });
 
+        // No --locked: older crates ship Cargo.lock entries that break on
+        // modern rustc (e.g. time 0.3.25 → E0282). See lib/install.ts.
         const pinnedVersion = COMPONENT_VERSIONS[pkg as keyof typeof COMPONENT_VERSIONS];
         const cargoArgs = pinnedVersion
-          ? ['install', pkg, '--version', pinnedVersion, '--locked', '--quiet']
-          : ['install', pkg, '--locked', '--quiet'];
+          ? ['install', pkg, '--version', pinnedVersion, '--quiet']
+          : ['install', pkg, '--quiet'];
 
         if (!dryRun) {
           try {
