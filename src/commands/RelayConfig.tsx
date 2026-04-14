@@ -94,7 +94,7 @@ export const RelayConfigView: React.FC<RelayConfigViewProps> = ({ authToggle, dm
       ok = setAuthFlag('nip42_dms', dmAuthToggle);
     }
     if (ok) restartRelay();
-    setResultMsg(ok ? '✓ Config updated — relay restarted' : '✗ Failed to update config');
+    setResultMsg(ok ? '✓ Config updated — relay restarted' : '✗ Config update failed — check relay config file');
     setPhase('done');
   }
 

@@ -20,6 +20,22 @@ interface ServicesPhaseProps {
 
 type S = { label: string; status: StepStatus; detail?: string };
 
+function humanizeBunkerError(raw: string | undefined): string {
+  if (!raw) return 'Amber did not respond — open the app and try again';
+  const lower = raw.toLowerCase();
+  if (lower.includes('timeout') || lower.includes('timed out'))
+    return 'Amber did not respond — open the app and approve the connection request';
+  if (lower.includes('connection refused') || lower.includes('econnrefused'))
+    return 'Could not reach Amber — make sure the app is open and the bunker is active';
+  if (lower.includes('invalid') || lower.includes('malformed') || lower.includes('parse'))
+    return 'Invalid bunker string — copy it again from Amber → Connect apps → your bunker';
+  if (lower.includes('unauthori') || lower.includes('rejected') || lower.includes('denied'))
+    return 'Amber rejected the request — tap Approve in the app, then retry';
+  if (lower.includes('not found') || lower.includes('no such'))
+    return 'ngit not found — run: nostr-station update';
+  return raw.slice(0, 120);
+}
+
 export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, onDone }) => {
   const [showStacksNote, setShowStacksNote] = useState(false);
   const [showGhNote, setShowGhNote] = useState(false);
@@ -94,7 +110,7 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
       if (cfg.bunker) {
         up(7, { status: 'running' });
         const ng = await setupNgitBunker(cfg.bunker, platform.cargoBin);
-        up(7, { status: ng.ok ? 'done' : 'error', detail: ng.detail });
+        up(7, { status: ng.ok ? 'done' : 'error', detail: ng.ok ? undefined : humanizeBunkerError(ng.detail) });
       }
 
       // SSH key

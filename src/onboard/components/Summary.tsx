@@ -2,7 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { P } from './palette.js';
 import type { Config } from '../../lib/detect.js';
-import { EDITOR_START_COMMANDS } from '../../lib/services.js';
+import { EDITOR_START_COMMANDS, EDITOR_FILENAMES } from '../../lib/services.js';
 
 interface SummaryProps {
   config: Config;
@@ -20,6 +20,7 @@ export const Summary: React.FC<SummaryProps> = ({ config, meshIp, demoMode = fal
     <Box flexDirection="column" marginLeft={2}>
       <Row label="Relay"    value="ws://localhost:8080" />
       <Row label="Mesh IP"  value={meshIp ?? 'run: nvpn status --json'} />
+      <Row label="npub"     value={config.npub || '(not set)'} />
       <Row label="Projects" value="~/projects" />
       <Row label="Logs"     value="~/logs" />
       <Row label="Config"   value="~/.config/nostr-rs-relay/config.toml" />
@@ -27,12 +28,25 @@ export const Summary: React.FC<SummaryProps> = ({ config, meshIp, demoMode = fal
 
     <Box marginTop={1} flexDirection="column" marginLeft={2}>
       <Text bold>Start a dev session:</Text>
+      {config.aiProvider !== 'anthropic' && (
+        <Text dimColor>  source ~/.claude_env   # load AI provider config</Text>
+      )}
       <Text dimColor>  cd ~/projects && {EDITOR_START_COMMANDS[config.editor] ?? 'claude'}</Text>
+      {(config.editor === 'cursor' || config.editor === 'windsurf' || config.editor === 'copilot') && (
+        <Text color={P.muted}>  Context already linked as {EDITOR_FILENAMES[config.editor]}</Text>
+      )}
+    </Box>
+
+    <Box marginTop={1} flexDirection="column" marginLeft={2}>
+      <Text bold>Or chat with your agent in the browser:</Text>
+      <Text dimColor>  nostr-station chat</Text>
+      <Text color={P.muted}>  Opens localhost:3000 — NOSTR_STATION.md loaded as context</Text>
     </Box>
 
     <Box marginTop={1} flexDirection="column" marginLeft={2}>
       <Text bold>Context file for your AI coding tool:</Text>
-      <Text dimColor>  ~/projects/NOSTR_STATION.md</Text>
+      <Text dimColor>  ~/projects/{EDITOR_FILENAMES[config.editor] ?? 'NOSTR_STATION.md'}</Text>
+      <Text color={P.muted}>  (source: ~/projects/NOSTR_STATION.md)</Text>
       <Text color={P.muted}>  Switch tools any time: nostr-station setup-editor</Text>
     </Box>
 

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Box } from 'ink';
 import { Banner } from './components/Banner.js';
 import { Summary } from './components/Summary.js';
+import { LaunchPicker } from './components/LaunchPicker.js';
 import { DetectPhase } from './phases/Detect.js';
 import { ConfigPhase } from './phases/Config.js';
 import { InstallPhase } from './phases/Install.js';
@@ -19,9 +20,10 @@ type Stage =
 
 interface OnboardProps {
   demoMode?: boolean;
+  onLaunch?: (intent: string) => void;
 }
 
-export const Onboard: React.FC<OnboardProps> = ({ demoMode = false }) => {
+export const Onboard: React.FC<OnboardProps> = ({ demoMode = false, onLaunch }) => {
   const [stage, setStage] = useState<Stage>('detect');
   const [platform, setPlatform] = useState<Platform | null>(null);
   const [installed, setInstalled] = useState<Installed | null>(null);
@@ -98,9 +100,14 @@ export const Onboard: React.FC<OnboardProps> = ({ demoMode = false }) => {
         />
       )}
 
-      {/* Summary */}
+      {/* Summary + launch picker */}
       {stage === 'done' && config && (
-        <Summary config={config} meshIp={meshIp} demoMode={demoMode} />
+        <>
+          <Summary config={config} meshIp={meshIp} demoMode={demoMode} />
+          {!demoMode && (
+            <LaunchPicker onLaunch={intent => onLaunch?.(intent)} />
+          )}
+        </>
       )}
     </Box>
   );

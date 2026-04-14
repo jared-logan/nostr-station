@@ -104,6 +104,8 @@ nostr-station keychain delete <key>  Remove a credential (confirmation required)
 nostr-station keychain rotate      Hot-swap ai-api-key with 60s rollback window
 nostr-station keychain rotate --rollback  Restore previous value (within 60s)
 nostr-station keychain migrate     Convert plaintext ~/.claude_env to keychain loader
+nostr-station chat                 Web chat UI at localhost:3000 with NOSTR_STATION.md as context
+nostr-station chat --port <n>      Custom port for the chat server
 nostr-station tui                  Live dashboard — events, logs, mesh status
 nostr-station seed                 Seed relay with dummy events for dev/testing
 nostr-station seed --events 100    Specify event count
@@ -225,6 +227,8 @@ Choose during onboard — or mix and match:
 - Node.js 22+ (installed automatically via nvm if missing)
 - ~2 GB free disk space (Rust toolchain + compiled binaries)
 - Internet connection for first install
+
+Prebuilt relay binaries target `linux-x86_64` (glibc ≥ 2.31) and `darwin-arm64`. On Intel Macs and older Linux distros, the relay falls back to `cargo install` and compiles locally (~10–15 min on modest hardware).
 
 ---
 

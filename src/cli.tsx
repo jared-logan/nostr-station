@@ -17,6 +17,7 @@ import { SetupEditor }   from './commands/SetupEditor.js';
 import { Nsite }         from './commands/Nsite.js';
 import { Keychain }      from './commands/Keychain.js';
 import { Push }          from './commands/Push.js';
+import { Chat }          from './commands/Chat.js';
 import { RelayConfigView, RelayWhitelist } from './commands/RelayConfig.js';
 import { getKeychain }   from './lib/keychain.js';
 import { requireInteractive } from './lib/tty.js';
@@ -70,7 +71,15 @@ switch (command) {
         process.exit(1);
       }
     }
-    render(React.createElement(Onboard, { demoMode: flag('--demo') }));
+    let launchIntent = '';
+    const { waitUntilExit } = render(React.createElement(Onboard, {
+      demoMode: flag('--demo'),
+      onLaunch: (intent: string) => { launchIntent = intent; },
+    }));
+    waitUntilExit().then(() => {
+      if (launchIntent === 'tui')  spawnSync('nostr-station', ['tui'],  { stdio: 'inherit' });
+      if (launchIntent === 'chat') spawnSync('nostr-station', ['chat'], { stdio: 'inherit' });
+    });
     break;
 
   case 'seed':
@@ -108,6 +117,12 @@ switch (command) {
         yes:    flag('--yes'),
       }));
     }
+    break;
+
+  case 'chat':
+    render(React.createElement(Chat, {
+      port: arg('--port') ? parseInt(arg('--port')!, 10) : 3000,
+    }));
     break;
 
   case 'logs':
@@ -247,21 +262,22 @@ function printHelp() {
     nostr-station <command> [options]
 
   COMMANDS
-    onboard              Interactive setup wizard (first run)
-    doctor               Health checks + quick fixes
-    status               Relay, mesh, and service status
-    update               Update all components
-    update --wizard      Interactive update with version preview
-    logs                 Tail relay or watchdog logs
-    relay                Manage the nostr-rs-relay service
-    tui                  Live dashboard — events, logs, mesh status
-    seed                 Seed relay with dummy events for dev/testing
-    push                 Push to all configured remotes (git + ngit)
-    keychain             Manage credentials stored in the OS keychain
-    nsite                Manage nsite publishing (nsyte)
-    setup-editor         Link NOSTR_STATION.md to your AI coding tool
-    completion           Generate shell tab-completion
-    uninstall            Clean removal
+    onboard              First-time setup — installs relay, wires up AI provider + Amber signing
+    doctor               Check system health; --fix auto-repairs common problems
+    status               Show relay, mesh, and service state
+    update               Fetch and apply the latest versions of all components
+    update --wizard      Interactive update with version preview and diff
+    logs                 Stream relay or watchdog logs  (-f to follow)
+    relay                Start, stop, restart, and configure the local relay
+    tui                  Live dashboard — events, connection map, and logs
+    seed                 Publish test events to your relay  (great for smoke-testing)
+    push                 Push current repo to GitHub + Nostr (ngit) simultaneously
+    keychain             Store, rotate, and inspect credentials in the OS keychain
+    chat                 Web chat UI at localhost:3000 — NOSTR_STATION.md as context
+    nsite                Publish a static site to Nostr via nsyte
+    setup-editor         Re-link NOSTR_STATION.md for a different AI coding tool
+    completion           Install or print shell tab-completion  (zsh / bash)
+    uninstall            Remove all nostr-station components cleanly
 
   RELAY SUBCOMMANDS
     relay start / stop / restart / status
@@ -290,6 +306,7 @@ function printHelp() {
 
   FLAGS
     onboard --demo
+    chat    --port <n>
     doctor  --fix --repair --deep
     status  --json
     update  --dry-run --yes --wizard

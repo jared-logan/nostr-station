@@ -184,7 +184,7 @@ const NsiteInit: React.FC = () => {
     }
 
     if (error) {
-      return <Box paddingX={1}><Text color={P.error}>Failed: {error}</Text></Box>;
+      return <Box paddingX={1}><Text color={P.error}>✗ {error}</Text></Box>;
     }
 
     return (

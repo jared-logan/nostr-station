@@ -25,7 +25,6 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
     const mapped: Check[] = results.map(r => ({
       label:  r.label,
       status: r.ok ? 'done' : 'error',
-      detail: r.ok ? undefined : 'failed',
       fixCmd: !r.ok ? getFix(r.label) : undefined,
     }));
 
@@ -38,6 +37,7 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
       mapped.push({
         label: 'Cargo bin in PATH',
         status: attempt('command -v cargo') ? 'done' : 'error',
+        fixCmd: 'source ~/.cargo/env',
       });
     }
 
@@ -61,6 +61,7 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
   }, []);
 
   const failures = checks.filter(c => c.status === 'error').length;
+  const actionable = checks.filter(c => c.status === 'error' && c.fixCmd);
 
   // Exit 1 if any checks are still failing after --fix (or without it).
   // Lets `nostr-station doctor && nostr-station push` short-circuit on
@@ -68,6 +69,9 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
   useEffect(() => {
     if (done && failures > 0) process.exitCode = 1;
   }, [done, failures]);
+
+  // Pad label to a fixed width so fix commands line up cleanly.
+  const PAD = Math.max(0, ...actionable.map(c => c.label.length)) + 2;
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -91,9 +95,25 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
               {`${failures - fixed} issue(s) remain · ${fixed} fixed`}
             </Text>
           ) : (
-            <Text color={P.warn}>
-              {`${failures} issue(s) found · run with --fix to repair`}
-            </Text>
+            <>
+              <Text color={P.warn}>{`${failures} issue(s) found`}</Text>
+              {actionable.length > 0 && (
+                <Box marginTop={1} flexDirection="column">
+                  <Text bold>Quick fixes:</Text>
+                  {actionable.map((c, i) => (
+                    <Box key={i} marginLeft={2}>
+                      <Box width={PAD}><Text color={P.muted}>{c.label}</Text></Box>
+                      <Text color={P.accentBright}>{c.fixCmd}</Text>
+                    </Box>
+                  ))}
+                  <Box marginTop={1}>
+                    <Text color={P.muted}>Or run </Text>
+                    <Text>nostr-station doctor --fix</Text>
+                    <Text color={P.muted}> to apply all automatically</Text>
+                  </Box>
+                </Box>
+              )}
+            </>
           )}
         </Box>
       )}
@@ -103,8 +123,16 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
 
 function getFix(label: string): string | undefined {
   const fixes: Record<string, string> = {
-    'Relay (localhost:8080)': 'launchctl start com.nostr-station.relay 2>/dev/null || systemctl --user start nostr-relay.service',
-    'nostr-vpn daemon':       'sudo nvpn service install && nvpn start --daemon --connect',
+    'Relay (localhost:8080)':
+      process.platform === 'darwin'
+        ? 'launchctl start com.nostr-station.relay'
+        : 'systemctl --user start nostr-relay.service',
+    'nostr-rs-relay binary':  'nostr-station update',
+    'nostr-vpn daemon':       'sudo nvpn service install',
+    'ngit binary':            'nostr-station update',
+    'nak binary':             'nostr-station update',
+    'claude-code binary':     'npm install -g @anthropic-ai/claude-code',
+    'Relay NIP-11 response':  'nostr-station relay restart',
   };
-  return Object.entries(fixes).find(([k]) => label.includes(k.split(' ')[0]))?.[1];
+  return fixes[label];
 }

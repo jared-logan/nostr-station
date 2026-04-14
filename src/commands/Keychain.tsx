@@ -309,7 +309,7 @@ const KeychainMigrate: React.FC = () => {
         await getKeychain().store('ai-api-key', apiKey);
         out.push({ text: `✓ API key stored in ${getKeychainBackendName()}`, ok: true });
       } catch (e: any) {
-        out.push({ text: `✗ Failed to store in keychain: ${e.message}`, ok: false });
+        out.push({ text: `✗ Couldn't store in keychain — ${e.message}`, ok: false });
         setLines(out); setDone(true); return;
       }
 

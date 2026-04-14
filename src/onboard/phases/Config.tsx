@@ -38,15 +38,15 @@ const VERSION_CONTROL: SelectOption[] = [
 ];
 
 const AI_PROVIDERS: SelectOption[] = [
-  { label: 'Anthropic (Claude)          standard API key',        value: 'anthropic'     },
-  { label: 'OpenRouter                  multi-model API',          value: 'openrouter'    },
-  { label: 'OpenCode Zen                curated coding models',    value: 'opencode-zen'  },
-  { label: 'Routstr  ⚡                 Lightning / Cashu',       value: 'routstr'       },
-  { label: 'PayPerQ  ⚡                 pay-per-query',           value: 'ppq'           },
-  { label: 'Ollama                      local models, no key',    value: 'ollama'        },
-  { label: 'LM Studio                   local models, no key',    value: 'lmstudio'     },
-  { label: 'Maple Proxy  🔒             TEE-encrypted, private',  value: 'maple'         },
-  { label: 'Custom endpoint             any OpenAI-compat API',   value: 'custom'        },
+  { label: 'Anthropic (Claude)          uses your ANTHROPIC_API_KEY env var',  value: 'anthropic'     },
+  { label: 'OpenRouter                  Claude, GPT-4, Gemini + 200 models',   value: 'openrouter'    },
+  { label: 'OpenCode Zen                coding-optimised model selection',      value: 'opencode-zen'  },
+  { label: 'Routstr  ⚡                 pay with Bitcoin / Cashu, no account', value: 'routstr'       },
+  { label: 'PayPerQ  ⚡                 pay per request, no subscription',     value: 'ppq'           },
+  { label: 'Ollama                      run models on this machine, no key',   value: 'ollama'        },
+  { label: 'LM Studio                   run models on this machine, no key',   value: 'lmstudio'      },
+  { label: 'Maple Proxy  🔒             TEE-encrypted — prompts never leave',  value: 'maple'         },
+  { label: 'Custom endpoint             any OpenAI-compatible API',            value: 'custom'        },
 ];
 
 const EDITORS: SelectOption[] = [
@@ -203,16 +203,31 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone, demoMode = fal
 
       {/* npub */}
       {field === 'npub' && (
-        <Prompt label="Your npub" placeholder="npub1..." value={input}
-          onChange={setInput}
-          onSubmit={v => { set('npub', v); advance('bunker'); }} />
+        <Box flexDirection="column">
+          <Box marginLeft={2} marginBottom={1} flexDirection="column">
+            <Text color={P.muted}>Your Nostr public key — starts with <Text color={P.accentBright}>npub1</Text>.</Text>
+            <Text color={P.muted}>Find it in Amethyst, Damus, Primal, or any Nostr client under your profile.</Text>
+          </Box>
+          <Prompt label="Your npub" placeholder="npub1..." value={input}
+            onChange={setInput}
+            onSubmit={v => { set('npub', v); advance('bunker'); }} />
+        </Box>
       )}
 
       {/* bunker */}
       {field === 'bunker' && (
-        <Prompt label="Amber bunker string (blank = configure later)" placeholder="bunker://..."
-          value={input} onChange={setInput}
-          onSubmit={v => { set('bunker', v); advance('relayName'); }} />
+        <Box flexDirection="column">
+          <Box marginLeft={2} marginBottom={1} flexDirection="column">
+            <Text color={P.muted}>Amber is an Android app that holds your Nostr private key.</Text>
+            <Text color={P.muted}>It signs git commits and events without your nsec ever leaving your phone.</Text>
+            <Text> </Text>
+            <Text color={P.muted}>{'Open Amber → Connect apps → Connect a bunker → copy the bunker:// string.'}</Text>
+            <Text color={P.muted}>Skip this now — you can connect Amber later with: <Text color={P.accentBright}>ngit login --bunker {'<string>'}</Text></Text>
+          </Box>
+          <Prompt label="Amber bunker string (blank = skip for now)" placeholder="bunker://..."
+            value={input} onChange={setInput}
+            onSubmit={v => { set('bunker', v); advance('relayName'); }} />
+        </Box>
       )}
 
       {/* relay name */}
