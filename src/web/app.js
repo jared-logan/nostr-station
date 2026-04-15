@@ -5,7 +5,7 @@
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'git', 'logs', 'config'];
+const PANELS = ['status', 'chat', 'relay', 'projects', 'logs', 'config'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -36,12 +36,44 @@ const toast = (() => {
   };
 })();
 
+// Session token lives in sessionStorage — cleared on tab close, never
+// persisted to localStorage so it isn't shared across tabs. See auth.js
+// for the server contract (Bearer <token>, 64-char hex).
+const SESSION_KEY         = 'ns-session-token';
+const SESSION_EXPIRES_KEY = 'ns-session-expires';
+
+function getSessionToken() { return sessionStorage.getItem(SESSION_KEY); }
+function setSessionToken(token, expiresAt) {
+  sessionStorage.setItem(SESSION_KEY, token);
+  sessionStorage.setItem(SESSION_EXPIRES_KEY, String(expiresAt));
+}
+function clearSessionToken() {
+  sessionStorage.removeItem(SESSION_KEY);
+  sessionStorage.removeItem(SESSION_EXPIRES_KEY);
+}
+
 // Drop-in fetch wrapper that surfaces non-2xx + network errors as toasts.
-// Returns parsed JSON on success, throws on failure (caller can add context).
+// Adds the Bearer session token on every call (unauthenticated requests to
+// public /api/auth/* paths still work — the server ignores the header).
+// On 401, clears the token and shows the auth screen without a page reload.
 async function api(path, init) {
+  const token = getSessionToken();
+  const headers = new Headers(init?.headers || {});
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
   let res;
-  try { res = await fetch(path, init); }
+  try { res = await fetch(path, { ...init, headers }); }
   catch (e) { toast('Network error', path, 'err'); throw e; }
+
+  if (res.status === 401 && !path.startsWith('/api/auth/')) {
+    // Session expired or token revoked — drop back to the auth screen
+    // without surfacing a red toast (the auth screen itself is the cue).
+    clearSessionToken();
+    AuthScreen?.show?.();
+    throw new Error(`${path} 401`);
+  }
+
   if (!res.ok) {
     let body = '';
     try { body = (await res.text()).slice(0, 180); } catch {}
@@ -51,6 +83,10 @@ async function api(path, init) {
   const ct = res.headers.get('content-type') || '';
   return ct.includes('json') ? res.json() : res.text();
 }
+
+// Forward declaration: assigned below once AuthScreen is defined. api() needs
+// to reference it during 401 handling but AuthScreen itself uses api().
+let AuthScreen = null;
 
 // Tiny clipboard helper — used by copy buttons + paste fields.
 async function copyToClipboard(text) {
@@ -151,18 +187,26 @@ function confirmDestructive({ title, description, typeToConfirm, confirmLabel = 
   });
 }
 
-// Reusable terminal-output modal for streaming SSE from /api/exec/:cmd.
-// `pathKey` is the exec slug (e.g. 'doctor', 'push', 'install/nak').
-// Resolves when the stream emits `done`. Close button is enabled on done.
-function openExecModal({ title, subtitle, endpoint }) {
-  const body = document.createElement('div');
-  body.innerHTML = `
-    <div class="note">Streaming from <code>${escapeHtml(endpoint)}</code></div>
-    <div class="term" id="exec-term"><span class="line sys">starting…</span><span class="cursor"></span></div>
+// Reusable terminal-output modal for streaming SSE from any POST endpoint
+// (/api/exec/:cmd, /api/projects/:id/git/push, …). Resolves when the stream
+// emits `done`. The footer button is enabled on done; the header × prompts
+// before force-closing a running operation.
+function openExecModal({ title, subtitle, endpoint, body }) {
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'exec-body';
+  bodyEl.innerHTML = `
+    <div class="exec-bar">
+      <div class="note">Streaming from <code>${escapeHtml(endpoint)}</code></div>
+      <label class="autoscroll-toggle">
+        <input type="checkbox" class="autoscroll" checked>
+        auto-scroll
+      </label>
+    </div>
+    <div class="term exec-term"><span class="line sys">starting…</span><span class="cursor"></span></div>
   `;
   const statusPill = document.createElement('span');
   statusPill.className = 'status-pill running';
-  statusPill.textContent = 'running';
+  statusPill.innerHTML = '<span class="spinner"></span>running';
 
   const foot = document.createElement('div');
   foot.style.display = 'flex'; foot.style.alignItems = 'center'; foot.style.width = '100%';
@@ -171,37 +215,70 @@ function openExecModal({ title, subtitle, endpoint }) {
   const closeBtn = document.createElement('button'); closeBtn.textContent = 'close'; closeBtn.disabled = true;
   foot.appendChild(statusWrap); foot.appendChild(closeBtn);
 
-  const modal = openModal({ title, subtitle, body, footer: foot });
-  const term = body.querySelector('#exec-term');
+  const modal = openModal({ title, subtitle, body: bodyEl, footer: foot });
+  modal.root.classList.add('exec-modal');
+
+  const term = bodyEl.querySelector('.exec-term');
   const cursor = term.querySelector('.cursor');
+  const autoscrollCb = bodyEl.querySelector('.autoscroll');
+
+  let running = true;
+  let reader = null;
 
   const addLine = (text, cls = '') => {
     const span = document.createElement('span');
     span.className = 'line ' + cls;
     span.textContent = text + '\n';
     term.insertBefore(span, cursor);
-    term.scrollTop = term.scrollHeight;
+    if (autoscrollCb.checked) term.scrollTop = term.scrollHeight;
   };
 
+  // Re-wire the modal's close × to prompt while running.
+  const origClose = modal.root.querySelector('.modal-close');
+  if (origClose) {
+    const newCloser = origClose.cloneNode(true);
+    origClose.parentNode.replaceChild(newCloser, origClose);
+    newCloser.addEventListener('click', async () => {
+      if (!running) { modal.close(); return; }
+      const ok = await confirmDestructive({
+        title: 'Close while running?',
+        description: 'Operation is still running. Close anyway?',
+        confirmLabel: 'Close',
+      });
+      if (ok) {
+        try { reader?.cancel(); } catch {}
+        modal.close();
+      }
+    });
+  }
   closeBtn.addEventListener('click', () => modal.close());
 
   return new Promise((resolve) => {
-    fetch(endpoint, { method: 'POST' }).then(async (res) => {
+    const headers = { 'Authorization': `Bearer ${getSessionToken() || ''}` };
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    }).then(async (res) => {
       if (!res.ok) {
         addLine(`HTTP ${res.status} — ${await res.text().catch(() => '')}`, 'err');
+        running = false;
         statusPill.className = 'status-pill error'; statusPill.textContent = 'error';
         closeBtn.disabled = false;
         resolve({ ok: false, code: -1 });
         return;
       }
-      const reader = res.body.getReader();
+      reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
       let doneCode = null;
       outer: while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
+        let read;
+        try { read = await reader.read(); }
+        catch { break outer; }
+        if (read.done) break;
+        buf += dec.decode(read.value, { stream: true });
         const lines = buf.split('\n'); buf = lines.pop();
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
@@ -211,13 +288,13 @@ function openExecModal({ title, subtitle, endpoint }) {
             const msg = JSON.parse(raw);
             if (msg.done) { doneCode = msg.code ?? 0; break outer; }
             const cls = msg.stream === 'stderr' ? 'err' : '';
-            // Strip ANSI escapes
             const clean = (msg.line || '').replace(/\x1b\[[0-9;]*m/g, '');
             addLine(clean, cls);
           } catch {}
         }
       }
       cursor.remove();
+      running = false;
       if (doneCode === 0) {
         addLine('— done —', 'ok');
         statusPill.className = 'status-pill done'; statusPill.textContent = 'done';
@@ -229,6 +306,7 @@ function openExecModal({ title, subtitle, endpoint }) {
       resolve({ ok: doneCode === 0, code: doneCode });
     }).catch((e) => {
       addLine(String(e.message || e), 'err');
+      running = false;
       statusPill.className = 'status-pill error'; statusPill.textContent = 'error';
       closeBtn.disabled = false;
       resolve({ ok: false, code: -1 });
@@ -240,6 +318,8 @@ function openExecModal({ title, subtitle, endpoint }) {
 
 function currentPanel() {
   const hash = (location.hash || '#status').slice(1);
+  // Old #git bookmarks land on the new Projects panel.
+  if (hash === 'git') return 'projects';
   return PANELS.includes(hash) ? hash : 'status';
 }
 
@@ -362,9 +442,28 @@ async function refreshIdentityChip() {
     avatar.innerHTML = '!';
     nameEl.textContent = 'no identity';
     subEl.textContent  = 'click to set up';
+    chip.removeAttribute('title');
     return;
   }
   chip.classList.remove('missing');
+
+  // Session expiry tooltip — refreshed on each chip repaint. Silent when
+  // there's no active session (localhost exemption, for example).
+  const exp = Number(sessionStorage.getItem(SESSION_EXPIRES_KEY) || 0);
+  if (exp > 0) {
+    const rem = exp - Date.now();
+    if (rem > 0) {
+      const mins = Math.floor(rem / 60000);
+      const hrs  = Math.floor(mins / 60);
+      chip.title = hrs > 0
+        ? `Session expires in ${hrs}h ${mins % 60}m`
+        : `Session expires in ${mins}m`;
+    } else {
+      chip.title = 'Session expired';
+    }
+  } else {
+    chip.removeAttribute('title');
+  }
 
   // Render placeholder avatar/name immediately so the chip never blanks.
   const fallback = truncNpub(cfg.npub);
@@ -450,6 +549,26 @@ const IdentityDrawer = (() => {
       </div>
     `;
     body.appendChild(signing);
+
+    // Session — only shown when we have an actual session (i.e. not the
+    // localhost exemption path, where there's nothing to sign out of).
+    if (getSessionToken()) {
+      const sessionSec = document.createElement('div');
+      sessionSec.className = 'drawer-section';
+      const exp = Number(sessionStorage.getItem(SESSION_EXPIRES_KEY) || 0);
+      const remaining = exp ? formatRemaining(exp - Date.now()) : '—';
+      sessionSec.innerHTML = `
+        <h4>Session</h4>
+        <div class="body">Expires in <span class="muted">${escapeHtml(remaining)}</span></div>
+      `;
+      const signOutBtn = document.createElement('button');
+      signOutBtn.textContent = 'sign out';
+      signOutBtn.className = 'danger';
+      signOutBtn.style.marginTop = '8px';
+      signOutBtn.addEventListener('click', signOut);
+      sessionSec.appendChild(signOutBtn);
+      body.appendChild(sessionSec);
+    }
 
     // Fetch live profile if we haven't yet
     if (!__profile) {
@@ -578,6 +697,23 @@ const IdentityDrawer = (() => {
     return `${hrs}h ago`;
   }
 
+  function formatRemaining(ms) {
+    if (!ms || ms < 0) return 'expired';
+    const mins = Math.floor(ms / 60000);
+    const hrs  = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    if (hrs > 0) return `${hrs}h ${remMins}m`;
+    return `${mins}m`;
+  }
+
+  async function signOut() {
+    try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
+    clearSessionToken();
+    __identity = null; __profile = null;
+    close();
+    AuthScreen.show();
+  }
+
   $('identity-chip').addEventListener('click', open);
 
   return { open, close, render };
@@ -695,8 +831,18 @@ const ChatPanel = (() => {
   const provSel = $('chat-provider');
   const modelSel = $('chat-model');
   const warnEl = $('chat-key-warning');
-  const history = [];
+
+  // Per-project message history. 'global' is the default bucket (no project).
+  const chatHistories = { global: [] };
+  let activeProject = null;         // { id, name } or null
   let busy = false;
+
+  function activeKey() { return activeProject?.id || 'global'; }
+  function currentHistory() {
+    const k = activeKey();
+    if (!chatHistories[k]) chatHistories[k] = [];
+    return chatHistories[k];
+  }
 
   function addMsg(role, text) {
     const el = document.createElement('div');
@@ -709,12 +855,71 @@ const ChatPanel = (() => {
   }
 
   function clearChat() {
-    history.length = 0;
+    const h = currentHistory();
+    h.length = 0;
+    const note = activeProject
+      ? `Cleared. Project context: ${activeProject.name}.`
+      : `Cleared. Start a new conversation — NOSTR_STATION.md still loaded as context.`;
     feed.innerHTML = `
       <div class="msg asst">
         <div class="lbl">assistant</div>
-        <div class="body">Cleared. Start a new conversation — NOSTR_STATION.md still loaded as context.</div>
+        <div class="body">${escapeHtml(note)}</div>
       </div>`;
+  }
+
+  function renderHistory() {
+    feed.innerHTML = '';
+    const h = currentHistory();
+    if (h.length === 0) {
+      const note = activeProject
+        ? `Context: ${activeProject.name}. Ask anything about this project.`
+        : 'Ready. NOSTR_STATION.md loaded as system context. What are you building?';
+      feed.innerHTML = `
+        <div class="msg asst">
+          <div class="lbl">assistant</div>
+          <div class="body">${escapeHtml(note)}</div>
+        </div>`;
+      return;
+    }
+    for (const m of h) {
+      addMsg(m.role === 'assistant' ? 'asst' : 'user', m.content);
+    }
+  }
+
+  // Project badge in chat-controls — inserted dynamically.
+  function ensureBadgeEl() {
+    let b = document.getElementById('chat-project-badge');
+    if (b) return b;
+    b = document.createElement('span');
+    b.id = 'chat-project-badge';
+    b.className = 'chat-project-badge';
+    b.style.display = 'none';
+    // Place next to key warning
+    warnEl.parentElement.appendChild(b);
+    return b;
+  }
+  function renderBadge() {
+    const b = ensureBadgeEl();
+    if (!activeProject) { b.style.display = 'none'; return; }
+    b.innerHTML = `
+      <span class="k">context</span>
+      <span class="v">${escapeHtml(activeProject.name)}</span>
+      <button class="clear-ctx" aria-label="Clear project context">×</button>
+    `;
+    b.style.display = '';
+    b.querySelector('.clear-ctx').onclick = () => setActiveProject(null);
+  }
+
+  async function setActiveProject(p) {
+    activeProject = p || null;
+    try {
+      await api('/api/chat/context', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: p?.id || null }),
+      });
+    } catch {}
+    renderBadge();
+    renderHistory();
   }
 
   async function populateProvider() {
@@ -793,6 +998,7 @@ const ChatPanel = (() => {
     input.style.height = 'auto';
     busy = true; send.disabled = true;
 
+    const history = currentHistory();
     history.push({ role: 'user', content: text });
     addMsg('user', text);
     const bodyEl = addMsg('asst', '');
@@ -804,7 +1010,7 @@ const ChatPanel = (() => {
     try {
       const res = await fetch('/api/chat', {
         method:  'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', 'Authorization': `Bearer ${getSessionToken() || ''}` },
         body:    JSON.stringify({ messages: history }),
       });
       if (!res.ok) throw new Error('server ' + res.status);
@@ -860,9 +1066,15 @@ const ChatPanel = (() => {
   let initialized = false;
   return {
     onEnter() {
-      if (!initialized) { initialized = true; populateProvider(); }
+      if (!initialized) {
+        initialized = true;
+        populateProvider();
+        renderBadge();
+      }
       input.focus();
     },
+    setActiveProject,
+    getActiveProject() { return activeProject; },
   };
 })();
 
@@ -1106,49 +1318,827 @@ const RelayPanel = (() => {
 
 // ── Panel: Git ───────────────────────────────────────────────────────────
 
-const GitPanel = (() => {
-  const body = $('git-body');
-  let loaded = false;
+// ── Projects: shared helpers ─────────────────────────────────────────────
 
-  function fmtTime(ms) {
-    if (!ms) return '';
-    const d = new Date(ms);
-    const mins = Math.round((Date.now() - ms) / 60000);
-    if (mins < 1)  return 'just now';
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.round(mins / 60);
-    if (hrs < 24)  return `${hrs}h ago`;
-    return d.toLocaleDateString();
+function fmtAgoMs(ms) {
+  if (!ms) return '—';
+  const mins = Math.round((Date.now() - ms) / 60000);
+  if (mins < 1)  return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24)  return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+function fmtAgoIso(iso) {
+  if (!iso) return '—';
+  return fmtAgoMs(new Date(iso).getTime());
+}
+
+function projectCapBadges(caps) {
+  const badges = [];
+  if (caps.git)   badges.push(`<span class="cap-chip cap-git">git</span>`);
+  if (caps.ngit)  badges.push(`<span class="cap-chip cap-ngit">ngit</span>`);
+  if (caps.nsite) badges.push(`<span class="cap-chip cap-nsite">nsite</span>`);
+  return badges.join('');
+}
+
+function projectIdentityLabel(project) {
+  if (project.identity.useDefault) return 'station identity';
+  const n = project.identity.npub;
+  if (!n) return 'project identity';
+  return truncNpub(n);
+}
+
+// ── Projects: drawer (add + edit wizards) ────────────────────────────────
+
+const ProjectDrawer = (() => {
+  const root  = $('project-drawer');
+  const scrim = $('project-drawer-scrim');
+  const body  = $('project-drawer-body');
+  const title = $('project-drawer-title');
+
+  let mode = 'add';               // 'add' | 'edit'
+  let editTarget = null;          // project id in edit mode
+  let draft = null;               // working copy
+  let expanded = 1;               // 1..4 stepper
+  let detect = null;              // last detect result
+  let ownerNpub = null;           // station identity for "use default"
+
+  function resetDraft() {
+    draft = {
+      name: '',
+      path: '',
+      noPath: false,
+      capabilities: { git: false, ngit: false, nsite: false },
+      identity: { useDefault: true, npub: '', bunkerUrl: '' },
+      remotes: { github: '', ngit: '' },
+      nsite: { url: '', lastDeploy: null },
+    };
+    expanded = 1;
+    detect = null;
   }
 
-  async function load() {
-    body.innerHTML = `<div style="color:var(--muted)">loading…</div>`;
-    try {
-      const [status, log] = await Promise.all([api('/api/git/status'), api('/api/git/log')]);
-      if (!status.inRepo) {
-        body.innerHTML = `<div class="empty-state">Not a git repository.<div class="hint">Run <code>git init</code> in a project directory and restart the dashboard from there.</div></div>`;
+  async function openAdd() {
+    mode = 'add'; editTarget = null;
+    title.textContent = 'Add project';
+    resetDraft();
+    try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
+    show();
+    render();
+  }
+
+  function openEditFromProject(project) {
+    mode = 'edit'; editTarget = project.id;
+    title.textContent = 'Edit project';
+    draft = {
+      name: project.name,
+      path: project.path || '',
+      noPath: !project.path,
+      capabilities: { ...project.capabilities },
+      identity: {
+        useDefault: project.identity.useDefault,
+        npub: project.identity.npub || '',
+        bunkerUrl: project.identity.bunkerUrl || '',
+      },
+      remotes: { github: project.remotes.github || '', ngit: project.remotes.ngit || '' },
+      nsite: { url: project.nsite.url || '', lastDeploy: project.nsite.lastDeploy || null },
+    };
+    expanded = 1;
+    show();
+    render();
+  }
+
+  function show() {
+    root.classList.add('open');
+    scrim.classList.add('open');
+    root.setAttribute('aria-hidden', 'false');
+  }
+  function close() {
+    root.classList.remove('open');
+    scrim.classList.remove('open');
+    root.setAttribute('aria-hidden', 'true');
+  }
+
+  scrim.addEventListener('click', close);
+  $('project-drawer-close').addEventListener('click', close);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && root.classList.contains('open')) close();
+  });
+
+  function render() {
+    body.innerHTML = '';
+    body.appendChild(stepEl(1, 'Path',         renderStep1()));
+    body.appendChild(stepEl(2, 'Capabilities', renderStep2()));
+    body.appendChild(stepEl(3, 'Identity',     renderStep3()));
+    body.appendChild(stepEl(4, 'Name',         renderStep4()));
+  }
+
+  function stepEl(n, label, contentEl) {
+    const wrap = document.createElement('div');
+    wrap.className = 'stepper-step' + (n === expanded ? ' active' : (n < expanded ? ' done' : ''));
+    wrap.innerHTML = `
+      <div class="step-head">
+        <span class="step-num">${n}</span>
+        <span class="step-label">${escapeHtml(label)}</span>
+        <span class="step-summary" data-step-summary></span>
+        <button class="step-edit" style="display:none">edit</button>
+      </div>
+    `;
+    const head = wrap.querySelector('.step-head');
+    const content = document.createElement('div');
+    content.className = 'step-content';
+    content.appendChild(contentEl);
+    wrap.appendChild(content);
+
+    const editBtn = wrap.querySelector('.step-edit');
+    const summaryEl = wrap.querySelector('[data-step-summary]');
+
+    if (n < expanded) {
+      editBtn.style.display = '';
+      editBtn.addEventListener('click', () => { expanded = n; render(); });
+      summaryEl.innerHTML = stepSummary(n);
+    } else {
+      summaryEl.textContent = '';
+    }
+    if (n !== expanded) content.style.display = 'none';
+    return wrap;
+  }
+
+  function stepSummary(n) {
+    if (n === 1) {
+      if (draft.noPath) return '<em>No local path (nsite-only)</em>';
+      return `<code>${escapeHtml(draft.path || '—')}</code>`;
+    }
+    if (n === 2) return projectCapBadges(draft.capabilities) || '<em class="muted">none</em>';
+    if (n === 3) return draft.identity.useDefault
+      ? 'Station identity'
+      : `Project: <code>${escapeHtml(truncNpub(draft.identity.npub))}</code>`;
+    if (n === 4) return escapeHtml(draft.name || '—');
+    return '';
+  }
+
+  function renderStep1() {
+    const el = document.createElement('div');
+    el.innerHTML = `
+      <label class="field-label">Local path</label>
+      <div class="field-row">
+        <input type="text" class="path-input" placeholder="/Users/you/projects/my-project" value="${escapeHtml(draft.path)}" ${draft.noPath ? 'disabled' : ''}>
+        <button type="button" class="paste-btn">paste</button>
+      </div>
+      <label class="checkbox-row">
+        <input type="checkbox" class="no-path-cb" ${draft.noPath ? 'checked' : ''}>
+        No local path (nsite-only)
+      </label>
+      <div class="detect-box"></div>
+      <div class="step-actions">
+        <button class="primary next-btn">Continue</button>
+      </div>
+    `;
+    const input = el.querySelector('.path-input');
+    const noPathCb = el.querySelector('.no-path-cb');
+    const detectBox = el.querySelector('.detect-box');
+    const nextBtn = el.querySelector('.next-btn');
+
+    const runDetect = async () => {
+      const p = input.value.trim();
+      if (!p) { detectBox.innerHTML = ''; return; }
+      detectBox.innerHTML = '<div class="detect-pending">detecting…</div>';
+      try {
+        const r = await api('/api/projects/detect', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path: p }),
+        });
+        detect = r;
+        if (!r.exists) {
+          detectBox.innerHTML = '<div class="detect err">Path not found</div>';
+          return;
+        }
+        draft.path = p;
+        if (draft.name === '' && r.suggestedName) draft.name = r.suggestedName;
+        if (r.isGitRepo) {
+          draft.capabilities.git = true;
+          if (r.githubRemote) draft.remotes.github = r.githubRemote;
+          if (r.ngitRemote)   { draft.capabilities.ngit = true; draft.remotes.ngit = r.ngitRemote; }
+          const bits = [];
+          bits.push('<span class="ok">Git repo detected</span>');
+          if (r.githubRemote) bits.push(`<span>GitHub: <code>${escapeHtml(r.githubRemote)}</code></span>`);
+          if (r.ngitRemote)   bits.push(`<span>ngit: <code>${escapeHtml(r.ngitRemote)}</code></span>`);
+          if (r.hasNsyte)     { draft.capabilities.nsite = true; bits.push('<span>nsyte config found</span>'); }
+          detectBox.innerHTML = `<div class="detect ok">${bits.join(' · ')}</div>`;
+        } else {
+          if (r.hasNsyte) draft.capabilities.nsite = true;
+          detectBox.innerHTML = `<div class="detect neutral">Not a git repo — configure as nsite-only or ngit-init later${r.hasNsyte ? ' · nsyte config found' : ''}</div>`;
+        }
+      } catch (e) {
+        detectBox.innerHTML = `<div class="detect err">${escapeHtml(e.message)}</div>`;
+      }
+    };
+    input.addEventListener('blur', runDetect);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runDetect(); } });
+
+    el.querySelector('.paste-btn').addEventListener('click', async () => {
+      try {
+        const t = (await navigator.clipboard.readText()).trim();
+        input.value = t;
+        runDetect();
+      } catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+    });
+
+    noPathCb.addEventListener('change', () => {
+      draft.noPath = noPathCb.checked;
+      if (draft.noPath) {
+        input.value = ''; input.disabled = true;
+        draft.path = '';
+        draft.capabilities.git = false; draft.capabilities.ngit = false;
+        draft.capabilities.nsite = true;
+        detectBox.innerHTML = '';
+      } else {
+        input.disabled = false;
+      }
+    });
+
+    nextBtn.addEventListener('click', () => {
+      if (!draft.noPath && !draft.path.trim()) { toast('Enter a path', 'or check "No local path"', 'warn'); return; }
+      if (draft.noPath) { draft.capabilities.nsite = true; }
+      expanded = 2; render();
+    });
+    return el;
+  }
+
+  function renderStep2() {
+    const el = document.createElement('div');
+    const gitDisabled = draft.noPath ? 'disabled' : '';
+    const ngitDisabled = draft.noPath ? 'disabled' : '';
+    el.innerHTML = `
+      <div class="cap-row">
+        <label class="cap-toggle">
+          <input type="checkbox" class="cap-git" ${draft.capabilities.git ? 'checked' : ''} ${gitDisabled}>
+          <div class="cap-body">
+            <div class="cap-title"><span class="cap-chip cap-git">git</span> GitHub / origin</div>
+            <div class="cap-sub">Standard git remote — pushes via <code>git push</code> or <code>nostr-station push</code>.</div>
+          </div>
+        </label>
+        <div class="cap-detail git-detail" style="${draft.capabilities.git ? '' : 'display:none'}">
+          <label class="field-label">GitHub remote URL</label>
+          <input type="text" class="github-remote" placeholder="https://github.com/you/repo" value="${escapeHtml(draft.remotes.github)}">
+        </div>
+      </div>
+      <div class="cap-row">
+        <label class="cap-toggle">
+          <input type="checkbox" class="cap-ngit" ${draft.capabilities.ngit ? 'checked' : ''} ${ngitDisabled}>
+          <div class="cap-body">
+            <div class="cap-title"><span class="cap-chip cap-ngit">ngit</span> Nostr-native repo</div>
+            <div class="cap-sub">Pushes git events through a nostr relay. Amber signs on your phone.</div>
+          </div>
+        </label>
+        <div class="cap-detail ngit-detail" style="${draft.capabilities.ngit ? '' : 'display:none'}">
+          <label class="field-label">ngit remote URL</label>
+          <input type="text" class="ngit-remote" placeholder="nostr://…" value="${escapeHtml(draft.remotes.ngit)}">
+          <div class="muted">Signing uses this project's identity (configured in step 3).</div>
+        </div>
+      </div>
+      <div class="cap-row">
+        <label class="cap-toggle">
+          <input type="checkbox" class="cap-nsite" ${draft.capabilities.nsite ? 'checked' : ''}>
+          <div class="cap-body">
+            <div class="cap-title"><span class="cap-chip cap-nsite">nsite</span> Published site</div>
+            <div class="cap-sub">Deploy a static site via nsyte. Optional, can be filled in later.</div>
+          </div>
+        </label>
+        <div class="cap-detail nsite-detail" style="${draft.capabilities.nsite ? '' : 'display:none'}">
+          <label class="field-label">nsite URL <span class="muted">(optional)</span></label>
+          <input type="text" class="nsite-url" placeholder="https://mysite.nsite.pub" value="${escapeHtml(draft.nsite.url)}">
+        </div>
+      </div>
+      <div class="cap-error"></div>
+      <div class="step-actions">
+        <button class="primary next-btn">Continue</button>
+      </div>
+    `;
+    const wire = (cbCls, capKey, detailCls) => {
+      const cb = el.querySelector(cbCls);
+      const detail = el.querySelector(detailCls);
+      cb.addEventListener('change', () => {
+        draft.capabilities[capKey] = cb.checked;
+        detail.style.display = cb.checked ? '' : 'none';
+      });
+    };
+    wire('.cap-git',   'git',   '.git-detail');
+    wire('.cap-ngit',  'ngit',  '.ngit-detail');
+    wire('.cap-nsite', 'nsite', '.nsite-detail');
+
+    el.querySelector('.github-remote').addEventListener('input', (e) => { draft.remotes.github = e.target.value.trim(); });
+    el.querySelector('.ngit-remote').addEventListener('input',   (e) => { draft.remotes.ngit   = e.target.value.trim(); });
+    el.querySelector('.nsite-url').addEventListener('input',     (e) => { draft.nsite.url      = e.target.value.trim(); });
+
+    el.querySelector('.next-btn').addEventListener('click', () => {
+      const errEl = el.querySelector('.cap-error');
+      const caps = draft.capabilities;
+      if (!caps.git && !caps.ngit && !caps.nsite) {
+        errEl.textContent = 'Enable at least one capability';
+        errEl.className = 'cap-error err';
         return;
       }
-      const remoteHtml = (status.remotes || []).map(r =>
-        `<div class="remote-row"><span class="k">${escapeHtml(r.type)} (${escapeHtml(r.name)})</span><span class="v">${escapeHtml(r.url)}</span></div>`
-      ).join('');
+      errEl.textContent = '';
+      expanded = 3; render();
+    });
+    return el;
+  }
+
+  function renderStep3() {
+    const el = document.createElement('div');
+    const ownerDisplay = ownerNpub ? truncNpub(ownerNpub) : '(not configured)';
+    el.innerHTML = `
+      <label class="radio-row">
+        <input type="radio" name="ident-mode" value="default" ${draft.identity.useDefault ? 'checked' : ''}>
+        <div>
+          <div class="radio-title">Use station identity</div>
+          <div class="radio-sub">${escapeHtml(ownerDisplay)} · uses your station owner identity for all signing.</div>
+        </div>
+      </label>
+      <label class="radio-row">
+        <input type="radio" name="ident-mode" value="project" ${draft.identity.useDefault ? '' : 'checked'}>
+        <div>
+          <div class="radio-title">Project-specific identity</div>
+          <div class="radio-sub">Isolates this project's signing. Recommended for brands, shops, or client projects.</div>
+        </div>
+      </label>
+      <div class="project-ident-fields" style="${draft.identity.useDefault ? 'display:none' : ''}">
+        <label class="field-label">npub</label>
+        <input type="text" class="ident-npub" placeholder="npub1… or 64-char hex" value="${escapeHtml(draft.identity.npub)}">
+        <div class="ident-npub-err err"></div>
+        <label class="field-label">Bunker URL <span class="muted">(optional)</span></label>
+        <input type="text" class="ident-bunker" placeholder="bunker://…" value="${escapeHtml(draft.identity.bunkerUrl)}">
+        <div class="muted">Amber will prompt on first signing operation if left empty.</div>
+      </div>
+      <div class="step-actions">
+        <button class="primary next-btn">Continue</button>
+      </div>
+    `;
+    const fieldsEl = el.querySelector('.project-ident-fields');
+    el.querySelectorAll('input[name="ident-mode"]').forEach(r => {
+      r.addEventListener('change', () => {
+        draft.identity.useDefault = (r.value === 'default');
+        fieldsEl.style.display = draft.identity.useDefault ? 'none' : '';
+      });
+    });
+    const npubInput = el.querySelector('.ident-npub');
+    const npubErr = el.querySelector('.ident-npub-err');
+    npubInput.addEventListener('input', () => {
+      const v = npubInput.value.trim();
+      draft.identity.npub = v;
+      npubErr.textContent = '';
+      if (v && v.startsWith('nsec')) {
+        npubErr.textContent = 'nsec detected — nostr-station never stores private keys';
+      }
+    });
+    el.querySelector('.ident-bunker').addEventListener('input', (e) => { draft.identity.bunkerUrl = e.target.value.trim(); });
+
+    el.querySelector('.next-btn').addEventListener('click', () => {
+      if (!draft.identity.useDefault) {
+        const v = draft.identity.npub;
+        if (!v) { npubErr.textContent = 'npub required'; return; }
+        if (v.startsWith('nsec')) { npubErr.textContent = 'nsec detected — nostr-station never stores private keys'; return; }
+        const valid = /^npub1[a-z0-9]{58,}$/.test(v) || /^[0-9a-f]{64}$/.test(v);
+        if (!valid) { npubErr.textContent = 'must be bech32 npub or 64-char hex'; return; }
+        if (draft.identity.bunkerUrl && !/^bunker:\/\//i.test(draft.identity.bunkerUrl)) {
+          npubErr.textContent = 'bunker URL must start with bunker://';
+          return;
+        }
+      }
+      expanded = 4; render();
+    });
+    return el;
+  }
+
+  function renderStep4() {
+    const el = document.createElement('div');
+    el.innerHTML = `
+      <label class="field-label">Name</label>
+      <input type="text" class="name-input" maxlength="64" value="${escapeHtml(draft.name)}" placeholder="my-project">
+
+      <div class="summary-card">
+        <div class="summary-row"><span class="k">Capabilities</span><span class="v summary-caps">${projectCapBadges(draft.capabilities) || '<em class="muted">none</em>'}</span></div>
+        <div class="summary-row"><span class="k">Identity</span><span class="v">${draft.identity.useDefault ? 'Station identity' : `Project: ${escapeHtml(truncNpub(draft.identity.npub))}`}</span></div>
+        <div class="summary-row"><span class="k">Path</span><span class="v">${draft.noPath ? '<em>nsite-only (no path)</em>' : `<code>${escapeHtml(draft.path || '—')}</code>`}</span></div>
+      </div>
+
+      <div class="step-actions">
+        <button class="primary save-btn">${mode === 'edit' ? 'Save changes' : 'Add project'}</button>
+      </div>
+    `;
+    const nameInput = el.querySelector('.name-input');
+    nameInput.addEventListener('input', () => { draft.name = nameInput.value; });
+    el.querySelector('.save-btn').addEventListener('click', save);
+    return el;
+  }
+
+  async function save() {
+    if (!draft.name.trim()) { toast('Name required', '', 'warn'); return; }
+    const payload = {
+      name: draft.name.trim(),
+      path: draft.noPath ? null : (draft.path.trim() || null),
+      capabilities: { ...draft.capabilities },
+      identity: {
+        useDefault: draft.identity.useDefault,
+        npub: draft.identity.useDefault ? null : (draft.identity.npub || null),
+        bunkerUrl: draft.identity.useDefault ? null : (draft.identity.bunkerUrl || null),
+      },
+      remotes: {
+        github: draft.capabilities.git  ? (draft.remotes.github || null) : null,
+        ngit:   draft.capabilities.ngit ? (draft.remotes.ngit   || null) : null,
+      },
+      nsite: {
+        url: draft.capabilities.nsite ? (draft.nsite.url || null) : null,
+        lastDeploy: draft.nsite.lastDeploy || null,
+      },
+    };
+    try {
+      if (mode === 'edit') {
+        await api(`/api/projects/${editTarget}`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        toast('Project updated', payload.name, 'ok');
+      } else {
+        await api('/api/projects', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        toast('Project added', payload.name, 'ok');
+      }
+      close();
+      ProjectsPanel.reload();
+    } catch (e) {
+      // api() already toasted.
+    }
+  }
+
+  return { openAdd, openEditFromProject, close };
+})();
+
+// ── Projects panel ───────────────────────────────────────────────────────
+
+const ProjectsPanel = (() => {
+  const body       = $('projects-body');
+  const headActions = $('projects-head-actions');
+  const title      = $('projects-title');
+  const subtitle   = $('projects-subtitle');
+
+  // View state persists across onEnter so back/refresh keeps users in place.
+  let state = { view: 'list', projectId: null, tab: 'overview' };
+  let projects = [];
+  let projectStatus = null;    // cached git/status for current detail
+  let projectGitLog = null;
+
+  async function reload() {
+    try {
+      projects = await api('/api/projects');
+    } catch {
+      projects = [];
+    }
+    render();
+  }
+
+  function onEnter() { reload(); }
+
+  function render() {
+    if (state.view === 'detail') renderDetail();
+    else renderList();
+  }
+
+  function renderList() {
+    title.textContent = 'Projects';
+    subtitle.textContent = 'Your Nostr development projects';
+    headActions.innerHTML = '';
+    const addBtn = document.createElement('button');
+    addBtn.className = 'primary';
+    addBtn.textContent = 'Add project';
+    addBtn.addEventListener('click', () => ProjectDrawer.openAdd());
+    headActions.appendChild(addBtn);
+
+    if (projects.length === 0) {
       body.innerHTML = `
-        <div class="git-header">
-          <span class="git-chip"><span class="k">branch</span><span class="v">${escapeHtml(status.branch)}</span></span>
-          <span class="git-chip"><span class="k">HEAD</span><span class="v">${escapeHtml(status.hash)}</span></span>
-          <span class="git-chip ${status.dirty ? 'dirty' : ''}"><span class="k">uncommitted</span><span class="v">${status.dirty} file${status.dirty !== 1 ? 's' : ''}</span></span>
-          <span class="git-chip"><span class="k">last commit</span><span class="v">${escapeHtml(fmtTime(status.timestamp))} · ${escapeHtml(status.author)}</span></span>
+        <div class="projects-empty">
+          <img class="empty-art" src="/nori.svg" alt="">
+          <div class="big">No projects yet</div>
+          <div class="hint">Add your first project to manage git, ngit, and nsite from one place.</div>
+          <button class="primary empty-add">Add project</button>
+        </div>
+      `;
+      body.querySelector('.empty-add').addEventListener('click', () => ProjectDrawer.openAdd());
+      return;
+    }
+
+    body.innerHTML = `<div class="project-grid"></div>`;
+    const grid = body.querySelector('.project-grid');
+    for (const p of projects) grid.appendChild(renderProjectCard(p));
+  }
+
+  function projectCardState(p) {
+    // Path-missing or capability-less ⇒ red; partial config ⇒ yellow; else default.
+    if (p.path && !fileExistsHint(p)) return 'err';
+    if (p.capabilities.git && !p.remotes.github) return 'warn';
+    if (p.capabilities.ngit && !p.remotes.ngit)  return 'warn';
+    return '';
+  }
+
+  // Client-side fs check isn't possible; we rely on a `pathMissing` hint if
+  // the server adds one later. For now, only err when path is explicitly null
+  // for non-nsite-only projects (which validation should've caught).
+  function fileExistsHint(_p) { return true; }
+
+  function renderProjectCard(p) {
+    const card = document.createElement('div');
+    const st = projectCardState(p);
+    card.className = 'project-card' + (st ? ' ' + st : '');
+    card.dataset.id = p.id;
+
+    const lastAct = p.nsite?.lastDeploy
+      ? `deployed ${fmtAgoIso(p.nsite.lastDeploy)}`
+      : '—';
+
+    card.innerHTML = `
+      <div class="pc-head">
+        <div class="pc-name">${escapeHtml(p.name || '(unnamed)')}</div>
+        <div class="pc-actions"></div>
+      </div>
+      <div class="pc-path">${p.path ? `<code>${escapeHtml(p.path)}</code>` : '<em class="muted">no local path</em>'}</div>
+      <div class="pc-badges">${projectCapBadges(p.capabilities)}</div>
+      <div class="pc-meta">
+        <div class="pc-meta-row"><span class="k">identity</span><span class="v">${escapeHtml(projectIdentityLabel(p))}</span></div>
+        <div class="pc-meta-row"><span class="k">last activity</span><span class="v pc-last-activity">${lastAct}</span></div>
+      </div>
+    `;
+
+    // Quick action icons
+    const actionsEl = card.querySelector('.pc-actions');
+    const chatBtn = iconBtn('chat', 'Open in chat',
+      `<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/></svg>`);
+    chatBtn.addEventListener('click', (e) => { e.stopPropagation(); openInChat(p); });
+    actionsEl.appendChild(chatBtn);
+
+    if (p.capabilities.git || p.capabilities.ngit) {
+      const pushBtn = iconBtn('push', 'Push',
+        `<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`);
+      pushBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectPush(p); });
+      actionsEl.appendChild(pushBtn);
+    }
+    if (p.capabilities.nsite) {
+      const deployBtn = iconBtn('deploy', 'Deploy',
+        `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M2 12h20M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>`);
+      deployBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectDeploy(p); });
+      actionsEl.appendChild(deployBtn);
+    }
+
+    card.addEventListener('click', () => openDetail(p.id));
+
+    // Fetch git activity async for git-capable projects to fill in "last commit"
+    if (p.capabilities.git && p.path) {
+      api(`/api/projects/${p.id}/git/status`).then(st => {
+        if (st && st.timestamp) {
+          card.querySelector('.pc-last-activity').textContent = `commit ${fmtAgoMs(st.timestamp)}`;
+        } else if (st && st.error) {
+          card.classList.add('err');
+        }
+      }).catch(() => {});
+    }
+    return card;
+  }
+
+  function iconBtn(kind, label, svg) {
+    const btn = document.createElement('button');
+    btn.className = 'pc-icon-btn';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.innerHTML = svg;
+    return btn;
+  }
+
+  // ── Detail view ──────────────────────────────────────────────────────
+  function openDetail(id) {
+    state.view = 'detail';
+    state.projectId = id;
+    state.tab = 'overview';
+    projectStatus = null; projectGitLog = null;
+    render();
+  }
+
+  function backToList() {
+    state.view = 'list';
+    state.projectId = null;
+    render();
+  }
+
+  function renderDetail() {
+    const p = projects.find(x => x.id === state.projectId);
+    if (!p) { backToList(); return; }
+
+    title.innerHTML = `<button class="detail-back" aria-label="Back">←</button><span class="detail-title">${escapeHtml(p.name)}</span>`;
+    title.querySelector('.detail-back').addEventListener('click', backToList);
+    subtitle.textContent = p.path ? p.path : 'nsite-only project';
+
+    headActions.innerHTML = '';
+    if (p.capabilities.git || p.capabilities.ngit) {
+      const pushBtn = document.createElement('button');
+      pushBtn.className = 'primary';
+      pushBtn.textContent = 'Push';
+      pushBtn.addEventListener('click', () => runProjectPush(p));
+      headActions.appendChild(pushBtn);
+    }
+    if (p.capabilities.nsite) {
+      const deployBtn = document.createElement('button');
+      deployBtn.textContent = 'Deploy';
+      deployBtn.addEventListener('click', () => runProjectDeploy(p));
+      headActions.appendChild(deployBtn);
+    }
+
+    // Tabs — only for enabled capabilities; Settings always shown.
+    const tabs = [
+      { key: 'overview', label: 'Overview' },
+      p.capabilities.git   && { key: 'git',   label: 'Git' },
+      p.capabilities.ngit  && { key: 'ngit',  label: 'ngit' },
+      p.capabilities.nsite && { key: 'nsite', label: 'nsite' },
+      { key: 'settings', label: 'Settings' },
+    ].filter(Boolean);
+    if (!tabs.find(t => t.key === state.tab)) state.tab = 'overview';
+
+    body.innerHTML = '';
+
+    // Status chip bar
+    const chipBar = document.createElement('div');
+    chipBar.className = 'project-chip-bar';
+    body.appendChild(chipBar);
+
+    // Tabs row
+    const tabsEl = document.createElement('div');
+    tabsEl.className = 'tabs project-tabs';
+    tabsEl.innerHTML = tabs.map(t =>
+      `<button class="tab ${t.key === state.tab ? 'active' : ''}" data-tab="${t.key}">${escapeHtml(t.label)}</button>`
+    ).join('');
+    body.appendChild(tabsEl);
+    tabsEl.addEventListener('click', (e) => {
+      const t = e.target.closest('.tab');
+      if (!t) return;
+      state.tab = t.dataset.tab;
+      render();
+    });
+
+    const content = document.createElement('div');
+    content.className = 'project-tab-content';
+    body.appendChild(content);
+
+    // Populate status chip bar + active tab.
+    renderChipBar(chipBar, p);
+    renderTab(content, p);
+  }
+
+  async function renderChipBar(el, p) {
+    const chips = [];
+    chips.push(`<span class="pchip identity"><span class="k">identity</span><span class="v">${escapeHtml(projectIdentityLabel(p))}</span></span>`);
+    el.innerHTML = chips.join('');
+
+    if ((p.capabilities.git || p.capabilities.ngit) && p.path) {
+      // Lazy fetch git status for chip bar
+      try {
+        projectStatus = await api(`/api/projects/${p.id}/git/status`);
+        const st = projectStatus;
+        if (st && st.inRepo) {
+          const extra = [];
+          extra.push(`<span class="pchip"><span class="k">branch</span><span class="v">${escapeHtml(st.branch)}</span></span>`);
+          extra.push(`<span class="pchip"><span class="k">HEAD</span><span class="v">${escapeHtml(st.hash)}</span></span>`);
+          if (st.dirty) extra.push(`<span class="pchip warn"><span class="k">uncommitted</span><span class="v">${st.dirty} file${st.dirty !== 1 ? 's' : ''}</span></span>`);
+          el.insertAdjacentHTML('afterbegin', extra.join(''));
+        }
+      } catch {}
+    }
+    if (p.capabilities.nsite && p.nsite?.lastDeploy) {
+      el.insertAdjacentHTML('beforeend',
+        `<span class="pchip"><span class="k">deployed</span><span class="v">${escapeHtml(fmtAgoIso(p.nsite.lastDeploy))}</span></span>`);
+    }
+  }
+
+  function renderTab(container, p) {
+    container.innerHTML = '';
+    if (state.tab === 'overview') renderOverview(container, p);
+    else if (state.tab === 'git')     renderGitTab(container, p);
+    else if (state.tab === 'ngit')    renderNgitTab(container, p);
+    else if (state.tab === 'nsite')   renderNsiteTab(container, p);
+    else if (state.tab === 'settings') renderSettingsTab(container, p);
+  }
+
+  async function renderOverview(container, p) {
+    container.innerHTML = `<div class="overview-loading muted">loading…</div>`;
+    let gitBlock = '', ngitBlock = '', nsiteBlock = '';
+
+    if (p.capabilities.git && p.path) {
+      try {
+        const st = projectStatus || await api(`/api/projects/${p.id}/git/status`);
+        projectStatus = st;
+        if (st && st.inRepo) {
+          const ghRemote = st.remotes?.find(r => r.type === 'github')?.url || p.remotes.github || '';
+          gitBlock = `
+            <div class="tab-section">
+              <h3>Git</h3>
+              <div class="overview-grid">
+                <div class="overview-kv"><div class="k">last commit</div><div class="v">${escapeHtml(st.hash)} · ${escapeHtml(st.message || '')}</div></div>
+                <div class="overview-kv"><div class="k">author</div><div class="v">${escapeHtml(st.author || '—')} · ${escapeHtml(fmtAgoMs(st.timestamp))}</div></div>
+                ${ghRemote ? `<div class="overview-kv has-copy"><div class="k">GitHub</div><div class="v"><code>${escapeHtml(ghRemote)}</code></div><div class="copy-slot" data-copy="${escapeHtml(ghRemote)}"></div></div>` : ''}
+                ${st.dirty ? `<div class="overview-kv"><div class="k">uncommitted</div><div class="v warn">${st.dirty} file${st.dirty !== 1 ? 's' : ''} · <a href="#" class="open-git-tab">view</a></div></div>` : ''}
+              </div>
+            </div>`;
+        }
+      } catch {}
+    }
+
+    if (p.capabilities.ngit) {
+      const bunker = p.identity.useDefault ? 'using station identity' : (p.identity.bunkerUrl ? 'project bunker configured' : 'no bunker (Amber prompts on first push)');
+      const url = p.remotes.ngit || '(not configured)';
+      ngitBlock = `
+        <div class="tab-section">
+          <h3>ngit</h3>
+          <div class="overview-grid">
+            <div class="overview-kv has-copy"><div class="k">nostr remote</div><div class="v"><code>${escapeHtml(url)}</code></div>${p.remotes.ngit ? `<div class="copy-slot" data-copy="${escapeHtml(url)}"></div>` : ''}</div>
+            <div class="overview-kv"><div class="k">bunker</div><div class="v">${escapeHtml(bunker)}</div></div>
+          </div>
+        </div>`;
+    }
+
+    if (p.capabilities.nsite) {
+      const url = p.nsite.url;
+      nsiteBlock = `
+        <div class="tab-section">
+          <h3>nsite</h3>
+          ${url
+            ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer" class="nsite-url-big">${escapeHtml(url)}</a>`
+            : `<div class="muted">No deployed URL yet</div>`}
+          <div class="overview-kv"><div class="k">last deploy</div><div class="v">${escapeHtml(fmtAgoIso(p.nsite.lastDeploy))}</div></div>
+          <div style="margin-top:12px"><button class="primary deploy-btn">Deploy now</button></div>
+        </div>`;
+    }
+
+    container.innerHTML = `
+      ${gitBlock}${ngitBlock}${nsiteBlock}
+      <div class="tab-section">
+        <div class="overview-actions">
+          <button class="primary open-chat-btn">Open in chat</button>
+          ${(p.capabilities.git || p.capabilities.ngit) ? '<button class="quick-push">Push</button>' : ''}
+          ${p.capabilities.nsite ? '<button class="quick-deploy">Deploy</button>' : ''}
+        </div>
+      </div>
+    `;
+    container.querySelector('.open-chat-btn')?.addEventListener('click', () => openInChat(p));
+    container.querySelector('.quick-push')?.addEventListener('click', () => runProjectPush(p));
+    container.querySelector('.quick-deploy')?.addEventListener('click', () => runProjectDeploy(p));
+    container.querySelector('.deploy-btn')?.addEventListener('click', () => runProjectDeploy(p));
+    container.querySelectorAll('.copy-slot').forEach(slot => {
+      slot.appendChild(copyBtn(slot.dataset.copy));
+    });
+    container.querySelector('.open-git-tab')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      openExecModal({
+        title: `git status · ${p.name}`,
+        subtitle: p.path || '',
+        endpoint: `/api/projects/${p.id}/exec`,
+        body: { cmd: 'git-status' },
+      });
+    });
+  }
+
+  async function renderGitTab(container, p) {
+    container.innerHTML = `<div class="muted">loading…</div>`;
+    try {
+      const [st, log] = await Promise.all([
+        api(`/api/projects/${p.id}/git/status`),
+        api(`/api/projects/${p.id}/git/log`),
+      ]);
+      projectStatus = st; projectGitLog = log;
+      if (!st.inRepo) {
+        container.innerHTML = `<div class="empty-state">${escapeHtml(st.error || 'not a git repo at this path')}</div>`;
+        return;
+      }
+      const remotesHtml = (st.remotes || []).map(r =>
+        `<div class="remote-row"><span class="k">${escapeHtml(r.type)} (${escapeHtml(r.name)})</span><span class="v">${escapeHtml(r.url)}</span><span class="copy-slot" data-copy="${escapeHtml(r.url)}"></span></div>`
+      ).join('');
+      container.innerHTML = `
+        <div class="tab-section">
+          <div class="tab-section-head">
+            <h3>Branch · ${escapeHtml(st.branch)}</h3>
+            <div class="tab-section-actions">
+              <button class="pull-btn">Pull</button>
+              <button class="primary push-btn">Push</button>
+            </div>
+          </div>
+          ${remotesHtml ? `<div class="remote-section"><h4>Remotes</h4>${remotesHtml}</div>` : ''}
         </div>
 
-        <div class="config-section" style="margin-bottom:18px">
-          <h3>Latest</h3>
-          <div style="font-size:12px;color:var(--text-bright);margin-bottom:4px">${escapeHtml(status.message || '—')}</div>
-          <div style="font-size:11px;color:var(--muted)">${escapeHtml(status.hash)} · ${escapeHtml(status.author)} · ${escapeHtml(fmtTime(status.timestamp))}</div>
-        </div>
-
-        ${remoteHtml ? `<div class="remote-section"><h4>Remotes</h4>${remoteHtml}</div>` : '<div style="color:var(--text-dim);font-size:11px;margin-bottom:12px">No remotes configured.</div>'}
-
-        <div class="config-section">
+        <div class="tab-section">
           <h3>Recent commits</h3>
           <div class="commits">
             ${(log || []).map(c => `
@@ -1156,50 +2146,327 @@ const GitPanel = (() => {
                 <span class="hash">${escapeHtml(c.hash)}</span>
                 <span class="msg">${escapeHtml(c.message)}</span>
                 <span class="author">${escapeHtml(c.author)}</span>
-                <span class="when">${escapeHtml(fmtTime(c.timestamp))}</span>
+                <span class="when">${escapeHtml(fmtAgoMs(c.timestamp))}</span>
               </div>
             `).join('')}
           </div>
         </div>
       `;
+      container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+      container.querySelector('.pull-btn').addEventListener('click', () => runProjectPull(p));
+      container.querySelector('.push-btn').addEventListener('click', () => runProjectPush(p));
     } catch (e) {
-      body.innerHTML = `<div class="empty-state" style="color:var(--error)">failed to load git status: ${escapeHtml(e.message)}</div>`;
+      container.innerHTML = `<div class="empty-state err">failed to load git status: ${escapeHtml(e.message)}</div>`;
     }
   }
 
-  $('git-push').addEventListener('click', async () => {
-    const confirmed = await confirmDestructive({
-      title: 'nostr-station push',
-      description: 'Pushes current branch to all configured remotes (GitHub + ngit where present). Amber will sign ngit pushes.',
+  function renderNgitTab(container, p) {
+    const remote = p.remotes.ngit || '(not configured)';
+    const signing = p.identity.useDefault
+      ? 'station identity'
+      : `${truncNpub(p.identity.npub || '')}${p.identity.bunkerUrl ? ' · bunker configured' : ''}`;
+    const alsoGit = p.capabilities.git
+      ? `<div class="muted" style="margin-top:8px"><code>nostr-station push</code> handles both the GitHub and ngit remotes simultaneously. The "Push to ngit" button below only pushes ngit.</div>`
+      : '';
+    container.innerHTML = `
+      <div class="tab-section">
+        <h3>Nostr remote</h3>
+        <div class="remote-row">
+          <span class="k">ngit</span><span class="v"><code>${escapeHtml(remote)}</code></span>
+          ${p.remotes.ngit ? `<span class="copy-slot" data-copy="${escapeHtml(remote)}"></span>` : ''}
+        </div>
+      </div>
+      <div class="tab-section">
+        <h3>Signing</h3>
+        <div class="overview-kv"><div class="k">identity</div><div class="v">${escapeHtml(signing)}</div></div>
+        <div class="muted">Pushes to the ngit remote trigger Amber signing on your phone.</div>
+        ${alsoGit}
+      </div>
+      <div class="tab-section">
+        <button class="primary ngit-push-btn">Push to ngit</button>
+      </div>
+    `;
+    container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+    container.querySelector('.ngit-push-btn').addEventListener('click', () => {
+      openExecModal({
+        title: `ngit push · ${p.name}`,
+        subtitle: 'Streaming ngit push',
+        endpoint: `/api/projects/${p.id}/ngit/push`,
+      }).then(r => {
+        if (r.ok) toast('ngit push complete', '', 'ok');
+        else      toast('ngit push failed', `exit ${r.code}`, 'err');
+      });
+    });
+  }
+
+  function renderNsiteTab(container, p) {
+    const url = p.nsite.url;
+    container.innerHTML = `
+      <div class="tab-section">
+        <h3>Deployed site</h3>
+        ${url
+          ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer" class="nsite-url-big">${escapeHtml(url)}</a>`
+          : `<div class="empty-state">No deployed URL set. Configure in Settings.</div>`}
+        <div class="overview-kv" style="margin-top:12px"><div class="k">last deploy</div><div class="v">${escapeHtml(fmtAgoIso(p.nsite.lastDeploy))}</div></div>
+      </div>
+      <div class="tab-section">
+        <button class="primary deploy-btn">Deploy now</button>
+      </div>
+      <div class="tab-section">
+        <h3>Deploy log</h3>
+        <div class="deploy-log empty-state">No deploy history yet</div>
+      </div>
+    `;
+    container.querySelector('.deploy-btn').addEventListener('click', () => runProjectDeploy(p));
+  }
+
+  function renderSettingsTab(container, p) {
+    container.innerHTML = `
+      <div class="tab-section">
+        <h3>Details</h3>
+        <label class="field-label">Name</label>
+        <div class="field-row">
+          <input type="text" class="s-name" maxlength="64" value="${escapeHtml(p.name)}">
+          <button class="primary save-name">save</button>
+        </div>
+
+        <label class="field-label">Local path</label>
+        <div class="field-row">
+          <input type="text" class="s-path" placeholder="/Users/you/projects/my-project" value="${escapeHtml(p.path || '')}">
+          <button class="primary save-path">save</button>
+        </div>
+        <div class="muted">Saving the path re-runs capability detection.</div>
+      </div>
+
+      <div class="tab-section">
+        <h3>Capabilities</h3>
+        <label class="checkbox-row"><input type="checkbox" class="s-cap-git" ${p.capabilities.git ? 'checked' : ''}> git</label>
+        <label class="checkbox-row"><input type="checkbox" class="s-cap-ngit" ${p.capabilities.ngit ? 'checked' : ''}> ngit</label>
+        <label class="checkbox-row"><input type="checkbox" class="s-cap-nsite" ${p.capabilities.nsite ? 'checked' : ''}> nsite</label>
+        <div class="step-actions"><button class="primary save-caps">save capabilities</button></div>
+      </div>
+
+      <div class="tab-section">
+        <h3>Identity</h3>
+        <label class="radio-row">
+          <input type="radio" name="s-ident-mode" value="default" ${p.identity.useDefault ? 'checked' : ''}>
+          <div>
+            <div class="radio-title">Use station identity</div>
+            <div class="radio-sub">Station owner npub signs all operations.</div>
+          </div>
+        </label>
+        <label class="radio-row">
+          <input type="radio" name="s-ident-mode" value="project" ${p.identity.useDefault ? '' : 'checked'}>
+          <div>
+            <div class="radio-title">Project-specific identity</div>
+            <div class="radio-sub">Isolates this project's signing.</div>
+          </div>
+        </label>
+        <div class="project-ident-fields" style="${p.identity.useDefault ? 'display:none' : ''}">
+          <label class="field-label">npub</label>
+          <input type="text" class="s-ident-npub" placeholder="npub1… or 64-char hex" value="${escapeHtml(p.identity.npub || '')}">
+          <label class="field-label">Bunker URL <span class="muted">(optional)</span></label>
+          <input type="text" class="s-ident-bunker" placeholder="bunker://…" value="${escapeHtml(p.identity.bunkerUrl || '')}">
+        </div>
+        <div class="step-actions"><button class="primary save-ident">save identity</button></div>
+      </div>
+
+      <div class="tab-section">
+        <h3>Read relays</h3>
+        <div class="muted">Override station read relays (optional). Empty means inherit station defaults.</div>
+        <div class="relay-list-editor"></div>
+        <div class="field-row">
+          <input type="text" class="relay-add-input" placeholder="wss://…">
+          <button class="add-relay">add</button>
+        </div>
+      </div>
+
+      <div class="danger-zone">
+        <h4>Danger zone</h4>
+        <div class="row">
+          <div>
+            <div>Remove project</div>
+            <div class="desc">Removes the project from nostr-station. Does not delete any files.</div>
+          </div>
+          <button class="danger remove-btn">remove</button>
+        </div>
+      </div>
+    `;
+
+    container.querySelector('.save-name').addEventListener('click', async () => {
+      const v = container.querySelector('.s-name').value.trim();
+      if (!v) return toast('Name required', '', 'warn');
+      await patchAndReload(p.id, { name: v });
+    });
+    container.querySelector('.save-path').addEventListener('click', async () => {
+      const v = container.querySelector('.s-path').value.trim();
+      const newPath = v || null;
+      let patch = { path: newPath };
+      if (newPath) {
+        try {
+          const det = await api('/api/projects/detect', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ path: newPath }),
+          });
+          if (det.exists) {
+            const caps = { ...p.capabilities };
+            if (det.isGitRepo) caps.git = true;
+            if (det.ngitRemote) caps.ngit = true;
+            if (det.hasNsyte) caps.nsite = true;
+            patch.capabilities = caps;
+            patch.remotes = {
+              github: det.githubRemote || p.remotes.github || null,
+              ngit:   det.ngitRemote   || p.remotes.ngit   || null,
+            };
+          }
+        } catch {}
+      }
+      await patchAndReload(p.id, patch);
+    });
+
+    container.querySelector('.save-caps').addEventListener('click', async () => {
+      const caps = {
+        git:   container.querySelector('.s-cap-git').checked,
+        ngit:  container.querySelector('.s-cap-ngit').checked,
+        nsite: container.querySelector('.s-cap-nsite').checked,
+      };
+      await patchAndReload(p.id, { capabilities: caps });
+    });
+
+    const identFields = container.querySelector('.project-ident-fields');
+    container.querySelectorAll('input[name="s-ident-mode"]').forEach(r => {
+      r.addEventListener('change', () => {
+        identFields.style.display = (r.value === 'default') ? 'none' : '';
+      });
+    });
+    container.querySelector('.save-ident').addEventListener('click', async () => {
+      const useDefault = container.querySelector('input[name="s-ident-mode"][value="default"]').checked;
+      const npub   = container.querySelector('.s-ident-npub').value.trim();
+      const bunker = container.querySelector('.s-ident-bunker').value.trim();
+      if (!useDefault && npub.startsWith('nsec')) return toast('nsec rejected', 'never paste your private key', 'err');
+      await patchAndReload(p.id, {
+        identity: {
+          useDefault,
+          npub: useDefault ? null : (npub || null),
+          bunkerUrl: useDefault ? null : (bunker || null),
+        },
+      });
+    });
+
+    // Relay list editor
+    const listEl = container.querySelector('.relay-list-editor');
+    const relays = p.readRelays || [];
+    if (relays.length === 0) {
+      listEl.innerHTML = `<div class="muted">inheriting station defaults</div>`;
+    } else {
+      listEl.innerHTML = relays.map(r =>
+        `<div class="relay-row"><code>${escapeHtml(r)}</code><button class="relay-remove" data-url="${escapeHtml(r)}">remove</button></div>`
+      ).join('');
+      listEl.querySelectorAll('.relay-remove').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const next = (p.readRelays || []).filter(u => u !== btn.dataset.url);
+          await patchAndReload(p.id, { readRelays: next.length ? next : null });
+        });
+      });
+    }
+    container.querySelector('.add-relay').addEventListener('click', async () => {
+      const input = container.querySelector('.relay-add-input');
+      const v = input.value.trim();
+      if (!v) return;
+      if (!/^wss?:\/\//.test(v)) return toast('Relay URL must start with wss://', '', 'warn');
+      const next = [...(p.readRelays || []), v];
+      await patchAndReload(p.id, { readRelays: next });
+    });
+
+    container.querySelector('.remove-btn').addEventListener('click', async () => {
+      const ok = await confirmDestructive({
+        title: 'Remove project',
+        description: 'This removes the project from nostr-station. It does not delete any files.',
+        confirmLabel: 'Remove',
+      });
+      if (!ok) return;
+      try {
+        await api(`/api/projects/${p.id}`, { method: 'DELETE' });
+        toast('Project removed', p.name, 'ok');
+        state.view = 'list'; state.projectId = null;
+        reload();
+      } catch {}
+    });
+  }
+
+  async function patchAndReload(id, patch) {
+    try {
+      await api(`/api/projects/${id}`, {
+        method: 'PATCH', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      toast('Saved', '', 'ok');
+      await reload();
+    } catch {}
+  }
+
+  // ── Quick action runners ────────────────────────────────────────────
+  async function runProjectPush(p) {
+    const ok = await confirmDestructive({
+      title: `Push · ${p.name}`,
+      description: p.capabilities.git && p.capabilities.ngit
+        ? 'Pushes to both GitHub and ngit remotes. Amber will sign ngit operations.'
+        : p.capabilities.ngit
+        ? 'Pushes to the ngit remote. Amber will sign.'
+        : 'Pushes current branch to origin.',
       confirmLabel: 'Push',
     });
-    if (!confirmed) return;
+    if (!ok) return;
     openExecModal({
-      title: 'Pushing…',
-      subtitle: 'Streams `nostr-station push --yes`',
-      endpoint: '/api/exec/push',
+      title: `push · ${p.name}`,
+      subtitle: p.path || '',
+      endpoint: `/api/projects/${p.id}/git/push`,
     }).then(r => {
-      if (r.ok) toast('Push complete', '', 'ok');
+      if (r.ok) toast('Push complete', p.name, 'ok');
       else      toast('Push finished with errors', `exit ${r.code}`, 'err');
-      load();
+      if (state.view === 'detail' && state.projectId === p.id) render();
     });
-  });
-
-  $('git-pull').addEventListener('click', () => {
+  }
+  function runProjectPull(p) {
     openExecModal({
-      title: 'git pull --ff-only',
-      subtitle: 'Fast-forward only — refuses on divergent history',
-      endpoint: '/api/exec/git-pull',
+      title: `git pull · ${p.name}`,
+      subtitle: 'fast-forward only',
+      endpoint: `/api/projects/${p.id}/git/pull`,
     }).then(r => {
-      if (r.ok) toast('Pulled', '', 'ok');
+      if (r.ok) toast('Pulled', p.name, 'ok');
       else      toast('Pull failed', `exit ${r.code}`, 'err');
-      load();
+      if (state.view === 'detail' && state.projectId === p.id) render();
     });
-  });
+  }
+  async function runProjectDeploy(p) {
+    const ok = await confirmDestructive({
+      title: `Deploy · ${p.name}`,
+      description: 'Runs `nostr-station nsite deploy --yes` in this project.',
+      confirmLabel: 'Deploy',
+    });
+    if (!ok) return;
+    openExecModal({
+      title: `deploy · ${p.name}`,
+      subtitle: p.path || '',
+      endpoint: `/api/projects/${p.id}/nsite/deploy`,
+    }).then(r => {
+      if (r.ok) toast('Deploy complete', p.name, 'ok');
+      else      toast('Deploy failed', `exit ${r.code}`, 'err');
+    });
+  }
 
-  return {
-    onEnter() { if (!loaded) { loaded = true; } load(); },
-  };
+  async function openInChat(p) {
+    try {
+      await api('/api/chat/context', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: p.id }),
+      });
+    } catch {}
+    ChatPanel.setActiveProject({ id: p.id, name: p.name });
+    location.hash = '#chat';
+  }
+
+  return { onEnter, reload, openDetail };
 })();
 
 // ── Panel: Logs (with VPN tab + error badge + scroll toggle) ─────────────
@@ -1289,13 +2556,17 @@ const ConfigPanel = (() => {
   async function load() {
     container.innerHTML = '<div class="config-section"><div style="color:var(--muted)">loading…</div></div>';
     try {
-      const [rc, cfg, git, ident] = await Promise.all([
+      // Session fetch is best-effort: the localhost-exemption path has no
+      // backing session, and we still want the rest of the panel to render.
+      const [rc, cfg, git, ident, session, profile] = await Promise.all([
         api('/api/relay-config'),
         api('/api/config'),
         api('/api/git/status'),
         api('/api/identity/config'),
+        api('/api/auth/session').catch(() => null),
+        api('/api/identity/profile').catch(() => null),
       ]);
-      render(rc, cfg, git, ident);
+      render(rc, cfg, git, ident, session, profile);
     } catch (e) {
       container.innerHTML = `<div class="config-section"><div style="color:var(--error)">failed to load: ${escapeHtml(e.message)}</div></div>`;
     }
@@ -1305,7 +2576,70 @@ const ConfigPanel = (() => {
     return `<div class="config-row"><div class="k">${escapeHtml(k)}</div><div class="v ${cls}">${escapeHtml(v)}</div></div>`;
   }
 
-  function render(rc, cfg, git, ident) {
+  // Identity section echoes who the dashboard is signed in as. The server
+  // already enforces that session.npub === configured station owner npub,
+  // so ident.npub is also the authenticated identity — we surface profile
+  // name + nip05 when available and session expiry alongside.
+  function renderIdentityBody(ident, session, profile) {
+    if (!ident.npub) {
+      return `<div class="body" style="font-size:12px;color:var(--warn)">
+        No npub configured — click the identity chip in the header to set up.
+      </div>`;
+    }
+
+    const displayName = profile && profile.name ? profile.name : truncNpub(ident.npub);
+    const nip05Html   = profile && profile.nip05
+      ? `<div style="font-size:11px;color:${profile.nip05Verified ? 'var(--success)' : 'var(--text-dim)'}">
+          ${escapeHtml(profile.nip05)}${profile.nip05Verified ? ' ✓ verified' : ' (unverified)'}
+        </div>`
+      : '';
+    const avatarHtml = profile && profile.picture
+      ? `<img src="${escapeHtml(profile.picture)}" style="width:40px;height:40px;border-radius:50%;object-fit:cover" alt="">`
+      : pixelAvatar(ident.npub, 40);
+
+    const sessionLine = session
+      ? `<span style="color:var(--success)">● signed in</span>
+         <span style="color:var(--text-dim);margin-left:8px">expires ${escapeHtml(fmtExpiry(session.expiresAt))}</span>`
+      : `<span style="color:var(--text-dim)">no active session (localhost exemption)</span>`;
+
+    return `
+      <div class="body" style="font-size:12px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+          <div>${avatarHtml}</div>
+          <div style="flex:1;min-width:0">
+            <div style="color:var(--text-bright);font-size:13px">${escapeHtml(displayName)}</div>
+            ${nip05Html}
+            <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.4px;margin-top:2px">
+              Station owner · signed in via Amber
+            </div>
+          </div>
+        </div>
+        <div class="config-row">
+          <div class="k">npub</div>
+          <div class="v" id="cfg-identity-npub" style="display:flex;align-items:center;gap:6px">
+            <span style="font-family:var(--font-mono);color:var(--text-bright);word-break:break-all">${escapeHtml(ident.npub)}</span>
+          </div>
+        </div>
+        <div class="config-row">
+          <div class="k">Session</div>
+          <div class="v" style="font-size:11px">${sessionLine}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  // "in 7h 22m" / "in 45m" / "now" — matches the identity-chip hover tooltip.
+  function fmtExpiry(ts) {
+    if (!ts) return 'unknown';
+    const ms = ts - Date.now();
+    if (ms <= 0) return 'now';
+    const mins = Math.floor(ms / 60000);
+    const hrs  = Math.floor(mins / 60);
+    if (hrs > 0) return `in ${hrs}h ${mins % 60}m`;
+    return `in ${mins}m`;
+  }
+
+  function render(rc, cfg, git, ident, session, profile) {
     const whitelistHtml = rc.whitelist && rc.whitelist.length
       ? `<a href="#relay" style="color:var(--accent-bright)">${rc.whitelist.length} npub${rc.whitelist.length !== 1 ? 's' : ''} →</a>`
       : `<a href="#relay" style="color:var(--warn)">empty — add one →</a>`;
@@ -1394,11 +2728,7 @@ const ConfigPanel = (() => {
 
       <div class="config-section">
         <h3>Identity (Amber / ngit)</h3>
-        <div class="body" style="font-size:12px">
-          ${ident.npub
-            ? `<div>npub: <span style="font-family:var(--font-mono);color:var(--text-bright)">${escapeHtml(truncNpub(ident.npub))}</span> — manage via identity drawer (header →)</div>`
-            : `<div style="color:var(--warn)">No npub configured — click the identity chip in the header to set up.</div>`}
-        </div>
+        ${renderIdentityBody(ident, session, profile)}
         <div class="callout" style="margin-top:10px">
           Bunker URL is managed inside ngit. Configure via <code>nostr-station onboard</code>
           or <code>ngit init</code>. Test signing from your mobile signer (Amber) on first push.
@@ -1418,6 +2748,11 @@ const ConfigPanel = (() => {
     // Wire toggles
     $('cfg-auth').addEventListener('change', (e) => saveRelayFlag('auth', e.target.checked));
     $('cfg-dm-auth').addEventListener('change', (e) => saveRelayFlag('dmAuth', e.target.checked));
+
+    // Copy button on the identity npub row — only rendered when an npub is
+    // actually configured (guarded by the same branch in renderIdentityBody).
+    const idRow = $('cfg-identity-npub');
+    if (idRow && ident.npub) idRow.appendChild(copyBtn(ident.npub));
 
     // Read-relays list
     $$('#read-relays .rm').forEach(btn => {
@@ -1549,17 +2884,483 @@ const ConfigPanel = (() => {
   };
 })();
 
+// ── Auth screen ──────────────────────────────────────────────────────────
+//
+// Full-viewport overlay shown whenever /api/auth/status reports the user
+// isn't authenticated. Offers three sign-in paths:
+//   1. NIP-07 browser extension (Alby, nos2x, ...) — when window.nostr exists
+//   2. Amber QR (nostrconnect://) — server-generated URI + SVG QR, polled
+//   3. Bunker URL paste (nsecBunker, Keycast, ...) — POSTed to /api/auth/bunker-url
+//
+// The screen also handles the "no npub configured" bootstrap case by showing
+// an inline npub input that POSTs /api/identity/set (same route as the
+// identity drawer setup flow).
+
+AuthScreen = (() => {
+  const root = $('auth-root');
+  let pollTimer = null;
+  let pollAbort = null;
+
+  // QR session is pinned for the lifetime of the screen: one POST to
+  // /api/auth/bunker-connect per displayed code. Polling, tab switching,
+  // and section collapse all reuse the same ephemeralPubkey. Only an
+  // explicit refresh, a timeout/error, or a successful sign-in drops it.
+  //
+  // Shape: { ephemeralPubkey, qrSvg, nostrconnectUri, expiresAt, challenge }
+  let qrSession = null;
+
+  function detectExtension() {
+    if (typeof window === 'undefined' || !window.nostr) return null;
+    // Lightweight fingerprint — extensions patch window in predictable ways.
+    if (window.alby)   return 'Alby';
+    if (window.nos2x)  return 'nos2x';
+    return 'extension';
+  }
+
+  function show() {
+    stopPoll();
+    root.hidden = false;
+    render();
+  }
+
+  function hide() {
+    stopPoll();
+    root.hidden = true;
+    root.innerHTML = '';
+  }
+
+  function stopPoll() {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    if (pollAbort) { pollAbort.abort(); pollAbort = null; }
+  }
+
+  async function render() {
+    let status;
+    try { status = await fetch('/api/auth/status').then(r => r.json()); }
+    catch {
+      root.innerHTML = `<div class="auth-card">
+        <div class="auth-head">
+          <img class="nori" src="/nori.svg" alt="">
+          <div>
+            <div class="wordmark">nostr-station</div>
+            <div class="subtitle" style="color:var(--error)">Server unreachable</div>
+          </div>
+        </div>
+      </div>`;
+      return;
+    }
+
+    if (status.authenticated) {
+      // Either a session was restored (server has our token) or localhost
+      // exemption is in effect. Tear down the auth screen and hand off.
+      hide();
+      bootDashboard(status.localhostExempt);
+      return;
+    }
+
+    if (!status.configured) {
+      renderSetup();
+    } else {
+      renderSignIn(status.npub);
+    }
+  }
+
+  // ── npub setup (shown when identity.json has no npub) ────────────────
+  function renderSetup() {
+    root.innerHTML = `
+      <div class="auth-card">
+        <div class="auth-head">
+          <img class="nori" src="/nori.svg" alt="">
+          <div>
+            <div class="wordmark">nostr-station</div>
+            <div class="subtitle">Sign in to continue</div>
+          </div>
+        </div>
+        <div class="auth-warn">No identity configured. Set your npub first.</div>
+        <div class="auth-setup">
+          <label>Your npub</label>
+          <input id="auth-npub-input" placeholder="npub1…" autocomplete="off" spellcheck="false">
+          <div class="actions">
+            <button id="auth-npub-paste">paste</button>
+            <button class="primary" id="auth-npub-save">save</button>
+          </div>
+        </div>
+        <div class="auth-footnote">
+          Or run <code>nostr-station onboard</code> to configure everything
+          (ngit, Amber, relays).
+        </div>
+      </div>
+    `;
+    $('auth-npub-paste').addEventListener('click', async () => {
+      try { $('auth-npub-input').value = (await navigator.clipboard.readText()).trim(); }
+      catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+    });
+    const save = async () => {
+      const val = $('auth-npub-input').value.trim();
+      if (!val) return;
+      try {
+        // /api/identity/set is public-ish here: without an npub configured
+        // there's no station owner yet, so the bootstrap write is allowed.
+        // (The route requires auth post-configuration — intentional: once
+        // a station owner exists, only they can rotate the npub.)
+        const r = await fetch('/api/identity/set', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ npub: val }),
+        }).then(r => r.json());
+        if (!r.ok) throw new Error(r.error || 'save failed');
+        toast('Identity saved', val, 'ok');
+        render();
+      } catch (e) {
+        toast('Save failed', e.message, 'err');
+      }
+    };
+    $('auth-npub-save').addEventListener('click', save);
+    $('auth-npub-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
+  }
+
+  // ── Sign-in options ──────────────────────────────────────────────────
+  function renderSignIn(npub) {
+    const ext = detectExtension();
+    const truncated = truncNpub(npub);
+
+    root.innerHTML = `
+      <div class="auth-card">
+        <div class="auth-head">
+          <img class="nori" src="/nori.svg" alt="">
+          <div>
+            <div class="wordmark">nostr-station</div>
+            <div class="subtitle">Sign in to continue</div>
+          </div>
+        </div>
+        <div class="auth-owner">
+          <div class="avatar">${pixelAvatar(npub, 32)}</div>
+          <div>
+            <div class="role">Station owner</div>
+            <div class="name">${escapeHtml(truncated)}</div>
+          </div>
+        </div>
+
+        ${ext ? `
+          <button class="primary auth-primary-btn" id="auth-ext-btn">
+            Sign in with ${escapeHtml(ext === 'extension' ? 'browser extension' : ext)}
+          </button>
+          <div class="auth-status-line" id="auth-ext-status" style="display:none"></div>
+        ` : `
+          <div class="auth-warn" style="color:var(--text-dim);background:var(--bg-elev);border-color:var(--border)">
+            No browser extension detected — install
+            <a href="https://getalby.com" target="_blank" rel="noreferrer">Alby</a>
+            or <a href="https://github.com/fiatjaf/nos2x" target="_blank" rel="noreferrer">nos2x</a>
+            for one-click sign-in, or use Amber below.
+          </div>
+        `}
+
+        <div class="auth-section ${ext ? 'collapsed' : ''}" id="auth-bunker-section">
+          <div class="auth-section-head">
+            <h4 style="margin:0">Sign in with Amber or bunker</h4>
+            <span class="chev">▾</span>
+          </div>
+          <div class="auth-section-body" style="margin-top:12px">
+            <div class="auth-tabs">
+              <button data-tab="qr" class="active">Scan QR (Amber)</button>
+              <button data-tab="url">Paste bunker URL</button>
+            </div>
+            <div id="auth-bunker-body"></div>
+          </div>
+        </div>
+
+        <div class="auth-footnote">
+          nostr-station never stores your nsec. Signing happens in your
+          extension, phone (Amber), or bunker service.
+        </div>
+      </div>
+    `;
+
+    if (ext) {
+      $('auth-ext-btn').addEventListener('click', () => signInWithExtension(ext));
+    }
+
+    // Collapsible bunker section
+    const section = $('auth-bunker-section');
+    section.querySelector('.auth-section-head').addEventListener('click', () => {
+      const collapsed = section.classList.toggle('collapsed');
+      if (!collapsed) activateTab(section.querySelector('.auth-tabs button.active').dataset.tab);
+      else stopPoll();
+    });
+
+    // Tab switching
+    section.querySelectorAll('.auth-tabs button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        section.querySelectorAll('.auth-tabs button').forEach(b => b.classList.toggle('active', b === btn));
+        activateTab(btn.dataset.tab);
+      });
+    });
+
+    if (!ext) {
+      // No extension → expand bunker section and default to QR tab.
+      activateTab('qr');
+    }
+  }
+
+  function activateTab(tab) {
+    // Tab switches pause polling but do NOT invalidate qrSession — a user
+    // glancing at "Paste bunker URL" and coming back to QR should see the
+    // same code, not a regenerated one.
+    stopPoll();
+    const body = $('auth-bunker-body');
+    if (!body) return;
+    if (tab === 'qr')  renderQrTab(body);
+    else                renderUrlTab(body);
+  }
+
+  // ── NIP-07 flow ──────────────────────────────────────────────────────
+  async function signInWithExtension(extName) {
+    const status = $('auth-ext-status');
+    const btn    = $('auth-ext-btn');
+    const setStatus = (text, kind = '') => {
+      status.style.display = 'flex';
+      status.className = 'auth-status-line' + (kind ? ' ' + kind : '');
+      status.innerHTML = kind === 'err'
+        ? `<span class="pulse"></span>${escapeHtml(text)}`
+        : `<span class="pulse"></span>${escapeHtml(text)}`;
+    };
+
+    btn.disabled = true;
+    setStatus(`Requesting signature from ${extName}…`);
+
+    try {
+      const { challenge } = await fetch('/api/auth/challenge', { method: 'POST' }).then(r => r.json());
+      const template = {
+        kind: 27235,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['u', window.location.origin],
+          ['method', 'POST'],
+        ],
+        content: challenge,
+      };
+      const event = await window.nostr.signEvent(template);
+      const res = await fetch('/api/auth/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ challenge, event }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `verify ${res.status}`);
+      completeSignIn(data);
+    } catch (e) {
+      setStatus(e.message || 'sign-in failed', 'err');
+      btn.disabled = false;
+    }
+  }
+
+  // ── Amber QR flow ────────────────────────────────────────────────────
+  //
+  // Two responsibilities, kept separate on purpose:
+  //   ensureQrSession() — owns the ephemeral keypair. Only POSTs when no
+  //                       pinned session exists (or we just invalidated one).
+  //                       Tab switches and section collapses never call it.
+  //   renderQrTab()     — paints the current session's QR/URI and hooks up
+  //                       the refresh button + poll loop. Idempotent: called
+  //                       again with the same pinned session is a no-op on
+  //                       the server.
+  async function ensureQrSession() {
+    if (qrSession) return qrSession;
+    const res = await fetch('/api/auth/bunker-connect', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `${res.status}`);
+    qrSession = data;
+    return qrSession;
+  }
+
+  async function renderQrTab(body) {
+    body.innerHTML = `<div class="auth-status-line"><span class="pulse"></span>Generating connection code…</div>`;
+    let start;
+    try { start = await ensureQrSession(); }
+    catch (e) {
+      body.innerHTML = `<div class="auth-status-line err"><span class="pulse"></span>${escapeHtml(e.message || 'failed')}</div>`;
+      return;
+    }
+
+    body.innerHTML = `
+      <div class="auth-qr">
+        <div class="qr-frame">${start.qrSvg || 'QR unavailable'}</div>
+        <div class="uri-row">
+          <code title="${escapeHtml(start.nostrconnectUri)}">${escapeHtml(start.nostrconnectUri)}</code>
+        </div>
+        <div class="auth-status-line" id="auth-qr-status">
+          <span class="pulse"></span>Waiting for Amber…
+        </div>
+        <button id="auth-qr-refresh" style="display:none">refresh QR</button>
+      </div>
+    `;
+    body.querySelector('.uri-row').appendChild(copyBtn(start.nostrconnectUri, 'copy URI'));
+    $('auth-qr-refresh').addEventListener('click', () => {
+      // User-initiated refresh is the ONLY path that drops the pinned
+      // session. Stops the current poll, clears state, re-renders.
+      qrSession = null;
+      stopPoll();
+      renderQrTab(body);
+    });
+
+    pollBunkerSession(start.ephemeralPubkey, {
+      onTimeout: () => {
+        qrSession = null;   // 120s expiry — next paint needs a fresh code
+        const s = $('auth-qr-status');
+        if (s) { s.className = 'auth-status-line warn'; s.innerHTML = '<span class="pulse"></span>Connection timed out. Try again.'; }
+        const r = $('auth-qr-refresh');
+        if (r) r.style.display = 'inline-block';
+      },
+      onError: (msg) => {
+        qrSession = null;   // whatever went wrong, the server session is gone
+        const s = $('auth-qr-status');
+        if (s) { s.className = 'auth-status-line err'; s.innerHTML = `<span class="pulse"></span>${escapeHtml(msg)}`; }
+        const r = $('auth-qr-refresh');
+        if (r) r.style.display = 'inline-block';
+      },
+    });
+  }
+
+  function pollBunkerSession(eph, { onTimeout, onError }) {
+    stopPoll();
+    const tick = async () => {
+      // Guard: if the pinned session was invalidated (refresh, timeout)
+      // while a tick was queued, skip this round entirely.
+      if (!qrSession || qrSession.ephemeralPubkey !== eph) return;
+      pollAbort = new AbortController();
+      try {
+        const r = await fetch(`/api/auth/bunker-session/${eph}`, { signal: pollAbort.signal });
+        const data = await r.json();
+        if (data.status === 'ok') {
+          qrSession = null;
+          completeSignIn(data);
+          return;
+        }
+        if (data.status === 'waiting') {
+          pollTimer = setTimeout(tick, 2000);
+          return;
+        }
+        if (data.status === 'timeout') { onTimeout?.(); return; }
+        onError?.(data.error || 'bunker sign-in failed');
+      } catch (e) {
+        if (e?.name === 'AbortError') return;
+        onError?.(e.message || 'poll failed');
+      }
+    };
+    tick();
+  }
+
+  // ── Bunker URL flow ──────────────────────────────────────────────────
+  function renderUrlTab(body) {
+    body.innerHTML = `
+      <div class="auth-bunker-paste">
+        <input id="auth-bunker-input" placeholder="bunker://…" autocomplete="off" spellcheck="false">
+        <div class="actions">
+          <button id="auth-bunker-paste">paste</button>
+          <button class="primary" id="auth-bunker-connect" style="flex:1">Connect</button>
+        </div>
+        <div class="auth-status-line" id="auth-bunker-status" style="display:none"></div>
+      </div>
+    `;
+    $('auth-bunker-paste').addEventListener('click', async () => {
+      try { $('auth-bunker-input').value = (await navigator.clipboard.readText()).trim(); }
+      catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+    });
+    const connect = async () => {
+      const val = $('auth-bunker-input').value.trim();
+      if (!/^bunker:\/\//i.test(val)) {
+        toast('Invalid URL', 'must start with bunker://', 'err');
+        return;
+      }
+      const status = $('auth-bunker-status');
+      const btn    = $('auth-bunker-connect');
+      status.style.display = 'flex';
+      status.className = 'auth-status-line';
+      status.innerHTML = `<span class="pulse"></span>Connecting to bunker…`;
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/auth/bunker-url', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ bunkerUrl: val }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `${res.status}`);
+        completeSignIn(data);
+      } catch (e) {
+        status.className = 'auth-status-line err';
+        status.innerHTML = `<span class="pulse"></span>${escapeHtml(e.message || 'bunker failed')}`;
+        btn.disabled = false;
+      }
+    };
+    $('auth-bunker-connect').addEventListener('click', connect);
+    $('auth-bunker-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
+  }
+
+  // ── Completion ───────────────────────────────────────────────────────
+  function completeSignIn(data) {
+    if (!data?.token) { toast('Sign-in failed', 'no token', 'err'); return; }
+    setSessionToken(data.token, data.expiresAt);
+    hide();
+    bootDashboard(false);
+    toast('Signed in', truncNpub(data.npub || ''), 'ok');
+  }
+
+  return { show, hide, render };
+})();
+
 // ── Registry + boot ──────────────────────────────────────────────────────
 
 const Panels = {
-  status: StatusPanel,
-  chat:   ChatPanel,
-  relay:  RelayPanel,
-  git:    GitPanel,
-  logs:   LogsPanel,
-  config: ConfigPanel,
+  status:   StatusPanel,
+  chat:     ChatPanel,
+  relay:    RelayPanel,
+  projects: ProjectsPanel,
+  logs:     LogsPanel,
+  config:   ConfigPanel,
 };
 
-refreshHeader();
-refreshHealth();
-activatePanel(currentPanel());
+// Dashboard boot path — called once auth is confirmed (or the localhost
+// exemption is active). Idempotent: re-invoking just re-kicks the panel
+// loaders, which each already de-dupe their fetches.
+let __bootStarted = false;
+function bootDashboard(localhostExempt) {
+  if (!__bootStarted) {
+    __bootStarted = true;
+    refreshHeader();
+    refreshHealth();
+    activatePanel(currentPanel());
+  }
+  toggleLocalhostBanner(localhostExempt);
+}
+
+function toggleLocalhostBanner(on) {
+  let el = document.getElementById('auth-localhost-banner');
+  if (on && !el) {
+    el = document.createElement('div');
+    el.id = 'auth-localhost-banner';
+    el.className = 'auth-localhost-banner';
+    el.textContent = 'Auth disabled for localhost — enable in Config';
+    document.body.appendChild(el);
+  } else if (!on && el) {
+    el.remove();
+  }
+}
+
+// Entry point: check auth status first, then either show the auth screen
+// or let bootDashboard() kick off the panel loaders.
+(async function authGate() {
+  let status;
+  try { status = await fetch('/api/auth/status').then(r => r.json()); }
+  catch {
+    // Server unreachable — show auth screen; render() will display the
+    // same error surface a retry will clear.
+    AuthScreen.show();
+    return;
+  }
+  if (status.authenticated) {
+    bootDashboard(status.localhostExempt);
+  } else {
+    AuthScreen.show();
+  }
+})();

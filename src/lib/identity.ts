@@ -14,6 +14,9 @@ import path from 'path';
 export interface Identity {
   npub:       string;       // bech32 "npub1..." or 64-char hex
   readRelays: string[];     // ws:// or wss:// URLs
+  // Opt-out of dashboard auth for localhost requests (127.0.0.1, ::1). Default
+  // true — manual override only, not surfaced in the UI yet.
+  requireAuth?: boolean;
 }
 
 const DEFAULT_READ_RELAYS = [
@@ -38,6 +41,7 @@ export function readIdentity(): Identity {
       readRelays: Array.isArray(parsed.readRelays) && parsed.readRelays.length > 0
                     ? parsed.readRelays.filter((x: any) => typeof x === 'string')
                     : DEFAULT_READ_RELAYS.slice(),
+      requireAuth: parsed.requireAuth === false ? false : undefined,
     };
   } catch {
     return { npub: '', readRelays: DEFAULT_READ_RELAYS.slice() };

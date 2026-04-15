@@ -25,11 +25,24 @@ import {
   addToWhitelist, removeFromWhitelist, setAuthFlag,
 } from './relay-config.js';
 import { detectInstalled, probeOllama, probeLmStudio } from './detect.js';
-import { getCurrentBranch, getRemotes, isGitRepo } from './git.js';
 import {
   readIdentity, addReadRelay, removeReadRelay, setNpub as setIdentityNpub,
   isNpubOrHex, isNsec, type Identity,
 } from './identity.js';
+import {
+  clearAllSessions, issueChallenge, consumeChallenge, createSession,
+  getSession, deleteSession, extractBearer, verifyNip98, authStatus,
+  isPublicApi, requireSession, expectedDashboardUrl, localhostExempt,
+} from './auth.js';
+import {
+  startNostrConnect, getBunkerSession, consumeBunkerSession,
+  signWithBunkerUrl,
+} from './auth-bunker.js';
+import {
+  readProjects, getProject, createProject, updateProject, deleteProject,
+  detectPath, projectGitStatus, projectGitLog, resolveProjectContext,
+  type Project,
+} from './projects.js';
 
 // ── Static assets ─────────────────────────────────────────────────────────────
 //
@@ -157,6 +170,11 @@ export function contextExists(): boolean {
   return fs.existsSync(path.join(os.homedir(), 'projects', 'NOSTR_STATION.md'));
 }
 
+// Active chat project — set via POST /api/chat/context, read by proxyChat()
+// to pick the right system prompt. null means "use global NOSTR_STATION.md".
+// Module-scoped, resets on server restart (same lifecycle as sessions).
+let activeChatProjectId: string | null = null;
+
 // ── Chat proxy (streaming SSE) ────────────────────────────────────────────────
 
 async function readBody(req: http.IncomingMessage): Promise<string> {
@@ -277,7 +295,10 @@ async function proxyChat(
     return;
   }
 
-  const system = getContextContent(os.homedir());
+  const activeProject = activeChatProjectId ? getProject(activeChatProjectId) : null;
+  const system = activeChatProjectId
+    ? resolveProjectContext(activeProject).content
+    : getContextContent(os.homedir());
   res.writeHead(200, {
     'Content-Type':  'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -463,54 +484,6 @@ async function setProviderConfig(body: any): Promise<{ ok: boolean; error?: stri
   return { ok: true };
 }
 
-// ── Git status helpers (missing pieces not in lib/git.ts) ─────────────────────
-
-function runGit(args: string[]): string | null {
-  try {
-    return execSync(`git ${args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ')} 2>/dev/null`)
-      .toString().trim();
-  } catch { return null; }
-}
-
-// Scrub tokens out of git remote URLs before sending to the client.
-// Users routinely embed PATs in https://<user>:<token>@github.com/... — we
-// don't want those showing up on screen or in screenshots of the dashboard.
-function scrubRemoteUrl(url: string): string {
-  return url.replace(/^(https?:\/\/)([^@\/]+)@/, '$1•••@');
-}
-
-function gitStatus(): any {
-  if (!isGitRepo()) return { inRepo: false };
-  const branch  = getCurrentBranch();
-  const hash    = runGit(['rev-parse', '--short', 'HEAD']) ?? '';
-  const msg     = runGit(['log', '-1', '--pretty=%s']) ?? '';
-  const ts      = Number(runGit(['log', '-1', '--pretty=%ct']) ?? '0') * 1000;
-  const author  = runGit(['log', '-1', '--pretty=%an']) ?? '';
-  const dirtyRaw = runGit(['status', '--short']) ?? '';
-  const dirty   = dirtyRaw.split('\n').filter(Boolean).length;
-  const remotes = getRemotes().map(r => ({ ...r, url: scrubRemoteUrl(r.url) }));
-  return {
-    inRepo: true,
-    branch, hash, message: msg, timestamp: ts, author,
-    dirty, remotes,
-  };
-}
-
-function gitLog(): any[] {
-  if (!isGitRepo()) return [];
-  const raw = runGit(['log', '-10', '--pretty=%h|%s|%an|%ct']);
-  if (!raw) return [];
-  return raw.split('\n').filter(Boolean).map(line => {
-    const [hash, message, author, ctSec] = line.split('|');
-    return {
-      hash: hash || '',
-      message: message || '',
-      author: author || '',
-      timestamp: (Number(ctSec) || 0) * 1000,
-    };
-  });
-}
-
 // ── Identity profile lookup ───────────────────────────────────────────────────
 //
 // Runs `nak req -k 0 -a <hex> <relays…>` with a short cap; nak streams until
@@ -687,7 +660,7 @@ function cmdSpecFor(key: string, slug?: string): CmdSpec | null {
   return null;
 }
 
-function streamExec(spec: CmdSpec, res: http.ServerResponse, req: http.IncomingMessage): void {
+function streamExec(spec: CmdSpec, res: http.ServerResponse, req: http.IncomingMessage, cwd?: string): void {
   res.writeHead(200, {
     'Content-Type':  'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -696,6 +669,7 @@ function streamExec(spec: CmdSpec, res: http.ServerResponse, req: http.IncomingM
   const child = spawn(spec.bin, spec.args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, ...(spec.env || {}) },
+    cwd: cwd || undefined,
   });
 
   const emit = (payload: object) => {
@@ -799,10 +773,181 @@ export async function startWebServer(port: number): Promise<void> {
   // in another terminal) without needing a server restart.
   await loadProviderConfig();
 
+  // Sessions are in-memory only and never survive a server restart — the
+  // user re-authenticates after a nostr-station chat restart. Explicit here
+  // for clarity in case the module is imported multiple times.
+  clearAllSessions();
+
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       const url    = (req.url || '/').split('?')[0];
       const method = req.method || 'GET';
+
+      // ── Auth endpoints (public) ──────────────────────────────────────
+      if (url === '/api/auth/status' && method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(authStatus(req)));
+        return;
+      }
+
+      if (url === '/api/auth/challenge' && method === 'POST') {
+        const c = issueChallenge();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(c));
+        return;
+      }
+
+      if (url === '/api/auth/verify' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'bad json' })); return; }
+        const challenge = String(parsed.challenge || '');
+        const event     = parsed.event;
+
+        if (!consumeChallenge(challenge)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'challenge unknown or expired' }));
+          return;
+        }
+        const r = verifyNip98({
+          challenge, event,
+          expectedUrl: expectedDashboardUrl(req),
+        });
+        if (!r.ok) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: r.error || 'verification failed' }));
+          return;
+        }
+        const ua = String(req.headers['user-agent'] || '').slice(0, 200);
+        const sess = createSession(r.npub!, ua);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          token: sess.token, expiresAt: sess.expiresAt, npub: sess.npub,
+        }));
+        return;
+      }
+
+      if (url === '/api/auth/bunker-connect' && method === 'POST') {
+        // Starts a nostrconnect:// (QR) flow. Returns the URI + QR SVG +
+        // ephemeral pubkey immediately; the actual relay subscription runs
+        // in the background until the remote signer answers or we time out.
+        const { challenge } = issueChallenge();
+        const start = await startNostrConnect(challenge, expectedDashboardUrl(req));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ...start, challenge }));
+        return;
+      }
+
+      const bunkerPollMatch = url.match(/^\/api\/auth\/bunker-session\/([0-9a-f]{64})$/);
+      if (bunkerPollMatch && method === 'GET') {
+        const eph = bunkerPollMatch[1];
+        const s   = getBunkerSession(eph);
+        if (!s) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'error', error: 'unknown session' }));
+          return;
+        }
+        if (s.status === 'waiting') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'waiting', expiresAt: s.expiresAt }));
+          return;
+        }
+        if (s.status !== 'ok' || !s.signedEvent || !s.challenge) {
+          consumeBunkerSession(eph);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: s.status, error: s.error }));
+          return;
+        }
+        // Success path — validate the signed event, then issue a session.
+        const verify = verifyNip98({
+          challenge:   s.challenge,
+          event:       s.signedEvent,
+          expectedUrl: expectedDashboardUrl(req),
+        });
+        consumeBunkerSession(eph);
+        if (!verify.ok) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'error', error: verify.error || 'verification failed' }));
+          return;
+        }
+        const ua = String(req.headers['user-agent'] || '').slice(0, 200);
+        const sess = createSession(verify.npub!, ua);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'ok',
+          token: sess.token, expiresAt: sess.expiresAt, npub: sess.npub,
+        }));
+        return;
+      }
+
+      if (url === '/api/auth/bunker-url' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'bad json' })); return; }
+        const bunkerUrl = String(parsed.bunkerUrl || '').trim();
+        if (!/^bunker:\/\//i.test(bunkerUrl)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bunker URL must start with bunker://' }));
+          return;
+        }
+        const { challenge } = issueChallenge();
+        const bunkerRes = await signWithBunkerUrl(bunkerUrl, challenge, expectedDashboardUrl(req));
+        if (!bunkerRes.ok) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: bunkerRes.error || 'bunker sign failed' }));
+          return;
+        }
+        const verify = verifyNip98({
+          challenge, event: bunkerRes.signedEvent,
+          expectedUrl: expectedDashboardUrl(req),
+        });
+        if (!verify.ok) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: verify.error || 'verification failed' }));
+          return;
+        }
+        const ua = String(req.headers['user-agent'] || '').slice(0, 200);
+        const sess = createSession(verify.npub!, ua);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          token: sess.token, expiresAt: sess.expiresAt, npub: sess.npub,
+        }));
+        return;
+      }
+
+      if (url === '/api/auth/logout' && method === 'POST') {
+        const token = extractBearer(req);
+        if (token) deleteSession(token);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      if (url === '/api/auth/session' && method === 'GET') {
+        const sess = requireSession(req, res);
+        if (!sess) return;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          npub: sess.npub, createdAt: sess.createdAt, expiresAt: sess.expiresAt,
+        }));
+        return;
+      }
+
+      // ── Gate everything else under /api/* ────────────────────────────
+      // Public paths (auth endpoints above) are already handled via early
+      // returns. Any other /api/* path requires a valid session token, or
+      // the identity.json requireAuth:false localhost exemption.
+      //
+      // Bootstrap exemption: /api/identity/set is accepted without auth
+      // only when no station owner is configured yet. This lets the auth
+      // screen set up an npub before anyone can sign in. Once an owner
+      // exists, all identity writes require a valid session.
+      if (url.startsWith('/api/') && !isPublicApi(url)) {
+        const bootstrap = url === '/api/identity/set'
+          && method === 'POST'
+          && !readIdentity().npub;
+        if (!bootstrap && !requireSession(req, res)) return;
+      }
 
       // API routes first — they take precedence over static.
       if (url === '/api/config' && method === 'GET') {
@@ -937,14 +1082,196 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
-      if (url === '/api/git/status' && method === 'GET') {
+      // ── Projects ───────────────────────────────────────────────────────
+      if (url === '/api/projects' && method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(gitStatus()));
+        res.end(JSON.stringify(readProjects()));
         return;
       }
-      if (url === '/api/git/log' && method === 'GET') {
+      if (url === '/api/projects' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400); res.end('bad json'); return; }
+        const r = createProject(parsed);
+        if (!r.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: r.error }));
+          return;
+        }
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r.project));
+        return;
+      }
+      if (url === '/api/projects/detect' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400); res.end('bad json'); return; }
+        const p = String(parsed.path || '').trim();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(gitLog()));
+        res.end(JSON.stringify(detectPath(p)));
+        return;
+      }
+
+      const projMatch = url.match(/^\/api\/projects\/([a-f0-9-]{10,})(?:\/(.*))?$/);
+      if (projMatch) {
+        const id = projMatch[1];
+        const tail = projMatch[2] || '';
+        const project = getProject(id);
+        if (!project) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'project not found' }));
+          return;
+        }
+
+        if (tail === '' && method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(project));
+          return;
+        }
+        if (tail === '' && method === 'PATCH') {
+          let parsed: any = {};
+          try { parsed = JSON.parse(await readBody(req)); }
+          catch { res.writeHead(400); res.end('bad json'); return; }
+          const r = updateProject(id, parsed);
+          if (!r.ok) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: r.error }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(r.project));
+          return;
+        }
+        if (tail === '' && method === 'DELETE') {
+          const r = deleteProject(id);
+          res.writeHead(r.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: r.ok }));
+          return;
+        }
+
+        if (tail === 'git/status' && method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(projectGitStatus(project.path || '')));
+          return;
+        }
+        if (tail === 'git/log' && method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(projectGitLog(project.path || '')));
+          return;
+        }
+        if (tail === 'git/pull' && method === 'POST') {
+          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
+          streamExec({ bin: 'git', args: ['pull', '--no-rebase', '--ff-only'] }, res, req, project.path);
+          return;
+        }
+        if (tail === 'git/push' && method === 'POST') {
+          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
+          // Route based on which capabilities are enabled.
+          // git + ngit → nostr-station push --yes (handles both remotes)
+          // git only   → git push origin HEAD
+          // ngit only  → ngit push
+          let spec: CmdSpec;
+          if (project.capabilities.git && project.capabilities.ngit) {
+            spec = { bin: process.execPath, args: [CLI_BIN, 'push', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
+          } else if (project.capabilities.git) {
+            spec = { bin: 'git', args: ['push', 'origin', 'HEAD'] };
+          } else if (project.capabilities.ngit) {
+            spec = { bin: 'ngit', args: ['push'] };
+          } else {
+            res.writeHead(400); res.end('no push-capable capability enabled'); return;
+          }
+          streamExec(spec, res, req, project.path);
+          return;
+        }
+
+        if (tail === 'ngit/status' && method === 'GET') {
+          // Mask bunker URL to domain-only for display.
+          const bunker = project.identity.bunkerUrl;
+          let bunkerDomain: string | null = null;
+          if (bunker) {
+            try { bunkerDomain = new URL(bunker.replace(/^bunker:/, 'https:')).host; }
+            catch { bunkerDomain = 'bunker'; }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            remote: project.remotes.ngit,
+            bunkerDomain,
+            useDefault: project.identity.useDefault,
+          }));
+          return;
+        }
+        if (tail === 'ngit/push' && method === 'POST') {
+          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
+          streamExec({ bin: 'ngit', args: ['push'] }, res, req, project.path);
+          return;
+        }
+
+        if (tail === 'exec' && method === 'POST') {
+          // Whitelisted read-only commands scoped to the project's cwd.
+          // Extend the switch below — NEVER interpolate body.cmd into argv.
+          let parsed: any = {};
+          try { parsed = JSON.parse(await readBody(req)); }
+          catch { res.writeHead(400); res.end('bad json'); return; }
+          const cmd = String(parsed.cmd || '');
+          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
+          let spec: CmdSpec | null = null;
+          if (cmd === 'git-status') spec = { bin: 'git', args: ['status'] };
+          if (!spec) { res.writeHead(400); res.end('unknown exec cmd'); return; }
+          streamExec(spec, res, req, project.path);
+          return;
+        }
+
+        if (tail === 'nsite/deploy' && method === 'POST') {
+          const cwd = project.path || process.cwd();
+          streamExec(
+            { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } },
+            res, req, cwd,
+          );
+          return;
+        }
+
+        res.writeHead(404); res.end('unknown project endpoint');
+        return;
+      }
+
+      // ── Chat project context ───────────────────────────────────────────
+      if (url === '/api/chat/context' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400); res.end('bad json'); return; }
+        const projectId = parsed.projectId ? String(parsed.projectId) : null;
+        const project   = projectId ? getProject(projectId) : null;
+        if (projectId && !project) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'project not found' }));
+          return;
+        }
+        activeChatProjectId = projectId;
+        const { source } = resolveProjectContext(project);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          projectId,
+          projectName: project?.name || null,
+          source,
+        }));
+        return;
+      }
+      const chatCtxMatch = url.match(/^\/api\/chat\/context(?:\/([a-f0-9-]{10,}))?$/);
+      if (chatCtxMatch && method === 'GET') {
+        const pid = chatCtxMatch[1];
+        const project = pid ? getProject(pid) : null;
+        if (pid && !project) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'project not found' }));
+          return;
+        }
+        const { content, source } = resolveProjectContext(project);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          projectId: pid || null,
+          projectName: project?.name || null,
+          content, source,
+        }));
         return;
       }
 

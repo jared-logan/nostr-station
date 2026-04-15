@@ -104,8 +104,8 @@ nostr-station keychain delete <key>  Remove a credential (confirmation required)
 nostr-station keychain rotate      Hot-swap ai-api-key with 60s rollback window
 nostr-station keychain rotate --rollback  Restore previous value (within 60s)
 nostr-station keychain migrate     Convert plaintext ~/.claude_env to keychain loader
-nostr-station chat                 Web chat UI at localhost:3000 with NOSTR_STATION.md as context
-nostr-station chat --port <n>      Custom port for the chat server
+nostr-station chat                 Web dashboard at localhost:3000 — chat, status, relay, logs, config
+nostr-station chat --port <n>      Custom port for the dashboard
 nostr-station tui                  Live dashboard — events, logs, mesh status
 nostr-station seed                 Seed relay with dummy events for dev/testing
 nostr-station seed --events 100    Specify event count
@@ -133,6 +133,24 @@ nostr-station is designed for **nsec-free development**. Your private key stays 
 # Or connect later
 ngit login --bunker <bunker-string>
 ```
+
+---
+
+## Dashboard
+
+`nostr-station chat` starts a local web dashboard at `http://localhost:3000` — chat, status, relay controls, live logs, and config in one view. The dashboard is locked to the station owner: every `/api/*` endpoint (and the panels that use them) requires a valid session.
+
+Signing in proves you hold the npub configured in `~/.config/nostr-station/identity.json`. Three paths:
+
+- **Browser extension (NIP-07)** — Alby, nos2x, Keys.band. One click if the extension is detected.
+- **Amber QR (NIP-46 `nostrconnect://`)** — scan with Amber on your phone; the dashboard polls until Amber approves.
+- **Bunker URL (NIP-46)** — paste a `bunker://` URI from nsecBunker, Keycast, or similar.
+
+Server-side: a random 32-byte challenge (60 s TTL, single-use) is signed by your remote signer as a NIP-98 kind-27235 event. On verification the server issues a 32-byte session token, returned via `Authorization: Bearer <token>`. Sessions are 8 h (override with `NOSTR_STATION_SESSION_TTL=<hours>`), extended on each authenticated request, in-memory only — a server restart invalidates every session and you sign in again.
+
+Token lives in `sessionStorage` (cleared on tab close, never written to disk). Sign out from the identity drawer. Your nsec is never exposed to the dashboard; only the ephemeral NIP-46 client secret is kept in memory and discarded after use.
+
+For local-only setups you can opt out by adding `"requireAuth": false` to `identity.json` — auth is then skipped for requests from `127.0.0.1`/`::1` only, with a persistent banner on the dashboard. Default is always on.
 
 ---
 
@@ -202,6 +220,7 @@ For human-readable `nsite://<name>` addresses, see [Titan](https://github.com/bt
 | `gh auth login` | Browser-based OAuth — token stored by `gh` in system keychain |
 | AI provider API key | Stored in OS keychain; `~/.claude_env` is a loader script, not a secret store |
 | Watchdog nsec | Stored in OS keychain — never written to the watchdog script file |
+| Dashboard sign-in | NIP-98 challenge signed by your remote signer (extension / Amber / bunker); session token in `sessionStorage`, never persisted |
 
 `~/.claude_env` contains no secrets — it calls `nostr-station keychain get ai-api-key --raw` at shell load time to retrieve the key into memory.
 
