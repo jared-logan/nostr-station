@@ -23,6 +23,7 @@ import { getKeychain }   from './lib/keychain.js';
 import { requireInteractive } from './lib/tty.js';
 import { detectPlatform } from './lib/detect.js';
 import { installSystemDepsInherit } from './lib/install.js';
+import { VERSION } from './lib/version.js';
 
 const [,, command = 'help', ...args] = process.argv;
 
@@ -277,7 +278,7 @@ switch (command) {
   case 'version':
   case '--version':
   case '-v':
-    console.log('nostr-station 0.0.3');
+    console.log(`nostr-station ${VERSION}`);
     break;
 
   case 'help':

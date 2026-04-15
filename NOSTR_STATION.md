@@ -87,7 +87,7 @@ npm run dev -- onboard
 
 ## Current version
 
-v0.0.3 (in progress). See CHANGELOG.md.
+v0.0.5 (in progress). See CHANGELOG.md.
 
 ## What must never be broken in contributions
 

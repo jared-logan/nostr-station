@@ -3,7 +3,18 @@
 All notable changes to nostr-station are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [0.0.3] — in progress
+## [0.0.5] — in progress
+### Added
+- **Web dashboard control center** — `nostr-station chat` now serves a full dashboard (not just chat): identity drawer with owner sign-in (NIP-07 / Amber QR / bunker URI), Status panel with live Service Health sidebar, Logs panel, Relay control panel, Config panel, Projects panel, and a streaming exec modal for long-running commands
+- **Owner auth (NIP-98)** — every `/api/*` endpoint requires a session token issued only to the npub in `identity.json`. Server signs a 32-byte challenge (60 s TTL, single-use), verifies kind-27235 response, issues 8-hour session. `sessionStorage`-scoped tokens, never on disk. Localhost opt-out via `"requireAuth": false` with persistent dashboard banner
+- **Projects panel** — register local project paths, detect Git/ngit/claude/stacks capabilities, run `ngit init` against a pre-filled relay, discover and clone Nostr-native repos
+- **ngit repo discovery + clone** — `Scan ngit` queries kind-30617 announcement events for the station owner's npub, surfaces name/description/clone URLs, builds server-resolved `~/projects/<name>` paths, clones via `git clone nostr://<npub>/<d-tag>` with strict argv construction (no shell)
+- **ngit account signer UI** — Config panel shows signer login state derived from `git config --global nostr.bunker-uri`, supports `ngit account login -i` (streams `nostrconnect://` for Amber scan) and `ngit account logout`, with masked URI display
+- **NGIT config section** — default-relay input with `wss://` validation and inline save confirmation; `ngitRelay` field added to `identity.json`
+- **Service Health sidebar** — interactive status dots (green/yellow/red) jump to matching Status cards with pulse highlight; tooltips expose state-specific resolution hints
+- **`src/lib/version.ts`** — single source of truth for the version string; `cli --version` and the onboard Banner both derive from `package.json` so they never drift apart again
+
+## [0.0.4] — 2026-04-15
 ### Added
 - `nostr-station chat` — local web chat UI at `localhost:3000`; reads AI provider from `~/.claude_env` + keychain, injects `NOSTR_STATION.md` as system context on every request, streams via SSE; supports Anthropic native + OpenAI-compatible endpoints (OpenRouter, Routstr, PayPerQ, OpenCode Zen, Maple, Ollama, LM Studio, custom)
 - Post-onboard launch picker — choose `tui` / `chat` / exit at the end of the wizard, spawns the selected command

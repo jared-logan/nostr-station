@@ -11,7 +11,7 @@ Sets up a local relay, mesh VPN, Nostr-native git with Amber signing, and your A
 curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/install.sh | bash
 ```
 
-> v0.0.3 — macOS (Apple Silicon + Intel) and Linux (apt / dnf / pacman).
+> v0.0.5 — macOS (Apple Silicon + Intel) and Linux (apt / dnf / pacman).
 
 ---
 
@@ -104,7 +104,7 @@ nostr-station keychain delete <key>  Remove a credential (confirmation required)
 nostr-station keychain rotate      Hot-swap ai-api-key with 60s rollback window
 nostr-station keychain rotate --rollback  Restore previous value (within 60s)
 nostr-station keychain migrate     Convert plaintext ~/.claude_env to keychain loader
-nostr-station chat                 Web dashboard at localhost:3000 — chat, status, relay, logs, config
+nostr-station chat                 Web dashboard at localhost:3000 — chat, status, relay, logs, config, projects, ngit
 nostr-station chat --port <n>      Custom port for the dashboard
 nostr-station tui                  Live dashboard — events, logs, mesh status
 nostr-station seed                 Seed relay with dummy events for dev/testing
@@ -138,7 +138,20 @@ ngit login --bunker <bunker-string>
 
 ## Dashboard
 
-`nostr-station chat` starts a local web dashboard at `http://localhost:3000` — chat, status, relay controls, live logs, and config in one view. The dashboard is locked to the station owner: every `/api/*` endpoint (and the panels that use them) requires a valid session.
+`nostr-station chat` starts a local web dashboard at `http://localhost:3000` — a full control center for the station in a single view. The dashboard is locked to the station owner: every `/api/*` endpoint (and the panels that use them) requires a valid session.
+
+### Panels
+
+| Panel | What it does |
+|-------|-------------|
+| **Chat** | AI chat streaming from your configured provider; injects `NOSTR_STATION.md` as system context |
+| **Status** | Service cards for relay, watchdog, mesh VPN, ngit, claude — green / yellow / red with live polling. Sidebar Service Health dots are interactive: click a yellow/red dot to jump to the card with a pulse highlight |
+| **Logs** | Live tail of relay, watchdog, or combined logs with follow mode |
+| **Relay** | Start / stop / restart, NIP-42 auth toggle, DM-auth toggle, whitelist add/remove |
+| **Config** | Read-relay list, AI provider, NGIT default relay (with `wss://` validation), and **ngit account (signer)** — shows login state from `git config --global nostr.bunker-uri`, streams `ngit account login -i` into the exec modal so you can scan the `nostrconnect://` URL with Amber |
+| **Projects** | Register local project paths, detect Git / ngit / claude / stacks capabilities, run `ngit init` against the station's default relay. **Scan ngit** discovers kind-30617 repo announcement events for your npub; **Clone this repo** resolves a server-owned `~/projects/<name>` path and clones via `git clone nostr://<npub>/<d-tag>` (strict argv, no shell) |
+
+### Owner authentication
 
 Signing in proves you hold the npub configured in `~/.config/nostr-station/identity.json`. Three paths:
 

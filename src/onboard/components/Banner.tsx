@@ -1,9 +1,10 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { P } from './palette.js';
+import { VERSION as PKG_VERSION } from '../../lib/version.js';
 
-// Version string — single source of truth for both wide and narrow banners
-const VERSION = 'v0.0.3';
+// Version string — derived from package.json so the banner never drifts
+const VERSION = `v${PKG_VERSION}`;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tier-based banner rendering — polish over spectacle.

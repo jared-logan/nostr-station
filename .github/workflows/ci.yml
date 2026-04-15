@@ -33,11 +33,12 @@ jobs:
       - name: Link globally as `nostr-station`
         run: npm link
 
-      - name: --version prints 0.0.3
+      - name: --version matches package.json
         run: |
           out=$(nostr-station --version)
           echo "$out"
-          [[ "$out" == "nostr-station 0.0.3" ]] || { echo "❌ unexpected version string"; exit 1; }
+          expected="nostr-station $(node -p "require('./package.json').version")"
+          [[ "$out" == "$expected" ]] || { echo "❌ got '$out', expected '$expected'"; exit 1; }
 
       - name: Help text lists every command
         run: |
