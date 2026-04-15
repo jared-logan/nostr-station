@@ -53,14 +53,27 @@ async function loadConfig(): Promise<ProviderConfig> {
   const { baseUrl, model } = parseClaudeEnv(homeDir);
   const isAnthropic = !baseUrl;
 
+  // Resolution order for the Anthropic API key:
+  //   1. process.env.ANTHROPIC_API_KEY — lets power users override ad-hoc
+  //      (e.g. `ANTHROPIC_API_KEY=sk-... nostr-station chat`).
+  //   2. OS keychain (ai-api-key slot) — the canonical store populated by
+  //      onboard + `nostr-station keychain set ai-api-key`.
+  //
+  // Before: we only checked (1). On Linux, the env var comes from sourcing
+  // ~/.claude_env in the user's shell rc, but chat is often launched from
+  // a context that didn't source it (GUI terminal, fresh subshell, etc.),
+  // so the key was stored in GNOME Keyring yet unavailable to chat-server.
   let apiKey: string;
   if (isAnthropic) {
-    apiKey = process.env.ANTHROPIC_API_KEY ?? '';
+    apiKey = process.env.ANTHROPIC_API_KEY
+      || (await getKeychain().retrieve('ai-api-key'))
+      || '';
     if (!apiKey) {
       throw new Error(
-        'ANTHROPIC_API_KEY is not set.\n'
-        + '  Set it with: export ANTHROPIC_API_KEY=sk-ant-...\n'
-        + '  Or run: nostr-station onboard to configure a different provider.'
+        'Anthropic API key not set.\n'
+        + '  Store it: nostr-station keychain set ai-api-key\n'
+        + '  Or override: ANTHROPIC_API_KEY=sk-ant-... nostr-station chat\n'
+        + '  Or reconfigure: nostr-station onboard'
       );
     }
   } else {
