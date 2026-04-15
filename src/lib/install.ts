@@ -106,6 +106,98 @@ async function runApt(
   }
 }
 
+// Pre-Ink variant of installSystemDeps.
+//
+// Why: inside a running Ink TUI, `sudo apt-get update` on Linux Mint hangs
+// indefinitely even with `sudo -n` + DEBIAN_FRONTEND=noninteractive + pipe
+// drain in runApt(). Running the same spawn config outside Ink (verified
+// via scripts/repro-apt-hang.mjs — all 7 variants complete in ~4s) works
+// fine. The hang is specific to the combination of Ink's raw-mode stdin
+// and sudo's PAM/TTY session setup; no amount of child-stdio tweaking from
+// within Ink reliably avoids it.
+//
+// Workaround: install system packages BEFORE Ink's render() mounts, with
+// `stdio: 'inherit'` so the child has native terminal access and the user
+// sees apt's own progress output. Same pattern as the sudo pre-auth in
+// cli.tsx. Caller is responsible for printing any header banner — this
+// function just runs the package manager.
+export async function installSystemDepsInherit(
+  p: Platform,
+): Promise<InstallResult> {
+  const sudoArgs = [
+    '-n',
+    '--preserve-env=DEBIAN_FRONTEND,NEEDRESTART_MODE,NEEDRESTART_SUSPEND',
+  ];
+  const env = {
+    ...process.env,
+    DEBIAN_FRONTEND: 'noninteractive',
+    NEEDRESTART_MODE: 'a',
+    NEEDRESTART_SUSPEND: '1',
+  };
+
+  const runInherit = async (
+    cmd: string,
+    args: string[],
+    timeoutMs: number,
+  ): Promise<InstallResult> => {
+    try {
+      await execa(cmd, args, { stdio: 'inherit', timeout: timeoutMs, env });
+      return { ok: true };
+    } catch (e) {
+      const err = e as ExecaError;
+      if (err.timedOut) {
+        return {
+          ok: false,
+          detail: `${cmd} timed out after ${Math.floor(timeoutMs / 1000)}s`,
+        };
+      }
+      return {
+        ok: false,
+        detail: err.shortMessage?.slice(0, 160) ?? 'failed',
+      };
+    }
+  };
+
+  switch (p.pkgMgr) {
+    case 'brew':
+      return runInherit('brew', ['install', 'git', 'curl', 'protobuf'], 10 * 60 * 1000);
+    case 'apt': {
+      const upd = await runInherit(
+        'sudo', [...sudoArgs, 'apt-get', 'update'], 5 * 60 * 1000,
+      );
+      if (!upd.ok) return upd;
+      return runInherit(
+        'sudo',
+        [
+          ...sudoArgs, 'apt-get', 'install', '-y',
+          '-o', 'Dpkg::Options::=--force-confdef',
+          '-o', 'Dpkg::Options::=--force-confold',
+          'build-essential', 'curl', 'git', 'pkg-config',
+          'libssl-dev', 'netcat-openbsd',
+          'libsecret-tools',
+          'protobuf-compiler',
+        ],
+        10 * 60 * 1000,
+      );
+    }
+    case 'dnf':
+      return runInherit(
+        'sudo',
+        [...sudoArgs, 'dnf', 'install', '-y',
+         'gcc', 'curl', 'git', 'openssl-devel', 'pkgconfig', 'nmap-ncat',
+         'protobuf-compiler'],
+        10 * 60 * 1000,
+      );
+    case 'pacman':
+      return runInherit(
+        'sudo',
+        [...sudoArgs, 'pacman', '-Sy', '--noconfirm',
+         'base-devel', 'curl', 'git', 'openssl', 'protobuf'],
+        10 * 60 * 1000,
+      );
+  }
+}
+
 export async function installSystemDeps(
   p: Platform,
   onProgress?: (detail: string) => void,

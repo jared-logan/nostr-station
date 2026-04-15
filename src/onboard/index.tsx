@@ -20,10 +20,19 @@ type Stage =
 
 interface OnboardProps {
   demoMode?: boolean;
+  // True when cli.tsx has already run `apt-get update && install` pre-Ink
+  // (Linux interactive only — see cli.tsx onboard case for why). The
+  // Install phase honours this by marking the system-packages row done
+  // on entry instead of re-running the install inside the TUI.
+  systemDepsPreInstalled?: boolean;
   onLaunch?: (intent: string) => void;
 }
 
-export const Onboard: React.FC<OnboardProps> = ({ demoMode = false, onLaunch }) => {
+export const Onboard: React.FC<OnboardProps> = ({
+  demoMode = false,
+  systemDepsPreInstalled = false,
+  onLaunch,
+}) => {
   const [stage, setStage] = useState<Stage>('detect');
   const [platform, setPlatform] = useState<Platform | null>(null);
   const [installed, setInstalled] = useState<Installed | null>(null);
@@ -68,6 +77,7 @@ export const Onboard: React.FC<OnboardProps> = ({ demoMode = false, onLaunch }) 
           platform={platform}
           installed={installed}
           config={config}
+          systemDepsPreInstalled={systemDepsPreInstalled}
           onDone={() => {
             if (stage === 'install') setStage('services');
           }}

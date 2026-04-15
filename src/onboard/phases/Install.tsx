@@ -19,6 +19,10 @@ interface InstallPhaseProps {
   platform: Platform;
   installed: Installed;
   config: Config;
+  // True when cli.tsx already ran the package-manager install pre-Ink.
+  // Skip the in-TUI call and render the row as done. See cli.tsx onboard
+  // case for the Ink+sudo+apt hang this works around.
+  systemDepsPreInstalled?: boolean;
   onDone: () => void;
 }
 
@@ -33,10 +37,11 @@ const CARGO_BINS = [
 ];
 
 export const InstallPhase: React.FC<InstallPhaseProps> = ({
-  platform, installed, config, onDone,
+  platform, installed, config, systemDepsPreInstalled = false, onDone,
 }) => {
   const initial: StepState[] = [
-    { label: 'System packages',  status: 'pending' },
+    { label: 'System packages',  status: systemDepsPreInstalled ? 'done' : 'pending',
+                                 detail:  systemDepsPreInstalled ? 'installed pre-TUI' : undefined },
     { label: 'Rust toolchain',   status: 'pending' },
     // Relay: prebuilt-first, compile fallback. Row ordering matches IDX below.
     { label: 'nostr-rs-relay',   status: 'pending' },
@@ -79,11 +84,17 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
       // "Reading package lists…" / "Unpacking libssl-dev…" instead of a
       // frozen spinner. Without streaming, a healthy apt run on a cold
       // runner looks indistinguishable from a hang.
-      update(IDX.sys, { status: 'running', detail: 'starting…' });
-      const sys = await installSystemDeps(platform, (detail) => {
-        update(IDX.sys, { detail });
-      });
-      update(IDX.sys, { status: sys.ok ? 'done' : 'error', detail: sys.detail });
+      //
+      // On Linux interactive (non-demo) runs, cli.tsx already installed
+      // system packages pre-Ink to dodge the sudo-inside-Ink hang; in
+      // that case the initial row is already 'done' and we skip the call.
+      if (!systemDepsPreInstalled) {
+        update(IDX.sys, { status: 'running', detail: 'starting…' });
+        const sys = await installSystemDeps(platform, (detail) => {
+          update(IDX.sys, { detail });
+        });
+        update(IDX.sys, { status: sys.ok ? 'done' : 'error', detail: sys.detail });
+      }
 
       // Rust
       update(IDX.rust, { status: 'running' });

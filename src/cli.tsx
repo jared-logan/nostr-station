@@ -21,6 +21,8 @@ import { Chat }          from './commands/Chat.js';
 import { RelayConfigView, RelayWhitelist } from './commands/RelayConfig.js';
 import { getKeychain }   from './lib/keychain.js';
 import { requireInteractive } from './lib/tty.js';
+import { detectPlatform } from './lib/detect.js';
+import { installSystemDepsInherit } from './lib/install.js';
 
 const [,, command = 'help', ...args] = process.argv;
 
@@ -31,55 +33,70 @@ switch (command) {
 
   case 'onboard':
     requireInteractive('onboard');
-    // Pre-authenticate sudo BEFORE Ink mounts.
+    // Pre-Ink steps, in order:
     //
-    // The Install phase runs `sudo apt-get update && sudo apt-get install …`
-    // with stdio: 'pipe'. If sudo's credential cache is empty, sudo writes
-    // `[sudo] password for <user>:` to the child's stderr and blocks waiting
-    // on stdin — which the pipe never drains, so the UI appears to freeze
-    // forever. The cleanest fix is to prompt for the password interactively,
-    // up-front, in a normal terminal BEFORE Ink takes over the screen and
-    // eats user input. `sudo -v` does exactly that: validate + refresh the
-    // cache, no command executed.
+    //   1. sudo -v — warm the credential cache so later elevated calls
+    //      don't deadlock on a password prompt inside a piped subprocess.
     //
-    // Gate pre-auth on Linux AND an interactive TTY stdin. Two reasons:
+    //   2. apt-get update && apt-get install — install system packages
+    //      BEFORE Ink mounts. Discovered the hard way that running these
+    //      inside the Ink TUI on Linux Mint hangs sudo indefinitely even
+    //      with `sudo -n` + non-interactive env + proper pipe drain; the
+    //      same spawn config outside Ink completes in ~4s (verified via
+    //      scripts/repro-apt-hang.mjs). The interaction between Ink's
+    //      raw-mode stdin and sudo's PAM/TTY setup is the culprit. We
+    //      dodge it by doing the longest Linux step pre-Ink with
+    //      stdio: 'inherit' — user sees native apt output, no pipes.
     //
-    //   1. If stdin isn't a TTY (CI feeding /dev/null, `yes | nostr-station
-    //      onboard`, etc.), sudo can't prompt the user for a password
-    //      anyway — so pre-auth is either unnecessary (passwordless sudo
-    //      in CI) or doomed (will fail with "a password is required" and
-    //      never recover). Either way, skipping it is correct.
-    //
-    //   2. `spawnSync` with `stdio: 'inherit'` on a non-TTY stdin leaves
-    //      Node's stdin handle in a state that breaks Ink's raw-mode
-    //      detection on subsequent mount, causing every subsequent
-    //      render to crash with "Raw mode is not supported." This
-    //      reproduces reliably in CI with `< /dev/null`.
-    //
-    // macOS brew runs unprivileged, so no pre-auth needed there.
-    if (process.platform === 'linux' && process.stdin.isTTY) {
-      process.stderr.write(
-        'nostr-station needs sudo to install system packages.\n'
-        + 'You may be prompted for your password once.\n',
-      );
-      const preAuth = spawnSync('sudo', ['-v'], { stdio: 'inherit' });
-      if (preAuth.status !== 0) {
+    // Both steps are Linux-only:
+    //   - macOS brew runs unprivileged (no sudo) and has never hung in Ink
+    //   - Non-TTY stdin (CI): sudo can't prompt anyway; let InstallPhase
+    //     handle system deps so non-interactive runs still work end-to-end.
+    //   - Demo mode: skip pre-Ink install (demo is for screenshots, and
+    //     running real apt would surprise someone just exploring the UI).
+    const isLinuxInteractive = process.platform === 'linux' && !!process.stdin.isTTY;
+    const demoMode = flag('--demo');
+
+    (async () => {
+      let systemDepsPreInstalled = false;
+
+      if (isLinuxInteractive && !demoMode) {
         process.stderr.write(
-          '\nsudo authentication failed or was cancelled — aborting.\n'
-          + 'Retry: nostr-station onboard\n',
+          'nostr-station needs sudo to install system packages.\n'
+          + 'You may be prompted for your password once.\n',
         );
-        process.exit(1);
+        const preAuth = spawnSync('sudo', ['-v'], { stdio: 'inherit' });
+        if (preAuth.status !== 0) {
+          process.stderr.write(
+            '\nsudo authentication failed or was cancelled — aborting.\n'
+            + 'Retry: nostr-station onboard\n',
+          );
+          process.exit(1);
+        }
+
+        process.stderr.write('\nInstalling system packages (one-time, ~1–3 min)…\n\n');
+        const sys = await installSystemDepsInherit(detectPlatform());
+        if (!sys.ok) {
+          process.stderr.write(
+            `\nSystem package install failed: ${sys.detail ?? 'unknown error'}\n`
+            + 'Retry: nostr-station onboard\n',
+          );
+          process.exit(1);
+        }
+        systemDepsPreInstalled = true;
+        process.stderr.write('\nSystem packages ready. Starting onboard…\n\n');
       }
-    }
-    let launchIntent = '';
-    const { waitUntilExit } = render(React.createElement(Onboard, {
-      demoMode: flag('--demo'),
-      onLaunch: (intent: string) => { launchIntent = intent; },
-    }));
-    waitUntilExit().then(() => {
+
+      let launchIntent = '';
+      const { waitUntilExit } = render(React.createElement(Onboard, {
+        demoMode,
+        systemDepsPreInstalled,
+        onLaunch: (intent: string) => { launchIntent = intent; },
+      }));
+      await waitUntilExit();
       if (launchIntent === 'tui')  spawnSync('nostr-station', ['tui'],  { stdio: 'inherit' });
       if (launchIntent === 'chat') spawnSync('nostr-station', ['chat'], { stdio: 'inherit' });
-    });
+    })();
     break;
 
   case 'seed':
