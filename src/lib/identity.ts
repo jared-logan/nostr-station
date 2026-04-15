@@ -14,6 +14,10 @@ import path from 'path';
 export interface Identity {
   npub:       string;       // bech32 "npub1..." or 64-char hex
   readRelays: string[];     // ws:// or wss:// URLs
+  // Default nostr relay for ngit (used by Projects → ngit init pre-fill and
+  // to distinguish ngit "installed but unconfigured" from "configured"
+  // in the dashboard Service Health sidebar).
+  ngitRelay?: string;
   // Opt-out of dashboard auth for localhost requests (127.0.0.1, ::1). Default
   // true — manual override only, not surfaced in the UI yet.
   requireAuth?: boolean;
@@ -41,6 +45,7 @@ export function readIdentity(): Identity {
       readRelays: Array.isArray(parsed.readRelays) && parsed.readRelays.length > 0
                     ? parsed.readRelays.filter((x: any) => typeof x === 'string')
                     : DEFAULT_READ_RELAYS.slice(),
+      ngitRelay:  typeof parsed.ngitRelay === 'string' && parsed.ngitRelay ? parsed.ngitRelay : undefined,
       requireAuth: parsed.requireAuth === false ? false : undefined,
     };
   } catch {
@@ -84,6 +89,21 @@ export function removeReadRelay(url: string): { ok: boolean; relays: string[] } 
   ident.readRelays = ident.readRelays.filter(r => r !== url);
   writeIdentity(ident);
   return { ok: true, relays: ident.readRelays };
+}
+
+export function setNgitRelay(url: string): { ok: boolean; error?: string; ngitRelay?: string } {
+  const trimmed = url.trim();
+  if (!trimmed) {
+    const ident = readIdentity();
+    delete ident.ngitRelay;
+    writeIdentity(ident);
+    return { ok: true, ngitRelay: '' };
+  }
+  if (!isValidRelayUrl(trimmed)) return { ok: false, error: 'url must start with ws:// or wss://' };
+  const ident = readIdentity();
+  ident.ngitRelay = trimmed;
+  writeIdentity(ident);
+  return { ok: true, ngitRelay: trimmed };
 }
 
 export function setNpub(npub: string): { ok: boolean; error?: string; npub?: string } {

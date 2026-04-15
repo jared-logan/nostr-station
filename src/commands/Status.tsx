@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { P } from '../onboard/components/palette.js';
 import { execSync } from 'child_process';
+import { readIdentity } from '../lib/identity.js';
 
 interface StatusProps { json: boolean; }
 
@@ -45,7 +46,14 @@ export function gatherStatus(): ServiceStatus[] {
   })();
 
   const ngitBin   = has('ngit');
-  const ngitAuth  = ngitBin ? cmd('ngit status 2>/dev/null | head -1') : null;
+  // Station-level "configured" signal is the default nostr relay the user
+  // saved in identity.json — set via Config → NGIT in the dashboard. This
+  // matches what the dashboard can act on; project-specific ngit remotes
+  // are surfaced inside the Projects panel instead.
+  const ngitRelay = (() => {
+    try { return readIdentity().ngitRelay || ''; }
+    catch { return ''; }
+  })();
 
   const claudeBin = has('claude');
   const claudeV   = claudeBin ? cmd('claude --version 2>/dev/null') : null;
@@ -59,7 +67,7 @@ export function gatherStatus(): ServiceStatus[] {
   //   err  — not installed
   const relayState: ServiceState = relayUp ? 'ok' : relayBin ? 'warn' : 'err';
   const vpnState:   ServiceState = meshIp  ? 'ok' : nvpnBin  ? 'warn' : 'err';
-  const ngitState:  ServiceState = ngitAuth ? 'ok' : ngitBin ? 'warn' : 'err';
+  const ngitState:  ServiceState = ngitBin && ngitRelay ? 'ok' : ngitBin ? 'warn' : 'err';
   const relayBinState: ServiceState = relayBin ? 'ok' : 'err';
   const claudeState:   ServiceState = claudeBin ? 'ok' : 'err';
   const nakState:      ServiceState = nakBin ? 'ok' : 'err';
@@ -67,7 +75,7 @@ export function gatherStatus(): ServiceStatus[] {
   return [
     { id: 'relay',     label: 'Relay',       value: relayUp ? 'ws://localhost:8080 ✓' : relayBin ? 'installed (down)' : 'not installed', ok: relayUp,      state: relayState    },
     { id: 'vpn',       label: 'nostr-vpn',   value: meshIp  ?? (nvpnBin  ? 'not connected' : 'not installed'),                            ok: !!meshIp,     state: vpnState      },
-    { id: 'ngit',      label: 'ngit',        value: ngitAuth ? 'authenticated' : ngitBin ? 'not configured' : 'not installed',            ok: !!ngitAuth,   state: ngitState     },
+    { id: 'ngit',      label: 'ngit',        value: ngitBin && ngitRelay ? `relay: ${ngitRelay.replace(/^wss?:\/\//, '')}` : ngitBin ? 'not configured' : 'not installed', ok: ngitBin && !!ngitRelay, state: ngitState     },
     { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed',                                                           ok: !!claudeV,    state: claudeState   },
     { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState      },
     { id: 'relay-bin', label: 'relay bin',   value: relayV   ?? 'not installed',                                                           ok: !!relayV,     state: relayBinState },

@@ -273,6 +273,7 @@ function openExecModal({ title, subtitle, endpoint, body }) {
       const dec = new TextDecoder();
       let buf = '';
       let doneCode = null;
+      const info = {};
       outer: while (true) {
         let read;
         try { read = await reader.read(); }
@@ -287,6 +288,10 @@ function openExecModal({ title, subtitle, endpoint, body }) {
           try {
             const msg = JSON.parse(raw);
             if (msg.done) { doneCode = msg.code ?? 0; break outer; }
+            // Info frames carry side-channel metadata (e.g. the resolved
+            // path from /api/ngit/clone). They don't render in the log —
+            // we stash them and surface via the resolved promise.
+            if (msg.info) { info[msg.info] = msg.value; continue; }
             const cls = msg.stream === 'stderr' ? 'err' : '';
             const clean = (msg.line || '').replace(/\x1b\[[0-9;]*m/g, '');
             addLine(clean, cls);
@@ -303,7 +308,7 @@ function openExecModal({ title, subtitle, endpoint, body }) {
         statusPill.className = 'status-pill error'; statusPill.textContent = `exit ${doneCode}`;
       }
       closeBtn.disabled = false;
-      resolve({ ok: doneCode === 0, code: doneCode });
+      resolve({ ok: doneCode === 0, code: doneCode, info });
     }).catch((e) => {
       addLine(String(e.message || e), 'err');
       running = false;
@@ -719,6 +724,20 @@ const IdentityDrawer = (() => {
   return { open, close, render };
 })();
 
+function healthTooltip(s) {
+  if (s.state === 'err') return `${s.label} not installed`;
+  if (s.state === 'warn') {
+    if (s.id === 'ngit')  return 'ngit not configured — set a default relay in Config';
+    if (s.id === 'relay') return 'Relay installed but not running — start it in the Relay panel';
+    if (s.id === 'vpn')   return 'nostr-vpn installed but not connected';
+    return `${s.label}: ${s.value}`;
+  }
+  // state === 'ok'
+  if (/^v?\d/.test(s.value)) return `${s.label} ${s.value}`;
+  if (s.value) return `${s.label} · ${s.value}`;
+  return `${s.label} running`;
+}
+
 async function refreshHealth() {
   try {
     const status = await api('/api/status');
@@ -730,9 +749,26 @@ async function refreshHealth() {
     health.innerHTML = '';
     for (const s of status) {
       const row = document.createElement('div');
-      row.className = 'row';
-      row.innerHTML = `<span class="dot ${stateClass(s.state)}" title="${escapeHtml(s.value)}"></span>
+      const interactive = s.state === 'warn' || s.state === 'err';
+      row.className = 'row' + (interactive ? ' interactive' : '');
+      row.dataset.service = s.id;
+      row.title = healthTooltip(s);
+      row.innerHTML = `<span class="dot ${stateClass(s.state)}"></span>
                        <span class="name">${escapeHtml(s.label)}</span>`;
+      if (interactive) {
+        row.addEventListener('click', () => {
+          location.hash = '#status';
+          // Defer until the Status panel is rendered.
+          setTimeout(() => {
+            const card = document.querySelector(`#status-cards .card[data-service="${CSS.escape(s.id)}"]`);
+            if (card) {
+              card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              card.classList.add('highlight');
+              setTimeout(() => card.classList.remove('highlight'), 1400);
+            }
+          }, 60);
+        });
+      }
       health.appendChild(row);
     }
 
@@ -774,6 +810,7 @@ const StatusPanel = {
       const cta = SERVICE_CTAS[s.id] || {};
       const card = document.createElement('div');
       card.className = `card ${stateClass(s.state)}`;
+      card.dataset.service = s.id;
       card.innerHTML = `
         <div class="label">${escapeHtml(s.label)}</div>
         <div class="value">${escapeHtml(s.value)}</div>
@@ -802,6 +839,22 @@ const StatusPanel = {
         meta.innerHTML = `run: <span class="cmd-inline">${escapeHtml(cta.configHint)}</span>`;
         ctaRow.appendChild(meta);
         ctaRow.appendChild(copyBtn(cta.configHint));
+      } else if (s.state === 'warn' && s.id === 'ngit') {
+        const btn = document.createElement('button');
+        btn.className = 'primary';
+        btn.textContent = 'Configure in Config';
+        btn.addEventListener('click', () => {
+          location.hash = '#config';
+          setTimeout(() => {
+            const sec = document.getElementById('cfg-ngit-section');
+            if (sec) {
+              sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              const input = document.getElementById('cfg-ngit-relay-input');
+              if (input) input.focus();
+            }
+          }, 120);
+        });
+        ctaRow.appendChild(btn);
       }
       if (ctaRow.childElementCount > 0) card.appendChild(ctaRow);
       cards.appendChild(card);
@@ -1366,6 +1419,7 @@ const ProjectDrawer = (() => {
   let expanded = 1;               // 1..4 stepper
   let detect = null;              // last detect result
   let ownerNpub = null;           // station identity for "use default"
+  let prefillNotice = null;       // {name, url} shown at top of the drawer when seeded from Discover
 
   function resetDraft() {
     draft = {
@@ -1385,6 +1439,45 @@ const ProjectDrawer = (() => {
     mode = 'add'; editTarget = null;
     title.textContent = 'Add project';
     resetDraft();
+    prefillNotice = null;
+    try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
+    show();
+    render();
+  }
+
+  // Used by the Discover flow — opens the Add drawer pre-seeded with a
+  // repo name, capabilities, and remote URLs. Path stays blank so the
+  // user can choose where to clone (or leave it empty for an ngit-only
+  // project with no local checkout — a supported configuration).
+  async function openAddPrefilled(seed) {
+    mode = 'add'; editTarget = null;
+    title.textContent = 'Add project';
+    resetDraft();
+    draft.name = seed.name || '';
+    // Leave draft.path empty — the server owns clone-target construction
+    // and returns the fully-resolved absolute path via the "resolvedPath"
+    // info frame. Pre-filling with a "~"-prefixed string risks saving a
+    // non-expanded path into projects.json when the user skips the clone
+    // step. The "Clone this repo" action on Step 1 populates draft.path
+    // with an absolute path once the clone succeeds.
+    draft.noPath = false;
+    draft.path = '';
+    draft.capabilities = {
+      git:   !!seed.capabilities?.git,
+      ngit:  !!seed.capabilities?.ngit,
+      nsite: false,
+    };
+    draft.remotes = {
+      github: seed.remotes?.github || '',
+      ngit:   seed.remotes?.ngit   || '',
+    };
+    // Start on Step 1 so the user walks forward through the flow. Steps
+    // 2–4 are already seeded — they just confirm and continue.
+    expanded = 1;
+    prefillNotice = {
+      name: draft.name,
+      url:  draft.remotes.ngit || draft.remotes.github || '',
+    };
     try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
     show();
     render();
@@ -1392,6 +1485,7 @@ const ProjectDrawer = (() => {
 
   function openEditFromProject(project) {
     mode = 'edit'; editTarget = project.id;
+    prefillNotice = null;
     title.textContent = 'Edit project';
     draft = {
       name: project.name,
@@ -1430,6 +1524,28 @@ const ProjectDrawer = (() => {
 
   function render() {
     body.innerHTML = '';
+    if (prefillNotice) {
+      const banner = document.createElement('div');
+      banner.className = 'prefill-banner';
+      banner.innerHTML = `
+        <div class="prefill-head">
+          <span class="prefill-label">Pre-filled from scanned ngit repo</span>
+          <button class="prefill-dismiss" type="button" title="Clear pre-fill">×</button>
+        </div>
+        <div class="prefill-body">
+          <div class="prefill-name">${escapeHtml(prefillNotice.name || '(unnamed)')}</div>
+          ${prefillNotice.url ? `<div class="prefill-url"><code>${escapeHtml(prefillNotice.url)}</code></div>` : ''}
+          <div class="prefill-hint muted">
+            Capabilities and remote URL are seeded — pick a local clone path on Step 1 (or check "No local path" to add without cloning).
+          </div>
+        </div>
+      `;
+      banner.querySelector('.prefill-dismiss').addEventListener('click', () => {
+        prefillNotice = null;
+        render();
+      });
+      body.appendChild(banner);
+    }
     body.appendChild(stepEl(1, 'Path',         renderStep1()));
     body.appendChild(stepEl(2, 'Capabilities', renderStep2()));
     body.appendChild(stepEl(3, 'Identity',     renderStep3()));
@@ -1480,9 +1596,79 @@ const ProjectDrawer = (() => {
     return '';
   }
 
+  // Shared Clone action used by the top-level Clone block and the
+  // in-detect-box fallback. Sends { url, repoName } — the server owns
+  // path construction (path.join(HOME, 'projects', repoName)) and
+  // returns the absolute clone target via the "resolvedPath" info
+  // frame. After success we detect + re-render so Step 1 shows the
+  // real absolute path and downstream steps pick up detected caps.
+  async function runCloneThenDetect(ngitRemote, repoName) {
+    if (!ngitRemote || !repoName) {
+      toast('Missing clone metadata', 'No naddr or repo name on the draft', 'err');
+      return;
+    }
+    const r = await openExecModal({
+      title: `Clone · ${repoName}`,
+      subtitle: `git clone ${ngitRemote} ~/projects/${repoName}`,
+      endpoint: '/api/ngit/clone',
+      body: { url: ngitRemote, repoName },
+    });
+    if (!r.ok) {
+      toast('Clone failed', `exit ${r.code} — see modal`, 'err');
+      return;
+    }
+    const resolved = r.info?.resolvedPath || '';
+    if (!resolved) {
+      toast('Clone finished', 'Server did not return a resolved path', 'warn');
+      return;
+    }
+    toast('Clone complete', resolved, 'ok');
+    try {
+      const d = await api('/api/projects/detect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: resolved }),
+      });
+      detect = d;
+      draft.path = resolved;
+      if (d.exists && d.isGitRepo) {
+        draft.capabilities.git = true;
+        if (d.githubRemote) draft.remotes.github = d.githubRemote;
+        if (d.ngitRemote)   { draft.capabilities.ngit = true; draft.remotes.ngit = d.ngitRemote; }
+        if (d.hasNsyte)     draft.capabilities.nsite = true;
+      }
+      if (d.suggestedName && !draft.name) draft.name = d.suggestedName;
+    } catch {}
+    render();
+  }
+
   function renderStep1() {
     const el = document.createElement('div');
+    // When the drawer was seeded from Scan ngit and the user hasn't
+    // cloned yet (draft.path empty), surface a dedicated "Clone this
+    // repo" action at the top of the step. The server constructs the
+    // target path as ~/projects/<repoName> via path.join(HOME, …) and
+    // returns the absolute target via the info frame — no "~" ever
+    // flows through the client.
+    const ngitRemote = draft.remotes.ngit || '';
+    const canClone   = !!prefillNotice
+      && draft.capabilities.ngit
+      && !draft.path
+      && (ngitRemote.startsWith('naddr1') || ngitRemote.startsWith('nostr://'));
+    const cloneBlock = canClone ? `
+      <div class="clone-ready">
+        <div class="clone-ready-title">Clone <b>${escapeHtml(draft.name || 'this repo')}</b> to your machine</div>
+        <div class="muted" style="font-size:11px;margin-top:4px">
+          Will run <code>git clone ${escapeHtml(ngitRemote)} ~/projects/${escapeHtml(draft.name || 'repo')}</code>
+          (expanded to an absolute path server-side).
+        </div>
+        <div class="step-actions" style="margin-top:10px">
+          <button class="primary clone-repo-btn">Clone this repo</button>
+        </div>
+      </div>
+    ` : '';
     el.innerHTML = `
+      ${cloneBlock}
       <label class="field-label">Local path</label>
       <div class="field-row">
         <input type="text" class="path-input" placeholder="/Users/you/projects/my-project" value="${escapeHtml(draft.path)}" ${draft.noPath ? 'disabled' : ''}>
@@ -1502,8 +1688,19 @@ const ProjectDrawer = (() => {
     const detectBox = el.querySelector('.detect-box');
     const nextBtn = el.querySelector('.next-btn');
 
+    // Wire the top-level Clone block (visible only when seeded + empty path).
+    const cloneRepoBtn = el.querySelector('.clone-repo-btn');
+    if (cloneRepoBtn) {
+      cloneRepoBtn.addEventListener('click', () => runCloneThenDetect(ngitRemote, draft.name));
+    }
+
     const runDetect = async () => {
       const p = input.value.trim();
+      // Capture the path immediately so Continue works regardless of what
+      // detection reports — the user may be typing a clone target that
+      // doesn't exist yet. The server-side save validates existence too
+      // where it matters; the drawer's job is to record intent.
+      draft.path = p;
       if (!p) { detectBox.innerHTML = ''; return; }
       detectBox.innerHTML = '<div class="detect-pending">detecting…</div>';
       try {
@@ -1514,10 +1711,37 @@ const ProjectDrawer = (() => {
         });
         detect = r;
         if (!r.exists) {
-          detectBox.innerHTML = '<div class="detect err">Path not found</div>';
+          // Non-existent path is a valid state when the user is adding a
+          // scanned ngit repo they haven't cloned yet. Show a neutral info
+          // message instead of a hard error — Continue stays enabled and
+          // the pre-seeded caps/remote are preserved. If we have an ngit
+          // naddr/nostr:// remote on hand (typical after a Discover pre-
+          // fill), offer an inline "Clone here" button that streams the
+          // clone into this exact path and re-runs detect on success.
+          const seeded = prefillNotice || draft.capabilities.ngit || draft.capabilities.git;
+          const ngitRemote = draft.remotes.ngit || '';
+          const canClone = draft.capabilities.ngit
+            && (ngitRemote.startsWith('naddr1') || ngitRemote.startsWith('nostr://'));
+          if (seeded) {
+            detectBox.innerHTML = `
+              <div class="detect neutral">
+                <div>Path doesn't exist yet — it will be created when the repo is cloned.</div>
+                ${canClone
+                  ? `<div class="detect-actions" style="margin-top:8px">
+                       <button class="primary clone-here-btn">Clone here</button>
+                       <span class="muted" style="font-size:11px;margin-left:8px">Streams <code>git clone ${escapeHtml(ngitRemote)} ${escapeHtml(p)}</code></span>
+                     </div>`
+                  : `<div class="muted" style="font-size:11px;margin-top:4px">You can clone manually in a terminal, then re-enter the path.</div>`}
+              </div>`;
+            const cloneBtn = detectBox.querySelector('.clone-here-btn');
+            if (cloneBtn) {
+              cloneBtn.addEventListener('click', () => runCloneThenDetect(ngitRemote, draft.name));
+            }
+          } else {
+            detectBox.innerHTML = '<div class="detect err">Path not found</div>';
+          }
           return;
         }
-        draft.path = p;
         if (draft.name === '' && r.suggestedName) draft.name = r.suggestedName;
         if (r.isGitRepo) {
           draft.capabilities.git = true;
@@ -1780,7 +2004,7 @@ const ProjectDrawer = (() => {
     }
   }
 
-  return { openAdd, openEditFromProject, close };
+  return { openAdd, openAddPrefilled, openEditFromProject, close };
 })();
 
 // ── Projects panel ───────────────────────────────────────────────────────
@@ -1817,6 +2041,12 @@ const ProjectsPanel = (() => {
     title.textContent = 'Projects';
     subtitle.textContent = 'Your Nostr development projects';
     headActions.innerHTML = '';
+    const discoverBtn = document.createElement('button');
+    discoverBtn.textContent = 'Scan ngit';
+    discoverBtn.title = 'Find ngit repos published under your npub';
+    discoverBtn.addEventListener('click', () => openDiscoverModal());
+    headActions.appendChild(discoverBtn);
+
     const addBtn = document.createElement('button');
     addBtn.className = 'primary';
     addBtn.textContent = 'Add project';
@@ -2161,6 +2391,13 @@ const ProjectsPanel = (() => {
   }
 
   function renderNgitTab(container, p) {
+    // When ngit capability is enabled but we haven't detected a nostr remote
+    // yet, the tab swaps to an Initialize form. The station-level default
+    // relay (identity.ngitRelay) pre-fills the field when available.
+    if (p.capabilities.ngit && !p.remotes.ngit) {
+      renderNgitInitForm(container, p);
+      return;
+    }
     const remote = p.remotes.ngit || '(not configured)';
     const signing = p.identity.useDefault
       ? 'station identity'
@@ -2195,6 +2432,80 @@ const ProjectsPanel = (() => {
       }).then(r => {
         if (r.ok) toast('ngit push complete', '', 'ok');
         else      toast('ngit push failed', `exit ${r.code}`, 'err');
+      });
+    });
+  }
+
+  async function renderNgitInitForm(container, p) {
+    const owner = await api('/api/identity/config').catch(() => ({ npub: '', ngitRelay: '' }));
+    const prefill = owner.ngitRelay || '';
+    const noPath  = !p.path;
+    container.innerHTML = `
+      <div class="tab-section">
+        <h3>Initialize ngit for this project</h3>
+        <div class="muted" style="margin-bottom:10px">
+          ngit is enabled for this project but no nostr remote is configured yet.
+          Publish the repo announcement to a relay to create one.
+        </div>
+
+        <label class="field-label">Nostr relay for this repo</label>
+        <div class="field-row">
+          <input type="text" class="ngit-init-relay" placeholder="wss://relay.damus.io" value="${escapeHtml(prefill)}" ${noPath ? 'disabled' : ''}>
+        </div>
+        ${prefill ? `<div class="muted" style="font-size:11px;margin-top:4px">Pre-filled from Config → NGIT.</div>` : ''}
+
+        <label class="field-label" style="margin-top:12px">npub</label>
+        <div class="field-row">
+          <input type="text" value="${escapeHtml(p.identity.useDefault ? (owner.npub || '') : (p.identity.npub || ''))}" disabled>
+        </div>
+
+        <label class="field-label" style="margin-top:12px">Signing</label>
+        <div class="muted" style="font-size:11px">Amber will sign on first push.</div>
+
+        <div class="step-actions" style="margin-top:14px">
+          <button class="primary ngit-init-btn" ${noPath ? 'disabled title="ngit requires a local repository path."' : ''}>Initialize ngit</button>
+        </div>
+      </div>
+    `;
+
+    if (noPath) return;
+
+    container.querySelector('.ngit-init-btn').addEventListener('click', () => {
+      const relay = container.querySelector('.ngit-init-relay').value.trim();
+      if (!relay || !/^wss?:\/\//i.test(relay)) {
+        toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
+        return;
+      }
+      openExecModal({
+        title: `Initialize ngit · ${p.name}`,
+        subtitle: `ngit init --relay ${relay}`,
+        endpoint: `/api/projects/${p.id}/ngit/init`,
+        body: { relay },
+      }).then(async (r) => {
+        if (!r.ok) return; // modal stays open on non-zero; user dismisses
+        try {
+          const det = await api('/api/projects/detect', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ path: p.path }),
+          });
+          if (det.ngitRemote) {
+            const remotes = { github: p.remotes.github || null, ngit: det.ngitRemote };
+            await api(`/api/projects/${p.id}`, {
+              method: 'PATCH',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ remotes }),
+            });
+            toast('ngit initialized', 'nostr remote added', 'ok');
+          } else {
+            toast('ngit initialized', 'no remote detected — reload to retry', 'warn');
+          }
+        } catch (e) {
+          toast('Post-init sync failed', e.message || '', 'warn');
+        }
+        // Re-fetches the project list, which triggers renderDetail() for the
+        // currently open project and swaps the tab from init form → normal view.
+        reload();
       });
     });
   }
@@ -2466,6 +2777,113 @@ const ProjectsPanel = (() => {
     location.hash = '#chat';
   }
 
+  // ── Discover ngit repos published under the station owner's npub ─────
+  //
+  // Opens a modal that hits GET /api/ngit/discover (server queries
+  // kind-30617 events from the read-relays) and lets the user seed an
+  // Add Project draft from any returned repo.
+  function openDiscoverModal() {
+    const body = document.createElement('div');
+    body.className = 'discover-modal';
+    body.innerHTML = `
+      <div class="discover-status">
+        <div class="spinner" style="margin:auto"></div>
+        <div class="discover-msg" style="text-align:center;margin-top:12px">Querying relays for your ngit repositories…</div>
+        <div class="discover-queried muted" style="text-align:center;margin-top:6px;font-size:11px"></div>
+      </div>
+      <div class="discover-results" style="display:none"></div>
+    `;
+    const modal = openModal({
+      title: 'Discover ngit repositories',
+      subtitle: 'kind 30617 · published under your npub',
+      body,
+    });
+    modal.root.classList.add('discover-modal-root');
+
+    const queriedEl = body.querySelector('.discover-queried');
+    const statusEl  = body.querySelector('.discover-status');
+    const resultsEl = body.querySelector('.discover-results');
+
+    api('/api/ngit/discover').then((res) => {
+      const queried = (res.queried || []).join(', ');
+      if (res.empty || !res.repos || res.repos.length === 0) {
+        statusEl.style.display = 'none';
+        resultsEl.style.display = '';
+        resultsEl.innerHTML = `
+          <div class="discover-empty">
+            <div class="big">No ngit repositories found under your npub.</div>
+            <div class="muted" style="margin-top:8px;font-size:11px">Queried: ${escapeHtml(queried || '(no relays)')}</div>
+            <a href="#config" class="config-link" style="display:inline-block;margin-top:10px">Check your read relay config →</a>
+          </div>
+        `;
+        resultsEl.querySelector('.config-link').addEventListener('click', () => modal.close());
+        return;
+      }
+      statusEl.style.display = 'none';
+      resultsEl.style.display = '';
+      resultsEl.innerHTML = res.repos.map((r, i) => discoverRepoCardHtml(r, i)).join('');
+      resultsEl.querySelectorAll('.discover-card').forEach((card) => {
+        const idx = Number(card.dataset.idx);
+        const repo = res.repos[idx];
+        card.querySelectorAll('[data-copy]').forEach(slot => slot.appendChild(copyBtn(slot.dataset.copy)));
+        card.querySelector('.add-to-projects').addEventListener('click', () => {
+          modal.close();
+          // Prefer the server-computed `cloneUrl` (nostr://<npub>/<d-tag>)
+          // — that is the form `git-remote-nostr` actually accepts per
+          // `ngit --help`. A bare naddr is NOT a valid `git clone`
+          // argument; naddr is kept on the repo for reference only.
+          const nostrUrl = repo.cloneUrl
+            || repo.clone.find(u => u.startsWith('nostr://'))
+            || '';
+          const gitUrl   = repo.clone.find(u => /^(git|https?|ssh):\/\//i.test(u)) || '';
+          ProjectDrawer.openAddPrefilled({
+            name: repo.name,
+            capabilities: { git: !!gitUrl, ngit: true },
+            remotes: { github: gitUrl, ngit: nostrUrl },
+          });
+        });
+      });
+      queriedEl.textContent = `Queried: ${queried}`;
+    }).catch((e) => {
+      statusEl.style.display = 'none';
+      resultsEl.style.display = '';
+      resultsEl.innerHTML = `
+        <div class="discover-empty err">
+          <div class="big">Could not reach relays.</div>
+          <div class="muted" style="margin-top:8px;font-size:11px">${escapeHtml(e.message || '')}</div>
+          <a href="#config" class="config-link" style="display:inline-block;margin-top:10px">Check your read relay configuration in Config →</a>
+        </div>
+      `;
+      resultsEl.querySelector('.config-link').addEventListener('click', () => modal.close());
+    });
+  }
+
+  function discoverRepoCardHtml(r, idx) {
+    const desc = (r.description || '').length > 120
+      ? (r.description.slice(0, 117) + '…')
+      : (r.description || '');
+    const cloneRows = (r.clone || []).map(url => `
+      <div class="clone-row">
+        <code>${escapeHtml(url)}</code>
+        <span class="copy-slot" data-copy="${escapeHtml(url)}"></span>
+      </div>
+    `).join('');
+    return `
+      <div class="discover-card" data-idx="${idx}">
+        <div class="discover-card-head">
+          <div class="discover-name">${escapeHtml(r.name)}</div>
+          <button class="primary add-to-projects" title="Open the Add Project drawer pre-filled with this repo's metadata">Add to Projects</button>
+        </div>
+        ${desc ? `<div class="discover-desc muted">${escapeHtml(desc)}</div>` : ''}
+        ${cloneRows ? `<div class="discover-clones">${cloneRows}</div>` : ''}
+        <div class="discover-meta muted">
+          Published ${escapeHtml(fmtAgoMs((r.published_at || 0) * 1000))}
+          ${r.web ? ` · <a href="${escapeHtml(r.web)}" target="_blank" rel="noreferrer">web ↗</a>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
   return { onEnter, reload, openDetail };
 })();
 
@@ -2558,15 +2976,15 @@ const ConfigPanel = (() => {
     try {
       // Session fetch is best-effort: the localhost-exemption path has no
       // backing session, and we still want the rest of the panel to render.
-      const [rc, cfg, git, ident, session, profile] = await Promise.all([
+      const [rc, cfg, ident, session, profile, ngitAccount] = await Promise.all([
         api('/api/relay-config'),
         api('/api/config'),
-        api('/api/git/status'),
         api('/api/identity/config'),
         api('/api/auth/session').catch(() => null),
         api('/api/identity/profile').catch(() => null),
+        api('/api/ngit/account').catch(() => ({ loggedIn: false, relays: [] })),
       ]);
-      render(rc, cfg, git, ident, session, profile);
+      render(rc, cfg, ident, session, profile, ngitAccount);
     } catch (e) {
       container.innerHTML = `<div class="config-section"><div style="color:var(--error)">failed to load: ${escapeHtml(e.message)}</div></div>`;
     }
@@ -2639,7 +3057,7 @@ const ConfigPanel = (() => {
     return `in ${mins}m`;
   }
 
-  function render(rc, cfg, git, ident, session, profile) {
+  function render(rc, cfg, ident, session, profile, ngitAccount) {
     const whitelistHtml = rc.whitelist && rc.whitelist.length
       ? `<a href="#relay" style="color:var(--accent-bright)">${rc.whitelist.length} npub${rc.whitelist.length !== 1 ? 's' : ''} →</a>`
       : `<a href="#relay" style="color:var(--warn)">empty — add one →</a>`;
@@ -2685,6 +3103,60 @@ const ConfigPanel = (() => {
             <input id="read-relay-input" placeholder="wss://relay.example.com" autocomplete="off">
             <button id="read-relay-paste">paste</button>
             <button class="primary" id="read-relay-add">add</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="config-section" id="cfg-ngit-section">
+        <h3>NGIT</h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+          Default nostr relay for ngit. Used to pre-fill <code>ngit init</code>
+          in the Projects panel. When set, the <b>ngit</b> service shows green
+          in Service Health.
+        </div>
+        <div class="config-row">
+          <div class="k">Default relay</div>
+          <div class="v">
+            <div class="keyrow">
+              <div class="keyfield">
+                <input id="cfg-ngit-relay-input" type="text" autocomplete="off" spellcheck="false" placeholder="wss://relay.damus.io" value="${escapeHtml(ident.ngitRelay || '')}">
+              </div>
+              <button class="primary" id="cfg-ngit-relay-save">save</button>
+            </div>
+            <div class="key-status-line ${ident.ngitRelay ? 'ok' : ''}" id="cfg-ngit-relay-status">
+              ${ident.ngitRelay ? '✓ saved' : 'not set'}
+            </div>
+          </div>
+        </div>
+
+        <div class="config-row" style="margin-top:14px">
+          <div class="k">Account (signer)</div>
+          <div class="v">
+            ${ngitAccount && ngitAccount.loggedIn ? `
+              <div class="key-status-line ok">✓ signer configured</div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:6px">
+                Relays: ${(ngitAccount.relays || []).length
+                  ? (ngitAccount.relays || []).map(r => `<code>${escapeHtml(r)}</code>`).join(' · ')
+                  : '<em>none declared</em>'}
+              </div>
+              ${ngitAccount.remotePubkey ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Remote pubkey: <code>${escapeHtml(ngitAccount.remotePubkey.slice(0, 12))}…</code></div>` : ''}
+              <div class="keyrow" style="margin-top:10px">
+                <button id="cfg-ngit-relogin">Re-login</button>
+                <button class="danger" id="cfg-ngit-logout">Logout</button>
+              </div>
+              <div class="muted" style="font-size:11px;margin-top:6px">
+                Re-login refreshes a stale bunker session — fixes <code>git-remote-nostr</code>
+                panics during clone/push.
+              </div>
+            ` : `
+              <div class="key-status-line err">✗ not logged in</div>
+              <div class="muted" style="font-size:11px;margin-top:6px">
+                A signer is required before you can clone ngit repos. Login connects Amber (or another NIP-46 signer) to ngit.
+              </div>
+              <div class="keyrow" style="margin-top:10px">
+                <button class="primary" id="cfg-ngit-relogin">Login</button>
+              </div>
+            `}
           </div>
         </div>
       </div>
@@ -2735,14 +3207,6 @@ const ConfigPanel = (() => {
         </div>
       </div>
 
-      <div class="config-section">
-        <h3>Git</h3>
-        ${git && git.inRepo ? `
-          ${row('Branch', git.branch)}
-          ${row('HEAD',   git.hash + (git.dirty ? ` · ${git.dirty} uncommitted` : ''))}
-          ${(git.remotes || []).map(r => row(`remote (${r.type})`, r.url)).join('')}
-        ` : '<div style="color:var(--text-dim);font-size:11px">Not a git repository.</div>'}
-      </div>
     `;
 
     // Wire toggles
@@ -2800,6 +3264,69 @@ const ConfigPanel = (() => {
       }
       keySave.disabled = false;
     });
+
+    // NGIT default relay — persists to identity.json via /api/identity/set.
+    const ngitInput  = $('cfg-ngit-relay-input');
+    const ngitSave   = $('cfg-ngit-relay-save');
+    const ngitStatus = $('cfg-ngit-relay-status');
+    async function saveNgitRelay() {
+      const val = ngitInput.value.trim();
+      if (val && !/^wss?:\/\//i.test(val)) {
+        toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
+        return;
+      }
+      ngitSave.disabled = true;
+      try {
+        const r = await api('/api/identity/set', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ngitRelay: val }),
+        });
+        if (!r.ok) throw new Error(r.error || 'save failed');
+        ngitStatus.className = 'key-status-line ok';
+        ngitStatus.textContent = val ? '✓ saved' : 'cleared';
+        toast(val ? 'ngit relay saved' : 'ngit relay cleared', val, 'ok');
+        // Sidebar dot + Status card may change color after this.
+        refreshHealth();
+      } catch (e) {
+        toast('Save failed', e.message, 'err');
+      }
+      ngitSave.disabled = false;
+    }
+    ngitSave.addEventListener('click', saveNgitRelay);
+    ngitInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveNgitRelay(); });
+
+    // ngit account (signer) — re-login and logout both stream via the
+    // exec modal. Login is interactive: ngit prints a nostrconnect://
+    // URL into the modal that the user scans with Amber. Logout is
+    // non-interactive and strips the nostr.* keys from global git
+    // config, after which the panel re-fetches status.
+    const loginBtn  = $('cfg-ngit-relogin');
+    const logoutBtn = $('cfg-ngit-logout');
+    if (loginBtn) {
+      loginBtn.addEventListener('click', () => {
+        openExecModal({
+          title: 'ngit account login',
+          subtitle: 'Streams ngit account login — scan the nostrconnect URL with Amber',
+          endpoint: '/api/ngit/account/login',
+        }).then(() => { load(); refreshHealth(); });
+      });
+    }
+    if (logoutBtn) {
+      logoutBtn.addEventListener('click', async () => {
+        const ok = await confirmDestructive({
+          title: 'Logout from ngit?',
+          description: 'Removes the bunker URI + app key from your global git config. ngit clone/push will stop working until you log in again.',
+          confirmLabel: 'Logout',
+        });
+        if (!ok) return;
+        openExecModal({
+          title: 'ngit account logout',
+          subtitle: 'Streaming ngit account logout',
+          endpoint: '/api/ngit/account/logout',
+        }).then(() => { load(); refreshHealth(); });
+      });
+    }
 
     // Provider/model selects
     const provSel  = $('cfg-provider');

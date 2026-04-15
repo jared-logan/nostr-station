@@ -17,6 +17,7 @@ import os from 'os';
 import fs from 'fs';
 import path from 'path';
 import { spawn, execSync, execFile } from 'child_process';
+import { nip19 } from 'nostr-tools';
 import { fileURLToPath } from 'url';
 import { getKeychain } from './keychain.js';
 import { gatherStatus } from '../commands/Status.js';
@@ -27,7 +28,8 @@ import {
 import { detectInstalled, probeOllama, probeLmStudio } from './detect.js';
 import {
   readIdentity, addReadRelay, removeReadRelay, setNpub as setIdentityNpub,
-  isNpubOrHex, isNsec, type Identity,
+  setNgitRelay as setIdentityNgitRelay,
+  isNpubOrHex, isNsec, isValidRelayUrl, type Identity,
 } from './identity.js';
 import {
   clearAllSessions, issueChallenge, consumeChallenge, createSession,
@@ -660,12 +662,15 @@ function cmdSpecFor(key: string, slug?: string): CmdSpec | null {
   return null;
 }
 
-function streamExec(spec: CmdSpec, res: http.ServerResponse, req: http.IncomingMessage, cwd?: string): void {
+function streamExec(spec: CmdSpec, res: http.ServerResponse, req: http.IncomingMessage, cwd?: string, prelude?: object): void {
   res.writeHead(200, {
     'Content-Type':  'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection':    'keep-alive',
   });
+  if (prelude) {
+    try { res.write(`data: ${JSON.stringify(prelude)}\n\n`); } catch {}
+  }
   const child = spawn(spec.bin, spec.args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, ...(spec.env || {}) },
@@ -1206,6 +1211,28 @@ export async function startWebServer(port: number): Promise<void> {
           return;
         }
 
+        if (tail === 'ngit/init' && method === 'POST') {
+          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
+          // Relay URL arrives in a JSON body and is validated strictly before
+          // being handed to ngit as a fixed argv element. The validator
+          // rejects whitespace and any non-ws(s):// scheme, so there's no
+          // path for a user string to reach the shell.
+          let parsed: any = {};
+          try { parsed = JSON.parse(await readBody(req)); }
+          catch { res.writeHead(400); res.end('bad json'); return; }
+          const raw = String(parsed.relay || '').trim();
+          if (!raw || !isValidRelayUrl(raw)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'relay must be a ws:// or wss:// URL' }));
+            return;
+          }
+          streamExec(
+            { bin: 'ngit', args: ['init', '--relay', raw], env: { NO_COLOR: '1', TERM: 'dumb' } },
+            res, req, project.path,
+          );
+          return;
+        }
+
         if (tail === 'exec' && method === 'POST') {
           // Whitelisted read-only commands scoped to the project's cwd.
           // Extend the switch below — NEVER interpolate body.cmd into argv.
@@ -1288,6 +1315,7 @@ export async function startWebServer(port: number): Promise<void> {
         res.end(JSON.stringify({
           npub:       ident.npub,
           readRelays: ident.readRelays,
+          ngitRelay:  ident.ngitRelay || '',
           hasProfile: !!ident.npub,
         }));
         return;
@@ -1297,12 +1325,31 @@ export async function startWebServer(port: number): Promise<void> {
         let parsed: any = {};
         try { parsed = JSON.parse(await readBody(req)); }
         catch { res.writeHead(400); res.end('bad json'); return; }
-        const input = String(parsed.npub || '').trim();
-        const r = setIdentityNpub(input);
-        // Setting a new npub invalidates any cached profile under the old id.
-        if (r.ok) bustProfileCache();
-        res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(r));
+        // Two fields may be set by this route — npub (bootstrap owner) and
+        // ngitRelay (station-level default for ngit). Both are optional; the
+        // handler updates whichever is present.
+        const hasNpub     = typeof parsed.npub      === 'string';
+        const hasNgitRly  = typeof parsed.ngitRelay === 'string';
+        if (!hasNpub && !hasNgitRly) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'nothing to update' }));
+          return;
+        }
+        let npubResult: { ok: boolean; error?: string; npub?: string } | null = null;
+        let ngitResult: { ok: boolean; error?: string; ngitRelay?: string } | null = null;
+        if (hasNpub) {
+          npubResult = setIdentityNpub(String(parsed.npub || '').trim());
+          if (npubResult.ok) bustProfileCache();
+        }
+        if (hasNgitRly) {
+          ngitResult = setIdentityNgitRelay(String(parsed.ngitRelay || '').trim());
+        }
+        const ok = (!npubResult || npubResult.ok) && (!ngitResult || ngitResult.ok);
+        const body: any = { ok };
+        if (npubResult) { if (npubResult.npub) body.npub = npubResult.npub; if (npubResult.error) body.error = npubResult.error; }
+        if (ngitResult) { if (ngitResult.ngitRelay !== undefined) body.ngitRelay = ngitResult.ngitRelay; if (ngitResult.error) body.error = ngitResult.error; }
+        res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body));
         return;
       }
 
@@ -1401,6 +1448,266 @@ export async function startWebServer(port: number): Promise<void> {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: String(e.message || e).slice(0, 200) }));
         }
+        return;
+      }
+
+      // ── ngit discovery (kind 30617 repo announcements) ─────────────────
+      //
+      // Queries the station owner's read relays for kind 30617 (NIP-34 repo
+      // announcement) events authored by the owner's npub. Results populate
+      // the Projects → Discover modal so users can import existing ngit
+      // repos as nostr-station Projects.
+      //
+      // Security: nak is invoked via spawn() with a fixed argv array (no
+      // shell), and every arg is either a literal, a bech32-decoded hex
+      // pubkey, or a relay URL already validated against `isValidRelayUrl`.
+      if (url === '/api/ngit/discover' && method === 'GET') {
+        const ident = readIdentity();
+        if (!ident.npub) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'identity not configured' }));
+          return;
+        }
+        // Decode via nostr-tools rather than shelling to `nak decode`, which
+        // returns JSON (not raw hex) and would smuggle invalid argv into the
+        // next step. nip19.decode is also faster and never spawns a process.
+        let hex = '';
+        if (/^[0-9a-f]{64}$/.test(ident.npub)) {
+          hex = ident.npub;
+        } else {
+          try {
+            const d = nip19.decode(ident.npub);
+            if (d.type === 'npub' && typeof d.data === 'string') hex = d.data;
+          } catch {}
+        }
+        if (!hex) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'could not decode npub to hex' }));
+          return;
+        }
+        const DEFAULT_DISCOVERY_RELAYS = ['wss://relay.damus.io', 'wss://relay.nostr.band'];
+        const relays = (ident.readRelays && ident.readRelays.length
+          ? ident.readRelays
+          : DEFAULT_DISCOVERY_RELAYS
+        ).filter(isValidRelayUrl).slice(0, 8);
+        if (relays.length === 0) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ repos: [], empty: true, queried: [] }));
+          return;
+        }
+
+        const args = ['req', '-k', '30617', '-a', hex, ...relays, '--stream'];
+        const child = spawn('nak', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+        const repos = new Map<string, any>();
+        let buf = '';
+        let settled = false;
+        const finish = (status: number, body: any) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          try { child.kill('SIGTERM'); } catch {}
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(body));
+        };
+
+        child.stdout.on('data', (chunk: Buffer) => {
+          buf += chunk.toString();
+          const lines = buf.split('\n');
+          buf = lines.pop() || '';
+          for (const line of lines) {
+            const s = line.trim();
+            if (!s) continue;
+            let ev: any;
+            try { ev = JSON.parse(s); } catch { continue; }
+            if (!ev || ev.kind !== 30617 || !Array.isArray(ev.tags)) continue;
+            const dTag = ev.tags.find((t: any[]) => Array.isArray(t) && t[0] === 'd')?.[1];
+            if (!dTag) continue;
+            const key = `${ev.pubkey}:${dTag}`;
+            const prev = repos.get(key);
+            if (prev && prev.published_at >= (ev.created_at || 0)) continue;
+            const descTag = ev.tags.find((t: any[]) => t[0] === 'description')?.[1] || '';
+            const cloneTags = ev.tags
+              .filter((t: any[]) => t[0] === 'clone')
+              .flatMap((t: any[]) => t.slice(1).filter((x: any) => typeof x === 'string' && x));
+            const webTag = ev.tags.find((t: any[]) => t[0] === 'web')?.[1] || '';
+            // Compute two nostr-native identifiers for this repo:
+            //   - `cloneUrl` in the form git-remote-nostr expects
+            //     (`nostr://<npub>/<d-tag>`, per `ngit --help`). This is
+            //     what actually works with `git clone`.
+            //   - `naddr` for reference / deep-linking; it's not a valid
+            //     `git clone` argument on its own.
+            // NIP-34 `clone` tags typically carry https/ssh/git URLs,
+            // not nostr-native identifiers — we build these ourselves.
+            let naddr = '';
+            let cloneUrl = '';
+            try {
+              naddr = nip19.naddrEncode({
+                kind: 30617,
+                pubkey: ev.pubkey,
+                identifier: String(dTag),
+                relays: relays.slice(0, 3),
+              });
+            } catch {}
+            try {
+              const npub = nip19.npubEncode(ev.pubkey);
+              cloneUrl = `nostr://${npub}/${String(dTag)}`;
+            } catch {}
+            repos.set(key, {
+              pubkey: ev.pubkey,
+              name: String(dTag),
+              description: String(descTag),
+              clone: cloneTags,
+              web: String(webTag),
+              naddr,
+              cloneUrl,
+              published_at: Number(ev.created_at || 0),
+            });
+          }
+        });
+
+        // --stream never exits on its own; cap at 10s and return whatever
+        // we've collected. Enough for typical npub inventories; pagination
+        // can come later if users start publishing hundreds of repos.
+        const timer = setTimeout(() => {
+          const list = Array.from(repos.values()).sort((a, b) => b.published_at - a.published_at);
+          finish(200, { repos: list, empty: list.length === 0, queried: relays });
+        }, 10000);
+
+        child.on('error', (e) => {
+          finish(500, { error: String(e.message || e), repos: [], empty: true, queried: relays });
+        });
+        child.on('close', () => {
+          const list = Array.from(repos.values()).sort((a, b) => b.published_at - a.published_at);
+          finish(200, { repos: list, empty: list.length === 0, queried: relays });
+        });
+
+        req.on('close', () => { try { child.kill('SIGTERM'); } catch {} });
+        return;
+      }
+
+      // ── ngit clone (streams `git clone <naddr> <path>`) ────────────────
+      //
+      // Pairs with /api/ngit/discover to give Projects → Discover a clean
+      // clone step. ngit repos are cloned with the stock `git` binary —
+      // ngit installs a protocol helper so `git clone <naddr>` resolves
+      // via nostr; there is no `ngit clone` subcommand.
+      //
+      // Security:
+      //   - url must be a nostr://… or naddr1… value (the only forms the
+      //     git-remote-nostr helper accepts); anything else is rejected.
+      //   - path must resolve under the user's home directory and must
+      //     not already exist.
+      //   - git is spawned via spawn() with a fixed argv — no shell.
+      if (url === '/api/ngit/clone' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400); res.end('bad json'); return; }
+        const rawUrl      = String(parsed.url      || '').trim();
+        const rawRepoName = String(parsed.repoName || '').trim();
+        if (!rawUrl || !(rawUrl.startsWith('nostr://') || rawUrl.startsWith('naddr1'))) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'url must be a nostr:// URL or naddr1… value' }));
+          return;
+        }
+        // repoName becomes the last segment of the clone target — reject
+        // any path separators, dotfile patterns, or traversal attempts.
+        // Allowed characters mirror what git itself accepts for repo dir
+        // names in practice: letters, digits, dot, dash, underscore.
+        if (!rawRepoName
+            || !/^[A-Za-z0-9._-]{1,64}$/.test(rawRepoName)
+            || rawRepoName === '.' || rawRepoName === '..'
+            || rawRepoName.startsWith('.')) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'repoName must be a simple identifier (letters, digits, . - _)' }));
+          return;
+        }
+        // Server owns the full path construction — never accept a user-
+        // supplied path, never use a "~"-prefixed string. HOME is read
+        // from the environment (falling back to os.homedir()) and the
+        // clone target is ~/projects/<repoName>, always absolute.
+        const home = process.env.HOME || os.homedir();
+        const projectsDir = path.join(home, 'projects');
+        const target      = path.join(projectsDir, rawRepoName);
+        try { fs.mkdirSync(projectsDir, { recursive: true, mode: 0o755 }); } catch {}
+        if (fs.existsSync(target)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `target path already exists: ${target}` }));
+          return;
+        }
+        // Emit the fully-resolved target as an `info` frame so the client
+        // can call /api/projects/detect and store the absolute path in
+        // projects.json — detect does not expand "~".
+        streamExec(
+          { bin: 'git', args: ['clone', rawUrl, target], env: { NO_COLOR: '1', TERM: 'dumb' } },
+          res, req, undefined,
+          { info: 'resolvedPath', value: target },
+        );
+        return;
+      }
+
+      // ── ngit account (signer) status + login/logout ────────────────────
+      //
+      // ngit stores the signer session in global git config under
+      // `nostr.bunker-uri` + `nostr.bunker-app-key`. We read the first to
+      // derive a "logged in?" state for the Config panel; the app-key is
+      // an ephemeral keypair only meaningful to ngit itself.
+      //
+      // The bunker-uri format is:
+      //   bunker://<remote-pubkey-hex>?relay=wss://...&relay=...&secret=<...>
+      // We mask the `secret=` query param before returning — it's a live
+      // session token that a UI/clipboard/screenshot shouldn't expose.
+      if (url === '/api/ngit/account' && method === 'GET') {
+        let bunkerUri = '';
+        try {
+          bunkerUri = execSync('git config --global --get nostr.bunker-uri', { stdio: ['ignore', 'pipe', 'pipe'] })
+            .toString().trim();
+        } catch {}
+        const loggedIn = !!bunkerUri;
+        const relays: string[] = [];
+        let remotePubkey = '';
+        if (loggedIn) {
+          try {
+            const u = new URL(bunkerUri.replace(/^bunker:/, 'https:'));
+            remotePubkey = u.host; // hex pubkey sits in the host slot
+            for (const r of u.searchParams.getAll('relay')) relays.push(r);
+          } catch {}
+        }
+        // Masked URI: keep scheme + remote pubkey + relay params, replace
+        // secret with asterisks. Safe to echo to the client.
+        const maskedUri = loggedIn
+          ? bunkerUri.replace(/([?&]secret=)[^&]*/i, '$1•••')
+          : '';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          loggedIn,
+          remotePubkey,
+          relays,
+          maskedUri,
+        }));
+        return;
+      }
+
+      if (url === '/api/ngit/account/login' && method === 'POST') {
+        // `ngit account login` is interactive — without a TTY it'll
+        // typically print a nostrconnect:// URL + wait for a remote
+        // signer (Amber) to connect. We stream stdout/stderr so the
+        // modal can surface the URL; the user scans it with Amber and
+        // the command completes on its own. `-i` forces interactive
+        // mode so ngit doesn't fall back to some non-interactive
+        // default that would skip the QR path.
+        streamExec(
+          { bin: 'ngit', args: ['account', 'login', '-i'], env: { NO_COLOR: '1', TERM: 'dumb' } },
+          res, req,
+        );
+        return;
+      }
+
+      if (url === '/api/ngit/account/logout' && method === 'POST') {
+        streamExec(
+          { bin: 'ngit', args: ['account', 'logout'], env: { NO_COLOR: '1', TERM: 'dumb' } },
+          res, req,
+        );
         return;
       }
 

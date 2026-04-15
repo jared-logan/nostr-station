@@ -234,6 +234,107 @@ input:focus, textarea:focus, select:focus {
 }
 .health .row .name { color: var(--text-dim); flex: 1; }
 .health .row .val { color: var(--text); font-size: 10px; }
+.health .row.interactive {
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  padding-left: 6px;
+  padding-right: 6px;
+  margin-left: -6px;
+  margin-right: -6px;
+  transition: background 140ms ease;
+}
+.health .row.interactive:hover {
+  background: var(--bg-hover, rgba(255,255,255,0.04));
+}
+.health .row.interactive:hover .name { color: var(--text-bright); }
+
+/* One-shot highlight pulse for a card that was jumped-to from the sidebar. */
+@keyframes status-card-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(123, 180, 255, 0.55); }
+  100% { box-shadow: 0 0 0 10px rgba(123, 180, 255, 0); }
+}
+.card.highlight {
+  animation: status-card-pulse 1.3s ease-out;
+  outline: 1px solid var(--accent-bright, #7bb4ff);
+}
+
+/* ── Discover ngit repos modal ───────────────────────────────────────── */
+.discover-modal-root .modal { width: 600px; max-width: 94vw; }
+.discover-modal-root .modal-body { max-height: 70vh; overflow-y: auto; }
+.discover-modal { display: flex; flex-direction: column; gap: 12px; }
+.discover-status { padding: 28px 12px; display: flex; flex-direction: column; align-items: center; }
+.discover-status .spinner {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.12);
+  border-top-color: var(--accent-bright, #7bb4ff);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.discover-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 12px;
+  background: var(--bg-elev);
+  margin-bottom: 10px;
+}
+.discover-card-head {
+  display: flex; align-items: center; gap: 10px;
+  justify-content: space-between;
+}
+.discover-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.discover-name { font-weight: 600; color: var(--text-bright); word-break: break-word; }
+.discover-desc { margin-top: 6px; font-size: 12px; }
+.discover-clones { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.discover-clones .clone-row {
+  display: flex; align-items: center; gap: 6px; font-size: 11px;
+}
+.discover-clones code {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); color: var(--text-dim);
+}
+.discover-meta { margin-top: 8px; font-size: 11px; }
+.discover-empty {
+  text-align: center; padding: 26px 14px;
+}
+.discover-empty .big { font-size: 14px; color: var(--text-bright); }
+.discover-empty.err .big { color: var(--error); }
+.discover-empty a { color: var(--accent-bright, #7bb4ff); }
+
+/* ── Pre-fill banner in Project drawer (when seeded from Discover) ──── */
+.prefill-banner {
+  margin: -4px -4px 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-bright, #7bb4ff);
+  border-radius: var(--r-sm);
+  background: rgba(123, 180, 255, 0.06);
+}
+.prefill-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.prefill-label {
+  font-size: 10px; letter-spacing: 1.4px; text-transform: uppercase;
+  color: var(--accent-bright, #7bb4ff); font-weight: 600;
+}
+.prefill-dismiss {
+  background: transparent; border: 0; color: var(--text-dim); font-size: 16px;
+  cursor: pointer; line-height: 1; padding: 2px 6px;
+}
+.prefill-dismiss:hover { color: var(--text-bright); }
+.prefill-name { font-size: 14px; color: var(--text-bright); font-weight: 600; }
+.prefill-url  { margin-top: 4px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prefill-url code { font-family: var(--font-mono); color: var(--text-dim); }
+.prefill-hint { margin-top: 8px; font-size: 11px; }
+
+.clone-ready {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px dashed var(--accent-bright, #7bb4ff);
+  border-radius: var(--r-sm);
+  background: rgba(123, 180, 255, 0.04);
+}
+.clone-ready-title { color: var(--text-bright); font-size: 13px; }
 
 /* ── main ─────────────────────────────────────────────────────────────── */
 
