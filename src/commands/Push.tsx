@@ -10,11 +10,15 @@ import {
 interface PushProps {
   githubOnly: boolean;
   ngitOnly: boolean;
+  // Skip the y/N prompt. Used by web dashboard exec endpoint so the modal can
+  // stream push output without needing a TTY. Always confirmed by the user in
+  // the UI before the POST fires, so skipping here doesn't bypass consent.
+  yes?: boolean;
 }
 
 type Phase = 'loading' | 'summary' | 'pushing' | 'done' | 'error';
 
-export const Push: React.FC<PushProps> = ({ githubOnly, ngitOnly }) => {
+export const Push: React.FC<PushProps> = ({ githubOnly, ngitOnly, yes = false }) => {
   const [phase, setPhase]       = useState<Phase>('loading');
   const [remotes, setRemotes]   = useState<Remote[]>([]);
   const [commits, setCommits]   = useState<Commit[]>([]);
@@ -62,8 +66,17 @@ export const Push: React.FC<PushProps> = ({ githubOnly, ngitOnly }) => {
     setRemotes(filtered);
     setCommits(unpushed);
     setBranch(br);
-    setPhase('summary');
+    // With --yes we skip the y/N confirm and push immediately. The summary
+    // still renders once via Ink, then we advance into 'pushing'.
+    setPhase(yes ? 'pushing' : 'summary');
   }, []);
+
+  // Auto-execute the push when --yes is set.
+  useEffect(() => {
+    if (yes && phase === 'pushing' && results.length === 0 && !pushing && remotes.length > 0) {
+      executePushes();
+    }
+  }, [yes, phase, remotes]);
 
   // Propagate error/partial-failure phases as a non-zero exit code so
   // shell chains (`nostr-station push && make deploy`) don't silently

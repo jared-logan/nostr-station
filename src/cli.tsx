@@ -4,7 +4,7 @@ import { spawnSync } from 'child_process';
 import { render } from 'ink';
 import { Onboard }       from './onboard/index.js';
 import { Seed }          from './commands/Seed.js';
-import { Doctor }        from './commands/Doctor.js';
+import { Doctor, runDoctorPlain } from './commands/Doctor.js';
 import { Status, gatherStatus, formatStatusJson } from './commands/Status.js';
 import { Update }        from './commands/Update.js';
 import { UpdateWizard }  from './commands/UpdateWizard.js';
@@ -107,6 +107,16 @@ switch (command) {
     break;
 
   case 'doctor':
+    // --plain bypasses Ink entirely — emits one-line-per-check text so
+    // non-TTY consumers (web dashboard SSE modal, CI jobs) get readable
+    // output instead of Ink's screen-redraw frames.
+    if (flag('--plain')) {
+      const code = runDoctorPlain({
+        fix:  flag('--fix') || flag('--repair'),
+        deep: flag('--deep'),
+      });
+      process.exit(code);
+    }
     render(React.createElement(Doctor, {
       fix:  flag('--fix') || flag('--repair'),
       deep: flag('--deep'),
@@ -226,25 +236,32 @@ switch (command) {
   }
 
   case 'push':
-    // Always shows a y/N confirmation before pushing. No --yes flag exists;
-    // adding one would be scope creep. Just fail fast in non-interactive use.
-    requireInteractive('push', 'Push always confirms before sending — run from a terminal.');
+    // --yes skips the y/N confirmation (used by the web dashboard exec
+    // endpoint, which confirms with the user in the UI before POSTing).
+    if (!flag('--yes')) {
+      requireInteractive('push', 'Push confirms before sending — run from a terminal, or pass --yes.');
+    }
     render(React.createElement(Push, {
       githubOnly: flag('--github'),
       ngitOnly:   flag('--ngit'),
+      yes:        flag('--yes'),
     }));
     break;
 
   case 'nsite': {
     const nsiteAction = (args[0] ?? 'status') as 'init' | 'publish' | 'deploy' | 'status' | 'open' | 'help';
-    // init is a full wizard; publish/deploy ask y/N before uploading. The
-    // rest (status, open, help) are read-only.
-    if (nsiteAction === 'init' || nsiteAction === 'publish' || nsiteAction === 'deploy') {
+    // init is a full wizard; publish/deploy ask y/N before uploading (unless
+    // --yes, used by the web dashboard which confirms in the UI). The rest
+    // (status, open, help) are read-only.
+    if (nsiteAction === 'init') {
       requireInteractive(`nsite ${nsiteAction}`);
+    } else if ((nsiteAction === 'publish' || nsiteAction === 'deploy') && !flag('--yes')) {
+      requireInteractive(`nsite ${nsiteAction}`, 'Pass --yes to skip the confirmation.');
     }
     render(React.createElement(Nsite, {
       action: nsiteAction,
       titan:  flag('--titan'),
+      yes:    flag('--yes'),
     }));
     break;
   }
@@ -290,7 +307,7 @@ function printHelp() {
     seed                 Publish test events to your relay  (great for smoke-testing)
     push                 Push current repo to GitHub + Nostr (ngit) simultaneously
     keychain             Store, rotate, and inspect credentials in the OS keychain
-    chat                 Web chat UI at localhost:3000 — NOSTR_STATION.md as context
+    chat                 Web dashboard at localhost:3000 — chat, relay, logs, status, config
     nsite                Publish a static site to Nostr via nsyte
     setup-editor         Re-link NOSTR_STATION.md for a different AI coding tool
     completion           Install or print shell tab-completion  (zsh / bash)

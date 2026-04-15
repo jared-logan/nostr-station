@@ -14,6 +14,49 @@ function attempt(cmd: string): boolean {
   catch { return false; }
 }
 
+// Bypasses Ink so the web dashboard (and CI jobs) can stream doctor output
+// as plain terminal text. Ink's screen-redraw frames look garbled in a
+// passive log viewer; this gives one-line-per-check output that greps clean.
+export function runDoctorPlain(opts: { fix: boolean; deep: boolean }): number {
+  const results: CheckResult[] = runChecks();
+  const checks: Check[] = results.map(r => ({
+    label:  r.label,
+    status: r.ok ? 'done' : 'error',
+    fixCmd: !r.ok ? getFix(r.label) : undefined,
+  }));
+  if (opts.deep) {
+    checks.push({ label: 'NVM in shell PATH',  status: attempt('command -v nvm')   ? 'done' : 'error' });
+    checks.push({ label: 'Cargo bin in PATH',  status: attempt('command -v cargo') ? 'done' : 'error', fixCmd: 'source ~/.cargo/env' });
+  }
+
+  const padLabel = Math.max(...checks.map(c => c.label.length), 0) + 2;
+  for (const c of checks) {
+    const mark = c.status === 'done' ? '✓' : '✗';
+    const line = `${mark}  ${c.label.padEnd(padLabel)}${c.status === 'done' ? 'ok' : 'FAIL'}`;
+    console.log(line);
+    if (c.status !== 'done' && c.fixCmd) console.log(`   ↳ fix: ${c.fixCmd}`);
+  }
+
+  let fixedCount = 0;
+  if (opts.fix) {
+    for (const c of checks) {
+      if (c.status === 'error' && c.fixCmd) {
+        const ok = attempt(c.fixCmd);
+        if (ok) { fixedCount++; console.log(`   → fixed: ${c.label}`); }
+        else    { console.log(`   ✗ fix failed: ${c.label}`); }
+      }
+    }
+  }
+
+  const failures  = checks.filter(c => c.status === 'error').length;
+  const remaining = opts.fix ? Math.max(0, failures - fixedCount) : failures;
+  console.log('---');
+  if (remaining === 0) console.log('All checks passed');
+  else                 console.log(`${remaining} issue(s) remain${opts.fix ? ` · ${fixedCount} fixed` : ''}`);
+
+  return remaining === 0 ? 0 : 1;
+}
+
 export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
   const [checks, setChecks] = useState<Check[]>([]);
   const [done, setDone] = useState(false);

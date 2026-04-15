@@ -14,6 +14,7 @@ type NsiteAction = 'init' | 'publish' | 'deploy' | 'status' | 'open' | 'help';
 interface NsiteProps {
   action: NsiteAction;
   titan?: boolean;   // --titan flag for nsite open
+  yes?:   boolean;   // --yes skips publish confirmation (web dashboard use)
 }
 
 const PROJECT_CONFIG_FILE = '.nsite/project.json';
@@ -264,7 +265,9 @@ const NsiteInit: React.FC = () => {
 
 // ── Publish ────────────────────────────────────────────────────────────────
 
-const NsitePublish: React.FC = () => {
+interface NsitePublishProps { yes?: boolean; }
+
+const NsitePublish: React.FC<NsitePublishProps> = ({ yes = false }) => {
   const cwd = process.cwd();
   const [phase, setPhase] = useState<'checking' | 'confirm' | 'publishing' | 'done' | 'blocked'>('checking');
   const [cfg, setCfg]     = useState<ProjectConfig | null>(null);
@@ -302,8 +305,15 @@ const NsitePublish: React.FC = () => {
     setCfg(config);
     setFileCount(count);
     setWarnings(warns);
-    setPhase('confirm');
+    setPhase(yes ? 'publishing' : 'confirm');
   }, []);
+
+  // Auto-publish when --yes is set (confirm is owned by the web dashboard UI).
+  useEffect(() => {
+    if (yes && phase === 'publishing' && cfg && output.length === 0) {
+      executePublish();
+    }
+  }, [yes, phase, cfg]);
 
   // blocked = pre-flight error (missing config, empty build, …). A
   // published-with-errors 'done' phase also needs a non-zero exit so CI
@@ -597,12 +607,12 @@ const HELP_LINES = [
 
 // ── Root ───────────────────────────────────────────────────────────────────
 
-export const Nsite: React.FC<NsiteProps> = ({ action, titan = false }) => {
+export const Nsite: React.FC<NsiteProps> = ({ action, titan = false, yes: yesFlag = false }) => {
   // deploy is a backward-compat alias for publish
   const resolved = action === 'deploy' ? 'publish' : action;
 
   if (resolved === 'init')    return <NsiteInit />;
-  if (resolved === 'publish') return <NsitePublish />;
+  if (resolved === 'publish') return <NsitePublish yes={yesFlag} />;
   if (resolved === 'status')  return <NsiteStatus />;
   if (resolved === 'open')    return <NsiteOpen titan={titan} />;
 

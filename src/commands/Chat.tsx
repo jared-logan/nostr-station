@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { execSync } from 'child_process';
 import { P } from '../onboard/components/palette.js';
-import { startChatServer, contextExists } from '../lib/chat-server.js';
+import { startWebServer, contextExists } from '../lib/web-server.js';
 
 interface ChatProps {
   port?: number;
@@ -14,7 +14,7 @@ export const Chat: React.FC<ChatProps> = ({ port = 3000 }) => {
   const [browserOpened, setBrowserOpened] = useState(false);
 
   useEffect(() => {
-    startChatServer(port)
+    startWebServer(port)
       .then(() => {
         setStatus('running');
         try {
@@ -34,27 +34,27 @@ export const Chat: React.FC<ChatProps> = ({ port = 3000 }) => {
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>
-        <Text color={P.accent} bold>nostr-station chat</Text>
+        <Text color={P.accent} bold>nostr-station dashboard</Text>
       </Box>
 
       {status === 'starting' && (
-        <Text color={P.muted}>Starting chat server on port {port}…</Text>
+        <Text color={P.muted}>Starting dashboard on port {port}…</Text>
       )}
 
       {status === 'running' && (
         <Box flexDirection="column">
           <Box>
             <Text color={P.success}>✓ </Text>
-            <Text>Chat server at </Text>
+            <Text>Dashboard live at </Text>
             <Text color={P.accentBright}>http://localhost:{port}</Text>
           </Box>
           <Box marginTop={1} flexDirection="column">
             {!contextExists() && (
               <Box marginBottom={1}>
-                <Text color={P.warn}>⚠  NOSTR_STATION.md not found at ~/projects — run onboard first for full context.</Text>
+                <Text color={P.warn}>⚠  NOSTR_STATION.md not found at ~/projects — run onboard first for full chat context.</Text>
               </Box>
             )}
-            <Text color={P.muted}>NOSTR_STATION.md injected as system context on every request.</Text>
+            <Text color={P.muted}>Panels: status · chat · relay · logs · config</Text>
             {browserOpened ? (
               <Text color={P.muted}>Browser opened. Press Ctrl+C to stop.</Text>
             ) : (

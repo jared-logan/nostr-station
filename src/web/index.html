@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nostr-station</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="/nori.svg" type="image/svg+xml">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="header">
+    <div class="brand">
+      <img class="nori" src="/nori.svg" alt="Nori the ostrich">
+      <div>
+        <div class="wordmark">nostr-station</div>
+        <div class="tagline">Nori · Nostr-native dev environment</div>
+      </div>
+    </div>
+    <div class="hdr-meta">
+      <button class="identity-chip" id="identity-chip" aria-label="Open identity drawer">
+        <span class="avatar" id="identity-avatar"></span>
+        <span class="identity-text">
+          <span class="identity-name" id="identity-name">loading…</span>
+          <span class="identity-sub" id="identity-sub"></span>
+        </span>
+      </button>
+      <span class="chip"><span class="dot" id="hdr-relay-dot"></span><span class="v" id="hdr-relay">relay</span></span>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div>
+      <div class="section-title">Navigation</div>
+      <nav class="nav" id="nav">
+        <a href="#status" data-panel="status">
+          <span class="nav-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+          Status
+        </a>
+        <a href="#chat" data-panel="chat">
+          <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/></svg></span>
+          Chat
+        </a>
+        <a href="#relay" data-panel="relay">
+          <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M5 12a7 7 0 0 1 14 0"/><path d="M8 12a4 4 0 0 1 8 0"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg></span>
+          Relay
+        </a>
+        <a href="#git" data-panel="git">
+          <span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 8v8M8 6h8a4 4 0 0 1 4 4v0M8 18h8a4 4 0 0 0 4-4v0"/></svg></span>
+          Git
+        </a>
+        <a href="#logs" data-panel="logs">
+          <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></span>
+          Logs
+          <span class="badge" id="logs-badge" style="display:none">0</span>
+        </a>
+        <a href="#config" data-panel="config">
+          <span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg></span>
+          Config
+        </a>
+      </nav>
+    </div>
+
+    <div>
+      <div class="section-title">Service Health</div>
+      <div class="health" id="health"></div>
+    </div>
+  </aside>
+
+  <main class="main">
+
+    <!-- STATUS -->
+    <section class="panel" data-panel="status">
+      <div class="panel-head">
+        <div>
+          <div class="title">Status</div>
+          <div class="subtitle">Service health · click Install or Configure to act</div>
+        </div>
+        <div class="panel-head-actions">
+          <button id="status-doctor">run doctor</button>
+          <button id="status-refresh">refresh</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="cards" id="status-cards"></div>
+      </div>
+    </section>
+
+    <!-- CHAT -->
+    <section class="panel" data-panel="chat">
+      <div class="panel-head">
+        <div>
+          <div class="title">Chat</div>
+          <div class="subtitle" id="chat-subtitle">NOSTR_STATION.md loaded as context</div>
+        </div>
+      </div>
+
+      <div class="chat-controls">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          <div class="group">
+            <label>provider</label>
+            <select id="chat-provider"></select>
+          </div>
+          <div class="group">
+            <label>model</label>
+            <select id="chat-model"></select>
+          </div>
+          <span id="chat-key-warning" class="key-warning" style="display:none"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button id="chat-clear">clear chat</button>
+        </div>
+      </div>
+
+      <div class="chat">
+        <div class="chat-feed" id="chat-feed">
+          <div class="msg asst">
+            <div class="lbl">assistant</div>
+            <div class="body">Ready. NOSTR_STATION.md loaded as system context. What are you building?</div>
+          </div>
+        </div>
+        <div class="chat-bar">
+          <textarea id="chat-input" placeholder="Ask about Nostr development… (⏎ send · ⇧⏎ newline)"></textarea>
+          <button class="primary" id="chat-send">send</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- RELAY -->
+    <section class="panel" data-panel="relay">
+      <div class="panel-head">
+        <div>
+          <div class="title">Relay</div>
+          <div class="subtitle">Live event stream · ws://localhost:8080</div>
+        </div>
+        <div class="panel-head-actions">
+          <button id="relay-start">start</button>
+          <button id="relay-restart">restart</button>
+          <button class="danger" id="relay-stop">stop</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="relay-stats">
+          <div class="stat"><div class="k">Status</div><div class="v accent" id="relay-status">…</div></div>
+          <div class="stat"><div class="k">Events seen</div><div class="v" id="relay-count">0</div></div>
+          <div class="stat"><div class="k">Unique pubkeys</div><div class="v" id="relay-pubkeys">0</div></div>
+          <div class="stat"><div class="k">WS connection</div><div class="v" id="relay-ws">disconnected</div></div>
+          <div class="stat"><div class="k">Database</div><div class="v" id="relay-db-size">—</div></div>
+        </div>
+
+        <div class="kinds" id="relay-kinds"></div>
+        <div class="events" id="relay-events">
+          <div class="empty-state">
+            Waiting for events…
+            <div class="hint">Publish one: <code>nak event -k 1 --sec &lt;nsec&gt; "hello" ws://localhost:8080</code></div>
+          </div>
+        </div>
+
+        <div class="whitelist-manager" id="relay-whitelist">
+          <h4>Whitelist</h4>
+          <div id="relay-whitelist-items"></div>
+          <div class="add-row">
+            <input id="relay-whitelist-input" placeholder="npub1… (or 64-char hex)">
+            <button id="relay-whitelist-paste">paste</button>
+            <button class="primary" id="relay-whitelist-add">add</button>
+          </div>
+        </div>
+
+        <div class="help-card">
+          <h4>Common nak commands</h4>
+          <pre data-cmd='nak event -k 1 --sec &lt;nsec&gt; "hello" ws://localhost:8080'><span class="code">nak event -k 1 --sec &lt;nsec&gt; "hello" ws://localhost:8080</span></pre>
+          <pre data-cmd='nak req -k 1 -l 20 ws://localhost:8080'><span class="code">nak req -k 1 -l 20 ws://localhost:8080</span></pre>
+          <pre data-cmd='nak req --stream ws://localhost:8080'><span class="code">nak req --stream ws://localhost:8080</span></pre>
+          <div style="color:var(--text-dim);font-size:11px;margin-top:8px">
+            NIP-42 auth is enabled — clients must sign an AUTH event with Amber to publish.
+            <a href="https://github.com/scsibug/nostr-rs-relay" target="_blank" rel="noreferrer">nostr-rs-relay docs →</a>
+          </div>
+        </div>
+
+        <div class="danger-zone">
+          <h4>Database</h4>
+          <div class="row">
+            <div>
+              <div>Export events</div>
+              <div class="desc">Dump current events to ~/nostr-exports/</div>
+            </div>
+            <button id="relay-db-export">export</button>
+          </div>
+          <div class="row">
+            <div>
+              <div>Wipe database</div>
+              <div class="desc">Deletes all events. Relay is stopped, files removed, restarted.</div>
+            </div>
+            <button class="danger" id="relay-db-wipe">wipe</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- GIT -->
+    <section class="panel" data-panel="git">
+      <div class="panel-head">
+        <div>
+          <div class="title">Git</div>
+          <div class="subtitle" id="git-subtitle">Branch + remote status</div>
+        </div>
+        <div class="panel-head-actions">
+          <button id="git-pull">pull</button>
+          <button class="primary" id="git-push">push</button>
+        </div>
+      </div>
+      <div class="panel-body" id="git-body">
+        <div style="color:var(--muted)">loading…</div>
+      </div>
+    </section>
+
+    <!-- LOGS -->
+    <section class="panel" data-panel="logs">
+      <div class="panel-head">
+        <div>
+          <div class="title">Logs</div>
+          <div class="subtitle">Live tail · colorized · ERROR lines trigger nav badge</div>
+        </div>
+        <div class="panel-head-actions">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">
+            <input type="checkbox" id="logs-autoscroll" checked style="margin:0">
+            auto-scroll
+          </label>
+          <button id="logs-clear">clear</button>
+          <button id="logs-pause">pause</button>
+        </div>
+      </div>
+      <div class="tabs" id="logs-tabs">
+        <button class="tab active" data-log="relay">relay</button>
+        <button class="tab" data-log="watchdog">watchdog</button>
+        <button class="tab" data-log="vpn">nostr-vpn</button>
+      </div>
+      <div class="log-view" id="log-view">
+        <div class="log-line" style="color: var(--muted)">connecting…</div>
+      </div>
+    </section>
+
+    <!-- CONFIG -->
+    <section class="panel" data-panel="config">
+      <div class="panel-head">
+        <div>
+          <div class="title">Config</div>
+          <div class="subtitle">Relay settings · AI provider · git remotes</div>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="config-sections" id="config-sections">
+          <div class="config-section"><div style="color:var(--muted)">loading…</div></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- Reusable overlays, populated by app.js -->
+<div id="toasts"></div>
+<div id="modal-root"></div>
+
+<!-- Identity drawer — populated + toggled by app.js -->
+<div class="drawer-scrim" id="drawer-scrim"></div>
+<aside class="drawer" id="identity-drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div class="title">Identity</div>
+    <button class="drawer-close" id="drawer-close" aria-label="Close">×</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
