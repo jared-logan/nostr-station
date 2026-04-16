@@ -110,9 +110,20 @@ export function deleteSession(token: string): boolean {
 
 export function extractBearer(req: http.IncomingMessage): string | null {
   const h = req.headers['authorization'];
-  if (typeof h !== 'string') return null;
-  const m = h.match(/^Bearer\s+([a-f0-9]{64})$/i);
-  return m ? m[1] : null;
+  if (typeof h === 'string') {
+    const m = h.match(/^Bearer\s+([a-f0-9]{64})$/i);
+    if (m) return m[1];
+  }
+  // Fallback: browser APIs that can't set Authorization headers (EventSource,
+  // WebSocket, <a> downloads) pass the session token as a `?token=…` query
+  // param instead. Accepted because the dashboard is 127.0.0.1-only and
+  // session tokens are short-lived — the standard caveats about tokens in
+  // URLs don't apply on the local trust boundary.
+  const url = req.url || '';
+  const q   = url.indexOf('?');
+  if (q < 0) return null;
+  const tok = new URLSearchParams(url.slice(q + 1)).get('token');
+  return tok && /^[a-f0-9]{64}$/.test(tok) ? tok : null;
 }
 
 // ── NIP-98 verification ─────────────────────────────────────────────────────

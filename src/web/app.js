@@ -2986,7 +2986,11 @@ const LogsPanel = (() => {
     disconnect();
     view.innerHTML = '';
     append([`connecting to ${svc}…`]);
-    es = new EventSource(`/api/logs/${svc}`);
+    // EventSource can't set Authorization headers, so we pass the session
+    // token as a query param. Server-side extractBearer() accepts both
+    // Authorization and ?token= for exactly this reason.
+    const tok = encodeURIComponent(getSessionToken() || '');
+    es = new EventSource(`/api/logs/${svc}${tok ? `?token=${tok}` : ''}`);
     es.addEventListener('message', (e) => {
       try {
         const data = JSON.parse(e.data);
