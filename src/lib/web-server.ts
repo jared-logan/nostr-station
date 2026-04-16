@@ -47,6 +47,7 @@ import {
 } from './relay-config.js';
 import { detectPlatform, detectInstalled, probeOllama, probeLmStudio } from './detect.js';
 import { bootstrapRelayServices } from './services.js';
+import { installNostrVpn } from './install.js';
 import {
   readIdentity, addReadRelay, removeReadRelay, setNpub as setIdentityNpub,
   setNgitRelay as setIdentityNgitRelay, setSetupComplete,
@@ -1659,6 +1660,45 @@ export async function startWebServer(port: number): Promise<void> {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: String(e.message ?? e) }));
         }
+        return;
+      }
+
+      // nvpn install — mirrors the TUI Services-phase nvpn step but
+      // streams the per-step progress back to the browser as
+      // newline-delimited JSON so the wizard can render each step live
+      // (download → extract → locate → copy → verify → init → service).
+      // Long-running (~30–60s with compile, more on slow links), so a
+      // synchronous response would look like a freeze.
+      //
+      // Protocol:
+      //   {"type":"progress","step":"<message>"}   — one per onProgress call
+      //   {"type":"done","ok":bool,"detail":str}   — final event, then stream closes
+      //
+      // Gated by the same localhost-exempt wizard window as the rest of
+      // /api/setup/*, no separate public-API entry needed. `sudo -n` inside
+      // installNostrVpn will fail when the cred cache is cold; the error
+      // surfaces in the final "done" event with the nvpn-install.log path so
+      // the user can rerun `sudo <cargoBin>/nvpn service install` manually.
+      if (url === '/api/setup/nvpn/install' && method === 'POST') {
+        res.writeHead(200, {
+          'Content-Type':      'application/x-ndjson',
+          'Cache-Control':     'no-cache',
+          'Connection':        'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        try {
+          const platform = detectPlatform();
+          const result = await installNostrVpn(platform, (step) => {
+            // node's http response.write() is synchronous from our side but
+            // the socket may apply backpressure — ignore it, we're emitting
+            // <1 event per step so throttling isn't a concern.
+            res.write(JSON.stringify({ type: 'progress', step }) + '\n');
+          });
+          res.write(JSON.stringify({ type: 'done', ok: result.ok, detail: result.detail ?? '' }) + '\n');
+        } catch (e: any) {
+          res.write(JSON.stringify({ type: 'done', ok: false, detail: String(e.message ?? e) }) + '\n');
+        }
+        res.end();
         return;
       }
 

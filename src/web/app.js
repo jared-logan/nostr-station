@@ -4656,7 +4656,7 @@ AuthScreen = (() => {
 
 const SetupWizard = (() => {
   const root = $('setup-root');
-  const STAGES = ['welcome', 'identity', 'relay', 'ai', 'ngit', 'done'];
+  const STAGES = ['welcome', 'identity', 'relay', 'ai', 'ngit', 'vpn', 'done'];
   let stageIdx = 0;
   const state = { npub: '', profile: null };
 
@@ -4720,6 +4720,7 @@ const SetupWizard = (() => {
     else if (stage === 'relay')    renderRelay();
     else if (stage === 'ai')       renderAi();
     else if (stage === 'ngit')     renderNgit();
+    else if (stage === 'vpn')      renderVpn();
     else if (stage === 'done')     renderDone();
     else                           renderStub(stage);
   }
@@ -5326,6 +5327,132 @@ const SetupWizard = (() => {
       pill.remove();
     });
     document.body.appendChild(pill);
+  }
+
+  // ── VPN ──────────────────────────────────────────────────────────────
+  // Optional stage. Downloads + installs the nvpn binary into ~/.cargo/bin
+  // and runs `sudo -n nvpn service install` to register the systemd unit.
+  // Skippable — users who don't need the mesh VPN can advance to Done.
+  //
+  // Reads a newline-delimited JSON stream from /api/setup/nvpn/install and
+  // renders one row per `{type:"progress"}` event so the user sees each
+  // step (download / extract / locate / copy / verify / init / service)
+  // live instead of a 60-second freeze. The final `{type:"done"}` event
+  // carries the overall ok/detail and closes the stream.
+  async function renderVpn() {
+    root.innerHTML = shell(
+      'nostr-vpn (optional)',
+      'Mesh VPN over Nostr — connect dev machines without port forwarding.',
+      `
+        <p class="setup-copy">
+          nostr-vpn creates an encrypted mesh between machines using Nostr as
+          the signalling layer. Useful if you run projects across laptop +
+          server; skip it if you only develop locally. You can always add it
+          later with <code>nostr-station doctor --fix</code>.
+        </p>
+        <div class="setup-vpn-steps" id="setup-vpn-steps"></div>
+        <div class="setup-actions">
+          <button class="setup-back">← Back</button>
+          <div style="display:flex;gap:8px">
+            <button class="setup-skip" id="setup-vpn-skip">Skip for now</button>
+            <button class="primary" id="setup-vpn-install">Install nvpn</button>
+          </div>
+        </div>
+      `,
+    );
+    root.querySelector('.setup-back').addEventListener('click', back);
+    root.querySelector('#setup-vpn-skip').addEventListener('click', next);
+
+    const installBtn = $('setup-vpn-install');
+    const stepsEl = $('setup-vpn-steps');
+
+    installBtn.addEventListener('click', async () => {
+      installBtn.disabled = true;
+      installBtn.innerHTML = '<span class="spinner"></span> Installing…';
+      stepsEl.innerHTML = '';
+
+      // Flip the currently-running row to the terminal state (ok/err) so
+      // the next progress event starts on a fresh row. `cls` is the CSS
+      // modifier to apply ('ok' when we advance past, 'err' when a failure
+      // closes out the stream).
+      const settleCurrent = (cls) => {
+        const cur = stepsEl.querySelector('.setup-step-row.current');
+        if (!cur) return;
+        cur.classList.remove('current');
+        cur.classList.add(cls);
+      };
+
+      const appendStep = (label) => {
+        const row = document.createElement('div');
+        row.className = 'setup-step-row current';
+        row.innerHTML = `
+          <span class="dot"><span class="spinner"></span></span>
+          <span class="label">${escapeHtml(label)}</span>
+        `;
+        stepsEl.appendChild(row);
+      };
+
+      let finalMsg = null;
+      try {
+        const resp = await fetch('/api/setup/nvpn/install', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+        });
+        if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+        // NDJSON reader — split by \n, JSON.parse each line, render. Buffer
+        // the partial tail across chunks so a single event split across
+        // two TCP reads still parses cleanly.
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let msg;
+            try { msg = JSON.parse(line); }
+            catch { continue; }
+            if (msg.type === 'progress') {
+              settleCurrent('ok');
+              appendStep(msg.step);
+            } else if (msg.type === 'done') {
+              finalMsg = msg;
+              settleCurrent(msg.ok ? 'ok' : 'err');
+              if (!msg.ok && msg.detail) {
+                const last = stepsEl.querySelector('.setup-step-row:last-child');
+                if (last) {
+                  const det = document.createElement('span');
+                  det.className = 'muted';
+                  det.textContent = msg.detail;
+                  last.appendChild(det);
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        settleCurrent('err');
+        toast('Install failed', e.message || String(e), 'err');
+        installBtn.disabled = false;
+        installBtn.textContent = 'Retry install';
+        return;
+      }
+
+      installBtn.disabled = false;
+      if (finalMsg?.ok) {
+        installBtn.textContent = 'Installed ✓';
+        toast('nvpn installed', finalMsg.detail || '', 'ok');
+        setTimeout(next, 800);
+      } else {
+        installBtn.textContent = 'Retry install';
+        toast('Install did not complete', finalMsg?.detail || 'see log at ~/logs/nvpn-install.log', 'warn');
+      }
+    });
   }
 
   // ── Done ─────────────────────────────────────────────────────────────
