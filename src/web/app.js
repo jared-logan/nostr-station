@@ -4643,6 +4643,240 @@ AuthScreen = (() => {
   return { show, hide, render };
 })();
 
+// ── Setup wizard ─────────────────────────────────────────────────────────
+//
+// Full-viewport overlay shown on /setup for first-run onboarding. Walks
+// the user through: welcome → identity → relay → ai → ngit → done. Each
+// stage advances `stageIdx`; the final stage unlocks the dashboard.
+//
+// The wizard writes directly to identity.json / ai-config.json via the
+// same routes the post-auth panels use — /api/identity/set is already
+// bootstrap-exempt when no station owner exists; later stages extend
+// that exemption during setup (built out in Step 6.5).
+
+const SetupWizard = (() => {
+  const root = $('setup-root');
+  const STAGES = ['welcome', 'identity', 'relay', 'ai', 'ngit', 'done'];
+  let stageIdx = 0;
+  const state = { npub: '', profile: null };
+
+  function show() {
+    stageIdx = 0;
+    root.hidden = false;
+    render();
+  }
+
+  function hide() {
+    root.hidden = true;
+    root.innerHTML = '';
+  }
+
+  function next() { if (stageIdx < STAGES.length - 1) { stageIdx++; render(); } }
+  function back() { if (stageIdx > 0)                  { stageIdx--; render(); } }
+
+  function progressDots() {
+    return STAGES.map((s, i) => {
+      const cls = i === stageIdx ? 'active' : (i < stageIdx ? 'done' : '');
+      return `<span class="setup-dot ${cls}" title="${escapeHtml(s)}"></span>`;
+    }).join('');
+  }
+
+  function shell(title, subtitle, inner) {
+    return `
+      <div class="setup-card">
+        <div class="setup-head">
+          <img class="nori" src="/nori.svg" alt="">
+          <div>
+            <div class="wordmark">nostr-station</div>
+            <div class="subtitle">${escapeHtml(subtitle)}</div>
+          </div>
+        </div>
+        <div class="setup-progress">
+          ${progressDots()}
+          <span class="setup-step-count">Step ${stageIdx + 1} of ${STAGES.length}</span>
+        </div>
+        <div class="setup-stage-title">${escapeHtml(title)}</div>
+        <div class="setup-stage">${inner}</div>
+      </div>
+    `;
+  }
+
+  function render() {
+    const stage = STAGES[stageIdx];
+    if      (stage === 'welcome')  renderWelcome();
+    else if (stage === 'identity') renderIdentity();
+    else                           renderStub(stage);
+  }
+
+  // ── Welcome ──────────────────────────────────────────────────────────
+  function renderWelcome() {
+    root.innerHTML = shell(
+      "Let's set up your station",
+      'A one-time walkthrough — takes about two minutes.',
+      `
+        <p class="setup-copy">
+          nostr-station runs a local Nostr relay, wires up AI-assisted
+          dev tools, and links your git + nsite signing via Amber.
+          Nothing you enter here leaves this machine.
+        </p>
+        <ul class="setup-list">
+          <li>Station identity (your npub)</li>
+          <li>Local relay (already running)</li>
+          <li>AI providers (chat + terminal defaults)</li>
+          <li>ngit signing via Amber</li>
+        </ul>
+        <div class="setup-actions">
+          <button class="primary setup-next">Get started →</button>
+        </div>
+      `,
+    );
+    root.querySelector('.setup-next').addEventListener('click', next);
+  }
+
+  // ── Identity ─────────────────────────────────────────────────────────
+  function renderIdentity() {
+    const hasPreview = !!state.profile && !state.profile.empty;
+    const displayName = hasPreview
+      ? (state.profile.name || truncNpub(state.npub))
+      : '';
+    const nip05Line = hasPreview && state.profile.nip05
+      ? `<div class="nip05">${escapeHtml(state.profile.nip05)}${state.profile.nip05Verified ? ' <span class="ok">✓ verified</span>' : ''}</div>`
+      : '';
+
+    root.innerHTML = shell(
+      'Sign in as the station owner',
+      'Your npub is public. Your nsec stays on your phone (Amber).',
+      `
+        <div class="setup-field">
+          <label>Your npub</label>
+          <div class="setup-row">
+            <input id="setup-npub" type="text" placeholder="npub1…"
+              autocomplete="off" spellcheck="false" value="${escapeHtml(state.npub)}">
+            <button id="setup-paste">paste</button>
+          </div>
+          <div class="setup-hint muted">
+            No npub yet? Install <a href="https://getalby.com" target="_blank" rel="noreferrer">Alby</a>
+            or <a href="https://github.com/greenart7c3/Amber" target="_blank" rel="noreferrer">Amber</a>
+            to create one.
+          </div>
+        </div>
+
+        <div class="setup-preview ${hasPreview ? '' : 'empty'}" id="setup-preview">
+          ${hasPreview ? `
+            <div class="avatar">
+              ${state.profile.picture
+                ? `<img src="${escapeHtml(state.profile.picture)}" alt="">`
+                : pixelAvatar(state.npub, 48)}
+            </div>
+            <div class="meta">
+              <div class="name">${escapeHtml(displayName)}</div>
+              ${nip05Line}
+              <div class="npub muted">${escapeHtml(truncNpub(state.npub))}</div>
+            </div>
+          ` : `
+            <div class="muted">Paste an npub above to preview your profile.</div>
+          `}
+        </div>
+
+        <div class="setup-actions">
+          <button class="setup-back">← Back</button>
+          <button class="primary setup-save" ${state.npub ? '' : 'disabled'}>
+            Save &amp; continue
+          </button>
+        </div>
+      `,
+    );
+
+    const input = $('setup-npub');
+    const saveBtn = root.querySelector('.setup-save');
+
+    // Debounced profile preview — fires ~400ms after the user stops
+    // typing so we don't spam the relay query on every keystroke.
+    let previewTimer = null;
+    const runPreview = async () => {
+      const val = input.value.trim();
+      state.npub = val;
+      saveBtn.disabled = !val;
+      if (!val || !/^(npub1|[0-9a-f]{64})/i.test(val)) {
+        state.profile = null;
+        return render();
+      }
+      try {
+        const p = await fetch(`/api/identity/profile/preview?npub=${encodeURIComponent(val)}`)
+          .then(r => r.ok ? r.json() : null);
+        if (p && !p.error) { state.profile = p; }
+      } catch { /* leave profile as-is; partial render is fine */ }
+      render();
+    };
+
+    input.addEventListener('input', () => {
+      state.npub = input.value.trim();
+      saveBtn.disabled = !state.npub;
+      clearTimeout(previewTimer);
+      previewTimer = setTimeout(runPreview, 400);
+    });
+
+    root.querySelector('#setup-paste').addEventListener('click', async () => {
+      try {
+        input.value = (await navigator.clipboard.readText()).trim();
+        input.dispatchEvent(new Event('input'));
+      } catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+    });
+
+    root.querySelector('.setup-back').addEventListener('click', back);
+    saveBtn.addEventListener('click', async () => {
+      const val = state.npub;
+      if (!val) return;
+      saveBtn.disabled = true;
+      saveBtn.innerHTML = '<span class="spinner"></span> Saving…';
+      try {
+        const r = await fetch('/api/identity/set', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ npub: val }),
+        }).then(r => r.json());
+        if (!r.ok) throw new Error(r.error || 'save failed');
+        toast('Identity saved', truncNpub(val), 'ok');
+        next();
+      } catch (e) {
+        toast('Save failed', e.message, 'err');
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save & continue';
+      }
+    });
+
+    // Auto-run preview on mount if we already have an npub in state
+    // (re-entering this stage via Back).
+    if (state.npub && !state.profile) runPreview();
+  }
+
+  // ── Stage stubs (built out in Steps 6.3–6.5) ─────────────────────────
+  function renderStub(stage) {
+    const titles = {
+      relay: 'Relay', ai: 'AI providers', ngit: 'ngit signing', done: 'All set',
+    };
+    root.innerHTML = shell(
+      titles[stage] || stage,
+      'This stage lands in the next slice.',
+      `
+        <p class="setup-copy muted">
+          Placeholder — the ${escapeHtml(stage)} stage ships in Step 6.${
+            stage === 'relay' ? '3' : stage === 'ai' ? '3' : stage === 'ngit' ? '4' : '5'
+          }. Use Back to step through what's done so far.
+        </p>
+        <div class="setup-actions">
+          <button class="setup-back">← Back</button>
+          <button class="primary setup-next">Continue →</button>
+        </div>
+      `,
+    );
+    root.querySelector('.setup-back').addEventListener('click', back);
+    root.querySelector('.setup-next').addEventListener('click', next);
+  }
+
+  return { show, hide };
+})();
+
 // ── Registry + boot ──────────────────────────────────────────────────────
 
 const Panels = {
@@ -4713,9 +4947,13 @@ function toggleLocalhostBanner(on) {
   }
 }
 
-// Entry point: check auth status first, then either show the auth screen
-// or let bootDashboard() kick off the panel loaders.
+// Entry point: /setup launches the first-run wizard; anywhere else
+// falls through to the auth gate → either dashboard or sign-in.
 (async function authGate() {
+  if (location.pathname === '/setup') {
+    SetupWizard.show();
+    return;
+  }
   let status;
   try { status = await fetch('/api/auth/status').then(r => r.json()); }
   catch {

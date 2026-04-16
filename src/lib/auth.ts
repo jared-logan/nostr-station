@@ -246,6 +246,10 @@ const PUBLIC_API_PREFIXES = [
   '/api/auth/bunker-connect',
   '/api/auth/bunker-session/',
   '/api/auth/bunker-url',
+  // Setup wizard needs to preview a profile for a user-pasted npub
+  // BEFORE any session exists — read-only, takes the npub in the query
+  // string, never touches stored identity state.
+  '/api/identity/profile/preview',
 ];
 
 export function isPublicApi(urlPath: string): boolean {

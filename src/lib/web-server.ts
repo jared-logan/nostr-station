@@ -49,7 +49,7 @@ import { detectInstalled, probeOllama, probeLmStudio } from './detect.js';
 import {
   readIdentity, addReadRelay, removeReadRelay, setNpub as setIdentityNpub,
   setNgitRelay as setIdentityNgitRelay,
-  isNpubOrHex, isNsec, isValidRelayUrl, type Identity,
+  isNpubOrHex, isNsec, isValidRelayUrl, DEFAULT_READ_RELAYS, type Identity,
 } from './identity.js';
 import {
   clearAllSessions, issueChallenge, consumeChallenge, createSession,
@@ -1558,6 +1558,30 @@ export async function startWebServer(port: number): Promise<void> {
         bustProfileCache();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(r));
+        return;
+      }
+
+      // Public read-only profile lookup for the setup wizard. Takes an
+      // npub in the query string and resolves it against the default
+      // discovery relays. Intentionally does NOT use stored identity
+      // state — the wizard runs before identity.json is written.
+      if (url.startsWith('/api/identity/profile/preview') && method === 'GET') {
+        const qpos = (req.url || '').indexOf('?');
+        const qs = qpos >= 0 ? new URLSearchParams((req.url || '').slice(qpos + 1)) : new URLSearchParams();
+        const raw = (qs.get('npub') || '').trim();
+        if (!raw || !isNpubOrHex(raw) || isNsec(raw)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid npub' }));
+          return;
+        }
+        try {
+          const p = await lookupProfile(raw, DEFAULT_READ_RELAYS.slice());
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(p));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: String(e.message || e) }));
+        }
         return;
       }
 
