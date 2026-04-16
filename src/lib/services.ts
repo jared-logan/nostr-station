@@ -4,6 +4,10 @@ import { execSync } from 'child_process';
 import type { Platform, Config } from './detect.js';
 import { getKeychain, getKeychainBackendName } from './keychain.js';
 import { addToWhitelist } from './relay-config.js';
+import { keychainAccountFor, getProvider as getAiProvider } from './ai-providers.js';
+import {
+  readAiConfig, writeAiConfig, type ProviderConfig,
+} from './ai-config.js';
 
 // ── Templates ──────────────────────────────────────────────────────────────────
 
@@ -288,6 +292,117 @@ export async function writeClaudeEnv(homeDir: string, c: Config): Promise<string
   ].join('\n') + '\n');
 
   return getKeychainBackendName();
+}
+
+// Maps the onboard Config.aiProvider slug → ai-providers.ts registry id.
+// Most match 1:1; the exception is 'ppq' which was renamed to 'payperq'
+// in the new registry. 'custom' has no registry entry — callers skip
+// writing an ai-config entry for it.
+const ONBOARD_PROVIDER_MAP: Record<string, string> = {
+  'anthropic':    'anthropic',
+  'openrouter':   'openrouter',
+  'opencode-zen': 'opencode-zen',
+  'routstr':      'routstr',
+  'ppq':          'payperq',
+  'ollama':       'ollama',
+  'lmstudio':     'lmstudio',
+  'maple':        'maple',
+};
+
+/**
+ * Writes ai-config.json based on the onboard Config values, alongside
+ * whatever writeClaudeEnv wrote to ~/.claude_env. Makes a fresh install
+ * land in the same state the upgrade-path migrateIfNeeded() produces —
+ * the Chat pane + CLI `nostr-station ai` see a configured provider from
+ * first boot without requiring the user to run anything extra.
+ *
+ * Duplicates the API key into the new `ai:<provider-id>` keychain slot
+ * so the per-provider lookup in /api/ai/chat finds it. Leaves the legacy
+ * `ai-api-key` slot intact for Claude Code's env-var path (writeClaudeEnv).
+ *
+ * Also wires Claude Code as a terminal-native provider when the user
+ * picked it as their editor — makes "Open in Claude Code" on project
+ * cards work without a separate Config panel step.
+ */
+export async function writeAiConfigFromOnboard(c: Config): Promise<void> {
+  const providerId = ONBOARD_PROVIDER_MAP[c.aiProvider];
+  if (!providerId) return;  // 'custom' etc. — no registry entry to write
+  const provider = getAiProvider(providerId);
+  if (!provider || provider.type !== 'api') return;
+
+  const cfg = readAiConfig();
+  const entry: ProviderConfig = { ...(cfg.providers[providerId] || {}) };
+
+  // Provider-specific keys + model overrides (mirror writeClaudeEnv).
+  // bareKey providers (ollama / lmstudio / maple) skip the key store —
+  // their daemons don't check — but still get a config entry so the
+  // Chat pane lists them as configured.
+  let rawKey: string | undefined;
+  let model: string | undefined;
+  let baseUrl: string | undefined;
+  switch (c.aiProvider) {
+    case 'anthropic':
+      // Claude Code uses ANTHROPIC_API_KEY from the shell env — see the
+      // writeClaudeEnv early-return for 'anthropic'. The new Chat pane
+      // surface falls back to the same env var at request time, so we
+      // don't require a key at onboard time either.
+      break;
+    case 'openrouter':
+      rawKey = c.openrouterKey;
+      model  = c.openrouterModel;
+      break;
+    case 'routstr':
+      rawKey  = c.routstrCashuToken;
+      baseUrl = c.routstrServer;
+      break;
+    case 'ppq':
+      rawKey = c.ppqApiKey;
+      break;
+    case 'opencode-zen':
+      rawKey = c.opencodeZenKey;
+      model  = c.opencodeZenModel;
+      break;
+    case 'maple':
+      rawKey  = c.mapleApiKey;
+      baseUrl = c.mapleBase;
+      break;
+    case 'ollama':
+      baseUrl = c.ollamaBase;
+      model   = c.ollamaModel;
+      break;
+    case 'lmstudio':
+      baseUrl = c.lmstudioBase;
+      model   = c.lmstudioModel;
+      break;
+  }
+
+  if (rawKey && rawKey.length >= 4) {
+    try {
+      await getKeychain().store(keychainAccountFor(providerId), rawKey);
+      entry.keyRef = `keychain:${keychainAccountFor(providerId)}`;
+    } catch {
+      // macOS aqua / keychain failure — fall through and write the
+      // config entry anyway. Config panel can re-enter the key in the
+      // browser form later (that path has Aqua).
+    }
+  }
+  if (model)   entry.model   = model;
+  if (baseUrl) entry.baseUrl = baseUrl;
+
+  cfg.providers[providerId] = entry;
+  // Set as chat default only when no default exists (defensive — upgrade
+  // paths set this already; onboard-first-run starts from empty).
+  if (!cfg.defaults.chat) cfg.defaults.chat = providerId;
+
+  // Terminal-native wiring — Claude Code is the only editor value that
+  // maps to a registry terminal-native provider today. Other editors
+  // (cursor / windsurf / …) are external apps, not CLI tools we spawn.
+  if (c.editor === 'claude-code') {
+    cfg.providers['claude-code'] = { ...(cfg.providers['claude-code'] || {}), enabled: true };
+    if (!cfg.defaults.terminal) cfg.defaults.terminal = 'claude-code';
+  }
+
+  writeAiConfig(cfg);
 }
 
 // Map each AI coding tool to its start command

@@ -5,7 +5,8 @@ import type { Platform, Config } from '../../lib/detect.js';
 import {
   writeRelayConfig, writeWatchdogScript, setupDirs,
   installRelayService, installWatchdogService,
-  writeClaudeEnv, generateWatchdogKeypair, writeContextFile,
+  writeClaudeEnv, writeAiConfigFromOnboard,
+  generateWatchdogKeypair, writeContextFile,
   EDITOR_FILENAMES,
 } from '../../lib/services.js';
 import { installNostrVpn, setupNgitBunker, generateSshKey } from '../../lib/install.js';
@@ -148,10 +149,15 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
         up(8, { status: 'done' });
       } catch (e: any) { up(8, { status: 'error', detail: e.message }); }
 
-      // AI provider — key stored in keychain, loader script written to ~/.claude_env
+      // AI provider — writes both the legacy ~/.claude_env loader (used by
+      // Claude Code via shell env) AND the new ~/.nostr-station/ai-config.json
+      // (used by Chat pane + CLI). Writing both keeps existing shell-env
+      // flows working while giving the dashboard a configured provider
+      // from first boot.
       up(9, { status: 'running' });
       try {
         const backend = await writeClaudeEnv(platform.homeDir, cfg);
+        await writeAiConfigFromOnboard(cfg);
         up(9, { status: 'done', detail: backend });
       } catch (e: any) { up(9, { status: 'error', detail: e.message }); }
 

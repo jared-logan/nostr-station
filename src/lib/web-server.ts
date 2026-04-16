@@ -2210,6 +2210,14 @@ export async function startWebServer(port: number): Promise<void> {
           try {
             apiKey = (await getKeychain().retrieve(keychainAccountFor(providerId))) ?? '';
           } catch { apiKey = ''; }
+          // Anthropic env-var fallback: onboard for aiProvider='anthropic'
+          // intentionally does not store a key (the user owns ANTHROPIC_API_KEY
+          // in their shell env via ~/.claude_env). Read it at request time so
+          // a fresh install doesn't hit "No API key" on the first chat turn.
+          // Mirrors the legacy /api/chat path in loadProviderConfig().
+          if (!apiKey && providerId === 'anthropic') {
+            apiKey = process.env.ANTHROPIC_API_KEY ?? '';
+          }
           if (!apiKey) {
             return sseError(`No API key for ${provider.displayName} — set one in Config`);
           }
