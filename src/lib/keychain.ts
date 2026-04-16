@@ -5,7 +5,16 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 
-export type KeychainKey = 'ai-api-key' | 'watchdog-nsec' | 'demo-nsec';
+// Known static slots (watchdog-nsec, demo-nsec) + the legacy single-provider
+// AI slot (ai-api-key) + the new per-provider slots (ai:anthropic, ai:openai,
+// ai:claude-code, …). The template literal preserves type-safety against
+// typos in call sites — `ai-apikey` still fails to compile — while allowing
+// the dynamic per-provider shape that the AI config system needs.
+export type KeychainKey =
+  | 'ai-api-key'
+  | 'watchdog-nsec'
+  | 'demo-nsec'
+  | `ai:${string}`;
 
 export interface KeychainBackend {
   store(key: KeychainKey, value: string): Promise<void>;
