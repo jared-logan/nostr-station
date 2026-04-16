@@ -27,7 +27,12 @@ import { detectPlatform } from './lib/detect.js';
 import { installSystemDepsInherit } from './lib/install.js';
 import { VERSION } from './lib/version.js';
 
-const [,, command = 'help', ...args] = process.argv;
+// argv[0] is node, argv[1] is this script. When no subcommand is given
+// (length === 2) we route to the web-first welcome flow instead of
+// printing help — the spec's "nostr-station → browser" behavior. An
+// explicit `help` / `--help` / `-h` still prints the text help.
+const bareInvocation = process.argv.length === 2;
+const [,, command = bareInvocation ? '__welcome__' : 'help', ...args] = process.argv;
 
 const flag = (f: string) => args.includes(f);
 const arg  = (f: string) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
@@ -156,6 +161,13 @@ switch (command) {
     render(React.createElement(Chat, {
       port: arg('--port') ? parseInt(arg('--port')!, 10) : 3000,
     }));
+    break;
+
+  case '__welcome__':
+    // No-args entry — boots the dashboard and deep-links the browser
+    // to the setup wizard at /setup. If the station is already set up
+    // the wizard short-circuits to the dashboard (handled in 6.2+).
+    render(React.createElement(Chat, { port: 3000, path: '/setup' }));
     break;
 
   case 'logs':

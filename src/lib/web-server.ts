@@ -2501,6 +2501,18 @@ export async function startWebServer(port: number): Promise<void> {
       if (method === 'GET' && serveVendorXterm(req, res)) return;
       if (method === 'GET' && serveStatic(req, res)) return;
 
+      // SPA routes — served from index.html. The client router picks up
+      // the path from location and renders the wizard/panel accordingly.
+      // Listed explicitly (not a catch-all) so typos still 404.
+      if (method === 'GET' && url === '/setup') {
+        const indexPath = path.join(WEB_DIR, 'index.html');
+        if (fs.existsSync(indexPath)) {
+          res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' });
+          fs.createReadStream(indexPath).pipe(res);
+          return;
+        }
+      }
+
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not found');
     });
