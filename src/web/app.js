@@ -3079,15 +3079,19 @@ const ConfigPanel = (() => {
     try {
       // Session fetch is best-effort: the localhost-exemption path has no
       // backing session, and we still want the rest of the panel to render.
-      const [rc, cfg, ident, session, profile, ngitAccount] = await Promise.all([
+      const [rc, cfg, ident, session, profile, ngitAccount, aiList] = await Promise.all([
         api('/api/relay-config'),
         api('/api/config'),
         api('/api/identity/config'),
         api('/api/auth/session').catch(() => null),
         api('/api/identity/profile').catch(() => null),
         api('/api/ngit/account').catch(() => ({ loggedIn: false, relays: [] })),
+        // /api/ai/providers returns the registry + per-provider state.
+        // Pre-4.x servers won't have this endpoint; a catch keeps the
+        // panel renderable against a stale backend (providers list hides).
+        api('/api/ai/providers').catch(() => null),
       ]);
-      render(rc, cfg, ident, session, profile, ngitAccount);
+      render(rc, cfg, ident, session, profile, ngitAccount, aiList);
     } catch (e) {
       container.innerHTML = `<div class="config-section"><div style="color:var(--error)">failed to load: ${escapeHtml(e.message)}</div></div>`;
     }
@@ -3160,7 +3164,7 @@ const ConfigPanel = (() => {
     return `in ${mins}m`;
   }
 
-  function render(rc, cfg, ident, session, profile, ngitAccount) {
+  function render(rc, cfg, ident, session, profile, ngitAccount, aiList) {
     const whitelistHtml = rc.whitelist && rc.whitelist.length
       ? `<a href="#relay" style="color:var(--accent-bright)">${rc.whitelist.length} npub${rc.whitelist.length !== 1 ? 's' : ''} →</a>`
       : `<a href="#relay" style="color:var(--warn)">empty — add one →</a>`;
@@ -3265,39 +3269,19 @@ const ConfigPanel = (() => {
       </div>
 
       <div class="config-section">
-        <h3>AI Provider</h3>
-        <div class="config-row">
-          <div class="k">Provider</div>
-          <div class="v"><select id="cfg-provider" style="min-width:180px"></select></div>
+        <h3>AI Providers</h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+          Terminal-native tools (Claude Code, OpenCode) launch in the terminal panel with cwd scoped to the selected project.
+          API providers stream through the Chat pane via <code>/api/ai/chat</code>.
         </div>
-        <div class="config-row">
-          <div class="k">Model</div>
-          <div class="v"><select id="cfg-model" style="min-width:180px"></select></div>
-        </div>
-        ${row('Base URL', cfg.baseUrl || '(provider default)')}
-        <div class="config-row">
-          <div class="k">API key</div>
-          <div class="v">
-            <div class="keyrow">
-              <div class="keyfield">
-                <input id="cfg-key-input" type="password" autocomplete="off" placeholder="paste provider key (sk-…)">
-                <button class="eye" id="cfg-key-eye" aria-label="toggle visibility">
-                  <svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
-                </button>
-              </div>
-              <button class="primary" id="cfg-key-save">save</button>
-            </div>
-            <div class="key-status-line ${cfg.configured ? 'ok' : 'err'}" id="cfg-key-status">
-              ${cfg.configured ? '✓ stored in keychain' : '✗ not stored'}
-            </div>
-          </div>
-        </div>
-        <div class="config-row">
+        ${renderAiProviders(aiList)}
+        <div class="config-row" style="margin-top:10px">
           <div class="k">Context</div>
           <div class="v ${cfg.hasContext ? 'on' : 'off'}">${cfg.hasContext ? 'NOSTR_STATION.md loaded' : 'not found'}</div>
         </div>
         <div class="callout">
-          Prefer CLI? <code>nostr-station keychain set ai-api-key</code>
+          Per-provider keys live in the OS keychain as <code>ai:&lt;provider&gt;</code>.
+          Config file: <code>~/.nostr-station/ai-config.json</code>.
         </div>
       </div>
 
@@ -3362,38 +3346,9 @@ const ConfigPanel = (() => {
       catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
     });
 
-    // API-key input — masked by default, reveal toggle, save button.
-    // Server never returns the stored key, and we never log it here.
-    const keyInput = $('cfg-key-input');
-    const keyEye   = $('cfg-key-eye');
-    const keySave  = $('cfg-key-save');
-    const keyStat  = $('cfg-key-status');
-    keyEye.addEventListener('click', () => {
-      keyInput.type = keyInput.type === 'password' ? 'text' : 'password';
-    });
-    keySave.addEventListener('click', async () => {
-      const key = keyInput.value;
-      if (!key) { toast('Enter a key first', '', 'warn'); return; }
-      keySave.disabled = true;
-      try {
-        const r = await api('/api/keychain/set', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ key }),
-        });
-        if (!r.ok) throw new Error(r.error || 'save failed');
-        keyInput.value = '';
-        keyStat.className = 'key-status-line ok';
-        keyStat.textContent = '✓ stored in keychain';
-        toast('API key stored', 'keychain write succeeded', 'ok');
-        // Let Chat panel and header warning bar refresh from /api/config.
-        document.dispatchEvent(new CustomEvent('api-config-changed'));
-        refreshHeader();
-      } catch (e) {
-        toast('Save failed', e.message, 'err');
-      }
-      keySave.disabled = false;
-    });
+    // Multi-provider AI list — see renderAiProviders() for the markup.
+    // Wire up all row actions + the "Add provider" dropdown in one place.
+    wireAiProviders();
 
     // NGIT default relay — persists to identity.json via /api/identity/set.
     const ngitInput  = $('cfg-ngit-relay-input');
@@ -3484,40 +3439,278 @@ const ConfigPanel = (() => {
       });
     }
 
-    // Provider/model selects
-    const provSel  = $('cfg-provider');
-    const modelSel = $('cfg-model');
-    provSel.innerHTML = PROVIDER_LIST.map(p => `<option value="${p.value}">${escapeHtml(p.label)}</option>`).join('');
-    const byName = {
-      'Anthropic': 'anthropic', 'OpenRouter': 'openrouter', 'OpenCode Zen': 'opencode-zen',
-      'Routstr': 'routstr', 'PayPerQ': 'ppq', 'Ollama': 'ollama',
-      'LM Studio': 'lmstudio', 'Maple': 'maple', 'Custom': 'custom',
-    };
-    const slug = byName[cfg.provider] || 'anthropic';
-    provSel.value = slug;
-    modelsFor(slug).then(models => {
-      modelSel.innerHTML = models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
-      if (cfg.model && models.includes(cfg.model)) modelSel.value = cfg.model;
-    });
-    provSel.addEventListener('change', async () => {
-      const models = await modelsFor(provSel.value);
-      modelSel.innerHTML = models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
-      saveProvider();
-    });
-    modelSel.addEventListener('change', saveProvider);
+  }
 
-    async function saveProvider() {
+  // ── AI providers list ───────────────────────────────────────────────
+  //
+  // Renders ai-config + registry state from /api/ai/providers. Callers
+  // render the list HTML then call wireAiProviders() to attach actions.
+  // Keep this in ConfigPanel so the close-over of load() + toast is free.
+
+  function renderAiProviders(aiList) {
+    if (!aiList || !Array.isArray(aiList.providers)) {
+      return `<div style="color:var(--warn);font-size:12px">AI provider list unavailable — server may be pre-Step-4.</div>`;
+    }
+    // Split into "configured" (shown at top) and "available" (in the Add
+    // dropdown). A provider is configured when it has ANY opt-in signal —
+    // a keyRef on API, or enabled:true on terminal-native. bareKey locals
+    // count as configured only when the user explicitly added them.
+    const configured = aiList.providers.filter(p => p.configured);
+    const available  = aiList.providers.filter(p => !p.configured);
+
+    const rows = configured.length === 0
+      ? `<div class="ai-empty">No AI providers configured yet. Add one below.</div>`
+      : configured.map(renderAiRow).join('');
+
+    // Add dropdown grouped by type.
+    const termOpts = available.filter(p => p.type === 'terminal-native')
+      .map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.displayName)}</option>`).join('');
+    const apiOpts = available.filter(p => p.type === 'api')
+      .map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.displayName)}</option>`).join('');
+
+    const addSelect = (termOpts || apiOpts) ? `
+      <div class="ai-add-row" style="margin-top:12px">
+        <select id="ai-add-select" style="min-width:220px">
+          <option value="">+ Add a provider…</option>
+          ${termOpts ? `<optgroup label="Terminal-native">${termOpts}</optgroup>` : ''}
+          ${apiOpts  ? `<optgroup label="API">${apiOpts}</optgroup>` : ''}
+        </select>
+        <div id="ai-add-keyrow" class="keyrow" style="margin-top:8px;display:none">
+          <div class="keyfield">
+            <input id="ai-add-key" type="password" autocomplete="off" placeholder="paste provider key (sk-…)">
+            <button class="eye" id="ai-add-eye" aria-label="toggle visibility" type="button">
+              <svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+          <button class="primary" id="ai-add-save" type="button">add</button>
+          <button id="ai-add-cancel" type="button">cancel</button>
+        </div>
+      </div>
+    ` : '';
+
+    return `
+      <div class="ai-providers-list" id="ai-providers-list">${rows}</div>
+      ${addSelect}
+    `;
+  }
+
+  function renderAiRow(p) {
+    const typeLabel  = p.type === 'terminal-native' ? 'terminal' : 'api';
+    const typeClass  = p.type === 'terminal-native' ? 'term' : 'api';
+    const isChatDef  = !!p.isDefault?.chat;
+    const isTermDef  = !!p.isDefault?.terminal;
+    // Action buttons — only show "set default" when it's not already set
+    // AND the provider type matches (chat defaults are API-only; terminal
+    // defaults are terminal-native only).
+    const actions = [];
+    if (p.type === 'api' && !isChatDef) {
+      actions.push(`<button class="ai-set-default" data-kind="chat" data-id="${escapeHtml(p.id)}">Use for Chat</button>`);
+    }
+    if (p.type === 'terminal-native' && !isTermDef) {
+      actions.push(`<button class="ai-set-default" data-kind="terminal" data-id="${escapeHtml(p.id)}">Use for Terminal</button>`);
+    }
+    actions.push(`<button class="danger ai-remove" data-id="${escapeHtml(p.id)}">Remove</button>`);
+
+    const badges = [];
+    badges.push(`<span class="ai-badge type-${typeClass}">${typeLabel}</span>`);
+    if (p.type === 'api') {
+      badges.push(`<span class="ai-badge status-ok">✓ key set</span>`);
+    } else {
+      badges.push(`<span class="ai-badge status-ok">enabled</span>`);
+    }
+    if (isChatDef)  badges.push(`<span class="ai-badge default">chat default</span>`);
+    if (isTermDef)  badges.push(`<span class="ai-badge default">terminal default</span>`);
+
+    const model = p.model ? `<span class="ai-model">${escapeHtml(p.model)}</span>` : '';
+
+    return `
+      <div class="ai-provider-row" data-id="${escapeHtml(p.id)}" data-type="${typeClass}">
+        <div class="ai-provider-head">
+          <span class="ai-provider-name">${escapeHtml(p.displayName)}</span>
+          ${badges.join('')}
+        </div>
+        ${model ? `<div class="ai-provider-meta">${model}</div>` : ''}
+        <div class="ai-provider-actions">${actions.join('')}</div>
+      </div>
+    `;
+  }
+
+  function wireAiProviders() {
+    // Row-level actions (Remove, Set-default) via event delegation —
+    // renderAiProviders re-renders the whole list on every change, so
+    // keeping listeners on the container dodges the re-bind dance.
+    const list = $('ai-providers-list');
+    if (list) {
+      list.addEventListener('click', async (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+        const id = btn.dataset.id;
+        if (!id) return;
+        if (btn.classList.contains('ai-remove')) {
+          const ok = await confirmDestructive({
+            title: `Remove ${id}?`,
+            description: 'Deletes the keychain entry (if any) and removes it from the provider list.',
+            confirmLabel: 'Remove',
+          });
+          if (!ok) return;
+          await removeAiProvider(id);
+          return;
+        }
+        if (btn.classList.contains('ai-set-default')) {
+          await setAiDefault(btn.dataset.kind, id);
+          return;
+        }
+      });
+    }
+
+    // Add dropdown — selecting a terminal-native provider adds it
+    // directly (no key needed). Selecting an API provider reveals the
+    // inline key input.
+    const sel = $('ai-add-select');
+    if (!sel) return;
+    const keyRow    = $('ai-add-keyrow');
+    const keyInput  = $('ai-add-key');
+    const keyEye    = $('ai-add-eye');
+    const saveBtn   = $('ai-add-save');
+    const cancelBtn = $('ai-add-cancel');
+
+    sel.addEventListener('change', async () => {
+      const id = sel.value;
+      if (!id) { keyRow.style.display = 'none'; return; }
+      // Find the chosen provider's type by matching against the current
+      // aiList closure — cheap linear search is fine, <20 entries.
+      const chosen = (aiList?.providers || []).find(x => x.id === id);
+      if (!chosen) { keyRow.style.display = 'none'; return; }
+
+      if (chosen.type === 'terminal-native') {
+        // No key. Enable immediately.
+        await enableTerminalProvider(id);
+        sel.value = '';
+      } else if (isBareKeyProvider(id)) {
+        // Local daemons (ollama / lmstudio / maple) don't need a real
+        // key — adding them just means creating an ai-config entry so
+        // they appear in the Chat dropdown. Server fills in the bareKey
+        // sentinel at request time.
+        await addBareKeyProvider(id);
+        sel.value = '';
+      } else {
+        // Show key input — user types, hits save.
+        keyRow.style.display = '';
+        keyInput.value = '';
+        keyInput.type  = 'password';
+        keyInput.focus();
+      }
+    });
+
+    keyEye?.addEventListener('click', () => {
+      keyInput.type = keyInput.type === 'password' ? 'text' : 'password';
+    });
+
+    saveBtn?.addEventListener('click', async () => {
+      const id  = sel.value;
+      const key = keyInput.value;
+      if (!id || !key) return;
+      saveBtn.disabled = true;
       try {
-        const r = await api('/api/config/set', {
+        const r = await api(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ provider: provSel.value, model: modelSel.value }),
+          body: JSON.stringify({ key }),
         });
         if (!r.ok) throw new Error(r.error || 'save failed');
-        toast('Provider saved', `${provSel.value} · ${modelSel.value}`, 'ok');
-        document.dispatchEvent(new CustomEvent('api-config-changed'));
-        refreshHeader();
-      } catch {}
+        toast('Provider added', id, 'ok');
+        // If no chat default yet, this one becomes it so users with a
+        // fresh install get working chat immediately after adding their
+        // first API provider. Server-side rule would be stricter; client
+        // opts in explicitly.
+        const list2 = await api('/api/ai/providers');
+        if (!list2?.defaults?.chat) await setAiDefault('chat', id);
+        load();
+      } catch (e) {
+        toast('Add failed', e.message, 'err');
+      }
+      saveBtn.disabled = false;
+    });
+
+    cancelBtn?.addEventListener('click', () => {
+      keyRow.style.display = 'none';
+      sel.value = '';
+      keyInput.value = '';
+    });
+  }
+
+  // Local-daemon provider ids that accept a sentinel / empty key and don't
+  // need a keychain entry. Mirrors the bareKey set in ai-providers.ts.
+  function isBareKeyProvider(id) {
+    return id === 'ollama' || id === 'lmstudio' || id === 'maple';
+  }
+
+  async function addBareKeyProvider(id) {
+    try {
+      await api('/api/ai/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providers: { [id]: {} } }),  // presence = opted-in
+      });
+      // Auto-set as chat default if none is set.
+      const list2 = await api('/api/ai/providers');
+      if (!list2?.defaults?.chat) await setAiDefault('chat', id);
+      toast('Provider added', id, 'ok');
+      load();
+    } catch (e) {
+      toast('Add failed', e.message, 'err');
+    }
+  }
+
+  async function enableTerminalProvider(id) {
+    try {
+      await api('/api/ai/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providers: { [id]: { enabled: true } } }),
+      });
+      // Auto-set as terminal default if none is set yet.
+      const list2 = await api('/api/ai/providers');
+      if (!list2?.defaults?.terminal) await setAiDefault('terminal', id);
+      toast('Provider enabled', id, 'ok');
+      load();
+    } catch (e) {
+      toast('Enable failed', e.message, 'err');
+    }
+  }
+
+  async function setAiDefault(kind, id) {
+    try {
+      await api('/api/ai/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ defaults: { [kind]: id } }),
+      });
+      toast(`${kind} default set`, id, 'ok');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
+      load();
+    } catch (e) {
+      toast('Default update failed', e.message, 'err');
+    }
+  }
+
+  async function removeAiProvider(id) {
+    try {
+      // Clear the key first (no-op for terminal-native; idempotent for
+      // already-missing entries). Then strip the config entry so it
+      // disappears from the list.
+      await api(`/api/ai/providers/${encodeURIComponent(id)}/key`, { method: 'DELETE' })
+        .catch(() => {});
+      await api('/api/ai/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providers: { [id]: null } }),
+      });
+      toast('Provider removed', id, 'ok');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
+      load();
+    } catch (e) {
+      toast('Remove failed', e.message, 'err');
     }
   }
 

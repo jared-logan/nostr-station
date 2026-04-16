@@ -662,6 +662,107 @@ input:focus, textarea:focus, select:focus {
   font-family: var(--font-mono);
 }
 
+/* ── AI providers list (Config panel → AI Providers section) ──────────── */
+.ai-providers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ai-empty {
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+}
+.ai-provider-row {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+  row-gap: 4px;
+  align-items: center;
+}
+.ai-provider-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ai-provider-name {
+  color: var(--text-bright);
+  font-weight: 500;
+  margin-right: 4px;
+}
+.ai-provider-meta {
+  grid-column: 1 / 2;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ai-provider-meta .ai-model { font-family: var(--font-mono); }
+.ai-provider-actions {
+  grid-row: 1 / 3;
+  grid-column: 2 / 3;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.ai-provider-actions button {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  font-size: 10px;
+  line-height: 1.3;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  text-transform: lowercase;
+}
+.ai-badge.type-term {
+  color: var(--accent-bright);
+  border-color: var(--accent-dim);
+  background: var(--accent-soft);
+}
+.ai-badge.type-api {
+  color: var(--info);
+  border-color: rgba(168, 159, 255, 0.3);
+  background: rgba(168, 159, 255, 0.08);
+}
+.ai-badge.status-ok {
+  color: var(--success);
+  border-color: rgba(61, 220, 132, 0.3);
+  background: rgba(61, 220, 132, 0.06);
+}
+.ai-badge.default {
+  color: var(--warn);
+  border-color: rgba(255, 176, 32, 0.4);
+  background: rgba(255, 176, 32, 0.1);
+}
+
+.ai-add-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ai-add-row select {
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 13px;
+}
+
 /* ── misc ─────────────────────────────────────────────────────────────── */
 
 .spinner {

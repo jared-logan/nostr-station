@@ -1891,9 +1891,14 @@ export async function startWebServer(port: number): Promise<void> {
         const cfg = readAiConfig();
         const list = listProviders().map(p => {
           const entry = cfg.providers[p.id];
-          const configured = p.type === 'api'
-            ? !!(entry?.keyRef) || !!((p as ApiProvider).bareKey)
-            : !!(entry?.enabled);
+          // "Configured" = user has an entry in ai-config. Without an entry
+          // even bareKey providers (ollama / lmstudio / maple) are "available
+          // to add" — their local daemon existence alone shouldn't auto-add
+          // them to the user's provider list without explicit opt-in.
+          const configured = !entry ? false
+            : p.type === 'api'
+              ? !!(entry.keyRef) || !!((p as ApiProvider).bareKey)
+              : !!(entry.enabled);
           return {
             id: p.id,
             displayName: p.displayName,
