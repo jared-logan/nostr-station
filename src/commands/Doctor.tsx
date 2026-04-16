@@ -107,7 +107,7 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
   const actionable = checks.filter(c => c.status === 'error' && c.fixCmd);
 
   // Exit 1 if any checks are still failing after --fix (or without it).
-  // Lets `nostr-station doctor && nostr-station push` short-circuit on
+  // Lets `nostr-station doctor && nostr-station publish` short-circuit on
   // a broken environment instead of pushing into a half-configured box.
   useEffect(() => {
     if (done && failures > 0) process.exitCode = 1;

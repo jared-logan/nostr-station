@@ -4,6 +4,17 @@ All notable changes to nostr-station are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.0.5] — in progress
+### Changed
+- **CLI command renames** — clearer, less collision-prone names across the top-level commands. Old names remain as deprecated aliases for one release cycle and print a one-line stderr warning when used.
+  - `push` → `publish` (avoids the "does it also pull?" ambiguity of `sync`; signals that the command orchestrates git + ngit + any configured signer, not just `git push`)
+  - `setup-editor` → `editor`
+  - `logs` → `relay logs` (folded under the `relay` subcommand group — `--service relay|watchdog|all` still works)
+
+### Fixed
+- **Onboard seeds `identity.json`** so the dashboard, ngit Service Health dot, and `Projects → ngit init` relay pre-fill all work on first run. If a prior file exists, missing fields are merged in without clobbering user customizations.
+- **`git push` preflight** in the dashboard streaming exec modal — if the project has no `origin` remote, the modal surfaces `No git remote named 'origin' — add one in project Settings.` instead of a cryptic git error.
+- **`npub`/hex helpers** in the web server now invoke `nak` via `execFileSync` with fixed argv arrays (no shell, no template literals). Not a live vuln — inputs are regex-validated — but sets the standard for argv hygiene pre-publish.
+
 ### Added
 - **Web dashboard control center** — `nostr-station chat` now serves a full dashboard (not just chat): identity drawer with owner sign-in (NIP-07 / Amber QR / bunker URI), Status panel with live Service Health sidebar, Logs panel, Relay control panel, Config panel, Projects panel, and a streaming exec modal for long-running commands
 - **Owner auth (NIP-98)** — every `/api/*` endpoint requires a session token issued only to the npub in `identity.json`. Server signs a 32-byte challenge (60 s TTL, single-use), verifies kind-27235 response, issues 8-hour session. `sessionStorage`-scoped tokens, never on disk. Localhost opt-out via `"requireAuth": false` with persistent dashboard banner

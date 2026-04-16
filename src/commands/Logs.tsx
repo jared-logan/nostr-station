@@ -28,7 +28,7 @@ export const Logs: React.FC<LogsProps> = ({ follow, service }) => {
   const [lines, setLines] = useState<{ text: string; color: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  // Exit 1 on error so `nostr-station logs || alert` scripts work.
+  // Exit 1 on error so `nostr-station relay logs || alert` scripts work.
   useEffect(() => {
     if (error) process.exitCode = 1;
   }, [error]);
@@ -70,7 +70,7 @@ export const Logs: React.FC<LogsProps> = ({ follow, service }) => {
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>
-        <Text color={P.accent} bold>nostr-station logs</Text>
+        <Text color={P.accent} bold>nostr-station relay logs</Text>
         <Text color={P.muted}> --service {service}</Text>
         {follow && <Text color={P.muted}> --follow</Text>}
       </Box>

@@ -47,7 +47,7 @@ export const Summary: React.FC<SummaryProps> = ({ config, meshIp, demoMode = fal
       <Text bold>Context file for your AI coding tool:</Text>
       <Text dimColor>  ~/projects/{EDITOR_FILENAMES[config.editor] ?? 'NOSTR_STATION.md'}</Text>
       <Text color={P.muted}>  (source: ~/projects/NOSTR_STATION.md)</Text>
-      <Text color={P.muted}>  Switch tools any time: nostr-station setup-editor</Text>
+      <Text color={P.muted}>  Switch tools any time: nostr-station editor</Text>
     </Box>
 
     <Box marginTop={1} flexDirection="column" marginLeft={2}>

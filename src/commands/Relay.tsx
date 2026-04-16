@@ -43,7 +43,7 @@ export const Relay: React.FC<RelayProps> = ({ action }) => {
   const [ok, setOk] = useState(true);
 
   // Propagate failure as exit 1 — `relay status` piped into a monitor,
-  // or `relay start && nostr-station logs -f`, should stop on failure.
+  // or `relay start && nostr-station relay logs -f`, should stop on failure.
   useEffect(() => {
     if (result !== null && !ok) process.exitCode = 1;
   }, [result, ok]);

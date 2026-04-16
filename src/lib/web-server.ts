@@ -650,7 +650,7 @@ function cmdSpecFor(key: string, slug?: string): CmdSpec | null {
 
   switch (key) {
     case 'doctor': return { bin: process.execPath, args: [CLI_BIN, 'doctor', '--plain'], env: { NO_COLOR: '1', TERM: 'dumb' } };
-    case 'push':   return { bin: process.execPath, args: [CLI_BIN, 'push', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
+    case 'publish': return { bin: process.execPath, args: [CLI_BIN, 'publish', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
     case 'deploy': return { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
     case 'git-pull': return { bin: 'git', args: ['pull', '--no-rebase', '--ff-only'] };
     case 'install': {
@@ -1193,12 +1193,12 @@ export async function startWebServer(port: number): Promise<void> {
         if (tail === 'git/push' && method === 'POST') {
           if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
           // Route based on which capabilities are enabled.
-          // git + ngit → nostr-station push --yes (handles both remotes)
+          // git + ngit → nostr-station publish --yes (handles both remotes)
           // git only   → git push origin HEAD
           // ngit only  → ngit push
           let spec: CmdSpec;
           if (project.capabilities.git && project.capabilities.ngit) {
-            spec = { bin: process.execPath, args: [CLI_BIN, 'push', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
+            spec = { bin: process.execPath, args: [CLI_BIN, 'publish', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
           } else if (project.capabilities.git) {
             // Preflight: if the repo has no `origin` remote, git push would
             // fail with a cryptic "fatal: 'origin' does not appear…". Surface

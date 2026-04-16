@@ -5,9 +5,9 @@ import { P } from '../onboard/components/palette.js';
 import { detectPlatform } from '../lib/detect.js';
 import { symlinkEditorFile, EDITOR_FILENAMES } from '../lib/services.js';
 
-interface SetupEditorProps {}
+interface EditorProps {}
 
-export const SetupEditor: React.FC<SetupEditorProps> = () => {
+export const Editor: React.FC<EditorProps> = () => {
   const [done, setDone] = useState(false);
   const [result, setResult] = useState<{ editor: string; linked: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +32,7 @@ export const SetupEditor: React.FC<SetupEditorProps> = () => {
   };
 
   // Propagate symlink failure as non-zero exit — so a shell pipeline
-  // that runs `setup-editor && doctor` doesn't continue on a broken link.
+  // that runs `editor && doctor` doesn't continue on a broken link.
   useEffect(() => {
     if (error) process.exitCode = 1;
   }, [error]);
@@ -40,7 +40,7 @@ export const SetupEditor: React.FC<SetupEditorProps> = () => {
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>
-        <Text color={P.accent} bold>nostr-station setup-editor</Text>
+        <Text color={P.accent} bold>nostr-station editor</Text>
       </Box>
       <Text color={P.accentDim}>{'─────────────────────────────'}</Text>
 

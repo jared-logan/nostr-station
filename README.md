@@ -43,7 +43,7 @@ The installer runs an interactive Ink TUI wizard with five phases:
 4. **Services** — writes configs, registers relay and watchdog as system services, seeds relay whitelist, stores credentials in OS keychain
 5. **Verify** — checks every component is running and reachable
 
-After setup, a `NOSTR_STATION.md` context file is written to `~/projects/` and symlinked to whatever filename your AI coding tool reads (`CLAUDE.md`, `.cursorrules`, `.windsurfrules`, etc.). Switch tools any time with `nostr-station setup-editor`.
+After setup, a `NOSTR_STATION.md` context file is written to `~/projects/` and symlinked to whatever filename your AI coding tool reads (`CLAUDE.md`, `.cursorrules`, `.windsurfrules`, etc.). Switch tools any time with `nostr-station editor`.
 
 ---
 
@@ -78,19 +78,19 @@ nostr-station status --json        Machine-readable JSON output
 nostr-station update               Update all components
 nostr-station update --dry-run     Preview updates without applying
 nostr-station update --wizard      Interactive update with version preview
-nostr-station logs                 Tail relay log
-nostr-station logs --follow        Follow log in real time (-f also works)
-nostr-station logs --service watchdog|relay|all
 nostr-station relay start|stop|restart|status
+nostr-station relay logs                       Tail relay log
+nostr-station relay logs --follow              Follow log in real time (-f also works)
+nostr-station relay logs --service watchdog|relay|all
 nostr-station relay config                     Show relay settings
 nostr-station relay config --auth on|off       Toggle NIP-42 auth
 nostr-station relay config --dm-auth on|off    Toggle DM auth restriction
 nostr-station relay whitelist                  List whitelisted npubs
 nostr-station relay whitelist --add <npub>     Add an npub
 nostr-station relay whitelist --remove <npub>  Remove an npub
-nostr-station push                 Push to all configured remotes (git + ngit)
-nostr-station push --github        Push to GitHub only
-nostr-station push --ngit          Push to ngit only
+nostr-station publish              Publish to all configured remotes (git + ngit)
+nostr-station publish --github     Publish to GitHub only
+nostr-station publish --ngit       Publish to ngit only
 nostr-station nsite init           Configure nsite for a project
 nostr-station nsite publish        Publish to Nostr/Blossom via Amber
 nostr-station nsite status         Compare local build vs published
@@ -111,7 +111,7 @@ nostr-station seed                 Seed relay with dummy events for dev/testing
 nostr-station seed --events 100    Specify event count
 nostr-station seed --full          Profiles + notes + follows + reactions
 nostr-station onboard --demo       Quick setup with throwaway keypair
-nostr-station setup-editor         Relink context file to a different AI tool
+nostr-station editor               Relink context file to a different AI tool
 nostr-station completion --shell zsh|bash --install
 nostr-station uninstall            Clean removal (relay data is preserved)
 ```
@@ -202,7 +202,7 @@ ngit push                 # push + sign via Amber
 ```bash
 gh repo clone <owner>/<repo>
 gh pr create
-nostr-station push        # push to all configured remotes at once
+nostr-station publish     # publish to all configured remotes at once
 ```
 
 ### nsite — static app publishing
@@ -227,8 +227,8 @@ For human-readable `nsite://<name>` addresses, see [Titan](https://github.com/bt
 
 | Operation | How credentials are handled |
 |-----------|----------------------------|
-| `push --github` | Uses gh OAuth token stored in system keychain by `gh`, never printed |
-| `push --ngit` | Signing request to Amber via relay — nsec never on machine |
+| `publish --github` | Uses gh OAuth token stored in system keychain by `gh`, never printed |
+| `publish --ngit` | Signing request to Amber via relay — nsec never on machine |
 | `nsite publish` | Signing request to Amber via bunker — nsec never on machine |
 | `gh auth login` | Browser-based OAuth — token stored by `gh` in system keychain |
 | AI provider API key | Stored in OS keychain; `~/.claude_env` is a loader script, not a secret store |
@@ -249,7 +249,7 @@ Choose during onboard — or mix and match:
 |--------|-------------|
 | **ngit only** | Nostr-native repos, Amber-signed pushes, no GitHub required |
 | **GitHub only** | Standard git + `gh` CLI — familiar workflow |
-| **Both** | ngit for Nostr repos, gh for GitHub — `nostr-station push` handles both |
+| **Both** | ngit for Nostr repos, gh for GitHub — `nostr-station publish` handles both |
 
 ---
 
@@ -276,7 +276,7 @@ nostr-station update --wizard        # interactive picker with current → lates
 - `nak` is pulled from the latest [fiatjaf/nak](https://github.com/fiatjaf/nak) GitHub release (Go binary, not a cargo install).
 - `claude-code` is updated via `npm update -g @anthropic-ai/claude-code`.
 
-A partial failure (e.g. one crate fails to build) exits with a non-zero code and prints which components succeeded — so `nostr-station update && nostr-station push` short-circuits on a broken update.
+A partial failure (e.g. one crate fails to build) exits with a non-zero code and prints which components succeeded — so `nostr-station update && nostr-station publish` short-circuits on a broken update.
 
 ---
 

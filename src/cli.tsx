@@ -13,10 +13,10 @@ import { Relay }         from './commands/Relay.js';
 import { Tui }           from './commands/Tui.js';
 import { Completion }    from './commands/Completion.js';
 import { Uninstall }     from './commands/Uninstall.js';
-import { SetupEditor }   from './commands/SetupEditor.js';
+import { Editor }        from './commands/Editor.js';
 import { Nsite }         from './commands/Nsite.js';
 import { Keychain }      from './commands/Keychain.js';
-import { Push }          from './commands/Push.js';
+import { Publish }       from './commands/Publish.js';
 import { Chat }          from './commands/Chat.js';
 import { RelayConfigView, RelayWhitelist } from './commands/RelayConfig.js';
 import { getKeychain }   from './lib/keychain.js';
@@ -154,6 +154,8 @@ switch (command) {
     break;
 
   case 'logs':
+    // Deprecated alias for `relay logs` — kept one release cycle.
+    process.stderr.write('⚠ "logs" is deprecated — use "relay logs" instead.\n');
     render(React.createElement(Logs, {
       follow:  flag('--follow') || flag('-f'),
       service: (arg('--service') ?? 'relay') as 'relay' | 'watchdog' | 'all',
@@ -162,6 +164,14 @@ switch (command) {
 
   case 'relay': {
     const relayAction = args[0] ?? 'status';
+
+    if (relayAction === 'logs') {
+      render(React.createElement(Logs, {
+        follow:  flag('--follow') || flag('-f'),
+        service: (arg('--service') ?? 'relay') as 'relay' | 'watchdog' | 'all',
+      }));
+      break;
+    }
 
     if (relayAction === 'config') {
       const authStr   = arg('--auth');
@@ -207,8 +217,12 @@ switch (command) {
     break;
 
   case 'setup-editor':
-    requireInteractive('setup-editor');
-    render(React.createElement(SetupEditor, null));
+    // Deprecated alias for `editor` — kept one release cycle.
+    process.stderr.write('⚠ "setup-editor" is deprecated — use "editor" instead.\n');
+    // fallthrough
+  case 'editor':
+    requireInteractive('editor');
+    render(React.createElement(Editor, null));
     break;
 
   case 'keychain': {
@@ -237,12 +251,16 @@ switch (command) {
   }
 
   case 'push':
+    // Deprecated alias for `publish` — kept one release cycle.
+    process.stderr.write('⚠ "push" is deprecated — use "publish" instead.\n');
+    // fallthrough
+  case 'publish':
     // --yes skips the y/N confirmation (used by the web dashboard exec
     // endpoint, which confirms with the user in the UI before POSTing).
     if (!flag('--yes')) {
-      requireInteractive('push', 'Push confirms before sending — run from a terminal, or pass --yes.');
+      requireInteractive('publish', 'Publish confirms before sending — run from a terminal, or pass --yes.');
     }
-    render(React.createElement(Push, {
+    render(React.createElement(Publish, {
       githubOnly: flag('--github'),
       ngitOnly:   flag('--ngit'),
       yes:        flag('--yes'),
@@ -302,20 +320,21 @@ function printHelp() {
     status               Show relay, mesh, and service state
     update               Fetch and apply the latest versions of all components
     update --wizard      Interactive update with version preview and diff
-    logs                 Stream relay or watchdog logs  (-f to follow)
-    relay                Start, stop, restart, and configure the local relay
+    relay                Start, stop, restart, configure, and tail logs for the local relay
     tui                  Live dashboard — events, connection map, and logs
     seed                 Publish test events to your relay  (great for smoke-testing)
-    push                 Push current repo to GitHub + Nostr (ngit) simultaneously
+    publish              Publish current repo to GitHub + Nostr (ngit) simultaneously
     keychain             Store, rotate, and inspect credentials in the OS keychain
     chat                 Web dashboard at localhost:3000 — chat, relay, logs, status, config
     nsite                Publish a static site to Nostr via nsyte
-    setup-editor         Re-link NOSTR_STATION.md for a different AI coding tool
+    editor               Re-link NOSTR_STATION.md for a different AI coding tool
     completion           Install or print shell tab-completion  (zsh / bash)
     uninstall            Remove all nostr-station components cleanly
 
   RELAY SUBCOMMANDS
     relay start / stop / restart / status
+    relay logs                         Tail relay log  (-f to follow)
+    relay logs --service <s>           Log source: relay | watchdog | all
     relay config                       Show relay configuration
     relay config --auth on|off         Toggle NIP-42 auth
     relay config --dm-auth on|off      Toggle DM auth restriction
@@ -345,8 +364,8 @@ function printHelp() {
     doctor  --fix --repair --deep
     status  --json
     update  --dry-run --yes --wizard
-    logs    --follow (-f)  --service relay|watchdog|all
-    push    --github  --ngit
+    relay logs  --follow (-f)  --service relay|watchdog|all
+    publish --github  --ngit
     nsite   --titan
     seed    --events <n>  --full
     keychain get --raw
@@ -360,13 +379,13 @@ function printHelp() {
     nostr-station seed --events 100
     nostr-station seed --full
     nostr-station doctor --fix
-    nostr-station logs --follow
+    nostr-station relay logs --follow
     nostr-station relay restart
     nostr-station update --wizard
     nostr-station tui
-    nostr-station push
-    nostr-station push --github
-    nostr-station push --ngit
+    nostr-station publish
+    nostr-station publish --github
+    nostr-station publish --ngit
     nostr-station completion --shell zsh --install
     nostr-station nsite init
     nostr-station nsite publish

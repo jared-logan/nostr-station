@@ -1803,7 +1803,7 @@ const ProjectDrawer = (() => {
           <input type="checkbox" class="cap-git" ${draft.capabilities.git ? 'checked' : ''} ${gitDisabled}>
           <div class="cap-body">
             <div class="cap-title"><span class="cap-chip cap-git">git</span> GitHub / origin</div>
-            <div class="cap-sub">Standard git remote — pushes via <code>git push</code> or <code>nostr-station push</code>.</div>
+            <div class="cap-sub">Standard git remote — pushes via <code>git push</code> or <code>nostr-station publish</code>.</div>
           </div>
         </label>
         <div class="cap-detail git-detail" style="${draft.capabilities.git ? '' : 'display:none'}">
@@ -2115,9 +2115,9 @@ const ProjectsPanel = (() => {
     actionsEl.appendChild(chatBtn);
 
     if (p.capabilities.git || p.capabilities.ngit) {
-      const pushBtn = iconBtn('push', 'Push',
+      const pushBtn = iconBtn('publish', 'Publish',
         `<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`);
-      pushBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectPush(p); });
+      pushBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectPublish(p); });
       actionsEl.appendChild(pushBtn);
     }
     if (p.capabilities.nsite) {
@@ -2178,8 +2178,8 @@ const ProjectsPanel = (() => {
     if (p.capabilities.git || p.capabilities.ngit) {
       const pushBtn = document.createElement('button');
       pushBtn.className = 'primary';
-      pushBtn.textContent = 'Push';
-      pushBtn.addEventListener('click', () => runProjectPush(p));
+      pushBtn.textContent = 'Publish';
+      pushBtn.addEventListener('click', () => runProjectPublish(p));
       headActions.appendChild(pushBtn);
     }
     if (p.capabilities.nsite) {
@@ -2318,13 +2318,13 @@ const ProjectsPanel = (() => {
       <div class="tab-section">
         <div class="overview-actions">
           <button class="primary open-chat-btn">Open in chat</button>
-          ${(p.capabilities.git || p.capabilities.ngit) ? '<button class="quick-push">Push</button>' : ''}
+          ${(p.capabilities.git || p.capabilities.ngit) ? '<button class="quick-push">Publish</button>' : ''}
           ${p.capabilities.nsite ? '<button class="quick-deploy">Deploy</button>' : ''}
         </div>
       </div>
     `;
     container.querySelector('.open-chat-btn')?.addEventListener('click', () => openInChat(p));
-    container.querySelector('.quick-push')?.addEventListener('click', () => runProjectPush(p));
+    container.querySelector('.quick-push')?.addEventListener('click', () => runProjectPublish(p));
     container.querySelector('.quick-deploy')?.addEventListener('click', () => runProjectDeploy(p));
     container.querySelector('.deploy-btn')?.addEventListener('click', () => runProjectDeploy(p));
     container.querySelectorAll('.copy-slot').forEach(slot => {
@@ -2362,7 +2362,7 @@ const ProjectsPanel = (() => {
             <h3>Branch · ${escapeHtml(st.branch)}</h3>
             <div class="tab-section-actions">
               <button class="pull-btn">Pull</button>
-              <button class="primary push-btn">Push</button>
+              <button class="primary push-btn">Publish</button>
             </div>
           </div>
           ${remotesHtml ? `<div class="remote-section"><h4>Remotes</h4>${remotesHtml}</div>` : ''}
@@ -2384,7 +2384,7 @@ const ProjectsPanel = (() => {
       `;
       container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
       container.querySelector('.pull-btn').addEventListener('click', () => runProjectPull(p));
-      container.querySelector('.push-btn').addEventListener('click', () => runProjectPush(p));
+      container.querySelector('.push-btn').addEventListener('click', () => runProjectPublish(p));
     } catch (e) {
       container.innerHTML = `<div class="empty-state err">failed to load git status: ${escapeHtml(e.message)}</div>`;
     }
@@ -2403,7 +2403,7 @@ const ProjectsPanel = (() => {
       ? 'station identity'
       : `${truncNpub(p.identity.npub || '')}${p.identity.bunkerUrl ? ' · bunker configured' : ''}`;
     const alsoGit = p.capabilities.git
-      ? `<div class="muted" style="margin-top:8px"><code>nostr-station push</code> handles both the GitHub and ngit remotes simultaneously. The "Push to ngit" button below only pushes ngit.</div>`
+      ? `<div class="muted" style="margin-top:8px"><code>nostr-station publish</code> handles both the GitHub and ngit remotes simultaneously. The "Publish to ngit" button below only pushes ngit.</div>`
       : '';
     container.innerHTML = `
       <div class="tab-section">
@@ -2420,7 +2420,7 @@ const ProjectsPanel = (() => {
         ${alsoGit}
       </div>
       <div class="tab-section">
-        <button class="primary ngit-push-btn">Push to ngit</button>
+        <button class="primary ngit-push-btn">Publish to ngit</button>
       </div>
     `;
     container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
@@ -2717,24 +2717,24 @@ const ProjectsPanel = (() => {
   }
 
   // ── Quick action runners ────────────────────────────────────────────
-  async function runProjectPush(p) {
+  async function runProjectPublish(p) {
     const ok = await confirmDestructive({
-      title: `Push · ${p.name}`,
+      title: `Publish · ${p.name}`,
       description: p.capabilities.git && p.capabilities.ngit
-        ? 'Pushes to both GitHub and ngit remotes. Amber will sign ngit operations.'
+        ? 'Publishes to both GitHub and ngit remotes. Amber will sign ngit operations.'
         : p.capabilities.ngit
-        ? 'Pushes to the ngit remote. Amber will sign.'
+        ? 'Publishes to the ngit remote. Amber will sign.'
         : 'Pushes current branch to origin.',
-      confirmLabel: 'Push',
+      confirmLabel: 'Publish',
     });
     if (!ok) return;
     openExecModal({
-      title: `push · ${p.name}`,
+      title: `publish · ${p.name}`,
       subtitle: p.path || '',
       endpoint: `/api/projects/${p.id}/git/push`,
     }).then(r => {
-      if (r.ok) toast('Push complete', p.name, 'ok');
-      else      toast('Push finished with errors', `exit ${r.code}`, 'err');
+      if (r.ok) toast('Publish complete', p.name, 'ok');
+      else      toast('Publish finished with errors', `exit ${r.code}`, 'err');
       if (state.view === 'detail' && state.projectId === p.id) render();
     });
   }

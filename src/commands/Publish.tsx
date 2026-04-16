@@ -7,18 +7,18 @@ import {
   type Remote, type Commit, type PushResult,
 } from '../lib/git.js';
 
-interface PushProps {
+interface PublishProps {
   githubOnly: boolean;
   ngitOnly: boolean;
   // Skip the y/N prompt. Used by web dashboard exec endpoint so the modal can
-  // stream push output without needing a TTY. Always confirmed by the user in
-  // the UI before the POST fires, so skipping here doesn't bypass consent.
+  // stream publish output without needing a TTY. Always confirmed by the user
+  // in the UI before the POST fires, so skipping here doesn't bypass consent.
   yes?: boolean;
 }
 
 type Phase = 'loading' | 'summary' | 'pushing' | 'done' | 'error';
 
-export const Push: React.FC<PushProps> = ({ githubOnly, ngitOnly, yes = false }) => {
+export const Publish: React.FC<PublishProps> = ({ githubOnly, ngitOnly, yes = false }) => {
   const [phase, setPhase]       = useState<Phase>('loading');
   const [remotes, setRemotes]   = useState<Remote[]>([]);
   const [commits, setCommits]   = useState<Commit[]>([]);
@@ -79,8 +79,8 @@ export const Push: React.FC<PushProps> = ({ githubOnly, ngitOnly, yes = false })
   }, [yes, phase, remotes]);
 
   // Propagate error/partial-failure phases as a non-zero exit code so
-  // shell chains (`nostr-station push && make deploy`) don't silently
-  // continue after a failed push. process.exitCode lets Ink finish
+  // shell chains (`nostr-station publish && make deploy`) don't silently
+  // continue after a failed publish. process.exitCode lets Ink finish
   // rendering the red error message before the process tears down —
   // a hard process.exit(1) would race the final render.
   useEffect(() => {
@@ -121,7 +121,7 @@ export const Push: React.FC<PushProps> = ({ githubOnly, ngitOnly, yes = false })
   if (phase === 'error') {
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Box marginBottom={1}><Text color={P.accent} bold>nostr-station push</Text></Box>
+        <Box marginBottom={1}><Text color={P.accent} bold>nostr-station publish</Text></Box>
         <Text color={P.error}>{errorMsg}</Text>
       </Box>
     );
@@ -139,7 +139,7 @@ export const Push: React.FC<PushProps> = ({ githubOnly, ngitOnly, yes = false })
     const hasMultiple = remotes.length > 1;
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Box marginBottom={1}><Text color={P.accent} bold>nostr-station push</Text></Box>
+        <Box marginBottom={1}><Text color={P.accent} bold>nostr-station publish</Text></Box>
 
         {commits.length === 0 ? (
           <Text color={P.muted}>No commits to push.</Text>
@@ -188,7 +188,7 @@ export const Push: React.FC<PushProps> = ({ githubOnly, ngitOnly, yes = false })
 
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Box marginBottom={1}><Text color={P.accent} bold>nostr-station push</Text></Box>
+        <Box marginBottom={1}><Text color={P.accent} bold>nostr-station publish</Text></Box>
 
         {remotes.map((remote, i) => {
           const result = results.find(r => r.remote === remote.name);

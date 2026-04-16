@@ -516,7 +516,7 @@ export const ConfigPhase: React.FC<ConfigPhaseProps> = ({ onDone, demoMode = fal
             </Box>
             <Box>
               <Text color={P.muted}>{'Switch editors any time: '}</Text>
-              <Text color={P.accentBright}>nostr-station setup-editor</Text>
+              <Text color={P.accentBright}>nostr-station editor</Text>
             </Box>
           </Box>
           <Select

@@ -7,19 +7,19 @@ import path from 'path';
 // typing `nostr-station <TAB>` in your terminal shows available commands.
 // It's a standard CLI convention that makes the tool feel native.
 
-const COMMANDS = ['onboard', 'doctor', 'status', 'update', 'logs', 'relay', 'tui', 'seed', 'push', 'keychain', 'nsite', 'setup-editor', 'uninstall', 'completion', 'version'];
+const COMMANDS = ['onboard', 'doctor', 'status', 'update', 'relay', 'tui', 'seed', 'publish', 'keychain', 'nsite', 'editor', 'uninstall', 'completion', 'version'];
 const KEYCHAIN_SUBCOMMANDS = ['list', 'get', 'set', 'delete', 'rotate', 'migrate'];
 const KEYCHAIN_KEYS = ['ai-api-key', 'watchdog-nsec'];
 const NSITE_SUBCOMMANDS = ['init', 'publish', 'deploy', 'status', 'open', 'help'];
-const PUSH_FLAGS = ['--github', '--ngit'];
-const RELAY_SUBCOMMANDS = ['start', 'stop', 'restart', 'status', 'config', 'whitelist'];
+const PUBLISH_FLAGS = ['--github', '--ngit'];
+const RELAY_SUBCOMMANDS = ['start', 'stop', 'restart', 'status', 'config', 'whitelist', 'logs'];
 const RELAY_CONFIG_FLAGS = ['--auth', '--dm-auth'];
 const RELAY_WHITELIST_FLAGS = ['--add', '--remove'];
+const RELAY_LOGS_FLAGS = ['--follow', '-f', '--service'];
+const RELAY_LOGS_SERVICES = ['relay', 'watchdog', 'all'];
 const ONBOARD_FLAGS = ['--demo'];
 const UPDATE_FLAGS = ['--dry-run', '--yes', '--wizard'];
 const DOCTOR_FLAGS = ['--fix', '--repair', '--deep'];
-const LOGS_FLAGS = ['--follow', '-f', '--service'];
-const LOGS_SERVICES = ['relay', 'watchdog', 'all'];
 const SEED_FLAGS = ['--events', '--full'];
 
 const ZSH_COMPLETION = `#compdef nostr-station
@@ -31,21 +31,20 @@ _nostr_station() {
     'doctor:Health checks and quick fixes'
     'status:Show relay and service status'
     'update:Update all installed components'
-    'logs:Tail relay or watchdog logs'
-    'relay:Manage the nostr-rs-relay service'
+    'relay:Manage the nostr-rs-relay service (incl. logs)'
     'tui:Live dashboard'
     'seed:Seed relay with dummy events for testing'
     'keychain:Manage credentials in the OS keychain'
-    'push:Push to all configured remotes (git + ngit)'
+    'publish:Publish to all configured remotes (git + ngit)'
     'nsite:Manage nsite publishing (nsyte)'
-    'setup-editor:Link NOSTR_STATION.md to your AI coding tool'
+    'editor:Link NOSTR_STATION.md to your AI coding tool'
     'uninstall:Remove nostr-station'
     'completion:Generate shell completion'
     'version:Print version'
   )
 
   local -a relay_cmds keychain_cmds keychain_keys nsite_cmds log_services
-  relay_cmds=('start' 'stop' 'restart' 'status' 'config' 'whitelist')
+  relay_cmds=('start' 'stop' 'restart' 'status' 'config' 'whitelist' 'logs')
   keychain_cmds=('list' 'get' 'set' 'delete' 'rotate' 'migrate')
   keychain_keys=('ai-api-key' 'watchdog-nsec')
   nsite_cmds=('init' 'publish' 'deploy' 'status' 'open' 'help')
@@ -73,6 +72,12 @@ _nostr_station() {
             '--add[Add an npub to whitelist]:npub:' \\
             '--remove[Remove an npub from whitelist]:npub:'
           ;;
+        logs)
+          _arguments \\
+            '--follow[Tail in real time]' \\
+            '-f[Tail in real time]' \\
+            '--service[Log source]:service:(relay watchdog all)'
+          ;;
         *)
           _describe 'relay subcommand' relay_cmds
           ;;
@@ -91,16 +96,10 @@ _nostr_station() {
     nsite)
       _describe 'nsite subcommand' nsite_cmds
       ;;
-    push)
+    publish)
       _arguments \\
-        '--github[Push to GitHub remote only]' \\
-        '--ngit[Push to ngit remote only]'
-      ;;
-    logs)
-      _arguments \\
-        '--follow[Tail in real time]' \\
-        '-f[Tail in real time]' \\
-        '--service[Log source]:service:(relay watchdog all)'
+        '--github[Publish to GitHub remote only]' \\
+        '--ngit[Publish to ngit remote only]'
       ;;
     doctor)
       _arguments \\
@@ -128,14 +127,14 @@ _nostr_station() {
   local cur prev words cword
   _init_completion || return
 
-  local commands="onboard doctor status update logs relay tui seed push keychain nsite setup-editor uninstall completion version"
+  local commands="onboard doctor status update relay tui seed publish keychain nsite editor uninstall completion version"
 
   case $prev in
     nostr-station)
       COMPREPLY=($(compgen -W "$commands" -- "$cur"))
       return ;;
     relay)
-      COMPREPLY=($(compgen -W "start stop restart status config whitelist" -- "$cur"))
+      COMPREPLY=($(compgen -W "start stop restart status config whitelist logs" -- "$cur"))
       return ;;
     config)
       if [[ \${words[2]} == "relay" ]]; then
@@ -161,12 +160,17 @@ _nostr_station() {
     seed)
       COMPREPLY=($(compgen -W "--events --full" -- "$cur"))
       return ;;
-    push)
+    publish)
       COMPREPLY=($(compgen -W "--github --ngit" -- "$cur"))
       return ;;
     nsite)
       COMPREPLY=($(compgen -W "init publish deploy status open help" -- "$cur"))
       return ;;
+    logs)
+      if [[ \${words[1]} == "relay" ]]; then
+        COMPREPLY=($(compgen -W "--follow -f --service" -- "$cur"))
+        return
+      fi ;;
     --service)
       COMPREPLY=($(compgen -W "relay watchdog all" -- "$cur"))
       return ;;
@@ -180,9 +184,7 @@ _nostr_station() {
       COMPREPLY=($(compgen -W "--fix --repair --deep" -- "$cur")) ;;
     update)
       COMPREPLY=($(compgen -W "--dry-run --yes --wizard" -- "$cur")) ;;
-    logs)
-      COMPREPLY=($(compgen -W "--follow -f --service" -- "$cur")) ;;
-    push)
+    publish)
       COMPREPLY=($(compgen -W "--github --ngit" -- "$cur")) ;;
     status)
       COMPREPLY=($(compgen -W "--json" -- "$cur")) ;;

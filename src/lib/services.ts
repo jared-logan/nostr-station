@@ -314,7 +314,7 @@ export const EDITOR_FILENAMES: Record<string, string> = {
 
 // Canonical source of truth — provider and tool agnostic.
 // Written once. Editor-specific filenames symlink here.
-// Switch tools any time: nostr-station setup-editor
+// Switch tools any time: nostr-station editor
 const CONTEXT_FILENAME = 'NOSTR_STATION.md';
 
 function buildContextContent(p: Platform, c: Config): string {
@@ -327,7 +327,7 @@ function buildContextContent(p: Platform, c: Config): string {
 - Add a test keypair: \`nostr-station relay whitelist --add <npub>\`
 - List whitelisted npubs: \`nostr-station relay whitelist\`
 - Restart: \`nostr-station relay restart\`
-- Logs: \`nostr-station logs --follow\`
+- Logs: \`nostr-station relay logs --follow\`
 
 ## Publishing & deployment
 
@@ -414,7 +414,7 @@ nak req -k 1 --auth <nsec> ws://localhost:8080
 | Relay status | \`nostr-station status\` |
 | Health check | \`nostr-station doctor\` |
 | Live dashboard | \`nostr-station tui\` |
-| Switch AI editor | \`nostr-station setup-editor\` |
+| Switch AI editor | \`nostr-station editor\` |
 
 ## AI provider
 ${(() => {
@@ -439,7 +439,7 @@ Seed after your first session:
 \`\`\`
 ` : ''}
 ---
-*Context file for your AI coding tool. Switch editors: \`nostr-station setup-editor\`*
+*Context file for your AI coding tool. Switch editors: \`nostr-station editor\`*
 *Source: ${p.projectsDir}/${CONTEXT_FILENAME}*
 `;
 }
