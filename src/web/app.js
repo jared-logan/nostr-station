@@ -3533,7 +3533,9 @@ const ConfigPanel = (() => {
 
     // Multi-provider AI list — see renderAiProviders() for the markup.
     // Wire up all row actions + the "Add provider" dropdown in one place.
-    wireAiProviders();
+    // aiList is captured explicitly; wireAiProviders() lives at the panel
+    // scope and can't reach render()'s param otherwise.
+    wireAiProviders(aiList);
 
     // NGIT default relay — persists to identity.json via /api/identity/set.
     const ngitInput  = $('cfg-ngit-relay-input');
@@ -3737,7 +3739,7 @@ const ConfigPanel = (() => {
     `;
   }
 
-  function wireAiProviders() {
+  function wireAiProviders(aiList) {
     // Row-level actions (Remove, Set-default) via event delegation —
     // renderAiProviders re-renders the whole list on every change, so
     // keeping listeners on the container dodges the re-bind dance.
