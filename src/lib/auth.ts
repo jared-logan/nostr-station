@@ -197,8 +197,18 @@ export function isLocalhost(req: http.IncomingMessage): boolean {
 }
 
 export function localhostExempt(req: http.IncomingMessage): boolean {
+  if (!isLocalhost(req)) return false;
   const ident = readIdentity();
-  return ident.requireAuth === false && isLocalhost(req);
+  // Two exemption paths for localhost requests:
+  //   1. Setup mode: no station owner configured yet. The setup wizard
+  //      needs to hit otherwise-gated endpoints (status, relay start,
+  //      AI config, ngit login) before any session exists. Without a
+  //      configured npub there's no owner to auth against anyway.
+  //   2. Explicit opt-out: requireAuth:false in identity.json. Manual
+  //      override for users who don't want the sign-in flow on LAN /
+  //      local dev boxes.
+  if (!ident.npub) return true;
+  return ident.requireAuth === false;
 }
 
 // ── Status snapshot ─────────────────────────────────────────────────────────

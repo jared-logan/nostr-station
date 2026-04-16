@@ -4705,6 +4705,8 @@ const SetupWizard = (() => {
     const stage = STAGES[stageIdx];
     if      (stage === 'welcome')  renderWelcome();
     else if (stage === 'identity') renderIdentity();
+    else if (stage === 'relay')    renderRelay();
+    else if (stage === 'ai')       renderAi();
     else                           renderStub(stage);
   }
 
@@ -4850,10 +4852,294 @@ const SetupWizard = (() => {
     if (state.npub && !state.profile) runPreview();
   }
 
-  // ── Stage stubs (built out in Steps 6.3–6.5) ─────────────────────────
+  // ── Relay ────────────────────────────────────────────────────────────
+  // Install scripts start the relay before launching the wizard; this
+  // stage is the "confirm we see it live" checkpoint. If it's not
+  // running, offer a one-click start — `nostr-station chat` can land
+  // here from a pre-install flow that skipped the bash bootstrap.
+  async function renderRelay() {
+    root.innerHTML = shell(
+      'Local relay',
+      'Your private Nostr relay running on ws://localhost:8080.',
+      `
+        <div class="setup-relay" id="setup-relay-body">
+          <div class="muted"><span class="spinner"></span> Checking relay…</div>
+        </div>
+        <div class="setup-actions">
+          <button class="setup-back">← Back</button>
+          <button class="primary setup-next" id="setup-relay-next" disabled>Continue →</button>
+        </div>
+      `,
+    );
+    root.querySelector('.setup-back').addEventListener('click', back);
+    root.querySelector('.setup-next').addEventListener('click', next);
+
+    const bodyEl = $('setup-relay-body');
+    const nextBtn = $('setup-relay-next');
+
+    const paint = async () => {
+      let relay = null;
+      try {
+        const status = await fetch('/api/status').then(r => r.ok ? r.json() : []);
+        relay = Array.isArray(status) ? status.find(s => s.id === 'relay') : null;
+      } catch {}
+
+      if (!relay) {
+        bodyEl.innerHTML = `<div class="setup-relay-row err">
+          <span class="dot err"></span>
+          <div>
+            <div class="title">Status unavailable</div>
+            <div class="muted">Couldn't reach the local API. Is the server still running?</div>
+          </div>
+        </div>`;
+        nextBtn.disabled = false;
+        return;
+      }
+
+      if (relay.state === 'ok') {
+        bodyEl.innerHTML = `<div class="setup-relay-row ok">
+          <span class="dot ok"></span>
+          <div>
+            <div class="title">Relay running · <code>ws://localhost:8080</code></div>
+            <div class="muted">${escapeHtml(relay.value || '')}</div>
+          </div>
+        </div>`;
+        nextBtn.disabled = false;
+        return;
+      }
+
+      const installed = relay.state === 'warn';
+      bodyEl.innerHTML = `
+        <div class="setup-relay-row ${relay.state}">
+          <span class="dot ${stateClass(relay.state)}"></span>
+          <div>
+            <div class="title">${installed ? 'Relay installed but not running' : 'Relay not installed'}</div>
+            <div class="muted">${escapeHtml(relay.value || '')}</div>
+          </div>
+        </div>
+        ${installed ? `
+          <div class="setup-actions" style="margin-top:12px;margin-bottom:0;justify-content:flex-start">
+            <button class="primary" id="setup-relay-start">Start relay</button>
+          </div>
+        ` : `
+          <div class="setup-hint muted" style="margin-top:12px">
+            Finish <code>nostr-station onboard</code> or <code>nostr-station doctor --fix</code> first, then revisit setup.
+          </div>
+        `}
+      `;
+      nextBtn.disabled = !installed;
+
+      const startBtn = $('setup-relay-start');
+      if (startBtn) startBtn.addEventListener('click', async () => {
+        startBtn.disabled = true;
+        startBtn.innerHTML = '<span class="spinner"></span> Starting…';
+        try {
+          await fetch('/api/relay/start', { method: 'POST' });
+        } catch {}
+        // Give systemd/launchd a beat to transition; re-check.
+        setTimeout(paint, 1200);
+      });
+    };
+    paint();
+  }
+
+  // ── AI providers ─────────────────────────────────────────────────────
+  // Thin wizard-only UI over the same /api/ai/providers endpoint the
+  // Config panel uses. Skippable — users can configure later in Config.
+  async function renderAi() {
+    root.innerHTML = shell(
+      'AI providers',
+      'Add at least one so Chat + "Open in AI" work. Skip and configure later if you like.',
+      `
+        <div class="setup-ai-body" id="setup-ai-body">
+          <div class="muted"><span class="spinner"></span> Loading providers…</div>
+        </div>
+        <div class="setup-actions">
+          <button class="setup-back">← Back</button>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="setup-skip" id="setup-ai-skip">Skip for now</button>
+            <button class="primary setup-next" id="setup-ai-next">Continue →</button>
+          </div>
+        </div>
+      `,
+    );
+    root.querySelector('.setup-back').addEventListener('click', back);
+    root.querySelector('#setup-ai-skip').addEventListener('click', next);
+    root.querySelector('#setup-ai-next').addEventListener('click', next);
+
+    const body = $('setup-ai-body');
+    const paint = async () => {
+      let list;
+      try { list = await fetch('/api/ai/providers').then(r => r.ok ? r.json() : null); }
+      catch { list = null; }
+      if (!list || !Array.isArray(list.providers)) {
+        body.innerHTML = `<div class="muted" style="color:var(--warn)">Provider list unavailable — skip and configure later from Config.</div>`;
+        return;
+      }
+      const configured = list.providers.filter(p => p.configured);
+      const available  = list.providers.filter(p => !p.configured);
+
+      const rows = configured.length === 0
+        ? `<div class="muted setup-ai-empty">No providers yet. Add one below — or skip and configure later.</div>`
+        : configured.map(p => `
+            <div class="setup-ai-row" data-id="${escapeHtml(p.id)}">
+              <div class="setup-ai-head">
+                <span class="setup-ai-name">${escapeHtml(p.displayName)}</span>
+                <span class="ai-badge type-${p.type === 'terminal-native' ? 'term' : 'api'}">
+                  ${p.type === 'terminal-native' ? 'terminal' : 'api'}
+                </span>
+                ${p.isDefault?.chat     ? '<span class="ai-badge default">chat default</span>' : ''}
+                ${p.isDefault?.terminal ? '<span class="ai-badge default">terminal default</span>' : ''}
+              </div>
+              <div class="setup-ai-actions">
+                ${p.type === 'api' && !p.isDefault?.chat
+                  ? `<button class="setup-ai-default" data-kind="chat" data-id="${escapeHtml(p.id)}">Use for Chat</button>`
+                  : ''}
+                ${p.type === 'terminal-native' && !p.isDefault?.terminal
+                  ? `<button class="setup-ai-default" data-kind="terminal" data-id="${escapeHtml(p.id)}">Use for Terminal</button>`
+                  : ''}
+                <button class="danger setup-ai-remove" data-id="${escapeHtml(p.id)}">Remove</button>
+              </div>
+            </div>
+          `).join('');
+
+      const termOpts = available.filter(p => p.type === 'terminal-native')
+        .map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.displayName)}</option>`).join('');
+      const apiOpts = available.filter(p => p.type === 'api')
+        .map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.displayName)}</option>`).join('');
+
+      body.innerHTML = `
+        <div class="setup-ai-list">${rows}</div>
+        ${(termOpts || apiOpts) ? `
+          <div class="setup-ai-add">
+            <select id="setup-ai-add-select">
+              <option value="">+ Add a provider…</option>
+              ${termOpts ? `<optgroup label="Terminal-native">${termOpts}</optgroup>` : ''}
+              ${apiOpts  ? `<optgroup label="API">${apiOpts}</optgroup>` : ''}
+            </select>
+            <div id="setup-ai-keyrow" style="margin-top:8px;display:none">
+              <div class="keyrow">
+                <div class="keyfield">
+                  <input id="setup-ai-key" type="password" autocomplete="off" placeholder="paste provider key (sk-…)">
+                </div>
+                <button class="primary" id="setup-ai-save">add</button>
+                <button id="setup-ai-cancel">cancel</button>
+              </div>
+            </div>
+          </div>
+        ` : ''}
+      `;
+
+      // Row actions — the /api/ai/config POST endpoint is what the
+      // Config panel uses (merge-patch on providers + defaults); we
+      // target it directly so behaviour matches the main dashboard.
+      const patchConfig = async (patch) => {
+        await fetch('/api/ai/config', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(patch),
+        });
+      };
+
+      body.querySelectorAll('.setup-ai-remove').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.id;
+          if (!confirm(`Remove ${id}?`)) return;
+          try {
+            // Clear any keychain entry, then drop the config row.
+            await fetch(`/api/ai/providers/${encodeURIComponent(id)}/key`, { method: 'DELETE' })
+              .catch(() => {});
+            await patchConfig({ providers: { [id]: null } });
+            toast(`Removed ${id}`, '', 'ok');
+          } catch (e) { toast('Remove failed', e.message, 'err'); }
+          paint();
+        });
+      });
+
+      body.querySelectorAll('.setup-ai-default').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.id;
+          const kind = btn.dataset.kind;
+          try {
+            await patchConfig({ defaults: { [kind]: id } });
+            toast(`${kind} default → ${id}`, '', 'ok');
+          } catch (e) { toast('Set default failed', e.message, 'err'); }
+          paint();
+        });
+      });
+
+      const sel = $('setup-ai-add-select');
+      if (!sel) return;
+      const keyRow = $('setup-ai-keyrow');
+      const keyInput = $('setup-ai-key');
+      const saveBtn = $('setup-ai-save');
+      const cancelBtn = $('setup-ai-cancel');
+
+      // bareKey providers are local daemons that don't need an API key —
+      // matches the main dashboard's classification (see isBareKeyProvider).
+      const BARE_KEY_IDS = ['ollama', 'lmstudio', 'maple'];
+
+      sel.addEventListener('change', async () => {
+        const id = sel.value;
+        if (!id) { keyRow.style.display = 'none'; return; }
+        const chosen = list.providers.find(p => p.id === id);
+        if (!chosen) return;
+        if (chosen.type === 'terminal-native') {
+          try {
+            await patchConfig({ providers: { [id]: { enabled: true } } });
+            toast(`Added ${chosen.displayName}`, '', 'ok');
+          } catch (e) { toast('Add failed', e.message, 'err'); }
+          sel.value = '';
+          paint();
+          return;
+        }
+        if (BARE_KEY_IDS.includes(id)) {
+          try {
+            await patchConfig({ providers: { [id]: {} } });
+            toast(`Added ${chosen.displayName}`, '', 'ok');
+          } catch (e) { toast('Add failed', e.message, 'err'); }
+          sel.value = '';
+          paint();
+          return;
+        }
+        keyRow.style.display = '';
+        keyInput.value = '';
+        keyInput.focus();
+      });
+
+      saveBtn?.addEventListener('click', async () => {
+        const id  = sel.value;
+        const key = keyInput.value;
+        if (!id || !key) return;
+        saveBtn.disabled = true;
+        try {
+          await fetch(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ key }),
+          });
+          toast(`Added ${id}`, '', 'ok');
+          sel.value = '';
+          keyRow.style.display = 'none';
+          paint();
+        } catch (e) {
+          toast('Add failed', e.message, 'err');
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+      cancelBtn?.addEventListener('click', () => {
+        sel.value = '';
+        keyRow.style.display = 'none';
+      });
+    };
+    paint();
+  }
+
+  // ── Stage stubs (built out in Steps 6.4–6.5) ─────────────────────────
   function renderStub(stage) {
     const titles = {
-      relay: 'Relay', ai: 'AI providers', ngit: 'ngit signing', done: 'All set',
+      ngit: 'ngit signing', done: 'All set',
     };
     root.innerHTML = shell(
       titles[stage] || stage,
@@ -4861,7 +5147,7 @@ const SetupWizard = (() => {
       `
         <p class="setup-copy muted">
           Placeholder — the ${escapeHtml(stage)} stage ships in Step 6.${
-            stage === 'relay' ? '3' : stage === 'ai' ? '3' : stage === 'ngit' ? '4' : '5'
+            stage === 'ngit' ? '4' : '5'
           }. Use Back to step through what's done so far.
         </p>
         <div class="setup-actions">
