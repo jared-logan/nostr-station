@@ -1,6 +1,6 @@
 {
   "name": "nostr-station",
-  "version": "0.0.5-3",
+  "version": "0.0.5-4",
   "description": "One-command Nostr dev environment — relay, mesh VPN, ngit, Claude Code, Stacks",
   "type": "module",
   "bin": {
