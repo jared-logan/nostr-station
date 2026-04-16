@@ -528,7 +528,11 @@ export async function installNodePtyPrebuilt(
     return installNodePtyCompile(root, pinnedVersion);
   }
   const targetKey = `${os}-${arch}`;
-  const supported = new Set(['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']);
+  // darwin-x64 is intentionally absent from our prebuilt matrix — see
+  // .github/workflows/release-node-pty-prebuilts.yml for the rationale
+  // (deprecated runner + upstream already ships a darwin-x64 prebuild
+  // that the short-circuit at the top of this function already caught).
+  const supported = new Set(['linux-x64', 'linux-arm64', 'darwin-arm64']);
   if (!supported.has(targetKey)) {
     onProgress(`no prebuilt for ${targetKey} — compiling`);
     return installNodePtyCompile(root, pinnedVersion);

@@ -40,6 +40,17 @@ jobs:
     name: Build ${{ matrix.asset-suffix }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    # Matrix rationale:
+    #   - linux-x64/arm64 are the only architectures node-pty upstream does
+    #     NOT ship prebuilds for. These are the ones we strictly need.
+    #   - darwin-arm64 is covered by upstream's bundled prebuild, but we keep
+    #     it as an insurance policy: if upstream ever drops it or ships a
+    #     broken one, installNodePtyPrebuilt() can still recover.
+    #   - darwin-x64 is intentionally NOT built. GitHub's macos-13 runners
+    #     were EOL'd (jobs error with "macos-13-us-default is not supported"),
+    #     macos-14/15 runners are arm64-only, and Intel Mac runners are
+    #     paid-tier. Intel Mac users ride on node-pty's own upstream
+    #     darwin-x64 prebuild, which works for the foreseeable future.
     strategy:
       fail-fast: false
       matrix:
@@ -52,9 +63,6 @@ jobs:
             os: linux
           - runner: macos-14
             asset-suffix: darwin-arm64
-            os: macos
-          - runner: macos-13
-            asset-suffix: darwin-x64
             os: macos
     steps:
       - name: Install system deps (Linux)
