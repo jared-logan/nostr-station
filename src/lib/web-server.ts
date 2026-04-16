@@ -16,7 +16,7 @@ import http from 'http';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { spawn, execSync, execFile } from 'child_process';
+import { spawn, execSync, execFile, execFileSync } from 'child_process';
 import { nip19 } from 'nostr-tools';
 import { fileURLToPath } from 'url';
 import { getKeychain } from './keychain.js';
@@ -509,7 +509,7 @@ const PROFILE_TTL_MS = 5 * 60 * 1000;
 function npubToHexLocal(npub: string): string {
   if (/^[0-9a-f]{64}$/.test(npub)) return npub;
   try {
-    const out = execSync(`nak decode ${npub}`, { stdio: 'pipe' }).toString().trim();
+    const out = execFileSync('nak', ['decode', npub], { stdio: 'pipe' }).toString().trim();
     return /^[0-9a-f]{64}$/.test(out) ? out : '';
   } catch { return ''; }
 }
@@ -517,7 +517,7 @@ function npubToHexLocal(npub: string): string {
 function hexToNpubLocal(hex: string): string {
   if (/^npub1/.test(hex)) return hex;
   try {
-    const out = execSync(`nak encode npub ${hex}`, { stdio: 'pipe' }).toString().trim();
+    const out = execFileSync('nak', ['encode', 'npub', hex], { stdio: 'pipe' }).toString().trim();
     return out || hex;
   } catch { return hex; }
 }
@@ -701,6 +701,27 @@ function streamExec(spec: CmdSpec, res: http.ServerResponse, req: http.IncomingM
   const cleanup = () => { try { child.kill(); } catch {} };
   req.on('close', cleanup);
   req.on('error', cleanup);
+}
+
+// Emits a single SSE stderr line + done frame so the exec modal renders a
+// readable error exactly like a real command failure would. Used for
+// preflight checks (e.g. missing git remote) where we want to skip the
+// spawn entirely but keep the UX consistent with streamed command failures.
+function streamExecError(res: http.ServerResponse, req: http.IncomingMessage, message: string): void {
+  res.writeHead(200, {
+    'Content-Type':  'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection':    'keep-alive',
+  });
+  const emit = (payload: object) => {
+    try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {}
+  };
+  emit({ line: message, stream: 'stderr' });
+  emit({ done: true, code: 1 });
+  try { res.end(); } catch {}
+  const noop = () => {};
+  req.on('close', noop);
+  req.on('error', noop);
 }
 
 // ── Relay database management ─────────────────────────────────────────────────
@@ -1179,6 +1200,15 @@ export async function startWebServer(port: number): Promise<void> {
           if (project.capabilities.git && project.capabilities.ngit) {
             spec = { bin: process.execPath, args: [CLI_BIN, 'push', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
           } else if (project.capabilities.git) {
+            // Preflight: if the repo has no `origin` remote, git push would
+            // fail with a cryptic "fatal: 'origin' does not appear…". Surface
+            // a readable error through the existing SSE modal instead.
+            try {
+              execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: project.path, stdio: 'pipe' });
+            } catch {
+              streamExecError(res, req, "No git remote named 'origin' — add one in project Settings.");
+              return;
+            }
             spec = { bin: 'git', args: ['push', 'origin', 'HEAD'] };
           } else if (project.capabilities.ngit) {
             spec = { bin: 'ngit', args: ['push'] };
