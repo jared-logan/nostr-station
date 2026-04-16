@@ -1,4 +1,6 @@
 import { execa, type ExecaError } from 'execa';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import type { Platform, Config } from './detect.js';
 import { COMPONENT_VERSIONS } from './versions.js';
 
@@ -423,6 +425,215 @@ export async function installRelayPrebuilt(
   }
 
   return { ok: true, detail: `${pinnedVersion} (prebuilt)` };
+}
+
+// Resolves the directory containing nostr-station's own package.json — the
+// root we install node-pty into and whose node_modules/ we patch with the
+// prebuilt native addon. Works in both `tsx src/...` dev mode and the
+// published `dist/lib/...` layout because path.dirname + '..', '..' from
+// either install.(ts|js) climbs out to the repo/install root.
+function stationRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+}
+
+// Best-effort check: does `require('node-pty')` succeed from the station's
+// install root? Run in a child Node so a successful compile during
+// `npm install -g nostr-station` is honored, but we never crash the parent
+// if node-pty is missing / incompatible / mis-linked.
+async function nodePtyLoads(root: string): Promise<boolean> {
+  try {
+    await execa(process.execPath, [
+      '-e',
+      "const p = require('node-pty'); if (typeof p.spawn !== 'function') process.exit(2);",
+    ], { cwd: root, stdio: 'pipe', timeout: 8000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Runs `npm install node-pty@<version> --ignore-scripts --no-save --silent`
+// inside the station root. --ignore-scripts keeps the ship-breaking node-gyp
+// compile from running; the JS wrapper + package layout land on disk but
+// the native addon is absent until we drop in a prebuilt. --no-save avoids
+// scribbling on nostr-station's own package.json post-install.
+async function installNodePtyJsOnly(
+  root: string,
+  version: string,
+): Promise<InstallResult> {
+  try {
+    await execa('npm', [
+      'install', `node-pty@${version}`,
+      '--prefix', root,
+      '--ignore-scripts', '--no-save', '--silent',
+    ], { cwd: root, stdio: 'pipe', timeout: 90_000 });
+    return { ok: true };
+  } catch (e) {
+    const err = e as ExecaError;
+    return { ok: false, detail: err.stderr?.toString().slice(0, 160) || 'npm install failed' };
+  }
+}
+
+// node-pty is an npm package that ships NO prebuilts upstream; their install
+// script runs `scripts/prebuild.js || node-gyp rebuild`, and prebuild.js only
+// succeeds if the user ran microsoft/node-pty's private build chain. That
+// means a plain `npm install node-pty` fails hard on any machine without
+// python3 + a C++ toolchain — which is most fresh dev boxes.
+//
+// We host our own prebuilts under the nostr-station repo's releases:
+//   https://github.com/jared-logan/nostr-station/releases/tag/node-pty-prebuilts-v{version}
+// Each tarball contains pty.node + spawn-helper for one (os, arch) pair,
+// built against N-API so the same binary works across Node ≥22 ABIs. See
+// .github/workflows/release-node-pty-prebuilts.yml for the build pipeline.
+//
+// Flow:
+//   1. Short-circuit if node-pty already loads cleanly (optional dep built
+//      successfully during `npm install -g nostr-station`, or a prior run
+//      already patched the native addon in).
+//   2. Ensure the JS wrapper is on disk with --ignore-scripts (skips compile).
+//   3. Download the arch-matching prebuilt tarball, verify SHA256, extract.
+//   4. chmod +x the spawn-helper sidecar (Unix only — required by node-pty).
+//   5. Re-verify load. If ANYTHING fails along the way, fall back to the
+//      vanilla compile path — users with build tools installed still win.
+//
+// The terminal panel refuses to open if node-pty isn't loadable; nothing
+// else in nostr-station depends on node-pty, so an install failure here
+// degrades gracefully to "terminal tab is disabled".
+export async function installNodePtyPrebuilt(
+  onProgress: (detail: string) => void,
+): Promise<InstallResult> {
+  const pinnedVersion = COMPONENT_VERSIONS['node-pty'];
+  if (!pinnedVersion) {
+    return { ok: false, detail: 'no pinned node-pty version — check versions.ts' };
+  }
+
+  const root = stationRoot();
+  const fs = await import('fs');
+  const crypto = await import('crypto');
+
+  // (1) Short-circuit: already works? (npm may have compiled it during
+  // `npm install -g nostr-station` if build tools were present.)
+  if (await nodePtyLoads(root)) {
+    return { ok: true, detail: `${pinnedVersion} (already loaded)` };
+  }
+
+  // (2) Map node's platform/arch to our asset naming convention.
+  // Asset format: node-pty-{version}-{os}-{arch}.tar.gz
+  const osMap: Record<string, string>   = { darwin: 'darwin', linux: 'linux' };
+  const archMap: Record<string, string> = { x64: 'x64', arm64: 'arm64' };
+  const os   = osMap[process.platform];
+  const arch = archMap[process.arch];
+  if (!os || !arch) {
+    onProgress(`unsupported platform ${process.platform}/${process.arch} — compiling`);
+    return installNodePtyCompile(root, pinnedVersion);
+  }
+  const targetKey = `${os}-${arch}`;
+  const supported = new Set(['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']);
+  if (!supported.has(targetKey)) {
+    onProgress(`no prebuilt for ${targetKey} — compiling`);
+    return installNodePtyCompile(root, pinnedVersion);
+  }
+
+  // (3) Ensure the JS wrapper + package layout is on disk. If node-pty's
+  // directory is already present (from a half-completed prior run), skip
+  // the install; otherwise fetch with --ignore-scripts.
+  const nodePtyDir = path.join(root, 'node_modules', 'node-pty');
+  const nodePtyPkgJson = path.join(nodePtyDir, 'package.json');
+  if (!fs.existsSync(nodePtyPkgJson)) {
+    onProgress('fetching node-pty package');
+    const js = await installNodePtyJsOnly(root, pinnedVersion);
+    if (!js.ok) {
+      onProgress(`npm install failed (${js.detail?.slice(0, 40)}) — compiling`);
+      return installNodePtyCompile(root, pinnedVersion);
+    }
+  }
+
+  // (4) Download + verify the prebuilt tarball.
+  const tag     = `node-pty-prebuilts-v${pinnedVersion}`;
+  const asset   = `node-pty-${pinnedVersion}-${targetKey}.tar.gz`;
+  const baseUrl = `https://github.com/jared-logan/nostr-station/releases/download/${tag}`;
+  const binUrl  = `${baseUrl}/${asset}`;
+  const sumsUrl = `${baseUrl}/SHA256SUMS`;
+  const tmpTar  = path.join(root, `.${asset}.tmp`);
+
+  onProgress(`downloading ${asset}`);
+  const dl = await run('curl', ['-fsSL', binUrl, '-o', tmpTar]);
+  if (!dl.ok) {
+    try { fs.unlinkSync(tmpTar); } catch {}
+    onProgress('prebuilt download failed — compiling');
+    return installNodePtyCompile(root, pinnedVersion);
+  }
+
+  try {
+    onProgress('verifying checksum');
+    const sumsRes = await fetch(sumsUrl, { headers: { 'User-Agent': 'nostr-station' } });
+    if (!sumsRes.ok) throw new Error(`sums http ${sumsRes.status}`);
+    const sumsText = await sumsRes.text();
+    const line = sumsText.split('\n').find(l => l.trim().endsWith(asset));
+    if (!line) throw new Error('asset not listed in SHA256SUMS');
+    const expected = line.trim().split(/\s+/)[0];
+    const actual = crypto.createHash('sha256').update(fs.readFileSync(tmpTar)).digest('hex');
+    if (expected !== actual) throw new Error('checksum mismatch');
+  } catch (e) {
+    try { fs.unlinkSync(tmpTar); } catch {}
+    onProgress(`${(e as Error).message} — compiling`);
+    return installNodePtyCompile(root, pinnedVersion);
+  }
+
+  // (5) Extract into build/Release/, creating the directory if this is the
+  // first install. node-pty's require() resolves its addon at
+  // ./build/Release/pty.node relative to the package, plus spawn-helper in
+  // the same directory for Unix PTY spawns.
+  const releaseDir = path.join(nodePtyDir, 'build', 'Release');
+  try { fs.mkdirSync(releaseDir, { recursive: true }); } catch {}
+
+  try {
+    onProgress('extracting prebuilt');
+    await execa('tar', ['-xzf', tmpTar, '-C', releaseDir], { stdio: 'pipe', timeout: 20_000 });
+  } catch (e) {
+    try { fs.unlinkSync(tmpTar); } catch {}
+    const err = e as ExecaError;
+    onProgress(`extract failed (${err.stderr?.toString().slice(0, 40) ?? 'unknown'}) — compiling`);
+    return installNodePtyCompile(root, pinnedVersion);
+  }
+  try { fs.unlinkSync(tmpTar); } catch {}
+
+  // (6) spawn-helper must be executable; tar preserves modes from the
+  // archive but paranoid chmod here guards against umask/filesystem quirks.
+  const spawnHelper = path.join(releaseDir, 'spawn-helper');
+  try { if (fs.existsSync(spawnHelper)) fs.chmodSync(spawnHelper, 0o755); } catch {}
+
+  // (7) Sanity: can we load the thing?
+  if (!(await nodePtyLoads(root))) {
+    onProgress('prebuilt failed to load — compiling');
+    return installNodePtyCompile(root, pinnedVersion);
+  }
+
+  return { ok: true, detail: `${pinnedVersion} (prebuilt)` };
+}
+
+// Fallback path when prebuilts don't exist or can't be used. Runs the vanilla
+// npm install which triggers node-gyp — requires python3 + a C++ toolchain.
+// On a machine with those already present (covered by installSystemDeps for
+// Linux; bundled with Xcode Command Line Tools for macOS) this succeeds; on a
+// bare machine it fails and the caller reports an actionable error.
+async function installNodePtyCompile(root: string, version: string): Promise<InstallResult> {
+  try {
+    await execa('npm', [
+      'install', `node-pty@${version}`,
+      '--prefix', root,
+      '--no-save', '--silent',
+    ], { cwd: root, stdio: 'pipe', timeout: 5 * 60 * 1000 });
+    if (await nodePtyLoads(root)) return { ok: true, detail: `${version} (compiled)` };
+    return { ok: false, detail: 'compiled but failed to load — check node ABI' };
+  } catch (e) {
+    const err = e as ExecaError;
+    return {
+      ok: false,
+      detail: err.stderr?.toString().slice(0, 160)
+        || 'compile failed — install python3 + build tools, or wait for a prebuilt',
+    };
+  }
 }
 
 // nak is fiatjaf's Nostr CLI. It is written in Go and is NOT published to

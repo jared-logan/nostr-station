@@ -6,6 +6,7 @@ import { P } from '../components/palette.js';
 import type { Platform, Config, Installed } from '../../lib/detect.js';
 import {
   installSystemDeps, installRust, installCargoBin, installNak, installRelayPrebuilt,
+  installNodePtyPrebuilt,
   installClaudeCode, installGitHubCLI, installStacks, installBlossom, installNsyte,
 } from '../../lib/install.js';
 
@@ -48,6 +49,10 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
     // one row per cargo bin — label updates live during compile
     ...CARGO_BINS.map(b => ({ label: b.label, status: 'pending' as StepStatus })),
     { label: 'nak',              status: 'pending' },
+    // Web terminal runtime — enables the xterm.js panel in the dashboard.
+    // Tries our prebuilt first (4 arches, see release-node-pty-prebuilts.yml);
+    // compile fallback requires python3 + build tools. Non-fatal on failure.
+    { label: 'Web terminal',     status: 'pending' },
     { label: 'Claude Code',      status: (config.aiProvider === 'anthropic' || config.editor === 'claude-code') ? 'pending' : 'skip' as StepStatus },
     { label: 'GitHub CLI',       status: config.versionControl !== 'ngit' ? 'pending' : 'skip' as StepStatus },
     { label: 'Stacks',           status: config.installStacks  ? 'pending' : 'skip' as StepStatus },
@@ -61,16 +66,17 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
 
   // Stable index offsets
   const IDX = {
-    sys:    0,
-    rust:   1,
-    relay:  2,
-    ngit:   3,
-    nak:    4,
-    claude: 5,
-    gh:     6,
-    stacks: 7,
-    blossom:8,
-    nsyte:  9,
+    sys:     0,
+    rust:    1,
+    relay:   2,
+    ngit:    3,
+    nak:     4,
+    nodePty: 5,
+    claude:  6,
+    gh:      7,
+    stacks:  8,
+    blossom: 9,
+    nsyte:   10,
   };
 
   const update = (i: number, patch: Partial<StepState>) =>
@@ -137,6 +143,19 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
       update(IDX.nak, { status: 'running', detail: 'downloading…' });
       const nak = await installNak(platform.cargoBin);
       update(IDX.nak, { status: nak.ok ? 'done' : 'error', detail: nak.detail });
+
+      // node-pty — native PTY addon powering the dashboard terminal panel.
+      // Prebuilt-first (hosted on this repo's releases), compile fallback on
+      // any failure. Non-fatal: if node-pty can't be installed, the terminal
+      // panel is simply disabled; the rest of the dashboard works unchanged.
+      update(IDX.nodePty, { status: 'running', detail: 'resolving…' });
+      const pty = await installNodePtyPrebuilt((detail) => {
+        update(IDX.nodePty, { detail });
+      });
+      update(IDX.nodePty, {
+        status: pty.ok ? 'done' : 'error',
+        detail: pty.ok ? pty.detail : `${pty.detail ?? 'failed'} — terminal panel disabled`,
+      });
 
       // Claude Code — only if using Anthropic or Claude Code as editor
       const shouldInstallClaudeCode = config.aiProvider === 'anthropic' || config.editor === 'claude-code';

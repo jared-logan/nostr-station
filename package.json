@@ -18,6 +18,9 @@
     "onboard": "tsx src/cli.tsx onboard"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
     "execa": "^9.0.0",
     "ink": "^5.0.0",
     "ink-select-input": "^6.0.0",
@@ -25,11 +28,16 @@
     "ink-text-input": "^6.0.0",
     "nostr-tools": "^2.23.3",
     "qrcode": "^1.5.4",
-    "react": "^18.3.1"
+    "react": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.1",
+    "@types/ws": "^8.5.10",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0"
   },

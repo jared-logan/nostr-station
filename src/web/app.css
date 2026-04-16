@@ -2100,3 +2100,200 @@ input:focus, textarea:focus, select:focus {
   line-height: 1;
 }
 .chat-project-badge .clear-ctx:hover { color: var(--error); border: none; }
+
+/* ── Terminal panel ────────────────────────────────────────────────────────
+   Collapsed: 30px bar pinned to the bottom of the viewport, persisting
+   across every panel. Expanded: the bar grows up into a drawer whose
+   height is driven by --term-h (clamped 180–70vh). The dashboard's main
+   grid isn't re-ordered; we use fixed positioning so the panel overlays
+   the bottom of .main and app.js doesn't have to recompute layouts. */
+:root {
+  --term-bar-h: 30px;
+  --term-h: 340px;
+}
+.term-shell {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  height: var(--term-bar-h);
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+  transition: height 180ms ease;
+}
+body.term-expanded .term-shell {
+  height: calc(var(--term-h) + var(--term-bar-h));
+}
+body.term-dragging .term-shell {
+  transition: none;
+}
+body.term-expanded .main {
+  /* Keep the bottom of the main panel visible above the drawer so long
+     content (project list, chat transcript) doesn't hide behind xterm. */
+  padding-bottom: calc(var(--term-h) + var(--term-bar-h) + 8px);
+}
+body:not(.term-expanded) .main {
+  padding-bottom: calc(var(--term-bar-h) + 4px);
+}
+
+.term-resize-handle {
+  height: 4px;
+  cursor: ns-resize;
+  background: transparent;
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+}
+body.term-expanded .term-resize-handle:hover,
+body.term-dragging .term-resize-handle {
+  background: var(--accent-soft);
+}
+body:not(.term-expanded) .term-resize-handle {
+  display: none;
+}
+
+.term-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--term-bar-h);
+  padding: 0 12px;
+  gap: 8px;
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+.term-bar-toggle {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  height: 100%;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+}
+.term-bar-toggle:hover { color: var(--text-bright); border: none; }
+.term-bar-toggle .term-chevron {
+  display: inline-block;
+  font-size: 9px;
+  color: var(--text-dim);
+  transition: transform 180ms ease;
+}
+body.term-expanded .term-bar-toggle .term-chevron {
+  transform: rotate(180deg);
+}
+.term-bar-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+.term-bar-label {
+  font-weight: 500;
+  color: var(--text);
+  flex: 0 0 auto;
+}
+.term-bar-sub {
+  color: var(--text-dim);
+  margin-left: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.term-bar-sub::before { content: '· '; color: var(--muted); }
+.term-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.term-bar-btn {
+  height: 20px;
+  width: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  border-radius: var(--r-sm);
+}
+.term-bar-btn:hover {
+  color: var(--error);
+  border-color: var(--border-strong);
+}
+
+.term-panel {
+  flex: 1 1 auto;
+  position: relative;
+  background: #0a0a0a;
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+}
+.term-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px 6px 0 10px;
+  display: flex;
+}
+.term-xterm {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+/* xterm's own root fills its host. Force the internal screen to paint the
+   same background as the panel so the empty-space below the cursor doesn't
+   show the body colour on fractional pixel rounding. */
+.term-xterm .xterm,
+.term-xterm .xterm-viewport,
+.term-xterm .xterm-screen {
+  background: #0a0a0a;
+}
+.term-xterm .xterm .xterm-scroll-area { background: transparent; }
+
+.term-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 160ms ease;
+  padding: 20px;
+}
+.term-empty-inner {
+  pointer-events: auto;
+  text-align: center;
+  max-width: 380px;
+}
+.term-empty-title {
+  font-size: 13px;
+  color: var(--text-bright);
+  margin-bottom: 4px;
+}
+.term-empty-body {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin-bottom: 14px;
+}
+/* Hide the empty-state once a session is attached; terminal.js doesn't
+   flip a class, so we lean on xterm's presence — xterm injects
+   .xterm-helpers into .term-xterm the first time term.open() runs. */
+.term-xterm:has(.xterm-helpers) ~ .term-empty { display: none; }
+

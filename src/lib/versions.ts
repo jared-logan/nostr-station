@@ -11,5 +11,11 @@
 export const COMPONENT_VERSIONS: Partial<Record<string, string>> = {
   'nostr-rs-relay': '0.8.12',
   'ngit':           '2.2.3',
+  // node-pty is an npm package, but ships no prebuilts upstream and requires
+  // a C++ toolchain to compile. We build prebuilts per-arch in CI (N-API so
+  // one binary covers all Node >=22 ABIs) and host them on the nostr-station
+  // GitHub releases. See .github/workflows/release-node-pty-prebuilts.yml
+  // and installNodePtyPrebuilt() in install.ts.
+  'node-pty':       '1.1.0',
 };
 

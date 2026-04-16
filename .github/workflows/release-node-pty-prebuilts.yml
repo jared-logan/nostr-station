@@ -1,0 +1,158 @@
+name: node-pty Prebuilts
+
+# Build node-pty's native addon from source for each supported target and
+# publish the resulting `.node` binaries as a GitHub release. nostr-station's
+# installNodePtyPrebuilt() then downloads these at onboard time instead of
+# making every user install a full C++ toolchain (Xcode CLT / build-essential +
+# python3 + node-gyp) just to compile 400 lines of PTY glue.
+#
+# Why this workflow is even needed: microsoft/node-pty does NOT ship prebuilts
+# upstream — their npm `install` script runs `scripts/prebuild.js || node-gyp
+# rebuild`, and prebuild.js only succeeds if someone ran their private build
+# chain. So on every end-user machine without Xcode/build-essential+python3,
+# `npm install` on a package that depends on node-pty fails hard.
+#
+# We pin node-pty to a specific version (see COMPONENT_VERSIONS['node-pty'] in
+# src/lib/versions.ts) and build it with node-addon-api's N-API ABI so one
+# prebuilt `pty.node` covers every Node >= 22 runtime. On Unix we also ship
+# the `spawn-helper` sidecar executable; node-pty shells to it for every new
+# PTY, and loadbearing behaviour breaks without it.
+#
+# Run this workflow manually whenever COMPONENT_VERSIONS['node-pty'] is bumped.
+# The install path falls back to plain `npm install node-pty` (compile from
+# source) for any target/version combo that doesn't have a prebuilt, so this
+# workflow is strictly an optimization — nothing breaks if a prebuilt is
+# missing, users on those arches just need build tools.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "node-pty version to build (must match npm)"
+        required: true
+        default: "1.1.0"
+
+permissions:
+  contents: write  # needed to create the GitHub release in the publish job
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset-suffix }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            asset-suffix: linux-x64
+            os: linux
+          - runner: ubuntu-22.04-arm
+            asset-suffix: linux-arm64
+            os: linux
+          - runner: macos-14
+            asset-suffix: darwin-arm64
+            os: macos
+          - runner: macos-13
+            asset-suffix: darwin-x64
+            os: macos
+    steps:
+      - name: Install system deps (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential python3
+
+      - name: Install Node (pinned to station engines.node >=22)
+        uses: actions/setup-node@v4
+        with:
+          # node-pty compiles against node-addon-api, so the resulting
+          # `pty.node` is N-API-stable across Node versions. One build per
+          # arch is enough for all Node >= 22 runtimes the station targets.
+          node-version: '22'
+
+      - name: Build node-pty ${{ github.event.inputs.version }}
+        run: |
+          # Use a clean scratch directory so nothing about the runner's
+          # caches or node_modules state leaks into the release artifact.
+          mkdir -p /tmp/nodepty-build
+          cd /tmp/nodepty-build
+          npm init -y >/dev/null
+          # --build-from-source forces compilation even if some future
+          # version of node-pty starts bundling its own prebuilds — we
+          # want the artifact we control.
+          npm install --build-from-source "node-pty@${{ github.event.inputs.version }}"
+          ls -la node_modules/node-pty/build/Release/
+          # Sanity: the two artifacts we always need. spawn-helper only
+          # exists on Unix; if it's missing on Linux/macOS the build is
+          # broken and we shouldn't ship it.
+          test -f node_modules/node-pty/build/Release/pty.node
+          test -f node_modules/node-pty/build/Release/spawn-helper
+
+      - name: Package artifacts (tarball)
+        run: |
+          version="${{ github.event.inputs.version }}"
+          suffix="${{ matrix.asset-suffix }}"
+          cd /tmp/nodepty-build/node_modules/node-pty/build/Release
+          tarball="node-pty-${version}-${suffix}.tar.gz"
+          # Include both the native addon and the spawn-helper executable.
+          # Ordering matters for reproducibility of the sha256.
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              -czf "${{ github.workspace }}/${tarball}" \
+              pty.node spawn-helper
+          ls -la "${{ github.workspace }}/${tarball}"
+          # Smoke test: untar into a disposable node_modules/node-pty and
+          # `require()` it to prove the binary actually loads.
+          smoke=/tmp/nodepty-smoke
+          rm -rf "$smoke"
+          mkdir -p "$smoke"
+          cd "$smoke"
+          npm init -y >/dev/null
+          npm install --ignore-scripts "node-pty@${version}"
+          mkdir -p node_modules/node-pty/build/Release
+          tar -xzf "${{ github.workspace }}/${tarball}" \
+              -C node_modules/node-pty/build/Release
+          node -e "const pty = require('node-pty'); const p = pty.spawn('echo', ['ok'], { name: 'xterm', cols: 80, rows: 24 }); p.onData(d => process.stdout.write(d)); p.onExit(({ exitCode }) => process.exit(exitCode));"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-pty-${{ matrix.asset-suffix }}
+          path: node-pty-${{ github.event.inputs.version }}-${{ matrix.asset-suffix }}.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la artifacts/
+
+      - name: Compute SHA256SUMS
+        working-directory: artifacts
+        run: |
+          sha256sum node-pty-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: artifacts
+        run: |
+          version="${{ github.event.inputs.version }}"
+          tag="node-pty-prebuilts-v${version}"
+          repo="${{ github.repository }}"
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            echo "Release $tag already exists — deleting before recreate"
+            gh release delete "$tag" --repo "$repo" --yes --cleanup-tag
+          fi
+          gh release create "$tag" --repo "$repo" \
+            --title "node-pty $version prebuilts" \
+            --notes "Prebuilt node-pty ${version} native addons consumed by nostr-station's installNodePtyPrebuilt(). Each tarball contains pty.node + spawn-helper for one (os, arch). See .github/workflows/release-node-pty-prebuilts.yml." \
+            node-pty-* SHA256SUMS

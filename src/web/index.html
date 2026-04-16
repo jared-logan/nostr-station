@@ -264,6 +264,41 @@
   </main>
 </div>
 
+<!-- Terminal panel — collapsed bar always present; expanded drawer slides up
+     from the bottom and shrinks the main grid row above. xterm.js assets are
+     loaded on-demand by terminal.js the first time the panel is opened. -->
+<div class="term-shell" id="term-shell" hidden>
+  <div class="term-resize-handle" id="term-resize" aria-hidden="true"></div>
+  <div class="term-bar" id="term-bar">
+    <button class="term-bar-toggle" id="term-bar-toggle" aria-expanded="false" aria-controls="term-panel">
+      <span class="term-chevron" aria-hidden="true">▲</span>
+      <span class="term-bar-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="4 17 10 11 4 5"/>
+          <line x1="12" y1="19" x2="20" y2="19"/>
+        </svg>
+      </span>
+      <span class="term-bar-label" id="term-bar-label">Terminal</span>
+      <span class="term-bar-sub" id="term-bar-sub"></span>
+    </button>
+    <div class="term-bar-actions">
+      <button class="term-bar-btn" id="term-bar-close" hidden aria-label="Close session" title="Close terminal session">×</button>
+    </div>
+  </div>
+  <div class="term-panel" id="term-panel" hidden>
+    <div class="term-body" id="term-body">
+      <div class="term-xterm" id="term-xterm"></div>
+      <div class="term-empty" id="term-empty">
+        <div class="term-empty-inner">
+          <div class="term-empty-title">Terminal</div>
+          <div class="term-empty-body">No session. Launch one from the dashboard — Config → NGIT → Re-login, or run a shell.</div>
+          <button class="primary" id="term-empty-shell">Open shell</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Reusable overlays, populated by app.js -->
 <div id="toasts"></div>
 <div id="modal-root"></div>
@@ -288,6 +323,7 @@
   <div class="drawer-body" id="project-drawer-body"></div>
 </aside>
 
+<script src="/terminal.js"></script>
 <script type="module" src="/app.js"></script>
 </body>
 </html>

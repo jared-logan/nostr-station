@@ -3296,15 +3296,41 @@ const ConfigPanel = (() => {
     ngitSave.addEventListener('click', saveNgitRelay);
     ngitInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveNgitRelay(); });
 
-    // ngit account (signer) — re-login and logout both stream via the
-    // exec modal. Login is interactive: ngit prints a nostrconnect://
-    // URL into the modal that the user scans with Amber. Logout is
-    // non-interactive and strips the nostr.* keys from global git
-    // config, after which the panel re-fetches status.
+    // ngit account (signer).
+    //
+    //   - Login is INTERACTIVE: ngit renders a `█`-block QR code to the PTY
+    //     for scanning in Amber and then prompts for signer-relay choices.
+    //     Requires a real terminal, which the streaming exec modal isn't
+    //     (it's a line-buffered SSE renderer with no TTY underneath). We
+    //     route it into the xterm.js terminal panel instead — the first
+    //     trigger wired to that panel. When the terminal is unavailable
+    //     (node-pty missing), fall back to the exec modal; ngit degrades
+    //     into a URL-only path that's still usable even without a TTY.
+    //
+    //   - Logout is non-interactive — strips nostr.* keys from global git
+    //     config — so the lightweight SSE modal remains the right tool.
+    //
+    // After either operation completes, re-fetch ngit status + service
+    // health so the UI reflects the new signer state.
     const loginBtn  = $('cfg-ngit-relogin');
     const logoutBtn = $('cfg-ngit-logout');
     if (loginBtn) {
       loginBtn.addEventListener('click', () => {
+        if (window.NSTerminal?.isAvailable?.()) {
+          window.NSTerminal.open('ngit-login');
+          // Re-fetch signer status when the terminal session ends. We don't
+          // know exactly when that is (PTY process lifecycle is owned by
+          // the server), so kick off a few polls over the next ~2min —
+          // enough to cover the typical scan + approve round trip.
+          const refetch = () => { load(); refreshHealth(); };
+          [5_000, 15_000, 45_000, 120_000].forEach(ms => setTimeout(refetch, ms));
+          return;
+        }
+        // Fallback path — terminal unavailable. Fire the old modal; ngit
+        // will print the nostrconnect:// URL (no QR) and the user can
+        // copy/paste it into Amber.
+        const reason = window.NSTerminal?.getUnavailableReason?.();
+        if (reason) toast('Terminal unavailable — falling back to streaming modal', reason, 'warn');
         openExecModal({
           title: 'ngit account login',
           subtitle: 'Streams ngit account login — scan the nostrconnect URL with Amber',
@@ -3857,9 +3883,18 @@ function bootDashboard(localhostExempt) {
     refreshHeader();
     refreshHealth();
     activatePanel(currentPanel());
+    // Terminal panel is opt-in per session (user clicks to open) but the
+    // capability probe + reconnect-if-live runs during boot so a refreshed
+    // dashboard with a live ngit/Claude session resumes without user action.
+    // Fire-and-forget; terminal.js owns its own error surfacing.
+    window.NSTerminal?.init?.();
   }
   toggleLocalhostBanner(localhostExempt);
 }
+
+// Toast helper exposed so terminal.js (loaded before app.js) can surface
+// errors through the same UI as the rest of the dashboard.
+window.toast = toast;
 
 function toggleLocalhostBanner(on) {
   let el = document.getElementById('auth-localhost-banner');
