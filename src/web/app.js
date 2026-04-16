@@ -4871,10 +4871,22 @@ const SetupWizard = (() => {
   }
 
   // ── Relay ────────────────────────────────────────────────────────────
-  // Install scripts start the relay before launching the wizard; this
-  // stage is the "confirm we see it live" checkpoint. If it's not
-  // running, offer a one-click start — `nostr-station chat` can land
-  // here from a pre-install flow that skipped the bash bootstrap.
+  // This stage owns the full local-relay install: it writes the relay
+  // config.toml, the watchdog script + keypair, and the systemd/launchd
+  // unit files, then enables the service. The relay *binary* still has to
+  // be installed ahead of time (compile or prebuilt download via
+  // install.sh or `nostr-station onboard`) — that step isn't ported into
+  // the browser because it can take 10+ minutes.
+  //
+  // Three paint states map to three status rows:
+  //   ok    → relay is up, just move on.
+  //   warn  → binary present; might need unit install and/or start.
+  //           One idempotent "Install & start" button hits the setup
+  //           endpoint, which writes the units, enables them, and starts
+  //           the service. Also covers the "unit exists but stopped" case
+  //           since enable --now is a no-op-plus-start when already enabled.
+  //   error → binary missing. Point the user at `nostr-station onboard`
+  //           and leave the stage walkable so they can skip past.
   async function renderRelay() {
     root.innerHTML = shell(
       'Local relay',
@@ -4931,30 +4943,68 @@ const SetupWizard = (() => {
         <div class="setup-relay-row ${relay.state}">
           <span class="dot ${stateClass(relay.state)}"></span>
           <div>
-            <div class="title">${installed ? 'Relay installed but not running' : 'Relay not installed'}</div>
+            <div class="title">${installed ? 'Relay not yet running' : 'Relay not installed'}</div>
             <div class="muted">${escapeHtml(relay.value || '')}</div>
           </div>
         </div>
         ${installed ? `
           <div class="setup-actions" style="margin-top:12px;margin-bottom:0;justify-content:flex-start">
-            <button class="primary" id="setup-relay-start">Start relay</button>
+            <button class="primary" id="setup-relay-install">Install &amp; start relay</button>
           </div>
+          <div id="setup-relay-steps" class="setup-relay-steps"></div>
         ` : `
           <div class="setup-hint muted" style="margin-top:12px">
-            Finish <code>nostr-station onboard</code> or <code>nostr-station doctor --fix</code> first, then revisit setup.
+            Finish <code>nostr-station onboard</code> first — that compiles the relay binary
+            (10+ min on a cold machine), then revisit this page.
           </div>
         `}
       `;
       nextBtn.disabled = !installed;
 
-      const startBtn = $('setup-relay-start');
-      if (startBtn) startBtn.addEventListener('click', async () => {
-        startBtn.disabled = true;
-        startBtn.innerHTML = '<span class="spinner"></span> Starting…';
+      const installBtn = $('setup-relay-install');
+      if (!installBtn) return;
+
+      installBtn.addEventListener('click', async () => {
+        installBtn.disabled = true;
+        installBtn.innerHTML = '<span class="spinner"></span> Installing service…';
+        const stepsEl = $('setup-relay-steps');
+        stepsEl.innerHTML = '';
         try {
-          await fetch('/api/relay/start', { method: 'POST' });
-        } catch {}
-        // Give systemd/launchd a beat to transition; re-check.
+          const r = await fetch('/api/setup/relay/install', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({}),
+          }).then(r => r.json().catch(() => ({ ok: false, error: 'server returned non-JSON' })));
+
+          // Render each sub-step (dirs, keypair, config, units, enable) —
+          // the bootstrap endpoint returns a structured list so a user
+          // whose systemctl --user instance is unreachable (common on SSH
+          // sessions without linger) can see *which* step warned.
+          if (Array.isArray(r.steps)) {
+            stepsEl.innerHTML = r.steps.map(s => `
+              <div class="setup-step-row ${s.ok ? 'ok' : 'err'}">
+                <span class="dot ${s.ok ? 'ok' : 'err'}"></span>
+                <span class="label">${escapeHtml(s.name)}</span>
+                ${s.detail ? `<span class="muted">${escapeHtml(s.detail)}</span>` : ''}
+              </div>
+            `).join('');
+          }
+
+          if (!r.ok) {
+            installBtn.disabled = false;
+            installBtn.textContent = 'Retry install';
+            toast('Relay install had errors', r.error || 'see step details', 'warn');
+            return;
+          }
+
+          toast('Relay installed', r.up ? 'service started' : 'enable succeeded', 'ok');
+        } catch (e) {
+          toast('Install failed', e.message || String(e), 'err');
+          installBtn.disabled = false;
+          installBtn.textContent = 'Retry install';
+          return;
+        }
+        // Give systemd/launchd a beat to transition; re-check status.
         setTimeout(paint, 1200);
       });
     };

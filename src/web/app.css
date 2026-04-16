@@ -1845,6 +1845,29 @@ input:focus, textarea:focus, select:focus {
 .setup-relay-row .title { font-size: 13px; color: var(--text-bright); }
 .setup-relay-row .muted { font-size: 11px; margin-top: 3px; }
 
+/* Per-step results returned by POST /api/setup/relay/install — rendered
+   below the Install button so the user can see which of dirs / keypair
+   / config / units / enable succeeded or warned. */
+.setup-relay-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+.setup-step-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--border);
+}
+.setup-step-row.ok  { border-left-color: var(--success); }
+.setup-step-row.err { border-left-color: var(--error); }
+.setup-step-row .dot { margin-top: 2px; flex-shrink: 0; }
+.setup-step-row .label { color: var(--text-bright); flex-shrink: 0; }
+.setup-step-row .muted { font-size: 11px; }
+
 .setup-ai-empty {
   text-align: center;
   padding: 18px;

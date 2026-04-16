@@ -3,7 +3,7 @@ import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import { P } from './palette.js';
 
-export type StepStatus = 'pending' | 'running' | 'done' | 'error' | 'skip';
+export type StepStatus = 'pending' | 'running' | 'done' | 'warn' | 'error' | 'skip';
 
 interface StepProps {
   label: string;
@@ -15,6 +15,7 @@ const icons: Record<StepStatus, string> = {
   pending: '○',
   running: '◉',
   done:    '✓',
+  warn:    '⚠',
   error:   '✗',
   skip:    '–',
 };
@@ -23,6 +24,7 @@ const colors: Record<StepStatus, string> = {
   pending: P.muted,
   running: P.accentBright,
   done:    P.success,
+  warn:    P.warn,
   error:   P.error,
   skip:    P.muted,
 };

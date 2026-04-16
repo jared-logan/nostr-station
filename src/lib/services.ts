@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import { nip19 } from 'nostr-tools';
+import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import type { Platform, Config } from './detect.js';
 import { getKeychain, getKeychainBackendName } from './keychain.js';
 import { addToWhitelist } from './relay-config.js';
@@ -159,8 +161,18 @@ function write(filePath: string, content: string, mode = 0o644) {
   fs.writeFileSync(filePath, content, { mode });
 }
 
-function shell(cmd: string) {
-  try { execSync(cmd, { stdio: 'pipe' }); } catch {}
+export interface ShellResult { ok: boolean; error?: string }
+
+function shell(cmd: string): ShellResult {
+  try {
+    execSync(cmd, { stdio: 'pipe' });
+    return { ok: true };
+  } catch (e: any) {
+    const stderr = e?.stderr?.toString?.() ?? '';
+    const stdout = e?.stdout?.toString?.() ?? '';
+    const msg = (stderr || stdout || e?.message || 'exec failed').trim();
+    return { ok: false, error: msg.slice(0, 240) };
+  }
 }
 
 export function writeRelayConfig(p: Platform, c: Config) {
@@ -189,29 +201,47 @@ export function setupDirs(p: Platform) {
   }
 }
 
-export function installRelayService(p: Platform) {
+// Install result shape. `unitPaths` is what got written to disk (one for launchd,
+// one or two for systemd); `enable` captures the `launchctl load` /
+// `systemctl --user enable --now` attempt. The file write throws on failure —
+// this function only returns when the unit file is on disk. enable.ok=false
+// means the unit file exists but could not be loaded/started (the most common
+// cause is SSH sessions without `loginctl enable-linger $USER`; the unit file
+// is still there and `systemctl --user daemon-reload && enable --now` works
+// once the user systemd instance is reachable).
+export interface ServiceInstallResult {
+  unitPaths: string[];
+  enable: ShellResult;
+}
+
+export function installRelayService(p: Platform): ServiceInstallResult {
   if (p.serviceBackend === 'launchd') {
     const dest = `${p.launchAgentsDir}/com.nostr-station.relay.plist`;
     write(dest, LAUNCHD_RELAY(p));
-    shell(`launchctl unload "${dest}" 2>/dev/null; launchctl load "${dest}"`);
-  } else {
-    const unitDir = `${p.homeDir}/.config/systemd/user`;
-    write(`${unitDir}/nostr-relay.service`, SYSTEMD_RELAY(p));
-    shell('systemctl --user daemon-reload && systemctl --user enable --now nostr-relay.service');
+    const enable = shell(`launchctl unload "${dest}" 2>/dev/null; launchctl load "${dest}"`);
+    return { unitPaths: [dest], enable };
   }
+  const unitDir = `${p.homeDir}/.config/systemd/user`;
+  const dest = `${unitDir}/nostr-relay.service`;
+  write(dest, SYSTEMD_RELAY(p));
+  const enable = shell('systemctl --user daemon-reload && systemctl --user enable --now nostr-relay.service');
+  return { unitPaths: [dest], enable };
 }
 
-export function installWatchdogService(p: Platform) {
+export function installWatchdogService(p: Platform): ServiceInstallResult {
   if (p.serviceBackend === 'launchd') {
     const dest = `${p.launchAgentsDir}/com.nostr-station.watchdog.plist`;
     write(dest, LAUNCHD_WATCHDOG(p));
-    shell(`launchctl unload "${dest}" 2>/dev/null; launchctl load "${dest}"`);
-  } else {
-    const unitDir = `${p.homeDir}/.config/systemd/user`;
-    write(`${unitDir}/nostr-watchdog.service`, SYSTEMD_WATCHDOG_SERVICE(p));
-    write(`${unitDir}/nostr-watchdog.timer`, SYSTEMD_WATCHDOG_TIMER);
-    shell('systemctl --user daemon-reload && systemctl --user enable --now nostr-watchdog.timer');
+    const enable = shell(`launchctl unload "${dest}" 2>/dev/null; launchctl load "${dest}"`);
+    return { unitPaths: [dest], enable };
   }
+  const unitDir = `${p.homeDir}/.config/systemd/user`;
+  const svcPath = `${unitDir}/nostr-watchdog.service`;
+  const timerPath = `${unitDir}/nostr-watchdog.timer`;
+  write(svcPath, SYSTEMD_WATCHDOG_SERVICE(p));
+  write(timerPath, SYSTEMD_WATCHDOG_TIMER);
+  const enable = shell('systemctl --user daemon-reload && systemctl --user enable --now nostr-watchdog.timer');
+  return { unitPaths: [svcPath, timerPath], enable };
 }
 
 export async function writeClaudeEnv(homeDir: string, c: Config): Promise<string> {
@@ -594,4 +624,189 @@ export async function generateWatchdogKeypair(cargoBin: string): Promise<{ npub:
   } catch {
     return { npub: '', backend: '' };
   }
+}
+
+// Idempotent keypair management for the web-wizard bootstrap path. Unlike
+// generateWatchdogKeypair() — which unconditionally runs `nak keygen` and
+// rotates the nsec on every call — this helper reuses whatever is already
+// in the keychain so re-running the wizard doesn't orphan the previous
+// identity. Falls back to generating a fresh keypair via nostr-tools (no
+// `nak` binary dependency) when the slot is empty or the stored value is
+// not a valid nsec.
+export async function ensureWatchdogKeypair(): Promise<{ npub: string; reused: boolean; backend: string }> {
+  const kc = getKeychain();
+  const existing = await kc.retrieve('watchdog-nsec');
+  if (existing && existing.startsWith('nsec')) {
+    try {
+      const decoded = nip19.decode(existing);
+      if (decoded.type === 'nsec') {
+        const sk = decoded.data as Uint8Array;
+        const pk = getPublicKey(sk);
+        return { npub: nip19.npubEncode(pk), reused: true, backend: getKeychainBackendName() };
+      }
+    } catch { /* malformed — fall through and regenerate */ }
+  }
+  const sk = generateSecretKey();
+  const pk = getPublicKey(sk);
+  const nsec = nip19.nsecEncode(sk);
+  await kc.store('watchdog-nsec', nsec);
+  return { npub: nip19.npubEncode(pk), reused: false, backend: getKeychainBackendName() };
+}
+
+// ── Relay bootstrap (shared by web wizard + TUI) ──────────────────────────────
+//
+// Single entry point that performs every step needed to stand up the local
+// relay from a clean slate: data + log + scripts dirs, watchdog keypair,
+// relay config.toml, watchdog script, systemd/launchd unit files, and
+// `enable --now` so the relay actually starts. All steps are idempotent — safe
+// to call on a fresh install, during a wizard re-run, or as a repair path.
+//
+// Why this exists instead of leaving Services.tsx as the only caller: the web
+// setup wizard at /setup needs to do the same full job from the browser (the
+// previous Relay stage only polled status). Factoring the sequence here means
+// both the TUI Services phase and POST /api/setup/relay/install execute the
+// same steps in the same order, so they can't diverge. Returns a per-step
+// result list so either front-end can render it as a checklist and surface
+// the specific step that failed (vs. the old silent-shell-failure behaviour).
+
+export interface BootstrapRelayInput {
+  npub: string;
+  relayName?: string;
+  fallbackRelays?: string;
+  whitelistExtra?: string;
+}
+
+export interface BootstrapStep {
+  name: string;
+  ok: boolean;
+  detail?: string;
+}
+
+export interface BootstrapRelayResult {
+  ok: boolean;
+  steps: BootstrapStep[];
+}
+
+function npubToHexStrict(npubOrHex: string): string {
+  const v = npubOrHex.trim();
+  if (/^[0-9a-f]{64}$/.test(v)) return v;
+  const d = nip19.decode(v);
+  if (d.type !== 'npub' || typeof d.data !== 'string') {
+    throw new Error('not a valid npub or 64-char hex');
+  }
+  return d.data;
+}
+
+export async function bootstrapRelayServices(
+  platform: Platform,
+  input: BootstrapRelayInput,
+): Promise<BootstrapRelayResult> {
+  const steps: BootstrapStep[] = [];
+
+  let hexPubkey: string;
+  try {
+    hexPubkey = npubToHexStrict(input.npub);
+  } catch (e: any) {
+    steps.push({ name: 'Validate npub', ok: false, detail: e.message });
+    return { ok: false, steps };
+  }
+
+  try {
+    setupDirs(platform);
+    steps.push({ name: 'Directories', ok: true });
+  } catch (e: any) {
+    steps.push({ name: 'Directories', ok: false, detail: String(e.message ?? e) });
+    return { ok: false, steps };
+  }
+
+  let watchdogNpub = '';
+  try {
+    const kp = await ensureWatchdogKeypair();
+    watchdogNpub = kp.npub;
+    steps.push({
+      name: 'Watchdog keypair',
+      ok: true,
+      detail: `${kp.reused ? 'reused' : 'generated'} → ${kp.backend}`,
+    });
+  } catch (e: any) {
+    // Non-fatal for the relay itself — the watchdog becomes inactive but
+    // the relay still runs. Surface the error; don't abort the bootstrap.
+    steps.push({ name: 'Watchdog keypair', ok: false, detail: String(e.message ?? e) });
+  }
+
+  // Minimal Config shape for the relay-config + watchdog-script writers.
+  // These writers only read a handful of fields (relay name, pubkey, fallback
+  // relays, whitelist inputs); we cast once and keep the surface narrow.
+  const cfg = {
+    npub: input.npub,
+    hexPubkey,
+    relayName: input.relayName ?? 'nostr-dev-relay',
+    fallbackRelays: input.fallbackRelays ?? 'wss://relay.damus.io wss://nos.lol',
+    watchdogNpub,
+    whitelistExtra: input.whitelistExtra,
+  } as unknown as Config;
+
+  // Relay config.toml — idempotent: if the user already has a config (TUI
+  // onboard, hand-edited, prior wizard run) we do NOT overwrite it. That
+  // would trample the relay name, whitelist, and auth flags the user chose.
+  // We still call addToWhitelist for the main + watchdog npubs so a repair
+  // run from a box where the config was written before the watchdog keypair
+  // was generated still ends up with both keys whitelisted.
+  const relayConfigPath = `${platform.configDir}/config.toml`;
+  const configExisted = fs.existsSync(relayConfigPath);
+  try {
+    if (configExisted) {
+      if (hexPubkey)    addToWhitelist(hexPubkey, relayConfigPath);
+      if (watchdogNpub) addToWhitelist(watchdogNpub, relayConfigPath);
+      steps.push({ name: 'Relay config', ok: true, detail: 'existing config preserved' });
+    } else {
+      writeRelayConfig(platform, cfg);
+      steps.push({ name: 'Relay config', ok: true });
+    }
+  } catch (e: any) {
+    steps.push({ name: 'Relay config', ok: false, detail: String(e.message ?? e) });
+    return { ok: false, steps };
+  }
+
+  // Watchdog script — safe to rewrite; it's just a bash wrapper around
+  // `nostr-station keychain get watchdog-nsec`, and the canonical content
+  // is regenerated from the template each install.
+  try {
+    writeWatchdogScript(platform, cfg);
+    steps.push({ name: 'Watchdog script', ok: true });
+  } catch (e: any) {
+    steps.push({ name: 'Watchdog script', ok: false, detail: String(e.message ?? e) });
+  }
+
+  // Relay + watchdog service unit files. Writing succeeds or throws; the
+  // `enable --now` step can fail independently (common on SSH sessions
+  // without linger) — we record that distinction so callers can tell the
+  // user "unit is on disk but systemd can't reach it" vs "unit is missing".
+  try {
+    const r = installRelayService(platform);
+    steps.push({
+      name: 'Relay service',
+      ok: r.enable.ok,
+      detail: r.enable.ok
+        ? r.unitPaths[0]
+        : `wrote ${r.unitPaths[0]} — enable failed: ${r.enable.error}`,
+    });
+  } catch (e: any) {
+    steps.push({ name: 'Relay service', ok: false, detail: String(e.message ?? e) });
+  }
+
+  try {
+    const r = installWatchdogService(platform);
+    steps.push({
+      name: 'Watchdog service',
+      ok: r.enable.ok,
+      detail: r.enable.ok
+        ? r.unitPaths.join(', ')
+        : `wrote ${r.unitPaths.join(', ')} — enable failed: ${r.enable.error}`,
+    });
+  } catch (e: any) {
+    steps.push({ name: 'Watchdog service', ok: false, detail: String(e.message ?? e) });
+  }
+
+  return { ok: steps.every(s => s.ok), steps };
 }

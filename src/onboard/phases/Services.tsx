@@ -123,15 +123,32 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
       try { writeWatchdogScript(platform, cfg); up(3, { status: 'done' }); }
       catch (e: any) { up(3, { status: 'error', detail: e.message }); }
 
-      // Relay service
+      // Relay service — `installRelayService` returns a two-part result:
+      // the unit file write (throws on failure) and the enable step (soft
+      // fail, common on SSH sessions without linger). Surface the enable
+      // error as a warning in the row detail instead of silently succeeding.
       up(4, { status: 'running' });
-      try { installRelayService(platform); up(4, { status: 'done' }); }
-      catch (e: any) { up(4, { status: 'error', detail: e.message }); }
+      try {
+        const r = installRelayService(platform);
+        if (r.enable.ok) {
+          up(4, { status: 'done' });
+        } else {
+          up(4, { status: 'warn', detail: `unit written; enable failed: ${r.enable.error}` });
+        }
+      } catch (e: any) { up(4, { status: 'error', detail: e.message }); }
 
-      // Watchdog service
+      // Watchdog service — same split. Enable failure here is also non-fatal;
+      // the user can rerun `systemctl --user enable --now nostr-watchdog.timer`
+      // after fixing linger / logging back into a graphical session.
       up(5, { status: 'running' });
-      try { installWatchdogService(platform); up(5, { status: 'done' }); }
-      catch (e: any) { up(5, { status: 'error', detail: e.message }); }
+      try {
+        const r = installWatchdogService(platform);
+        if (r.enable.ok) {
+          up(5, { status: 'done' });
+        } else {
+          up(5, { status: 'warn', detail: `units written; enable failed: ${r.enable.error}` });
+        }
+      } catch (e: any) { up(5, { status: 'error', detail: e.message }); }
 
       // nostr-vpn
       up(6, { status: 'running' });

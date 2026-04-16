@@ -1,6 +1,6 @@
 import fs from 'fs';
 import os from 'os';
-import { execSync } from 'child_process';
+import { nip19 } from 'nostr-tools';
 
 export interface RelaySettings {
   name: string;
@@ -16,19 +16,20 @@ export function defaultConfigPath(): string {
   return `${os.homedir()}/.config/nostr-rs-relay/config.toml`;
 }
 
-function cmd(c: string): string | null {
-  try { return execSync(c, { stdio: 'pipe' }).toString().trim(); }
-  catch { return null; }
-}
-
 export function npubToHex(npub: string): string {
-  if (!npub.startsWith('npub')) return npub;  // already hex or empty
-  return cmd(`nak decode ${npub}`) ?? '';
+  if (!npub) return '';
+  if (/^[0-9a-f]{64}$/.test(npub)) return npub;  // already hex
+  try {
+    const d = nip19.decode(npub);
+    if (d.type === 'npub' && typeof d.data === 'string') return d.data;
+  } catch {}
+  return '';
 }
 
 export function hexToNpub(hex: string): string {
+  if (!hex) return '';
   if (hex.startsWith('npub')) return hex;  // already npub
-  return cmd(`nak encode npub ${hex}`) ?? hex;
+  try { return nip19.npubEncode(hex); } catch { return hex; }
 }
 
 // ── Read ───────────────────────────────────────────────────────────────────────

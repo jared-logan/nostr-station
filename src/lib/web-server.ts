@@ -45,7 +45,8 @@ import {
   readRelaySettings, defaultConfigPath, hexToNpub, npubToHex,
   addToWhitelist, removeFromWhitelist, setAuthFlag,
 } from './relay-config.js';
-import { detectInstalled, probeOllama, probeLmStudio } from './detect.js';
+import { detectPlatform, detectInstalled, probeOllama, probeLmStudio } from './detect.js';
+import { bootstrapRelayServices } from './services.js';
 import {
   readIdentity, addReadRelay, removeReadRelay, setNpub as setIdentityNpub,
   setNgitRelay as setIdentityNgitRelay, setSetupComplete,
@@ -1621,6 +1622,50 @@ export async function startWebServer(port: number): Promise<void> {
       //     reach this endpoint in the first place.
       //   - Once setupComplete flips true, this branch rejects further
       //     calls — a second-session upgrade requires real auth.
+      // Setup wizard Relay stage — performs the full first-install bootstrap
+      // for the local relay: dirs, watchdog keypair, relay config.toml,
+      // watchdog script, systemd/launchd unit files, and enable --now.
+      // Idempotent, so safe to re-run mid-wizard or as a repair path.
+      //
+      // Gated by localhostExempt during the wizard (setupComplete !== true)
+      // and by a normal session afterwards, via the standard middleware —
+      // no public-API carveout needed. Assumes the relay BINARY is already
+      // installed; the wizard leaves compile/download to `nostr-station
+      // onboard` because that step can run 10+ minutes and needs a TTY.
+      if (url === '/api/setup/relay/install' && method === 'POST') {
+        const ident = readIdentity();
+        if (!ident.npub) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'identity.npub is not set — finish the Identity stage first' }));
+          return;
+        }
+        // Optional body — caller can override relay name + fallback relays
+        // + extra whitelisted npubs. Empty body is fine; the bootstrap
+        // applies the same defaults as the TUI Config phase.
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req) || '{}'); }
+        catch { /* empty / malformed body — fall through with defaults */ }
+        try {
+          const platform = detectPlatform();
+          const result = await bootstrapRelayServices(platform, {
+            npub:           ident.npub,
+            relayName:      typeof parsed.relayName      === 'string' ? parsed.relayName      : undefined,
+            fallbackRelays: typeof parsed.fallbackRelays === 'string' ? parsed.fallbackRelays : undefined,
+            whitelistExtra: typeof parsed.whitelistExtra === 'string' ? parsed.whitelistExtra : undefined,
+          });
+          // Probe the running relay so the client can short-circuit its own
+          // status poll. `isRelayUp()` hits localhost:8080; safe to call even
+          // when enable --now failed — just returns false.
+          const up = isRelayUp();
+          res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ...result, up }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e.message ?? e) }));
+        }
+        return;
+      }
+
       if (url === '/api/setup/complete' && method === 'POST') {
         const ident = readIdentity();
         if (!ident.npub) {
