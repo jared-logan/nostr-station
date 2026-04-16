@@ -33,7 +33,10 @@ const arg  = (f: string) => { const i = args.indexOf(f); return i >= 0 ? args[i 
 switch (command) {
 
   case 'onboard':
-    requireInteractive('onboard');
+    // --demo is the explicit non-interactive path — takes no prompts and
+    // produces deterministic output for screenshots / CI. Gating it behind
+    // the TTY check broke e2e-linux (stdin is /dev/null in GH Actions).
+    if (!flag('--demo')) requireInteractive('onboard');
     // Pre-Ink steps, in order:
     //
     //   1. sudo -v — warm the credential cache so later elevated calls
