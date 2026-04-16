@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import { execSync } from 'child_process';
+import { spawn } from 'child_process';
 import { P } from '../onboard/components/palette.js';
 import { startWebServer, contextExists } from '../lib/web-server.js';
 
@@ -12,6 +12,35 @@ interface ChatProps {
   path?: string;
 }
 
+// Fire-and-forget browser open. Deliberately does NOT block or throw:
+//   - xdg-open on a headless Linux box may be absent (ENOENT), have a
+//     broken MIME database, or exit with non-zero but still succeed. Any
+//     of these used to deadlock the previous execSync+timeout path long
+//     enough that the user assumed the server never started.
+//   - spawn + detached + unref lets the child outlive us and decouples
+//     Node's event loop from whatever xdg-open is doing.
+//   - The 'error' listener is required because spawn on a missing binary
+//     emits 'error' asynchronously; without a listener it crashes the
+//     process via uncaughtException.
+//
+// Returns true if we handed the URL off to a launcher, false if no
+// launcher was available. "Handed off" ≠ "browser actually opened" — the
+// child may still exit 1, but we treat that as user's problem, not ours.
+function tryOpenBrowser(url: string): boolean {
+  const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+  try {
+    const child = spawn(opener, [url], {
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.on('error', () => { /* missing opener → silent */ });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const Chat: React.FC<ChatProps> = ({ port = 3000, path = '' }) => {
   const [status, setStatus]       = useState<'starting' | 'running' | 'error'>('starting');
   const [error, setError]         = useState('');
@@ -20,19 +49,19 @@ export const Chat: React.FC<ChatProps> = ({ port = 3000, path = '' }) => {
 
   useEffect(() => {
     const url = `http://localhost:${port}${path}`;
-    const openBrowser = () => {
-      try {
-        const open = process.platform === 'darwin' ? 'open' : 'xdg-open';
-        execSync(`${open} ${url}`, { stdio: 'ignore', timeout: 3000 });
-        setBrowserOpened(true);
-      } catch {
-        setBrowserOpened(false);
-      }
+    const announce = (reused: boolean) => {
+      // Durable stderr line — shows up even if Ink hasn't flushed its
+      // re-render yet, so users watching the terminal always see the
+      // URL before we hand off to the browser.
+      process.stderr.write(
+        `Dashboard ${reused ? 'already running' : 'running'} at ${url}\n`,
+      );
+      setBrowserOpened(tryOpenBrowser(url));
     };
     startWebServer(port)
       .then(() => {
         setStatus('running');
-        openBrowser();
+        announce(false);
       })
       .catch((e: Error) => {
         // If another process already holds the port, treat it as a
@@ -42,7 +71,7 @@ export const Chat: React.FC<ChatProps> = ({ port = 3000, path = '' }) => {
         if (/EADDRINUSE|already.*in use|listen EADDRINUSE/i.test(e.message)) {
           setReusedServer(true);
           setStatus('running');
-          openBrowser();
+          announce(true);
           return;
         }
         setError(e.message);

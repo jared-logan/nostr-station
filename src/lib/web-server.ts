@@ -927,39 +927,35 @@ function exportRelayEvents(): Promise<{ ok: boolean; file?: string; error?: stri
 // ── Server ────────────────────────────────────────────────────────────────────
 
 export async function startWebServer(port: number): Promise<void> {
-  // Best-effort load at startup — we reload per-request so the Chat panel
-  // picks up a newly-stored key (e.g. user ran `keychain set ai-api-key`
-  // in another terminal) without needing a server restart.
-  await loadProviderConfig();
-
   // Sessions are in-memory only and never survive a server restart — the
   // user re-authenticates after a nostr-station chat restart. Explicit here
   // for clarity in case the module is imported multiple times.
   clearAllSessions();
 
-  // Probe node-pty at startup — not for correctness (terminal.ts does the
-  // same lazy check on first use) but to trigger ensureSpawnHelperExecutable()
-  // before the first user click. The chmod self-heal for npm-stripped perms
-  // can't wait for the authenticated capability probe, because that round
-  // trip has observable latency the first time a browser hits the dashboard.
-  // Fire-and-forget; a failure here means the terminal panel is disabled,
-  // which the client surfaces via the capability endpoint anyway.
-  loadPty().catch(() => {});
-
-  // One-shot silent migration from v0.x single-provider layout. Runs before
-  // the first /api/ai/* request so downstream readAiConfig() calls see the
-  // migrated file. No-op when ai-config.json already exists. Logs the
-  // outcome to stderr so operators can trace what happened on first boot.
-  migrateIfNeeded()
-    .then(r => {
-      if (r.migrated) {
-        const bits: string[] = [];
-        if (r.from) bits.push(`chat ← ${r.from.provider}`);
-        if (r.terminalEnabled?.length) bits.push(`terminal ← ${r.terminalEnabled.join(',')}`);
-        process.stderr.write(`[ai-config] migrated (${bits.join('; ') || 'empty'})\n`);
-      }
-    })
-    .catch(e => process.stderr.write(`[ai-config] migration failed: ${e?.message || e}\n`));
+  // Deferred warm-up tasks. Everything here used to run BEFORE
+  // `server.listen()` with `await` — a fresh Linux box with no seeded
+  // GNOME keyring would hang on `secret-tool lookup` inside
+  // loadProviderConfig (waits for an unlock prompt that never comes),
+  // leaving the server unbound and `curl localhost:3000` refused.
+  //
+  // Run these AFTER the socket is bound so the dashboard starts no matter
+  // what the keychain / node-pty / ai-config state is. Per-request handlers
+  // already re-load loadProviderConfig(), so missing the warm-up costs at
+  // most one cold-path lookup on the first chat request.
+  const warmUp = () => {
+    loadProviderConfig().catch(() => {});
+    loadPty().catch(() => {});
+    migrateIfNeeded()
+      .then(r => {
+        if (r.migrated) {
+          const bits: string[] = [];
+          if (r.from) bits.push(`chat ← ${r.from.provider}`);
+          if (r.terminalEnabled?.length) bits.push(`terminal ← ${r.terminalEnabled.join(',')}`);
+          process.stderr.write(`[ai-config] migrated (${bits.join('; ') || 'empty'})\n`);
+        }
+      })
+      .catch(e => process.stderr.write(`[ai-config] migration failed: ${e?.message || e}\n`));
+  };
 
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
@@ -2714,6 +2710,12 @@ export async function startWebServer(port: number): Promise<void> {
       }
     });
 
-    server.listen(port, '127.0.0.1', () => resolve());
+    server.listen(port, '127.0.0.1', () => {
+      // Kick off best-effort warm-ups now that the socket is bound. If any
+      // of them hang (secret-tool unlock prompt, node-pty prebuilt probe,
+      // ai-config migration) the dashboard is still up and serving.
+      warmUp();
+      resolve();
+    });
   });
 }
