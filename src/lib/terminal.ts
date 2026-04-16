@@ -278,6 +278,12 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
     case 'ngit-push':
       return { cmd: 'ngit', args: ['push'], cwd, label: cwd ? `ngit push · ${path.basename(cwd)}` : 'ngit push' };
 
+    // nsite deploy — keep --yes because the dashboard already confirms via
+    // its destructive-action dialog before reaching here. Terminal gives
+    // users the coloured output + any mid-flight prompts that SSE flattens.
+    case 'nsite-deploy':
+      return ns(['nsite', 'deploy', '--yes'], cwd ? `deploy · ${path.basename(cwd)}` : 'deploy');
+
     // NOTE: we intentionally do NOT expose a 'keychain-ai-key' trigger here.
     // node-pty spawns with POSIX_SPAWN_SETSID (required — every PTY is its
     // own session), which detaches the child from the Aqua session bootstrap

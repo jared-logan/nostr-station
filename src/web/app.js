@@ -2488,6 +2488,13 @@ const ProjectsPanel = (() => {
     `;
     container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
     container.querySelector('.ngit-push-btn').addEventListener('click', () => {
+      // ngit push is interactive once Amber gets involved (sign prompts).
+      // Prefer the terminal panel; keep the SSE modal as fallback for
+      // installs without node-pty.
+      if (window.NSTerminal?.isAvailable?.()) {
+        window.NSTerminal.open('ngit-push', { projectId: p.id });
+        return;
+      }
       openExecModal({
         title: `ngit push · ${p.name}`,
         subtitle: 'Streaming ngit push',
@@ -2841,6 +2848,13 @@ const ProjectsPanel = (() => {
       confirmLabel: 'Deploy',
     });
     if (!ok) return;
+    // Terminal gets the coloured progress + any blossom server prompts
+    // that the SSE modal flattens. Fallback to SSE when node-pty is
+    // unavailable keeps the feature working end-to-end.
+    if (window.NSTerminal?.isAvailable?.()) {
+      window.NSTerminal.open('nsite-deploy', { projectId: p.id });
+      return;
+    }
     openExecModal({
       title: `deploy · ${p.name}`,
       subtitle: p.path || '',
