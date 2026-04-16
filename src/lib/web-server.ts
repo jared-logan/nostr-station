@@ -1895,15 +1895,24 @@ export async function startWebServer(port: number): Promise<void> {
           // even bareKey providers (ollama / lmstudio / maple) are "available
           // to add" — their local daemon existence alone shouldn't auto-add
           // them to the user's provider list without explicit opt-in.
+          const hasKey   = !!(entry?.keyRef);
+          const bareKey  = p.type === 'api' && !!((p as ApiProvider).bareKey);
+          const enabled  = !!(entry?.enabled);
           const configured = !entry ? false
             : p.type === 'api'
-              ? !!(entry.keyRef) || !!((p as ApiProvider).bareKey)
-              : !!(entry.enabled);
+              ? (hasKey || bareKey)
+              : enabled;
           return {
             id: p.id,
             displayName: p.displayName,
             type: p.type,
             configured,
+            // hasKey: a real API key is stored in the keychain. Distinct
+            // from bareKey providers (Ollama / LM Studio / Maple) which
+            // don't need one — the UI renders a "local" badge instead of
+            // "key set" to avoid misleading users.
+            hasKey,
+            bareKey,
             // Expose the effective model + baseUrl so the Chat dropdown can
             // show what will actually be sent without re-implementing the
             // override-vs-registry resolution client-side.

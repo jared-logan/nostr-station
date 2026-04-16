@@ -3513,10 +3513,22 @@ const ConfigPanel = (() => {
 
     const badges = [];
     badges.push(`<span class="ai-badge type-${typeClass}">${typeLabel}</span>`);
-    if (p.type === 'api') {
+    // Status badge — three distinct states so bareKey locals don't claim
+    // to have a key that never existed:
+    //   api + keyRef    → "key set"
+    //   api + bareKey   → "local"
+    //   terminal-native → "enabled"
+    if (p.type === 'api' && p.hasKey) {
       badges.push(`<span class="ai-badge status-ok">✓ key set</span>`);
-    } else {
+    } else if (p.type === 'api' && p.bareKey) {
+      badges.push(`<span class="ai-badge status-ok">local</span>`);
+    } else if (p.type === 'terminal-native') {
       badges.push(`<span class="ai-badge status-ok">enabled</span>`);
+    } else {
+      // Edge case: api provider in config but no keyRef and no bareKey.
+      // Shouldn't happen normally, but badge something so users know
+      // they need to set a key.
+      badges.push(`<span class="ai-badge">needs key</span>`);
     }
     if (isChatDef)  badges.push(`<span class="ai-badge default">chat default</span>`);
     if (isTermDef)  badges.push(`<span class="ai-badge default">terminal default</span>`);
