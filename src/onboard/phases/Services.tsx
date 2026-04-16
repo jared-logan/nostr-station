@@ -11,6 +11,9 @@ import {
 import { installNostrVpn, setupNgitBunker, generateSshKey } from '../../lib/install.js';
 import { execa } from 'execa';
 import { npubToHex } from '../../lib/detect.js';
+import {
+  writeIdentity, readIdentity, identityExists, DEFAULT_READ_RELAYS,
+} from '../../lib/identity.js';
 
 interface ServicesPhaseProps {
   platform: Platform;
@@ -68,6 +71,30 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
       up(0, { status: 'running' });
       try { setupDirs(platform); up(0, { status: 'done' }); }
       catch (e: any) { up(0, { status: 'error', detail: e.message }); }
+
+      // identity.json — seed on fresh install so dashboard, ngit Service Health
+      // dot, and Projects → ngit init relay pre-fill all work on first run.
+      // If a prior identity.json exists, preserve its fields and only fill in
+      // anything missing (e.g. ngitRelay on an upgrade from pre-ngit builds).
+      try {
+        if (!identityExists()) {
+          writeIdentity({
+            npub: cfg.npub,
+            readRelays: DEFAULT_READ_RELAYS.slice(),
+            ngitRelay: 'ws://localhost:8080',
+          });
+        } else {
+          const existing = readIdentity();
+          if (!existing.npub || !existing.ngitRelay) {
+            writeIdentity({
+              npub: existing.npub || cfg.npub,
+              readRelays: existing.readRelays,
+              ngitRelay: existing.ngitRelay || 'ws://localhost:8080',
+              ...(existing.requireAuth === false ? { requireAuth: false } : {}),
+            });
+          }
+        }
+      } catch { /* non-fatal — dashboard will prompt if identity is missing */ }
 
       // Watchdog keypair — nsec stored in keychain, not in script or config
       up(1, { status: 'running' });

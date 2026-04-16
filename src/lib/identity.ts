@@ -23,7 +23,7 @@ export interface Identity {
   requireAuth?: boolean;
 }
 
-const DEFAULT_READ_RELAYS = [
+export const DEFAULT_READ_RELAYS = [
   'wss://relay.damus.io',
   'wss://relay.nostr.band',
   'wss://nos.lol',
@@ -34,6 +34,10 @@ function configDir(): string {
 }
 function configPath(): string {
   return path.join(configDir(), 'identity.json');
+}
+
+export function identityExists(): boolean {
+  return fs.existsSync(configPath());
 }
 
 export function readIdentity(): Identity {
