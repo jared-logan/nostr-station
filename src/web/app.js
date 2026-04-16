@@ -2114,6 +2114,21 @@ const ProjectsPanel = (() => {
     chatBtn.addEventListener('click', (e) => { e.stopPropagation(); openInChat(p); });
     actionsEl.appendChild(chatBtn);
 
+    // "Open in Claude Code" — spawns Claude in a terminal tab with cwd set
+    // to the project path. Requires a local path (nothing to cd into for
+    // nsite-only projects) and node-pty available (the terminal panel
+    // won't render otherwise, but we double-check so the button isn't
+    // misleading on unsupported installs).
+    if (p.path && window.NSTerminal?.isAvailable?.()) {
+      const claudeBtn = iconBtn('claude', 'Open in Claude Code',
+        `<svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`);
+      claudeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.NSTerminal.open('claude', { projectId: p.id });
+      });
+      actionsEl.appendChild(claudeBtn);
+    }
+
     if (p.capabilities.git || p.capabilities.ngit) {
       const pushBtn = iconBtn('publish', 'Publish',
         `<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`);
@@ -2175,6 +2190,12 @@ const ProjectsPanel = (() => {
     subtitle.textContent = p.path ? p.path : 'nsite-only project';
 
     headActions.innerHTML = '';
+    if (p.path && window.NSTerminal?.isAvailable?.()) {
+      const claudeBtn = document.createElement('button');
+      claudeBtn.textContent = 'Open in Claude Code';
+      claudeBtn.addEventListener('click', () => window.NSTerminal.open('claude', { projectId: p.id }));
+      headActions.appendChild(claudeBtn);
+    }
     if (p.capabilities.git || p.capabilities.ngit) {
       const pushBtn = document.createElement('button');
       pushBtn.className = 'primary';
