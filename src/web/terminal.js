@@ -604,5 +604,8 @@
     collapse,
     isAvailable: () => !!available,
     getUnavailableReason: () => window.__nsTerminalUnavailableReason || null,
+    // Number of live tabs — used by the sidebar Terminal nav to decide
+    // whether clicking should spawn a shell or just expand an existing one.
+    tabCount: () => tabs.length,
   };
 })();

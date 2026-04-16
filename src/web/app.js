@@ -3968,7 +3968,30 @@ function bootDashboard(localhostExempt) {
     // capability probe + reconnect-if-live runs during boot so a refreshed
     // dashboard with a live ngit/Claude session resumes without user action.
     // Fire-and-forget; terminal.js owns its own error surfacing.
-    window.NSTerminal?.init?.();
+    window.NSTerminal?.init?.().then(() => {
+      // Unhide the sidebar Terminal nav item once we know node-pty is
+      // available. Checked AFTER init so the async capability probe has
+      // settled — panels using a click-time check don't need this, but
+      // the nav item would flicker if we showed it early and hid it.
+      const navTerm = $('nav-terminal');
+      if (navTerm && window.NSTerminal?.isAvailable?.()) {
+        navTerm.hidden = false;
+        navTerm.addEventListener('click', (e) => {
+          // No panel to activate — just toggle the terminal drawer, open
+          // a shell tab if none exists. Prevent the hash from changing so
+          // the currently-viewed panel stays put.
+          e.preventDefault();
+          if (!window.NSTerminal.isAvailable()) return;
+          window.NSTerminal.expand();
+          // Only spawn a shell if the terminal has no live tabs yet — if
+          // the user already has a Claude session or ngit login running,
+          // we just raise the drawer, we don't pile on a new tab.
+          if ((window.NSTerminal.tabCount?.() ?? 0) === 0) {
+            window.NSTerminal.open('shell');
+          }
+        });
+      }
+    });
   }
   toggleLocalhostBanner(localhostExempt);
 }
