@@ -2791,6 +2791,28 @@ const ProjectsPanel = (() => {
       confirmLabel: 'Publish',
     });
     if (!ok) return;
+
+    // Prefer the terminal panel — publish is an Ink flow with colour +
+    // Amber prompts that the SSE modal can only render as NO_COLOR plain
+    // text. Pick the key that matches the project's capabilities (mirrors
+    // the server-side branch in /api/projects/:id/git/push). When node-pty
+    // isn't available we fall back to the exec modal so the feature still
+    // works end-to-end.
+    if (window.NSTerminal?.isAvailable?.()) {
+      const key = (p.capabilities.git && p.capabilities.ngit) ? 'publish'
+                : p.capabilities.ngit ? 'ngit-push'
+                : p.capabilities.git  ? 'git-push'
+                : null;
+      if (!key) { toast('Publish unavailable', 'No git/ngit capability', 'warn'); return; }
+      window.NSTerminal.open(key, { projectId: p.id });
+      // Refresh the detail view a couple of times so chips (HEAD, uncommitted
+      // count) pick up the push result without the user clicking refresh.
+      if (state.view === 'detail' && state.projectId === p.id) {
+        [5_000, 30_000].forEach(ms => setTimeout(() => render(), ms));
+      }
+      return;
+    }
+
     openExecModal({
       title: `publish · ${p.name}`,
       subtitle: p.path || '',

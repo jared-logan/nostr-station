@@ -265,6 +265,19 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
     // scrollback, search via shell if they pipe, etc.). -f keeps tail open.
     case 'relay-logs':     return ns(['relay', 'logs', '-f'], 'relay logs');
 
+    // Project publish flows. The three keys mirror the server-side
+    // capability branch in /api/projects/:id/git/push so the client can
+    // pick without duplicating the decision. cwd is project.path (passed
+    // via createTerminal's projectId → cwd resolver). --yes stays on the
+    // Ink publish because the dashboard already prompts via a confirm
+    // dialog; double-confirming isn't useful.
+    case 'publish':
+      return ns(['publish', '--yes'], cwd ? `publish · ${path.basename(cwd)}` : 'publish');
+    case 'git-push':
+      return { cmd: 'git', args: ['push', 'origin', 'HEAD'], cwd, label: cwd ? `git push · ${path.basename(cwd)}` : 'git push' };
+    case 'ngit-push':
+      return { cmd: 'ngit', args: ['push'], cwd, label: cwd ? `ngit push · ${path.basename(cwd)}` : 'ngit push' };
+
     // NOTE: we intentionally do NOT expose a 'keychain-ai-key' trigger here.
     // node-pty spawns with POSIX_SPAWN_SETSID (required — every PTY is its
     // own session), which detaches the child from the Aqua session bootstrap
