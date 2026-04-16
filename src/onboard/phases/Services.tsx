@@ -83,6 +83,9 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
             npub: cfg.npub,
             readRelays: DEFAULT_READ_RELAYS.slice(),
             ngitRelay: 'ws://localhost:8080',
+            // TUI onboard is a complete flow — mark it done so the
+            // dashboard doesn't treat localhost as exempt on first run.
+            setupComplete: true,
           });
         } else {
           const existing = readIdentity();
@@ -92,6 +95,7 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
               readRelays: existing.readRelays,
               ngitRelay: existing.ngitRelay || 'ws://localhost:8080',
               ...(existing.requireAuth === false ? { requireAuth: false } : {}),
+              setupComplete: existing.setupComplete ?? true,
             });
           }
         }

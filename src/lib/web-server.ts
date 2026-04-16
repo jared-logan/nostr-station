@@ -48,7 +48,7 @@ import {
 import { detectInstalled, probeOllama, probeLmStudio } from './detect.js';
 import {
   readIdentity, addReadRelay, removeReadRelay, setNpub as setIdentityNpub,
-  setNgitRelay as setIdentityNgitRelay,
+  setNgitRelay as setIdentityNgitRelay, setSetupComplete,
   isNpubOrHex, isNsec, isValidRelayUrl, DEFAULT_READ_RELAYS, type Identity,
 } from './identity.js';
 import {
@@ -1511,12 +1511,15 @@ export async function startWebServer(port: number): Promise<void> {
         let parsed: any = {};
         try { parsed = JSON.parse(await readBody(req)); }
         catch { res.writeHead(400); res.end('bad json'); return; }
-        // Two fields may be set by this route — npub (bootstrap owner) and
-        // ngitRelay (station-level default for ngit). Both are optional; the
-        // handler updates whichever is present.
+        // Fields accepted by this route:
+        //   - npub          (bootstrap owner)
+        //   - ngitRelay     (station-level default for ngit)
+        //   - setupComplete (wizard progress marker — see localhostExempt)
+        // All optional; handler updates whichever is present.
         const hasNpub     = typeof parsed.npub      === 'string';
         const hasNgitRly  = typeof parsed.ngitRelay === 'string';
-        if (!hasNpub && !hasNgitRly) {
+        const hasSetup    = typeof parsed.setupComplete === 'boolean';
+        if (!hasNpub && !hasNgitRly && !hasSetup) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'nothing to update' }));
           return;
@@ -1529,6 +1532,9 @@ export async function startWebServer(port: number): Promise<void> {
         }
         if (hasNgitRly) {
           ngitResult = setIdentityNgitRelay(String(parsed.ngitRelay || '').trim());
+        }
+        if (hasSetup) {
+          setSetupComplete(parsed.setupComplete);
         }
         const ok = (!npubResult || npubResult.ok) && (!ngitResult || ngitResult.ok);
         const body: any = { ok };
@@ -1600,6 +1606,43 @@ export async function startWebServer(port: number): Promise<void> {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: String(e.message || e) }));
         }
+        return;
+      }
+
+      // Setup wizard completion — called once from the Done stage. Flips
+      // setupComplete=true (ending the localhost exemption on this box
+      // when npub is set + requireAuth is on) and issues a fresh session
+      // token for the stored npub so the dashboard unlocks without a
+      // separate sign-in round trip.
+      //
+      // Safe to expose without a NIP-98 signature because:
+      //   - setupComplete !== true means we're still inside the wizard's
+      //     localhostExempt window, i.e. only something on 127.0.0.1 can
+      //     reach this endpoint in the first place.
+      //   - Once setupComplete flips true, this branch rejects further
+      //     calls — a second-session upgrade requires real auth.
+      if (url === '/api/setup/complete' && method === 'POST') {
+        const ident = readIdentity();
+        if (!ident.npub) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'identity not set' }));
+          return;
+        }
+        if (ident.setupComplete === true) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'setup already complete — sign in normally' }));
+          return;
+        }
+        setSetupComplete(true);
+        const ua = String(req.headers['user-agent'] || '');
+        const sess = createSession(ident.npub, ua);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          token:     sess.token,
+          npub:      sess.npub,
+          expiresAt: sess.expiresAt,
+        }));
         return;
       }
 

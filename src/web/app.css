@@ -1927,6 +1927,36 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 
 .setup-ngit-amber .primary { min-width: 220px; }
 
+.setup-done {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 14px;
+  background: color-mix(in srgb, var(--success) 10%, var(--bg-elev));
+  border: 1px solid color-mix(in srgb, var(--success) 50%, var(--border));
+  border-radius: var(--r);
+}
+.setup-done-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--success);
+  color: #0e1c12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.setup-done-body .setup-copy { margin: 0; }
+.setup-done-status {
+  margin-top: 10px;
+  font-size: 11px;
+  text-align: right;
+}
+.setup-done-status.err { color: var(--error); }
+
 .auth-card {
   width: 420px;
   max-width: 100%;

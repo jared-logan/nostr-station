@@ -4660,7 +4660,19 @@ const SetupWizard = (() => {
   let stageIdx = 0;
   const state = { npub: '', profile: null };
 
-  function show() {
+  async function show() {
+    // If the station is already set up AND the viewer is authenticated,
+    // there's nothing for the wizard to do — redirect to dashboard. We
+    // check both because a fresh browser on an already-set-up box still
+    // needs to hit the normal sign-in screen, not this wizard.
+    try {
+      const st = await fetch('/api/auth/status').then(r => r.json());
+      if (st.configured && st.authenticated && st.session) {
+        location.href = '/';
+        return;
+      }
+    } catch { /* fall through — render wizard anyway */ }
+
     stageIdx = 0;
     root.hidden = false;
     render();
@@ -4708,6 +4720,7 @@ const SetupWizard = (() => {
     else if (stage === 'relay')    renderRelay();
     else if (stage === 'ai')       renderAi();
     else if (stage === 'ngit')     renderNgit();
+    else if (stage === 'done')     renderDone();
     else                           renderStub(stage);
   }
 
@@ -4833,10 +4846,14 @@ const SetupWizard = (() => {
       saveBtn.disabled = true;
       saveBtn.innerHTML = '<span class="spinner"></span> Saving…';
       try {
+        // Writing setupComplete=false here keeps the localhost exemption
+        // alive for the rest of the wizard (relay/ai/ngit stages) even
+        // after npub is set. It flips to true in the Done stage via
+        // /api/setup/complete, at which point normal auth takes over.
         const r = await fetch('/api/identity/set', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ npub: val }),
+          body: JSON.stringify({ npub: val, setupComplete: false }),
         }).then(r => r.json());
         if (!r.ok) throw new Error(r.error || 'save failed');
         toast('Identity saved', truncNpub(val), 'ok');
@@ -5261,17 +5278,67 @@ const SetupWizard = (() => {
     document.body.appendChild(pill);
   }
 
-  // ── Stage stubs (built out in Step 6.5) ──────────────────────────────
-  function renderStub(stage) {
-    const titles = { done: 'All set' };
+  // ── Done ─────────────────────────────────────────────────────────────
+  // POSTs /api/setup/complete which flips setupComplete=true and hands
+  // us a session token — we store it exactly like a normal sign-in and
+  // navigate to '/' so the dashboard boots under real auth.
+  function renderDone() {
     root.innerHTML = shell(
-      titles[stage] || stage,
-      'This stage lands in the next slice.',
+      'Your station is ready',
+      'Setup complete — the dashboard is unlocking.',
       `
-        <p class="setup-copy muted">
-          Placeholder — the ${escapeHtml(stage)} stage ships in Step 6.5.
-          Use Back to step through what's done so far.
-        </p>
+        <div class="setup-done">
+          <div class="setup-done-icon">✓</div>
+          <div class="setup-done-body">
+            <p class="setup-copy">
+              Everything's wired up. Click below to sign in and open the
+              dashboard. You can revisit any of these settings any time
+              from <strong>Config</strong>.
+            </p>
+          </div>
+        </div>
+        <div class="setup-actions">
+          <button class="setup-back">← Back</button>
+          <button class="primary" id="setup-done-go">Open dashboard →</button>
+        </div>
+        <div class="setup-done-status muted" id="setup-done-status"></div>
+      `,
+    );
+    root.querySelector('.setup-back').addEventListener('click', back);
+
+    const goBtn = $('setup-done-go');
+    const statusEl = $('setup-done-status');
+    goBtn.addEventListener('click', async () => {
+      goBtn.disabled = true;
+      goBtn.innerHTML = '<span class="spinner"></span> Unlocking…';
+      statusEl.textContent = '';
+      try {
+        const r = await fetch('/api/setup/complete', { method: 'POST' })
+          .then(r => r.json());
+        if (!r.ok || !r.token) throw new Error(r.error || 'setup completion failed');
+        // Store the token the same way AuthScreen does so the dashboard
+        // picks it up on load.
+        setSessionToken(r.token, r.expiresAt);
+        toast('Welcome to nostr-station', truncNpub(r.npub || ''), 'ok');
+        // Clean up any hoisted terminal state before handing off.
+        document.body.classList.remove('setup-term-hoist');
+        document.getElementById('setup-return-pill')?.remove();
+        location.href = '/';
+      } catch (e) {
+        statusEl.textContent = e.message;
+        statusEl.classList.add('err');
+        goBtn.disabled = false;
+        goBtn.textContent = 'Retry';
+      }
+    });
+  }
+
+  // ── Stage stubs (unused once all stages are live) ────────────────────
+  function renderStub(stage) {
+    root.innerHTML = shell(
+      stage,
+      'Placeholder stage.',
+      `
         <div class="setup-actions">
           <button class="setup-back">← Back</button>
           <button class="primary setup-next">Continue →</button>

@@ -21,6 +21,14 @@ export interface Identity {
   // Opt-out of dashboard auth for localhost requests (127.0.0.1, ::1). Default
   // true — manual override only, not surfaced in the UI yet.
   requireAuth?: boolean;
+  // Tri-state — written by the web setup wizard at /setup:
+  //   - false : wizard is in progress (localhost stays exempt so the
+  //             remaining stages can hit otherwise-gated endpoints)
+  //   - true  : wizard completed; normal auth applies
+  //   - undefined : legacy (pre-6.5 TUI onboard, hand-edited json).
+  //             Treated as "complete" — we don't want existing users
+  //             stuck in exempt mode after an upgrade.
+  setupComplete?: boolean;
 }
 
 export const DEFAULT_READ_RELAYS = [
@@ -51,6 +59,7 @@ export function readIdentity(): Identity {
                     : DEFAULT_READ_RELAYS.slice(),
       ngitRelay:  typeof parsed.ngitRelay === 'string' && parsed.ngitRelay ? parsed.ngitRelay : undefined,
       requireAuth: parsed.requireAuth === false ? false : undefined,
+      setupComplete: typeof parsed.setupComplete === 'boolean' ? parsed.setupComplete : undefined,
     };
   } catch {
     return { npub: '', readRelays: DEFAULT_READ_RELAYS.slice() };
@@ -117,4 +126,10 @@ export function setNpub(npub: string): { ok: boolean; error?: string; npub?: str
   ident.npub = npub;
   writeIdentity(ident);
   return { ok: true, npub };
+}
+
+export function setSetupComplete(complete: boolean): void {
+  const ident = readIdentity();
+  ident.setupComplete = complete;
+  writeIdentity(ident);
 }
