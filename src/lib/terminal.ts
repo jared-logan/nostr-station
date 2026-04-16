@@ -255,10 +255,11 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
     // Our own CLI subcommands — Ink mounts against the PTY so the full TUI
     // (selects, spinners, multi-step wizards) renders as it does in a real
     // terminal. ns() picks node+cli.js or tsx+cli.tsx based on layout.
-    case 'doctor':  return ns(['doctor'],  'doctor');
-    case 'onboard': return ns(['onboard'], 'onboard');
-    case 'update':  return ns(['update'],  'update');
-    case 'seed':    return ns(['seed'],    'seed');
+    case 'doctor':         return ns(['doctor'],             'doctor');
+    case 'onboard':        return ns(['onboard'],            'onboard');
+    case 'update':         return ns(['update'],             'update');
+    case 'update-wizard':  return ns(['update', '--wizard'], 'update');
+    case 'seed':           return ns(['seed'],               'seed');
 
     // NOTE: we intentionally do NOT expose a 'keychain-ai-key' trigger here.
     // node-pty spawns with POSIX_SPAWN_SETSID (required — every PTY is its

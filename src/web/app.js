@@ -3257,11 +3257,38 @@ const ConfigPanel = (() => {
         </div>
       </div>
 
+      <div class="config-section">
+        <h3>System</h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+          Fetch newer versions of all components (relay, ngit, nak, Claude Code, Stacks). The
+          wizard opens in a terminal tab with per-component diffs before applying.
+        </div>
+        <div class="keyrow">
+          <button id="cfg-update-wizard">Update components</button>
+          <span style="font-size:11px;color:var(--muted);align-self:center">
+            runs <code>nostr-station update --wizard</code>
+          </span>
+        </div>
+      </div>
+
     `;
 
     // Wire toggles
     $('cfg-auth').addEventListener('change', (e) => saveRelayFlag('auth', e.target.checked));
     $('cfg-dm-auth').addEventListener('change', (e) => saveRelayFlag('dmAuth', e.target.checked));
+
+    // System → Update components — runs `nostr-station update --wizard` in a
+    // terminal tab. Wizard is interactive (shows diff, prompts to apply)
+    // which requires a real TTY, so it's terminal-only with a toast fallback.
+    $('cfg-update-wizard')?.addEventListener('click', () => {
+      if (window.NSTerminal?.isAvailable?.()) {
+        window.NSTerminal.open('update-wizard');
+      } else {
+        toast('Terminal unavailable',
+          window.NSTerminal?.getUnavailableReason?.() || 'Run update from your own shell: `nostr-station update --wizard`',
+          'err');
+      }
+    });
 
     // Copy button on the identity npub row — only rendered when an npub is
     // actually configured (guarded by the same branch in renderIdentityBody).
