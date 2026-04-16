@@ -259,6 +259,55 @@ function completionsUrl(baseUrl: string): string {
 
 type Msg = { role: string; content: string };
 
+// ── Model-list adapters (used by GET /api/ai/providers/:id/models) ────────
+//
+// Anthropic + OpenAI-compat expose /v1/models; the Gemini-through-OpenAI
+// shim does too. Results are keyed on the `id` field in the response's
+// `data[]` array — that's what the /v1/chat/completions endpoint accepts.
+
+async function fetchAnthropicModels(apiKey: string): Promise<string[]> {
+  const res = await fetch('https://api.anthropic.com/v1/models', {
+    headers: {
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`anthropic ${res.status}: ${body.slice(0, 160)}`);
+  }
+  const data = await res.json() as any;
+  const list = Array.isArray(data?.data) ? data.data : [];
+  const ids  = list.map((m: any) => m?.id).filter((s: any) => typeof s === 'string' && s);
+  if (ids.length === 0) throw new Error('anthropic returned no models');
+  return ids;
+}
+
+async function fetchOpenAICompatModels(
+  apiKey: string, baseUrl: string, bareKey: boolean,
+): Promise<string[]> {
+  // Most OpenAI-compat endpoints expose /v1/models at the same base URL
+  // as /v1/chat/completions. Some (Ollama, LM Studio) accept an empty
+  // Authorization; only attach the header when we have a real key.
+  const url = baseUrl.replace(/\/$/, '').endsWith('/v1')
+    ? `${baseUrl.replace(/\/$/, '')}/models`
+    : `${baseUrl.replace(/\/$/, '')}/v1/models`;
+  const headers: Record<string, string> = { 'accept': 'application/json' };
+  if (apiKey && !bareKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${res.status}: ${body.slice(0, 160)}`);
+  }
+  const data = await res.json() as any;
+  const list = Array.isArray(data?.data) ? data.data : [];
+  const ids  = list.map((m: any) => m?.id).filter((s: any) => typeof s === 'string' && s);
+  if (ids.length === 0) throw new Error('provider returned no models');
+  // Alphabetical keeps the Chat dropdown scannable; providers often
+  // return chronological which mixes gpt-3 / gpt-4 / etc. unpredictably.
+  return ids.sort();
+}
+
 async function streamAnthropic(
   messages: Msg[], system: string, cfg: ProviderConfig, res: http.ServerResponse,
 ): Promise<void> {
@@ -2025,6 +2074,49 @@ export async function startWebServer(port: number): Promise<void> {
         } catch (e: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: String(e.message || e).slice(0, 200) }));
+        }
+        return;
+      }
+
+      // GET /api/ai/providers/:id/models — live-fetch the provider's
+      // model list via its own /v1/models endpoint and return the
+      // normalized ids. Clients cache the result in ai-config.
+      // knownModels so subsequent Chat panel renders skip the round-trip.
+      const aiModelsMatch = url.match(/^\/api\/ai\/providers\/([a-z0-9-]+)\/models$/);
+      if (aiModelsMatch && method === 'GET') {
+        const id = aiModelsMatch[1];
+        const provider = getProvider(id);
+        if (!provider || provider.type !== 'api') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `unknown API provider: ${id}` }));
+          return;
+        }
+        // Resolve key — bareKey providers skip the keychain read entirely.
+        let apiKey = '';
+        if (!provider.bareKey) {
+          try {
+            apiKey = (await getKeychain().retrieve(keychainAccountFor(id))) ?? '';
+          } catch { apiKey = ''; }
+          if (!apiKey) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'no API key stored — add one first' }));
+            return;
+          }
+        }
+        const cfg = readAiConfig();
+        const baseUrl = cfg.providers[id]?.baseUrl ?? provider.baseUrl;
+        try {
+          const models = provider.flavor === 'anthropic'
+            ? await fetchAnthropicModels(apiKey)
+            : await fetchOpenAICompatModels(apiKey, baseUrl, !!provider.bareKey);
+          // Persist immediately so the Chat pane + subsequent panel
+          // renders see the fresh list without another round-trip.
+          setProviderEntry(id, { knownModels: models });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ models }));
+        } catch (e: any) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: String(e.message || e).slice(0, 240) }));
         }
         return;
       }

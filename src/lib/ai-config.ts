@@ -49,6 +49,11 @@ export interface ProviderConfig {
   // Optional overrides. When absent, PROVIDERS registry defaults apply.
   model?:   string;
   baseUrl?: string;
+  // Cached live-fetched model list — populated when the user clicks
+  // "Fetch models" in the Config panel. The Chat pane's model dropdown
+  // prefers this over the hand-curated PROVIDER_LIST fallback so users
+  // see exactly what their key is entitled to.
+  knownModels?: string[];
 }
 
 export interface AiConfig {

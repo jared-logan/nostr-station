@@ -365,10 +365,33 @@ const PROVIDER_LIST = [
   { value: 'custom',       label: 'Custom',       models: ['default'] },
 ];
 
+// ai-config cache — read-once per ~3s to avoid refetching when Chat
+// switches providers in rapid succession. invalidateAiCfg() forces a
+// refresh after writes (adding / removing providers, fetching models).
+const _aiCfgCache = { data: null, at: 0 };
+async function getAiCfg() {
+  const now = Date.now();
+  if (_aiCfgCache.data && (now - _aiCfgCache.at) < 3000) return _aiCfgCache.data;
+  const cfg = await api('/api/ai/config').catch(() => null);
+  _aiCfgCache.data = cfg;
+  _aiCfgCache.at   = now;
+  return cfg;
+}
+function invalidateAiCfg() { _aiCfgCache.data = null; }
+
 async function modelsFor(provider) {
+  // 1. Live-fetched list cached in ai-config wins — that's what the
+  //    user's key is actually entitled to, not our stale hardcoded list.
+  try {
+    const cfg = await getAiCfg();
+    const known = cfg?.providers?.[provider]?.knownModels;
+    if (Array.isArray(known) && known.length) return known;
+  } catch {}
+  // 2. Hand-curated fallback from PROVIDER_LIST.
   const p = PROVIDER_LIST.find(x => x.value === provider);
   if (!p) return [];
   if (!p.dynamic) return p.models;
+  // 3. Ollama: dynamic probe of the local daemon.
   try {
     const { models } = await api('/api/ollama/models');
     return models.length ? models : ['llama3.2'];
@@ -3603,8 +3626,13 @@ const ConfigPanel = (() => {
     const isTermDef  = !!p.isDefault?.terminal;
     // Action buttons — only show "set default" when it's not already set
     // AND the provider type matches (chat defaults are API-only; terminal
-    // defaults are terminal-native only).
+    // defaults are terminal-native only). "Fetch models" lives on API
+    // rows and pulls the live list from /v1/models, caching into
+    // ai-config.knownModels for the Chat pane's dropdown.
     const actions = [];
+    if (p.type === 'api') {
+      actions.push(`<button class="ai-fetch-models" data-id="${escapeHtml(p.id)}">Fetch models</button>`);
+    }
     if (p.type === 'api' && !isChatDef) {
       actions.push(`<button class="ai-set-default" data-kind="chat" data-id="${escapeHtml(p.id)}">Use for Chat</button>`);
     }
@@ -3672,6 +3700,10 @@ const ConfigPanel = (() => {
         }
         if (btn.classList.contains('ai-set-default')) {
           await setAiDefault(btn.dataset.kind, id);
+          return;
+        }
+        if (btn.classList.contains('ai-fetch-models')) {
+          await fetchModelsForProvider(id, btn);
           return;
         }
       });
@@ -3806,6 +3838,31 @@ const ConfigPanel = (() => {
     } catch (e) {
       toast('Default update failed', e.message, 'err');
     }
+  }
+
+  async function fetchModelsForProvider(id, btn) {
+    // Visual feedback — the round trip can take a few seconds on
+    // Anthropic, and silent hangs feel broken.
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Fetching…';
+    try {
+      const r = await api(`/api/ai/providers/${encodeURIComponent(id)}/models`);
+      const count = Array.isArray(r?.models) ? r.models.length : 0;
+      if (count === 0) throw new Error('no models returned');
+      toast(`${id}: ${count} models`, r.models.slice(0, 3).join(', ') + (count > 3 ? '…' : ''), 'ok');
+      // The server already persisted knownModels into ai-config.json;
+      // our client cache needs to drop so the Chat dropdown re-reads
+      // from disk on its next populate call.
+      invalidateAiCfg();
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
+      // No full panel re-render needed — the list membership hasn't
+      // changed, just the per-provider model data.
+    } catch (e) {
+      toast('Fetch failed', e.message || String(e), 'err');
+    }
+    btn.disabled = false;
+    btn.textContent = orig;
   }
 
   async function removeAiProvider(id) {
