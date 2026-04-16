@@ -756,96 +756,184 @@ export async function installBlossom(homeDir: string): Promise<InstallResult> {
 }
 
 // Installs nvpn into the user-writable `${cargoBin}` slot (`~/.cargo/bin`),
-// same pattern as the relay + nak binaries. An earlier version of this
-// function delegated to upstream's `install.sh`, which:
-//   1. Targets /usr/local/bin by default and invokes `sudo install` internally
-//      to copy there. We spawned install.sh over a pipe with no TTY, so sudo
-//      couldn't prompt for a password and failed silently. On a fresh Linux
-//      box the nvpn binary never landed anywhere on PATH, and the follow-up
-//      `sudo nvpn service install` call crashed with "command not found".
-//   2. Couldn't work around this by passing --install-dir either — even
-//      /usr/local/bin is on root's PATH but not predictably on `sudo`'s
-//      sanitised PATH (secure_path resets it).
+// same pattern as the relay + nak binaries. Earlier revisions of this
+// function either delegated to upstream's install.sh (which shelled out to
+// sudo over a non-TTY pipe and silently no-op'd) or piped `curl | tar` in a
+// single `sh -c` so download failures and extraction failures were
+// indistinguishable. Both failure modes surfaced as a red "error" row in
+// the TUI with no indication of which step failed.
 //
-// Dropping the binary into ${cargoBin} avoids both issues: user-writable
-// (no sudo for the copy), already on the interactive user's PATH (rustup
-// adds it to the shell rc files), AND the `sudo nvpn service install` call
-// below uses the absolute path so sudo's sanitised PATH doesn't matter.
+// This rewrite breaks the flow into named, individually-attributable steps
+// and streams each one through `onProgress` so the Services phase row
+// updates live. Errors include the specific step, the exit code / stderr
+// snippet, and (for downloads) the full URL so the user can re-fetch
+// manually. Writes a log file at ~/logs/nvpn-install.log so a post-mortem
+// is available after the TUI exits.
 export async function installNostrVpn(
   platform: { nvpnTarget: string; cargoBin: string },
+  onProgress: (detail: string) => void = () => {},
 ): Promise<InstallResult> {
+  const fs = await import('fs');
+  const os = await import('os');
+  const path = await import('path');
+
+  const logPath = path.join(os.homedir(), 'logs', 'nvpn-install.log');
+  const log: string[] = [];
+  const append = (line: string) => {
+    const stamped = `[${new Date().toISOString()}] ${line}`;
+    log.push(stamped);
+    try {
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      fs.appendFileSync(logPath, stamped + '\n');
+    } catch { /* best-effort — log file is diagnostic, not load-bearing */ }
+  };
+  const step = (msg: string) => { append(`step: ${msg}`); onProgress(msg); };
+  const fail = (stepName: string, reason: string): InstallResult => {
+    append(`FAIL ${stepName}: ${reason}`);
+    return {
+      ok: false,
+      detail: `${stepName} — ${reason} (log: ${logPath})`,
+    };
+  };
+
   const nvpnBin = `${platform.cargoBin}/nvpn`;
+  append(`target=${platform.nvpnTarget} cargoBin=${platform.cargoBin}`);
 
   // Short-circuit: if the binary is already present AND responds to --help,
-  // declare victory. We can't use `nvpn status --json` because `status`
-  // reaches out to the daemon and returns non-zero when disconnected, which
-  // would trigger an unnecessary reinstall on every onboard re-run.
+  // declare victory. `nvpn status --json` would be wrong here — it talks to
+  // the daemon and exits non-zero when disconnected, forcing a reinstall
+  // on every onboard re-run.
+  step('checking for existing install');
   try {
     await execa(nvpnBin, ['--help'], { stdio: 'pipe', timeout: 5000 });
+    append('already installed — skipping');
     return { ok: true, detail: 'already installed' };
-  } catch {}
+  } catch { /* fall through to install */ }
 
   const url = `https://github.com/mmalmi/nostr-vpn/releases/latest/download/nvpn-${platform.nvpnTarget}.tar.gz`;
   const tmp = `/tmp/nvpn-install-${Date.now()}`;
-  const fs = await import('fs');
+  const tarPath = `${tmp}/nvpn.tar.gz`;
   fs.mkdirSync(tmp, { recursive: true });
+  append(`tmp dir: ${tmp}`);
 
-  const dl = await run('sh', ['-c', `curl -fsSL "${url}" | tar -xz -C "${tmp}"`]);
-  if (!dl.ok) {
+  // Download — split from the extract step (older code piped curl | tar
+  // which hid HTTP errors behind tar's "Unexpected EOF"). `-w` prints the
+  // HTTP code to stdout so we can log 404s distinctly from connection
+  // failures.
+  step(`downloading ${url}`);
+  try {
+    const { stdout: httpCode } = await execa(
+      'curl',
+      ['-fsSL', '-o', tarPath, '-w', '%{http_code}', url],
+      { stdio: 'pipe', timeout: 60_000 },
+    );
+    append(`curl ok, http=${httpCode || '?'}`);
+  } catch (e: any) {
+    const stderr = e?.stderr?.toString?.() || '';
+    const exit   = e?.exitCode ?? '?';
     fs.rmSync(tmp, { recursive: true, force: true });
-    return {
-      ok: false,
-      detail:
-        `download failed for ${platform.nvpnTarget} — upstream may not publish a prebuilt ` +
-        `for this platform (check github.com/mmalmi/nostr-vpn/releases): ${dl.detail ?? ''}`,
-    };
+    return fail(
+      'download',
+      `curl failed (exit ${exit}) for ${url}: ${stderr.trim().slice(0, 160) || 'no stderr'}`,
+    );
   }
 
-  // Tarball layout has shifted over time — earlier releases put `nvpn` at
-  // the root, recent ones nest it inside an `nvpn/` subdir alongside the
-  // README and install.sh. Probe both.
+  // Extract — tar's own errors surface clearly here, distinct from the
+  // download step.
+  step('extracting tarball');
+  try {
+    await execa('tar', ['-xzf', tarPath, '-C', tmp], { stdio: 'pipe', timeout: 30_000 });
+    append(`extract ok, contents: ${fs.readdirSync(tmp).join(', ')}`);
+  } catch (e: any) {
+    const stderr = e?.stderr?.toString?.() || '';
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return fail('extract', `tar failed: ${stderr.trim().slice(0, 160) || e.message?.slice(0, 160)}`);
+  }
+
+  // Locate the binary. Upstream moved it in/out of an `nvpn/` subdir across
+  // releases; probe both layouts and log where we found it (or what's
+  // actually there, if neither matches).
+  step('locating binary');
   let binSrc = `${tmp}/nvpn`;
   if (!fs.existsSync(binSrc) || fs.statSync(binSrc).isDirectory()) {
     const nested = `${tmp}/nvpn/nvpn`;
-    if (fs.existsSync(nested)) {
+    if (fs.existsSync(nested) && !fs.statSync(nested).isDirectory()) {
       binSrc = nested;
     } else {
+      const listing = fs.readdirSync(tmp).join(', ');
       fs.rmSync(tmp, { recursive: true, force: true });
-      return { ok: false, detail: 'nvpn binary not found in release tarball' };
+      return fail('locate', `nvpn binary not found in tarball; root contents: ${listing}`);
     }
   }
+  append(`found binary at ${binSrc}`);
 
+  step(`copying to ${nvpnBin}`);
   try {
     fs.mkdirSync(platform.cargoBin, { recursive: true });
     fs.copyFileSync(binSrc, nvpnBin);
     fs.chmodSync(nvpnBin, 0o755);
+    append(`copy ok, mode=0755`);
   } catch (e: any) {
     fs.rmSync(tmp, { recursive: true, force: true });
-    return { ok: false, detail: `copy to ${nvpnBin} failed: ${e.message?.slice(0, 80) ?? 'unknown'}` };
+    return fail('copy', `copy to ${nvpnBin} failed: ${e.message?.slice(0, 160) ?? 'unknown'}`);
   }
   fs.rmSync(tmp, { recursive: true, force: true });
 
-  // nvpn init — non-interactive, generates keypair if not already present.
-  // --yes or equivalent varies by version; we pass it and ignore failure
-  // since some versions don't need it. Absolute path so PATH state doesn't
-  // matter (same rationale as the sudo call below).
+  // Verify the copy actually executes before we try anything else. Catches
+  // glibc/musl mismatches, cross-arch copies, permissions, etc.
+  step('verifying binary');
+  try {
+    await execa(nvpnBin, ['--help'], { stdio: 'pipe', timeout: 5000 });
+    append('verify ok');
+  } catch (e: any) {
+    const stderr = e?.stderr?.toString?.() || '';
+    return fail('verify', `${nvpnBin} --help failed: ${stderr.trim().slice(0, 160) || e.message?.slice(0, 160)}`);
+  }
+
+  // nvpn init — non-fatal if it fails; keypair may already exist or the
+  // subcommand name may have changed upstream. Log the error but don't
+  // abort the overall install.
+  step('nvpn init');
   try {
     await execa(nvpnBin, ['init', '--yes'], { stdio: 'pipe', timeout: 10000 });
+    append('init --yes ok');
   } catch {
     try {
       await execa(nvpnBin, ['init'], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 10000,
-        input: '\n',
+        stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000, input: '\n',
       });
-    } catch {}
+      append('init (stdin-newline) ok');
+    } catch (e: any) {
+      append(`init skipped: ${(e?.message || '').slice(0, 120)}`);
+    }
   }
 
-  // `sudo nvpn service install` bare would fail because sudo's secure_path
-  // doesn't include ~/.cargo/bin. Use the absolute path instead — the
-  // service-install step itself copies into /etc/systemd/system so it
-  // doesn't need nvpn on root's PATH afterwards either.
-  return run('sudo', [nvpnBin, 'service', 'install']);
+  // Systemd unit install. Uses the absolute path so sudo's secure_path
+  // doesn't need `~/.cargo/bin` — the service-install subcommand installs
+  // into /etc/systemd/system (or the distro equivalent) and doesn't need
+  // nvpn on root's PATH afterwards.
+  step('sudo nvpn service install');
+  try {
+    const { stdout, stderr } = await execa(
+      'sudo', ['-n', nvpnBin, 'service', 'install'],
+      { stdio: 'pipe', timeout: 30_000 },
+    );
+    append(`service install ok; stdout=${stdout.slice(0, 120)} stderr=${stderr.slice(0, 120)}`);
+    return { ok: true, detail: `installed ${nvpnBin}` };
+  } catch (e: any) {
+    const stderr = e?.stderr?.toString?.() || '';
+    // The binary IS installed at this point — only the systemd unit setup
+    // failed. Return partial success so Services.tsx shows a warn, not an
+    // error, and the user can rerun `sudo nvpn service install` by hand.
+    append(`service install FAILED: ${stderr.trim().slice(0, 240) || e.message?.slice(0, 240)}`);
+    return {
+      ok: false,
+      detail:
+        `binary installed at ${nvpnBin} — service install failed: ` +
+        `${stderr.trim().slice(0, 140) || e.message?.slice(0, 140) || 'unknown'} ` +
+        `(log: ${logPath})`,
+    };
+  }
 }
 
 export async function setupNgitBunker(bunker: string, cargoBin: string): Promise<InstallResult> {

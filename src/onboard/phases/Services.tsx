@@ -150,9 +150,15 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
         }
       } catch (e: any) { up(5, { status: 'error', detail: e.message }); }
 
-      // nostr-vpn
+      // nostr-vpn — stream each install step (download / extract / copy /
+      // verify / service install) into the row detail so a silent hang or a
+      // mid-flow failure is visible in real time instead of just flipping
+      // to red at the end. Full step log is always written to
+      // ~/logs/nvpn-install.log for post-mortem diagnosis.
       up(6, { status: 'running' });
-      const vpn = await installNostrVpn(platform);
+      const vpn = await installNostrVpn(platform, (d) =>
+        up(6, { status: 'running', detail: d }),
+      );
       up(6, { status: vpn.ok ? 'done' : 'error', detail: vpn.detail });
 
       // ngit bunker
