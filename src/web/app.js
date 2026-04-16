@@ -2188,9 +2188,47 @@ const ProjectsPanel = (() => {
   let projectStatus = null;    // cached git/status for current detail
   let projectGitLog = null;
 
+  // Resolved terminal-native AI (claude-code / opencode) from ai-config.
+  // null when defaults.terminal isn't set OR the configured provider isn't
+  // in our terminal.ts key map. Drives the "Open in …" button visibility
+  // on cards + the detail view, and the "Set up a terminal AI" callout
+  // at panel head when nothing's configured.
+  let terminalAi = null;
+
+  // Map from ai-providers.ts registry id → terminal.ts resolver key.
+  // Update when a new terminal-native provider is added to the registry.
+  const TERMINAL_AI_KEY = {
+    'claude-code': 'claude',
+    'opencode':    'opencode',
+  };
+
+  async function loadTerminalAi() {
+    try {
+      const list = await api('/api/ai/providers');
+      const id = list?.defaults?.terminal;
+      const entry = id ? list.providers.find(p => p.id === id) : null;
+      if (entry && entry.configured && TERMINAL_AI_KEY[entry.id]) {
+        terminalAi = {
+          id:          entry.id,
+          displayName: entry.displayName,
+          key:         TERMINAL_AI_KEY[entry.id],
+        };
+      } else {
+        terminalAi = null;
+      }
+    } catch {
+      terminalAi = null;
+    }
+  }
+
   async function reload() {
     try {
-      projects = await api('/api/projects');
+      // Run in parallel — both are independent + we render once at the end.
+      const [ps] = await Promise.all([
+        api('/api/projects').catch(() => []),
+        loadTerminalAi(),
+      ]);
+      projects = Array.isArray(ps) ? ps : [];
     } catch {
       projects = [];
     }
@@ -2198,6 +2236,14 @@ const ProjectsPanel = (() => {
   }
 
   function onEnter() { reload(); }
+
+  // Re-resolve the terminal AI when Config panel changes providers /
+  // defaults. Cards + detail view re-render so the "Open in …" button
+  // label or callout flips immediately.
+  document.addEventListener('api-config-changed', async () => {
+    await loadTerminalAi();
+    if (state.view === 'list' || state.view === 'detail') render();
+  });
 
   function render() {
     if (state.view === 'detail') renderDetail();
@@ -2233,7 +2279,18 @@ const ProjectsPanel = (() => {
       return;
     }
 
-    body.innerHTML = `<div class="project-grid"></div>`;
+    // Panel-level callout when no terminal-native AI is configured but at
+    // least one project has a local path — otherwise the "Open in AI"
+    // buttons would silently be absent and the user wouldn't know where
+    // to set it up. Points to Config → AI Providers.
+    const hasLocalPath = projects.some(p => p.path);
+    const calloutHtml = (!terminalAi && hasLocalPath && window.NSTerminal?.isAvailable?.())
+      ? `<div class="callout" style="margin-bottom:12px">
+           No terminal AI configured — "Open in …" is hidden on project cards.
+           <a href="#config">Set one up in Config</a> (Claude Code or OpenCode).
+         </div>`
+      : '';
+    body.innerHTML = `${calloutHtml}<div class="project-grid"></div>`;
     const grid = body.querySelector('.project-grid');
     for (const p of projects) grid.appendChild(renderProjectCard(p));
   }
@@ -2281,19 +2338,22 @@ const ProjectsPanel = (() => {
     chatBtn.addEventListener('click', (e) => { e.stopPropagation(); openInChat(p); });
     actionsEl.appendChild(chatBtn);
 
-    // "Open in Claude Code" — spawns Claude in a terminal tab with cwd set
-    // to the project path. Requires a local path (nothing to cd into for
-    // nsite-only projects) and node-pty available (the terminal panel
-    // won't render otherwise, but we double-check so the button isn't
-    // misleading on unsupported installs).
-    if (p.path && window.NSTerminal?.isAvailable?.()) {
-      const claudeBtn = iconBtn('claude', 'Open in Claude Code',
+    // "Open in <Terminal AI>" — spawns the configured terminal-native
+    // provider (Claude Code, OpenCode, …) in a terminal tab with cwd
+    // scoped to the project path. Hidden when:
+    //   - no local path (nothing to cd into)
+    //   - node-pty unavailable (terminal panel won't render)
+    //   - no terminal-native provider configured (ai-config.defaults.terminal)
+    // The panel-level callout (see renderList) covers the "how do I set
+    // this up?" question when the button is hidden.
+    if (p.path && window.NSTerminal?.isAvailable?.() && terminalAi) {
+      const btn = iconBtn(terminalAi.id, `Open in ${terminalAi.displayName}`,
         `<svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`);
-      claudeBtn.addEventListener('click', (e) => {
+      btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        window.NSTerminal.open('claude', { projectId: p.id });
+        window.NSTerminal.open(terminalAi.key, { projectId: p.id });
       });
-      actionsEl.appendChild(claudeBtn);
+      actionsEl.appendChild(btn);
     }
 
     if (p.capabilities.git || p.capabilities.ngit) {
@@ -2357,11 +2417,11 @@ const ProjectsPanel = (() => {
     subtitle.textContent = p.path ? p.path : 'nsite-only project';
 
     headActions.innerHTML = '';
-    if (p.path && window.NSTerminal?.isAvailable?.()) {
-      const claudeBtn = document.createElement('button');
-      claudeBtn.textContent = 'Open in Claude Code';
-      claudeBtn.addEventListener('click', () => window.NSTerminal.open('claude', { projectId: p.id }));
-      headActions.appendChild(claudeBtn);
+    if (p.path && window.NSTerminal?.isAvailable?.() && terminalAi) {
+      const btn = document.createElement('button');
+      btn.textContent = `Open in ${terminalAi.displayName}`;
+      btn.addEventListener('click', () => window.NSTerminal.open(terminalAi.key, { projectId: p.id }));
+      headActions.appendChild(btn);
     }
     if (p.capabilities.git || p.capabilities.ngit) {
       const pushBtn = document.createElement('button');
