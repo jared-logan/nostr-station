@@ -216,6 +216,7 @@
         white: '#c8c8d0', brightWhite: '#ececf0',
       },
       scrollback: 5000,
+      ignoreBracketedPasteMode: true,
       allowProposedApi: true,
     });
     const FitCtor = window.FitAddon && window.FitAddon.FitAddon;
