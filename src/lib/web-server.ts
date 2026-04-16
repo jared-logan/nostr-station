@@ -36,7 +36,8 @@ import {
   type ApiProvider,
 } from './ai-providers.js';
 import {
-  readAiConfig, migrateIfNeeded,
+  readAiConfig, writeAiConfig, migrateIfNeeded, setProviderEntry,
+  type ProviderConfig as AiProviderConfig,
 } from './ai-config.js';
 import { buildAiContext } from './ai-context.js';
 import { gatherStatus } from '../commands/Status.js';
@@ -1919,6 +1920,123 @@ export async function startWebServer(port: number): Promise<void> {
         // so it's safe to expose as-is. Used by the CLI + debugging.
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(readAiConfig()));
+        return;
+      }
+
+      if (url === '/api/ai/config' && method === 'POST') {
+        // Partial ai-config update. Semantics:
+        //   - providers: MERGE per-id entries. Set a provider-id to null
+        //     to remove it entirely.
+        //   - defaults: MERGE per-kind slots ('terminal' | 'chat'). Null
+        //     removes the slot.
+        // Keys are NEVER accepted here — the body is keyRef-safe config
+        // only. Use POST /api/ai/providers/:id/key for the raw key path.
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400); res.end('bad json'); return; }
+
+        const cfg = readAiConfig();
+        if (parsed.providers && typeof parsed.providers === 'object') {
+          for (const [id, entry] of Object.entries(parsed.providers)) {
+            if (!getProvider(id)) continue;  // reject unknown provider ids
+            if (entry === null) { delete cfg.providers[id]; continue; }
+            if (typeof entry !== 'object') continue;
+            const existing = cfg.providers[id] ?? {};
+            // Only accept known-safe fields — no keyRef acceptance here
+            // (that goes through /api/ai/providers/:id/key). baseUrl
+            // validated loosely since users with custom relays need it.
+            const next: AiProviderConfig = { ...existing };
+            const e = entry as any;
+            if (typeof e.enabled === 'boolean') next.enabled = e.enabled;
+            if (typeof e.model   === 'string')  next.model   = e.model.slice(0, 160);
+            if (typeof e.baseUrl === 'string')  next.baseUrl = e.baseUrl.slice(0, 300);
+            cfg.providers[id] = next;
+          }
+        }
+        if (parsed.defaults && typeof parsed.defaults === 'object') {
+          const d = parsed.defaults as any;
+          if (d.terminal === null) delete cfg.defaults.terminal;
+          else if (typeof d.terminal === 'string' && getProvider(d.terminal)) {
+            cfg.defaults.terminal = d.terminal;
+          }
+          if (d.chat === null) delete cfg.defaults.chat;
+          else if (typeof d.chat === 'string' && getProvider(d.chat)) {
+            cfg.defaults.chat = d.chat;
+          }
+        }
+        writeAiConfig(cfg);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, cfg }));
+        return;
+      }
+
+      // POST /api/ai/providers/:id/key — stores an API key in the keychain
+      // under `ai:<id>` AND sets the matching keyRef in ai-config.json.
+      // This is the one place where raw keys enter the server process;
+      // the key never gets echoed back in any response.
+      //
+      // Runs in the web-server process (which inherited Aqua from the
+      // user's terminal), so macOS keychain writes succeed even though
+      // they wouldn't from a PTY child — see terminal.ts for that note.
+      const aiKeyMatch = url.match(/^\/api\/ai\/providers\/([a-z0-9-]+)\/key$/);
+      if (aiKeyMatch && method === 'POST') {
+        const id = aiKeyMatch[1];
+        const provider = getProvider(id);
+        if (!provider || provider.type !== 'api') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: `unknown API provider: ${id}` }));
+          return;
+        }
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400); res.end('bad json'); return; }
+        const key = typeof parsed.key === 'string' ? parsed.key : '';
+        if (!key || key.length < 4) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'key is empty or too short' }));
+          return;
+        }
+        // Defensive: reject obvious nsec paste — provider slots are for
+        // AI keys only.
+        if (isNsec(key)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'nsec detected — this slot is for AI keys only' }));
+          return;
+        }
+        try {
+          await getKeychain().store(keychainAccountFor(id), key);
+          setProviderEntry(id, { keyRef: `keychain:${keychainAccountFor(id)}` });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e.message || e).slice(0, 200) }));
+        }
+        return;
+      }
+
+      if (aiKeyMatch && method === 'DELETE') {
+        const id = aiKeyMatch[1];
+        const provider = getProvider(id);
+        if (!provider || provider.type !== 'api') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: `unknown API provider: ${id}` }));
+          return;
+        }
+        try {
+          await getKeychain().delete(keychainAccountFor(id));
+        } catch {} // idempotent — already-missing is not an error
+        // Don't nuke the whole entry (model / baseUrl overrides are still
+        // valid without a key); just strip the keyRef pointer. The Chat
+        // pane's "configured?" check flips to false on next render.
+        const cfg = readAiConfig();
+        if (cfg.providers[id]?.keyRef) {
+          const { keyRef, ...rest } = cfg.providers[id];
+          cfg.providers[id] = rest;
+          writeAiConfig(cfg);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
         return;
       }
 
