@@ -83,11 +83,16 @@ jobs:
           # want the artifact we control.
           npm install --build-from-source "node-pty@${{ github.event.inputs.version }}"
           ls -la node_modules/node-pty/build/Release/
-          # Sanity: the two artifacts we always need. spawn-helper only
-          # exists on Unix; if it's missing on Linux/macOS the build is
-          # broken and we shouldn't ship it.
+          # pty.node is the N-API addon, always produced on Unix.
           test -f node_modules/node-pty/build/Release/pty.node
-          test -f node_modules/node-pty/build/Release/spawn-helper
+
+      - name: Sanity-check macOS spawn-helper
+        # spawn-helper is a macOS-only artifact — node-pty's binding.gyp
+        # gates its build on OS=="mac", and pty.cc routes Linux through a
+        # fork/execvp path that doesn't need it at all. So we require the
+        # binary on darwin runners and skip the check entirely on Linux.
+        if: matrix.os == 'macos'
+        run: test -f /tmp/nodepty-build/node_modules/node-pty/build/Release/spawn-helper
 
       - name: Package artifacts (tarball)
         run: |
@@ -95,24 +100,43 @@ jobs:
           suffix="${{ matrix.asset-suffix }}"
           cd /tmp/nodepty-build/node_modules/node-pty/build/Release
           tarball="node-pty-${version}-${suffix}.tar.gz"
-          # Include both the native addon and the spawn-helper executable.
-          # Ordering matters for reproducibility of the sha256.
-          tar --sort=name --owner=0 --group=0 --numeric-owner \
-              -czf "${{ github.workspace }}/${tarball}" \
-              pty.node spawn-helper
+          # Build the file list per-OS. Linux ships only pty.node;
+          # macOS adds spawn-helper alongside.
+          files=(pty.node)
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            files+=(spawn-helper)
+          fi
+          # Plain `tar -czf` — BSD tar on the macos-* runners doesn't
+          # accept the GNU-only --sort / --owner flags. A non-reproducible
+          # tarball is fine; we publish a SHA256SUMS alongside the assets
+          # and pin the expected hash at install time.
+          tar -czf "${{ github.workspace }}/${tarball}" "${files[@]}"
           ls -la "${{ github.workspace }}/${tarball}"
-          # Smoke test: untar into a disposable node_modules/node-pty and
-          # `require()` it to prove the binary actually loads.
+
+      - name: Smoke test tarball
+        run: |
+          version="${{ github.event.inputs.version }}"
+          suffix="${{ matrix.asset-suffix }}"
+          tarball="${{ github.workspace }}/node-pty-${version}-${suffix}.tar.gz"
+          # Spin up a fresh node_modules, install node-pty's JS wrapper with
+          # --ignore-scripts (no compile), delete any upstream prebuilds so
+          # node-pty's native loader has no choice but to land on OUR
+          # extracted files in build/Release, then do a real pty.spawn.
           smoke=/tmp/nodepty-smoke
           rm -rf "$smoke"
           mkdir -p "$smoke"
           cd "$smoke"
           npm init -y >/dev/null
           npm install --ignore-scripts "node-pty@${version}"
+          # Upstream ships prebuilds for darwin-*/win32-* that would
+          # shadow our tarball during require(). Removing the directory
+          # forces node-pty to load from build/Release — the path end
+          # users will populate via installNodePtyPrebuilt().
+          rm -rf node_modules/node-pty/prebuilds
           mkdir -p node_modules/node-pty/build/Release
-          tar -xzf "${{ github.workspace }}/${tarball}" \
-              -C node_modules/node-pty/build/Release
-          node -e "const pty = require('node-pty'); const p = pty.spawn('echo', ['ok'], { name: 'xterm', cols: 80, rows: 24 }); p.onData(d => process.stdout.write(d)); p.onExit(({ exitCode }) => process.exit(exitCode));"
+          tar -xzf "$tarball" -C node_modules/node-pty/build/Release
+          ls -la node_modules/node-pty/build/Release/
+          node -e "const pty = require('node-pty'); const p = pty.spawn('echo', ['ok'], { name: 'xterm', cols: 80, rows: 24 }); let out=''; p.onData(d => out+=d); p.onExit(({ exitCode }) => { if (!out.includes('ok')) { console.error('unexpected output:', JSON.stringify(out)); process.exit(1); } process.exit(exitCode ?? 0); });"
 
       - uses: actions/upload-artifact@v4
         with:
