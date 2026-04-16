@@ -27,6 +27,18 @@ import {
   writeInput as writeTerminalInput, resizeSession as resizeTerminal,
   listSessions as listTerminals, destroyAllSessions as destroyAllTerminals,
 } from './terminal.js';
+// AI provider registry. A legacy local `PROVIDERS` map in this file serves
+// the old single-provider /api/config/set flow; importing the new one from
+// ai-providers.ts with the same name would shadow it, so we pull named
+// helpers instead. The old map goes away in a later step.
+import {
+  listProviders, getProvider, keychainAccountFor,
+  type ApiProvider,
+} from './ai-providers.js';
+import {
+  readAiConfig, migrateIfNeeded,
+} from './ai-config.js';
+import { buildAiContext } from './ai-context.js';
 import { gatherStatus } from '../commands/Status.js';
 import {
   readRelaySettings, defaultConfigPath, hexToNpub, npubToHex,
@@ -882,6 +894,21 @@ export async function startWebServer(port: number): Promise<void> {
   // Fire-and-forget; a failure here means the terminal panel is disabled,
   // which the client surfaces via the capability endpoint anyway.
   loadPty().catch(() => {});
+
+  // One-shot silent migration from v0.x single-provider layout. Runs before
+  // the first /api/ai/* request so downstream readAiConfig() calls see the
+  // migrated file. No-op when ai-config.json already exists. Logs the
+  // outcome to stderr so operators can trace what happened on first boot.
+  migrateIfNeeded()
+    .then(r => {
+      if (r.migrated) {
+        const bits: string[] = [];
+        if (r.from) bits.push(`chat ← ${r.from.provider}`);
+        if (r.terminalEnabled?.length) bits.push(`terminal ← ${r.terminalEnabled.join(',')}`);
+        process.stderr.write(`[ai-config] migrated (${bits.join('; ') || 'empty'})\n`);
+      }
+    })
+    .catch(e => process.stderr.write(`[ai-config] migration failed: ${e?.message || e}\n`));
 
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
@@ -1844,6 +1871,143 @@ export async function startWebServer(port: number): Promise<void> {
       const logsMatch = url.match(/^\/api\/logs\/(relay|watchdog|vpn)$/);
       if (logsMatch && method === 'GET') {
         streamLogs(logsMatch[1] as 'relay' | 'watchdog' | 'vpn', res, req);
+        return;
+      }
+
+      // ── AI provider system (Step 4) ───────────────────────────────────
+      //
+      // Endpoints here talk to ai-config.json + per-provider keychain slots
+      // in the new multi-provider layout. The old /api/config/ /api/chat
+      // routes continue to work against the single-provider config until
+      // the Chat pane + Config panel UIs are switched over in later steps.
+
+      if (url === '/api/ai/providers' && method === 'GET') {
+        // Returns the full registry + per-provider configured state so the
+        // Chat pane + Config panel can render list UIs without querying
+        // the keychain per row. `configured` is a best-effort check against
+        // ai-config.json — actual chat requests still fail loud if the
+        // keychain slot is missing.
+        const cfg = readAiConfig();
+        const list = listProviders().map(p => {
+          const entry = cfg.providers[p.id];
+          const configured = p.type === 'api'
+            ? !!(entry?.keyRef) || !!((p as ApiProvider).bareKey)
+            : !!(entry?.enabled);
+          return {
+            id: p.id,
+            displayName: p.displayName,
+            type: p.type,
+            configured,
+            // Expose the effective model + baseUrl so the Chat dropdown can
+            // show what will actually be sent without re-implementing the
+            // override-vs-registry resolution client-side.
+            model:   p.type === 'api' ? (entry?.model   ?? (p as ApiProvider).defaultModel) : undefined,
+            baseUrl: p.type === 'api' ? (entry?.baseUrl ?? (p as ApiProvider).baseUrl)      : undefined,
+            isDefault: {
+              terminal: cfg.defaults.terminal === p.id,
+              chat:     cfg.defaults.chat === p.id,
+            },
+          };
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ providers: list, defaults: cfg.defaults }));
+        return;
+      }
+
+      if (url === '/api/ai/config' && method === 'GET') {
+        // Raw ai-config.json — already keyRef-only (never the raw keys),
+        // so it's safe to expose as-is. Used by the CLI + debugging.
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(readAiConfig()));
+        return;
+      }
+
+      if (url === '/api/ai/chat' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400); res.end('bad json'); return; }
+        const messages: Msg[] = Array.isArray(parsed.messages) ? parsed.messages : [];
+        const explicit: string | null = typeof parsed.provider === 'string' ? parsed.provider : null;
+        const projectId: string | null = typeof parsed.projectId === 'string' ? parsed.projectId : null;
+
+        // All failure modes emit SSE so the Chat pane's EventSource-like
+        // reader gets a consistent shape — `data: {error: "..."}` + `[DONE]`.
+        res.writeHead(200, {
+          'Content-Type':  'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection':    'keep-alive',
+        });
+        const sseError = (msg: string) => {
+          res.write(`data: ${JSON.stringify({ error: msg })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        };
+
+        // Resolution order: explicit > project override > defaults.chat.
+        // Project override is read from projects.json via getProject(); the
+        // `aiDefaults` field is optional and only gets populated when a user
+        // explicitly scopes a different provider per-project.
+        const cfg = readAiConfig();
+        let providerId: string | null = explicit;
+        if (!providerId && projectId) {
+          const p = getProject(projectId);
+          const pd = (p as any)?.aiDefaults?.chat;
+          if (typeof pd === 'string') providerId = pd;
+        }
+        if (!providerId) providerId = cfg.defaults.chat ?? null;
+
+        if (!providerId) {
+          return sseError('No chat provider configured — add one in Config');
+        }
+        const provider = getProvider(providerId);
+        if (!provider || provider.type !== 'api') {
+          return sseError(`Unknown or non-API provider: ${providerId}`);
+        }
+
+        // Resolve the key. bareKey providers (ollama / lm-studio / maple)
+        // don't need a real key — we pass an empty string and skip the
+        // Authorization header in streamOpenAICompat.
+        let apiKey = '';
+        if (provider.bareKey) {
+          apiKey = ''; // streamOpenAICompat already special-cases bareKey sentinels
+        } else {
+          try {
+            apiKey = (await getKeychain().retrieve(keychainAccountFor(providerId))) ?? '';
+          } catch { apiKey = ''; }
+          if (!apiKey) {
+            return sseError(`No API key for ${provider.displayName} — set one in Config`);
+          }
+        }
+
+        // Per-provider overrides from ai-config.json win over the registry
+        // defaults. Empty baseUrl only valid for anthropic-native.
+        const entry     = cfg.providers[providerId];
+        const baseUrl   = entry?.baseUrl ?? provider.baseUrl;
+        const model     = entry?.model   ?? provider.defaultModel;
+        const isAnth    = provider.flavor === 'anthropic';
+
+        // Build the context block + merge with any caller-supplied system
+        // prompt already in messages. We prepend rather than overwrite so
+        // future per-prompt system messages still apply.
+        const ctx = buildAiContext(projectId);
+        const system = ctx.text;
+
+        const runtimeCfg: ProviderConfig = {
+          isAnthropic:  isAnth,
+          baseUrl,
+          model,
+          apiKey,
+          providerName: provider.displayName,
+        };
+
+        try {
+          if (isAnth) await streamAnthropic(messages, system, runtimeCfg, res);
+          else        await streamOpenAICompat(messages, system, runtimeCfg, res);
+        } catch (e: any) {
+          res.write(`data: ${JSON.stringify({ error: String(e.message ?? e) })}\n\n`);
+        }
+        res.write('data: [DONE]\n\n');
+        res.end();
         return;
       }
 
