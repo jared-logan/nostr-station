@@ -2002,7 +2002,15 @@ export async function startWebServer(port: number): Promise<void> {
         if (parsed.providers && typeof parsed.providers === 'object') {
           for (const [id, entry] of Object.entries(parsed.providers)) {
             if (!getProvider(id)) continue;  // reject unknown provider ids
-            if (entry === null) { delete cfg.providers[id]; continue; }
+            if (entry === null) {
+              delete cfg.providers[id];
+              // Cascade: a removed provider can't still be a default —
+              // leaving it would point the Chat pane / "Open in AI" at
+              // a non-existent entry. CLI's Ai.tsx remove does the same.
+              if (cfg.defaults.terminal === id) delete cfg.defaults.terminal;
+              if (cfg.defaults.chat     === id) delete cfg.defaults.chat;
+              continue;
+            }
             if (typeof entry !== 'object') continue;
             const existing = cfg.providers[id] ?? {};
             // Only accept known-safe fields — no keyRef acceptance here

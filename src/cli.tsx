@@ -19,6 +19,8 @@ import { Keychain }      from './commands/Keychain.js';
 import { Publish }       from './commands/Publish.js';
 import { Chat }          from './commands/Chat.js';
 import { RelayConfigView, RelayWhitelist } from './commands/RelayConfig.js';
+import { Ai, type AiAction } from './commands/Ai.js';
+import { getProvider as getAiProvider } from './lib/ai-providers.js';
 import { getKeychain }   from './lib/keychain.js';
 import { requireInteractive } from './lib/tty.js';
 import { detectPlatform } from './lib/detect.js';
@@ -302,6 +304,68 @@ switch (command) {
     console.log(`nostr-station ${VERSION}`);
     break;
 
+  case 'ai': {
+    // Subcommand parsing:
+    //   ai                        → list
+    //   ai list                   → list
+    //   ai add <provider>         → add (interactive key for real API providers)
+    //   ai remove <provider>      → remove (y/N confirm unless --yes)
+    //   ai default terminal <p>   → set default
+    //   ai default chat <p>       → set default
+    const aiAction = (args[0] ?? 'list') as AiAction;
+
+    if (aiAction === 'list' || !args[0]) {
+      render(React.createElement(Ai, { action: 'list' }));
+      break;
+    }
+    if (aiAction === 'add') {
+      if (!args[1]) {
+        process.stderr.write('Usage: nostr-station ai add <provider>\nRun `nostr-station ai list` for available ids.\n');
+        process.exit(1);
+      }
+      // macOS keychain note: writing the key needs an Aqua session, which
+      // means running from iTerm / Terminal.app — NOT from the dashboard's
+      // terminal panel (PTY setsid drops the Aqua bootstrap). This gate
+      // exists to prompt for input; surface the reason if they're about
+      // to hit it blind.
+      const provider = args[1];
+      // Only prompt-interactive for API providers that need a real key.
+      // Terminal-native / bareKey adds are non-interactive (no prompts).
+      const def = getAiProvider(provider);
+      const needsKeyPrompt = !!(def && def.type === 'api' && !(def as any).bareKey);
+      if (needsKeyPrompt) requireInteractive(
+        'ai add',
+        process.platform === 'darwin'
+          ? 'On macOS the keychain write needs a real terminal — running from the dashboard terminal panel will fail.'
+          : undefined,
+      );
+      render(React.createElement(Ai, { action: 'add', providerId: provider }));
+      break;
+    }
+    if (aiAction === 'remove') {
+      if (!args[1]) {
+        process.stderr.write('Usage: nostr-station ai remove <provider> [--yes]\n');
+        process.exit(1);
+      }
+      if (!flag('--yes')) requireInteractive('ai remove', 'Pass --yes to skip confirmation.');
+      render(React.createElement(Ai, { action: 'remove', providerId: args[1], yes: flag('--yes') }));
+      break;
+    }
+    if (aiAction === 'default') {
+      const kind = args[1] as 'terminal' | 'chat';
+      const providerId = args[2];
+      if ((kind !== 'terminal' && kind !== 'chat') || !providerId) {
+        process.stderr.write('Usage: nostr-station ai default <terminal|chat> <provider>\n');
+        process.exit(1);
+      }
+      render(React.createElement(Ai, { action: 'default', kind, providerId }));
+      break;
+    }
+    process.stderr.write(`Unknown ai subcommand: ${aiAction}\n`);
+    process.stderr.write('Try: ai list | ai add <p> | ai remove <p> | ai default <terminal|chat> <p>\n');
+    process.exit(1);
+  }
+
   case 'help':
   case '--help':
   case '-h':
@@ -328,6 +392,7 @@ function printHelp() {
     seed                 Publish test events to your relay  (great for smoke-testing)
     publish              Publish current repo to GitHub + Nostr (ngit) simultaneously
     keychain             Store, rotate, and inspect credentials in the OS keychain
+    ai                   Manage AI providers — add, remove, list, set defaults
     chat                 Web dashboard at localhost:3000 — chat, relay, logs, status, config
     nsite                Publish a static site to Nostr via nsyte
     editor               Re-link NOSTR_STATION.md for a different AI coding tool
@@ -353,6 +418,14 @@ function printHelp() {
     keychain delete <key>              Remove a credential (y/N confirm)
     keychain rotate                    Rotate the AI API key
     keychain migrate                   Migrate from ~/.claude_env into keychain
+
+  AI SUBCOMMANDS
+    ai list                            Show configured providers + defaults
+    ai add <provider>                  Enable / set up a provider (interactive key for API)
+    ai remove <provider> [--yes]       Remove from keychain + ai-config
+    ai default terminal <provider>     Set default for "Open in AI" (Claude Code, OpenCode)
+    ai default chat <provider>         Set default for the Chat pane
+    (macOS: \`ai add\` needs a real terminal; the dashboard PTY can't write keychain)
 
   NSITE SUBCOMMANDS
     nsite init                         Interactive project setup
