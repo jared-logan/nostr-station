@@ -341,12 +341,24 @@ window.addEventListener('hashchange', () => activatePanel(currentPanel()));
 // Display labels + per-provider default model lists for the chat/config
 // switcher. Ollama models are hydrated live via /api/ollama/models.
 
+// Model lists per provider-id — client-side lookup for the Chat pane's
+// model dropdown. Ollama is dynamic (probes the local daemon's /api/tags
+// via /api/ollama/models); everything else is a hand-curated list of the
+// models we expect users to want, with the first entry matching the
+// registry default in src/lib/ai-providers.ts.
+//
+// IDs must match the ai-providers.ts registry (not the v0.x PROVIDER_LIST
+// names — 'payperq' not 'ppq').
 const PROVIDER_LIST = [
   { value: 'anthropic',    label: 'Anthropic',    models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
+  { value: 'openai',       label: 'OpenAI',       models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1-preview', 'o1-mini'] },
   { value: 'openrouter',   label: 'OpenRouter',   models: ['anthropic/claude-sonnet-4', 'openai/gpt-4o', 'google/gemini-2.5-pro', 'deepseek/deepseek-chat'] },
   { value: 'opencode-zen', label: 'OpenCode Zen', models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'gpt-4o', 'gemini-2.5-pro'] },
+  { value: 'groq',         label: 'Groq',         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'] },
+  { value: 'gemini',       label: 'Google Gemini', models: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'] },
+  { value: 'mistral',      label: 'Mistral',      models: ['mistral-large-latest', 'mistral-small-latest', 'codestral-latest'] },
   { value: 'routstr',      label: 'Routstr ⚡',    models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
-  { value: 'ppq',          label: 'PayPerQ ⚡',    models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
+  { value: 'payperq',      label: 'PayPerQ ⚡',    models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
   { value: 'ollama',       label: 'Ollama (local)', models: [], dynamic: true },
   { value: 'lmstudio',     label: 'LM Studio',    models: ['default'] },
   { value: 'maple',        label: 'Maple 🔒',      models: ['claude-sonnet-4', 'claude-opus-4-6'] },
@@ -998,19 +1010,19 @@ const ChatPanel = (() => {
   // and drives the "Add an AI provider in Config" callout.
   let hasConfiguredProvider = false;
 
-  async function populateProvider() {
-    // Hide the model dropdown + its label — per-provider model override
-    // now lives in Config. Simpler Chat UI: pick a provider, that's it.
-    if (modelSel) modelSel.style.display = 'none';
-    const modelLabelEl = modelSel?.previousElementSibling;
-    if (modelLabelEl) modelLabelEl.style.display = 'none';
+  // Cache of the last /api/ai/providers response so model changes can
+  // resolve the current provider's metadata without a re-fetch.
+  let aiProvidersCache = null;
 
+  async function populateProvider() {
     const list = await api('/api/ai/providers').catch(() => null);
+    aiProvidersCache = list;
     const configured = (list?.providers || []).filter(p => p.configured && p.type === 'api');
 
     if (configured.length === 0) {
       provSel.innerHTML = '<option value="">—</option>';
       provSel.disabled = true;
+      if (modelSel) { modelSel.innerHTML = ''; modelSel.disabled = true; }
       hasConfiguredProvider = false;
       showNoProviderCallout();
       updateSendDisabled();
@@ -1020,20 +1032,39 @@ const ChatPanel = (() => {
     hasConfiguredProvider = true;
     hideNoProviderCallout();
     provSel.disabled = false;
-    // Option label includes the effective model for quick context —
-    // "OpenAI · gpt-4o". Users can switch models in Config.
-    provSel.innerHTML = configured.map(p => {
-      const label = p.model ? `${p.displayName} · ${p.model}` : p.displayName;
-      return `<option value="${escapeHtml(p.id)}">${escapeHtml(label)}</option>`;
-    }).join('');
+    provSel.innerHTML = configured.map(p =>
+      `<option value="${escapeHtml(p.id)}">${escapeHtml(p.displayName)}</option>`
+    ).join('');
     // Preselect the chat default; fall back to the first configured entry
-    // if no default is set (shouldn't happen given auto-default on add,
-    // but defensive against hand-edited ai-config.json).
+    // if no default is set.
     const activeId = list?.defaults?.chat && configured.find(p => p.id === list.defaults.chat)
       ? list.defaults.chat
       : configured[0].id;
     provSel.value = activeId;
+    await populateModels(activeId);
     updateSendDisabled();
+  }
+
+  async function populateModels(providerId) {
+    if (!modelSel) return;
+    const models = await modelsFor(providerId);
+    if (!models.length) {
+      // Unknown provider in PROVIDER_LIST — hide the model picker
+      // gracefully rather than showing an empty dropdown.
+      modelSel.innerHTML = '';
+      modelSel.disabled = true;
+      return;
+    }
+    modelSel.disabled = false;
+    modelSel.innerHTML = models.map(m =>
+      `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`
+    ).join('');
+    // Prefer the per-provider override stored in ai-config; fall back to
+    // the registry default. The server's /api/ai/providers response
+    // already resolved this into the `model` field.
+    const entry = aiProvidersCache?.providers?.find(p => p.id === providerId);
+    const preferred = entry?.model;
+    if (preferred && models.includes(preferred)) modelSel.value = preferred;
   }
 
   // Fallback message when zero API providers are configured. Rendered as
@@ -1062,12 +1093,13 @@ const ChatPanel = (() => {
     send.disabled = busy || !hasConfiguredProvider;
   }
 
-  async function persistSelection() {
-    // Switching providers in the dropdown updates defaults.chat so the
-    // choice sticks across tab switches + server restarts. No keychain
-    // touch — that's gated separately.
+  async function persistProviderChange() {
+    // Switching providers moves defaults.chat + repopulates the model
+    // dropdown with the new provider's options. The new provider's stored
+    // model (or registry default) becomes the selected model.
     const id = provSel.value;
     if (!id) return;
+    await populateModels(id);
     try {
       await api('/api/ai/config', {
         method: 'POST',
@@ -1077,7 +1109,30 @@ const ChatPanel = (() => {
     } catch { /* api() already toasted */ }
   }
 
-  provSel.addEventListener('change', persistSelection);
+  async function persistModelChange() {
+    // Saving a per-provider model override — e.g. switching Anthropic
+    // from haiku to sonnet. Goes into ai-config.providers[id].model so
+    // the next boot + the Config panel reflect it.
+    const id  = provSel.value;
+    const mdl = modelSel?.value;
+    if (!id || !mdl) return;
+    try {
+      await api('/api/ai/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providers: { [id]: { model: mdl } } }),
+      });
+      // Refresh our cache so subsequent provider switches + renderings
+      // see the newly-saved override.
+      if (aiProvidersCache?.providers) {
+        const entry = aiProvidersCache.providers.find(p => p.id === id);
+        if (entry) entry.model = mdl;
+      }
+    } catch { /* api() already toasted */ }
+  }
+
+  provSel.addEventListener('change', persistProviderChange);
+  modelSel?.addEventListener('change', persistModelChange);
   $('chat-clear').addEventListener('click', clearChat);
 
   input.addEventListener('input', () => {
