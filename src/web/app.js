@@ -1386,6 +1386,19 @@ const RelayPanel = (() => {
     }
   });
 
+  // Relay logs in the terminal panel — alternative to the Logs panel's
+  // EventSource tail. Runs `nostr-station relay logs -f` which renders a
+  // coloured Ink TUI and keeps following until the tab closes.
+  $('relay-logs-term')?.addEventListener('click', () => {
+    if (window.NSTerminal?.isAvailable?.()) {
+      window.NSTerminal.open('relay-logs');
+    } else {
+      toast('Terminal unavailable',
+        window.NSTerminal?.getUnavailableReason?.() || 'Logs panel still works',
+        'warn');
+    }
+  });
+
   // Copy buttons on help card <pre data-cmd="..."> elements
   $$('.help-card pre[data-cmd]').forEach(pre => pre.appendChild(copyBtn(pre.dataset.cmd)));
 

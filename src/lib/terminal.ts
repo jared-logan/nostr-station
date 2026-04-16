@@ -260,6 +260,10 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
     case 'update':         return ns(['update'],             'update');
     case 'update-wizard':  return ns(['update', '--wizard'], 'update');
     case 'seed':           return ns(['seed'],               'seed');
+    // Follow the relay log in the terminal panel — alternative to the
+    // EventSource-based Logs panel for users who want the full TTY (colour,
+    // scrollback, search via shell if they pipe, etc.). -f keeps tail open.
+    case 'relay-logs':     return ns(['relay', 'logs', '-f'], 'relay logs');
 
     // NOTE: we intentionally do NOT expose a 'keychain-ai-key' trigger here.
     // node-pty spawns with POSIX_SPAWN_SETSID (required — every PTY is its
