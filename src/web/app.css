@@ -2242,40 +2242,141 @@ body.term-expanded .term-bar-toggle .term-chevron {
   overflow: hidden;
   min-height: 0;
   display: flex;
+  flex-direction: column;
 }
-.term-body {
+
+/* Tab strip — one button per live session + a trailing "+" for new-shell.
+   Horizontally scrollable when more tabs than fit; the + button stays
+   visible because it's pushed right in a separate flex slot. */
+.term-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 6px 8px 0 8px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+  min-height: 30px;
+  overflow: hidden;
+}
+.term-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 10px;
+  height: 26px;
+  max-width: 220px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.term-tab:hover:not(.active) {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--border);
+}
+.term-tab.active {
+  background: #0a0a0a;
+  color: var(--text-bright);
+  border-color: var(--border);
+  border-bottom-color: #0a0a0a;
+  /* Overlap the strip's own bottom border so the active tab looks seated
+     into the panel, matching editor-tab conventions. */
+  margin-bottom: -1px;
+}
+.term-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.term-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  line-height: 1;
+  font-size: 14px;
+  color: var(--muted);
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+.term-tab:hover .term-tab-close { color: var(--text-dim); }
+.term-tab-close:hover { background: var(--border-strong); color: var(--error); }
+.term-tab-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  margin-left: 4px;
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  color: var(--text-dim);
+  border-radius: var(--r-sm);
+  font-size: 14px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+.term-tab-new:hover {
+  color: var(--accent-bright);
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+/* Per-tab xterm host — stacked in one parent with CSS to show/hide. Hiding
+   via display:none would wipe xterm's measurements on every switch; we use
+   visibility + position so the buffer keeps its dimensions and scrollback. */
+.term-bodies {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
+  background: #0a0a0a;
+}
+.term-host {
+  position: absolute;
+  inset: 0;
   padding: 6px 6px 0 10px;
   display: flex;
 }
-.term-xterm {
+.term-host:not(.active) {
+  /* Keep layout measurements alive but take it out of the user's view.
+     visibility:hidden means xterm's ResizeObserver still sees the correct
+     host size, so switching back doesn't trigger a full re-layout. */
+  visibility: hidden;
+  pointer-events: none;
+}
+.term-host .xterm {
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
-}
-/* xterm's own root fills its host. Force the internal screen to paint the
-   same background as the panel so the empty-space below the cursor doesn't
-   show the body colour on fractional pixel rounding. */
-.term-xterm .xterm,
-.term-xterm .xterm-viewport,
-.term-xterm .xterm-screen {
   background: #0a0a0a;
 }
-.term-xterm .xterm .xterm-scroll-area { background: transparent; }
+.term-host .xterm,
+.term-host .xterm-viewport,
+.term-host .xterm-screen {
+  background: #0a0a0a;
+}
+.term-host .xterm .xterm-scroll-area { background: transparent; }
 
 .term-empty {
   position: absolute;
-  inset: 0;
+  inset: 30px 0 0 0;  /* below the tab strip */
   display: flex;
   align-items: center;
   justify-content: center;
   pointer-events: none;
-  opacity: 1;
-  transition: opacity 160ms ease;
   padding: 20px;
 }
+.term-empty.hidden { display: none; }
 .term-empty-inner {
   pointer-events: auto;
   text-align: center;
@@ -2292,8 +2393,4 @@ body.term-expanded .term-bar-toggle .term-chevron {
   line-height: 1.5;
   margin-bottom: 14px;
 }
-/* Hide the empty-state once a session is attached; terminal.js doesn't
-   flip a class, so we lean on xterm's presence — xterm injects
-   .xterm-helpers into .term-xterm the first time term.open() runs. */
-.term-xterm:has(.xterm-helpers) ~ .term-empty { display: none; }
 

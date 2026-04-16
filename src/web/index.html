@@ -286,14 +286,13 @@
     </div>
   </div>
   <div class="term-panel" id="term-panel" hidden>
-    <div class="term-body" id="term-body">
-      <div class="term-xterm" id="term-xterm"></div>
-      <div class="term-empty" id="term-empty">
-        <div class="term-empty-inner">
-          <div class="term-empty-title">Terminal</div>
-          <div class="term-empty-body">No session. Launch one from the dashboard — Config → NGIT → Re-login, or run a shell.</div>
-          <button class="primary" id="term-empty-shell">Open shell</button>
-        </div>
+    <div class="term-tabs" id="term-tabs" role="tablist"></div>
+    <div class="term-bodies" id="term-bodies"></div>
+    <div class="term-empty" id="term-empty">
+      <div class="term-empty-inner">
+        <div class="term-empty-title">Terminal</div>
+        <div class="term-empty-body">No session. Launch one from the dashboard — Config → NGIT → Re-login, or open a shell.</div>
+        <button class="primary" id="term-empty-shell">Open shell</button>
       </div>
     </div>
   </div>
