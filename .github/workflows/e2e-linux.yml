@@ -234,6 +234,94 @@ jobs:
           print('✓ nak + relay bin installed')
           "
 
+      - name: Verify — node-pty prebuilt installed and loadable
+        # Exercises the new terminal panel's server-side runtime on the
+        # arch where it actually matters (upstream node-pty ships zero
+        # Linux prebuilds — our pipeline is the only way Linux users
+        # get a working PTY without a C++ toolchain at install time).
+        #
+        # Checks:
+        #   1. nostr-station's own node_modules/node-pty exists (either
+        #      compiled locally during npm install or backfilled via
+        #      installNodePtyPrebuilt() during onboard).
+        #   2. build/Release/pty.node is present — that's the binary
+        #      node-pty's own loader resolves to for Linux.
+        #   3. `require('node-pty')` + pty.spawn('echo', ['ok']) succeed
+        #      and the child emits 'ok' over the PTY.
+        run: |
+          set -e
+          # Resolve the install root regardless of install mode. `npm root -g`
+          # is the global prefix; `npm link` installs under it too.
+          global_root=$(npm root -g)
+          station_dir="$global_root/nostr-station"
+          if [[ ! -d "$station_dir/node_modules/node-pty" ]]; then
+            # In npm link mode, the station_dir is a symlink to the checkout;
+            # its node_modules is the checkout's node_modules.
+            station_dir=$(dirname "$(readlink -f "$(which nostr-station)")")/..
+          fi
+          echo "station install root: $station_dir"
+          ls -la "$station_dir/node_modules/node-pty" | head -5
+          test -f "$station_dir/node_modules/node-pty/package.json"
+          test -f "$station_dir/node_modules/node-pty/build/Release/pty.node" \
+            || { echo "❌ build/Release/pty.node missing — prebuilt install did not land"; ls -laR "$station_dir/node_modules/node-pty/build" 2>&1 | head -40; ls -laR "$station_dir/node_modules/node-pty/prebuilds" 2>&1 | head -40; exit 1; }
+          echo "✓ pty.node present"
+
+          node --input-type=module -e "
+            import { createRequire } from 'module';
+            const req = createRequire('$station_dir/');
+            const pty = req('node-pty');
+            const p = pty.spawn('echo', ['ok'], { name: 'xterm', cols: 80, rows: 24 });
+            let out = '';
+            p.onData(d => { out += d; });
+            p.onExit(({ exitCode }) => {
+              if (!out.includes('ok')) {
+                console.error('❌ unexpected PTY output:', JSON.stringify(out));
+                process.exit(1);
+              }
+              console.log('✓ pty.spawn echo → output:', JSON.stringify(out));
+              process.exit(exitCode ?? 0);
+            });
+          "
+
+      - name: Verify — terminal capability endpoint
+        # Boots the web-server long enough to probe /api/terminal/capability
+        # and assert available:true. This is the same endpoint the browser
+        # uses to decide whether to render the terminal bar, so a green
+        # response here means a fresh install would surface the panel.
+        run: |
+          set -e
+          nostr-station chat --port 3999 > /tmp/ns-web.log 2>&1 &
+          web_pid=$!
+          trap "kill $web_pid 2>/dev/null || true" EXIT
+          # Wait for the server to accept connections — startup does an
+          # async load-pty probe, so give it a few seconds.
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if nc -z localhost 3999 2>/dev/null; then break; fi
+            sleep 1
+          done
+          # localhostExempt or requireAuth:false should apply on CI (demo
+          # identity). If the endpoint is gated, the probe will 401 — treat
+          # that as a non-fatal warning (the terminal panel itself is fine;
+          # we just can't reach the probe without a session).
+          resp=$(curl -sS -o /tmp/cap.json -w '%{http_code}' http://localhost:3999/api/terminal/capability)
+          echo "capability http: $resp"
+          cat /tmp/cap.json 2>/dev/null || true
+          echo
+          if [[ "$resp" == "200" ]]; then
+            python3 -c "
+            import json
+            d = json.load(open('/tmp/cap.json'))
+            assert d.get('available') is True, f'expected available:true, got {d}'
+            print('✓ terminal capability reported available')
+            "
+          elif [[ "$resp" == "401" ]]; then
+            echo "⚠  capability endpoint requires auth on this runner — not regressed, just not probable without an identity"
+          else
+            echo "❌ unexpected capability http: $resp"
+            tail -40 /tmp/ns-web.log
+            exit 1
+          fi
+
       - name: Verify — doctor (informational only)
         run: nostr-station doctor || true
 
