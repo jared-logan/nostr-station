@@ -249,7 +249,7 @@ switch (command) {
       requireInteractive(`keychain ${kcAction}`, hint);
     }
 
-    render(React.createElement(Keychain, { action: kcAction, key: kcKey }));
+    render(React.createElement(Keychain, { action: kcAction, credKey: kcKey }));
     break;
   }
 

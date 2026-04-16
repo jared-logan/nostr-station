@@ -181,6 +181,14 @@ export interface CreateOpts {
   cwd?: string;
 }
 
+// How to invoke our own CLI (node dist/cli.js / tsx src/cli.tsx).
+// Resolved once in web-server.ts to a valid file + runner pair, passed in
+// here so terminal.ts stays agnostic to dev vs. built layout.
+export interface CliSpawn {
+  bin:    string;   // node | <repo>/node_modules/.bin/tsx
+  prefix: string[]; // [cli.js] | [cli.tsx]
+}
+
 // Maximum accepted cols/rows for resize — guards against nonsense client
 // values without capping sensible future use (ultrawide monitors, font zooms).
 const MAX_COLS = 500;
@@ -205,21 +213,29 @@ function normalizeCwd(raw: string | undefined): string | undefined {
   return raw;
 }
 
-export function resolveCmd(opts: CreateOpts, cliBin: string): CmdSpec | null {
+export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
   const shell = process.env.SHELL || '/bin/bash';
   const cwd = normalizeCwd(opts.cwd);
-  const noColorEnv: Record<string, string> = {};
   // Intentionally DO NOT set NO_COLOR / TERM=dumb here — the whole point of
   // the terminal panel is that programs run against a real VT: colours,
   // cursor control, full-screen TUIs (Claude Code, ngit prompts) all work.
   // The old streaming-exec endpoints zeroed these out for line-oriented SSE;
   // terminal sessions get the xterm profile by default.
 
+  // Helper: wrap a subcommand as a spawn of our own CLI regardless of
+  // whether it's built (node dist/cli.js) or dev (tsx src/cli.tsx).
+  const ns = (args: string[], label: string): CmdSpec => ({
+    cmd: cli.bin,
+    args: [...cli.prefix, ...args],
+    cwd,
+    label,
+  });
+
   switch (opts.key) {
     case 'shell':
       // Login shell so interactive tooling that relies on ~/.zshrc / ~/.bashrc
       // (cargo, deno, pyenv shims) behaves as the user expects.
-      return { cmd: shell, args: ['-l'], cwd, label: path.basename(shell), env: noColorEnv };
+      return { cmd: shell, args: ['-l'], cwd, label: path.basename(shell) };
 
     case 'claude':
       return { cmd: 'claude', args: [], cwd, label: cwd ? `claude · ${path.basename(cwd)}` : 'claude' };
@@ -236,23 +252,22 @@ export function resolveCmd(opts: CreateOpts, cliBin: string): CmdSpec | null {
     case 'ngit-logout':
       return { cmd: 'ngit', args: ['account', 'logout'], cwd, label: 'ngit logout' };
 
-    // `doctor`, `onboard`, `update`, `seed`, etc. — spawn our own CLI in a
-    // child node so the Ink UI renders normally against the PTY.
-    case 'doctor':
-      return { cmd: process.execPath, args: [cliBin, 'doctor'], label: 'doctor' };
-    case 'onboard':
-      return { cmd: process.execPath, args: [cliBin, 'onboard'], label: 'onboard' };
-    case 'update':
-      return { cmd: process.execPath, args: [cliBin, 'update'], label: 'update' };
-    case 'seed':
-      return { cmd: process.execPath, args: [cliBin, 'seed'], label: 'seed' };
-  }
+    // Our own CLI subcommands — Ink mounts against the PTY so the full TUI
+    // (selects, spinners, multi-step wizards) renders as it does in a real
+    // terminal. ns() picks node+cli.js or tsx+cli.tsx based on layout.
+    case 'doctor':  return ns(['doctor'],  'doctor');
+    case 'onboard': return ns(['onboard'], 'onboard');
+    case 'update':  return ns(['update'],  'update');
+    case 'seed':    return ns(['seed'],    'seed');
 
-  // `ai-add <provider>` form. Slug is restricted to lowercase a-z / dashes to
-  // keep the argv free of any caller-supplied punctuation.
-  const aiMatch = opts.key.match(/^ai-add:([a-z][a-z0-9-]{0,30})$/);
-  if (aiMatch) {
-    return { cmd: process.execPath, args: [cliBin, 'ai', 'add', aiMatch[1]], label: `ai add ${aiMatch[1]}` };
+    // NOTE: we intentionally do NOT expose a 'keychain-ai-key' trigger here.
+    // node-pty spawns with POSIX_SPAWN_SETSID (required — every PTY is its
+    // own session), which detaches the child from the Aqua session bootstrap
+    // port that macOS `security` needs. Any `security add-generic-password`
+    // inside a PTY child fails with exit 36 ("User interaction is not
+    // allowed"). The dashboard's /api/keychain/set endpoint is the canonical
+    // paste path — it runs in the web-server process itself, which inherited
+    // Aqua from the user's real terminal and can talk to the keychain.
   }
 
   return null;
@@ -299,13 +314,13 @@ function appendBuffer(sess: Session, chunk: string): void {
 
 export async function createSession(
   opts: CreateOpts,
-  cliBin: string,
+  cli: CliSpawn,
 ): Promise<{ ok: true; id: string; label: string } | { ok: false; error: string }> {
   const pty = await loadPty();
   if (!pty) {
     return { ok: false, error: 'node-pty not installed — run `nostr-station doctor --fix`' };
   }
-  const spec = resolveCmd(opts, cliBin);
+  const spec = resolveCmd(opts, cli);
   if (!spec) {
     return { ok: false, error: `unknown command key: ${opts.key}` };
   }

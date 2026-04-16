@@ -21,8 +21,22 @@ class MacOSKeychain implements KeychainBackend {
   backendName() { return 'macOS Keychain'; }
 
   async store(key: KeychainKey, value: string): Promise<void> {
+    // `-U` updates in place if an entry already exists, but the in-place
+    // path triggers a SecurityAgent GUI prompt the first time any process
+    // that isn't in the user's Aqua session tries to use it. That fails
+    // with exit code 36 ("User interaction is not allowed") under SSH or
+    // inside the dashboard's node-pty terminal panel.
+    //
+    // Delete-then-add sidesteps the prompt: the fresh add is owned by the
+    // caller process and needs no confirmation. The delete silently swallows
+    // the not-found case so it's safe on first write.
+    try {
+      await execa('security', [
+        'delete-generic-password', '-s', 'nostr-station', '-a', key,
+      ]);
+    } catch {}
     await execa('security', [
-      'add-generic-password', '-s', 'nostr-station', '-a', key, '-w', value, '-U',
+      'add-generic-password', '-s', 'nostr-station', '-a', key, '-w', value,
     ]);
   }
 

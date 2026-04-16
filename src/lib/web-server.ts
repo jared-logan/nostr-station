@@ -680,7 +680,20 @@ function bustProfileCache(): void { PROFILE_CACHE.clear(); }
 //
 // The dashboard opens a modal that renders these lines into a terminal view.
 
+// Existing streaming-exec routes (publish, doctor, deploy…) pass CLI_BIN
+// to `node` and assume it exists as dist/cli.js. That breaks when the
+// dashboard is running in dev via `tsx src/cli.tsx chat` — cli.js never
+// gets built in that workflow. For the terminal panel we prefer a resolver
+// that picks whichever entrypoint actually exists and pairs it with the
+// matching runner (node + cli.js, or tsx + cli.tsx). CLI_BIN stays for the
+// legacy SSE call sites that already expect a Node+script pair; a dev who
+// exercises them is expected to have run `npm run build` at least once.
 const CLI_BIN = path.resolve(here, '..', 'cli.js');
+const CLI_TSX = path.resolve(here, '..', '..', 'src', 'cli.tsx');
+const TSX_BIN = path.resolve(here, '..', '..', 'node_modules', '.bin', 'tsx');
+const CLI_SPAWN = fs.existsSync(CLI_BIN)
+  ? { bin: process.execPath, prefix: [CLI_BIN] }
+  : { bin: TSX_BIN,          prefix: [CLI_TSX] };
 
 type CmdSpec = { bin: string; args: string[]; env?: Record<string, string> };
 function cmdSpecFor(key: string, slug?: string): CmdSpec | null {
@@ -1875,7 +1888,7 @@ export async function startWebServer(port: number): Promise<void> {
           }
           if (p.path) cwd = p.path;
         }
-        const r = await createTerminal({ key, cwd }, CLI_BIN);
+        const r = await createTerminal({ key, cwd }, CLI_SPAWN);
         if (!r.ok) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: r.error }));

@@ -14,7 +14,11 @@ type KeychainAction = 'list' | 'get' | 'set' | 'delete' | 'rotate' | 'migrate';
 
 interface KeychainProps {
   action: KeychainAction;
-  key?: string;
+  // `key` would be the natural name but React treats it as a reconciliation
+  // hint and strips it from props — the inner component sees undefined and
+  // Ink logs a runtime warning. Stick with credKey to match the child
+  // components' prop names.
+  credKey?: string;
 }
 
 // ── List ───────────────────────────────────────────────────────────────────
@@ -343,7 +347,7 @@ const KeychainMigrate: React.FC = () => {
 
 // ── Root component ─────────────────────────────────────────────────────────
 
-export const Keychain: React.FC<KeychainProps> = ({ action, key: credKey }) => {
+export const Keychain: React.FC<KeychainProps> = ({ action, credKey }) => {
   switch (action) {
     case 'list':    return <KeychainList />;
     case 'get':     return <KeychainGet credKey={credKey ?? 'ai-api-key'} />;
