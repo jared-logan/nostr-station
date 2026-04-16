@@ -691,7 +691,13 @@ function bustProfileCache(): void { PROFILE_CACHE.clear(); }
 const CLI_BIN = path.resolve(here, '..', 'cli.js');
 const CLI_TSX = path.resolve(here, '..', '..', 'src', 'cli.tsx');
 const TSX_BIN = path.resolve(here, '..', '..', 'node_modules', '.bin', 'tsx');
-const CLI_SPAWN = fs.existsSync(CLI_BIN)
+// Detect dev layout by checking where this module itself lives. When the
+// web-server is being run from src/lib/ (tsx-hosted), prefer spawning our
+// CLI subcommands from src/cli.tsx too — otherwise edits under src/ won't
+// land until the user runs `npm run build`. In prod (dist/lib/), we always
+// prefer the compiled cli.js + node pair.
+const IS_DEV = here.includes(`${path.sep}src${path.sep}lib`);
+const CLI_SPAWN = (!IS_DEV && fs.existsSync(CLI_BIN))
   ? { bin: process.execPath, prefix: [CLI_BIN] }
   : { bin: TSX_BIN,          prefix: [CLI_TSX] };
 

@@ -1369,6 +1369,23 @@ const RelayPanel = (() => {
   $('relay-stop').addEventListener('click', () => action('stop'));
   $('relay-restart').addEventListener('click', () => action('restart'));
 
+  // `seed` prompts for event count + confirms before sending, so it needs
+  // a real TTY. Deferred availability check: RelayPanel's module-init runs
+  // before NSTerminal.init() has finished probing /api/terminal/capability,
+  // so an init-time isAvailable() gate would always see null and stay hidden.
+  // Check at click-time instead — terminal panel or toast surfaces any
+  // unavailability reason. Live event stream above will show seeded events
+  // as they land.
+  $('relay-seed')?.addEventListener('click', () => {
+    if (window.NSTerminal?.isAvailable?.()) {
+      window.NSTerminal.open('seed');
+    } else {
+      toast('Terminal unavailable',
+        window.NSTerminal?.getUnavailableReason?.() || 'Run `nostr-station doctor --fix`',
+        'err');
+    }
+  });
+
   // Copy buttons on help card <pre data-cmd="..."> elements
   $$('.help-card pre[data-cmd]').forEach(pre => pre.appendChild(copyBtn(pre.dataset.cmd)));
 

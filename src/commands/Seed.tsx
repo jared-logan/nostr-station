@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { execa } from 'execa';
+import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { P } from '../onboard/components/palette.js';
 import { Select } from '../onboard/components/Select.js';
 
@@ -28,9 +29,15 @@ function randomContent(i: number): string {
   return NOTE_CONTENT[i % NOTE_CONTENT.length] + ` (#${i + 1})`;
 }
 
+// nak's `event` / `count` / `req` commands optionally read a partial event
+// or query from stdin. With stdio:'pipe' and no stdin write, they block on
+// EOF indefinitely — spent a while debugging a 0/50 progress bar before
+// discovering that. Passing `stdin: 'ignore'` closes stdin immediately so
+// nak skips the read and uses the --flag values directly. A 10s timeout
+// caps any remaining edge cases (unresponsive relay, network stall).
 async function nakPublish(args: string[]): Promise<boolean> {
   try {
-    await execa('nak', args, { stdio: 'pipe' });
+    await execa('nak', args, { stdin: 'ignore', timeout: 10_000 });
     return true;
   } catch {
     return false;
@@ -39,9 +46,7 @@ async function nakPublish(args: string[]): Promise<boolean> {
 
 async function relayEventCount(): Promise<number> {
   try {
-    // nak req -l 1 just to check connectivity; count is hard to get cleanly
-    // We use nak count if available, otherwise fall back to 0
-    const { stdout } = await execa('nak', ['count', RELAY_URL], { stdio: 'pipe', timeout: 3000 });
+    const { stdout } = await execa('nak', ['count', RELAY_URL], { stdin: 'ignore', timeout: 3000 });
     const n = parseInt(stdout.trim(), 10);
     return isNaN(n) ? 0 : n;
   } catch {
@@ -49,12 +54,19 @@ async function relayEventCount(): Promise<number> {
   }
 }
 
-async function generateSeedKeypair(): Promise<{ nsec: string; npub: string }> {
+function generateSeedKeypair(): { nsec: string; npub: string } {
+  // Previously shelled to `nak keygen`, which nak renamed to `nak key
+  // generate` + changed output to raw hex. Going through nostr-tools
+  // (already a dep) is both simpler and insulates us from further nak
+  // CLI churn. Throws are impossible in practice — generateSecretKey uses
+  // crypto.randomBytes — but callers still guard for a defensive empty
+  // result since the UI path depends on it.
   try {
-    const { stdout } = await execa('nak', ['keygen'], { stdio: 'pipe' });
-    const nsec = stdout.match(/nsec[a-z0-9]+/)?.[0] ?? '';
-    const npub = stdout.match(/npub[a-z0-9]+/)?.[0] ?? '';
-    return { nsec, npub };
+    const sk = generateSecretKey();
+    return {
+      nsec: nip19.nsecEncode(sk),
+      npub: nip19.npubEncode(getPublicKey(sk)),
+    };
   } catch {
     return { nsec: '', npub: '' };
   }
@@ -109,7 +121,7 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
   }, [phase, existingCount]);
 
   const runSeed = async () => {
-    const { nsec, npub } = await generateSeedKeypair();
+    const { nsec, npub } = generateSeedKeypair();
     if (!nsec) {
       setErrorMsg('Could not generate keypair — is nak installed? (nostr-station doctor --fix)');
       setPhase('error');
