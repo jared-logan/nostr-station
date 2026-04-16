@@ -753,6 +753,24 @@ input:focus, textarea:focus, select:focus {
   flex-direction: column;
   gap: 6px;
 }
+
+/* Chat pane empty-state callout when no API provider is configured. */
+.chat-no-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--warn);
+  border: 1px solid rgba(255, 176, 32, 0.4);
+  background: rgba(255, 176, 32, 0.08);
+  border-radius: 999px;
+}
+.chat-no-provider a {
+  color: var(--warn);
+  font-weight: 500;
+  text-decoration: underline;
+}
 .ai-add-row select {
   background: var(--bg-card);
   color: var(--text);

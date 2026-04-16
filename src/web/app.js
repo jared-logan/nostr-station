@@ -966,13 +966,20 @@ const ChatPanel = (() => {
   function renderBadge() {
     const b = ensureBadgeEl();
     if (!activeProject) { b.style.display = 'none'; return; }
+    // Click the name → jump to Projects panel (per Step 4.5 spec's
+    // "Project indicator" behavior). The × still clears the scope
+    // without navigating.
     b.innerHTML = `
       <span class="k">context</span>
-      <span class="v">${escapeHtml(activeProject.name)}</span>
+      <a href="#projects" class="v" title="Open in Projects">${escapeHtml(activeProject.name)}</a>
       <button class="clear-ctx" aria-label="Clear project context">×</button>
     `;
     b.style.display = '';
-    b.querySelector('.clear-ctx').onclick = () => setActiveProject(null);
+    b.querySelector('.clear-ctx').onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setActiveProject(null);
+    };
   }
 
   async function setActiveProject(p) {
@@ -987,63 +994,90 @@ const ChatPanel = (() => {
     renderHistory();
   }
 
+  // Track whether any API provider is configured; gates the send button
+  // and drives the "Add an AI provider in Config" callout.
+  let hasConfiguredProvider = false;
+
   async function populateProvider() {
-    provSel.innerHTML = PROVIDER_LIST.map(p => `<option value="${p.value}">${escapeHtml(p.label)}</option>`).join('');
-    const cfg = await api('/api/config').catch(() => null);
-    // Server gives us the provider NAME (e.g. "Anthropic") — map back to slug.
-    const byName = {
-      'Anthropic': 'anthropic', 'OpenRouter': 'openrouter', 'OpenCode Zen': 'opencode-zen',
-      'Routstr': 'routstr', 'PayPerQ': 'ppq', 'Ollama': 'ollama',
-      'LM Studio': 'lmstudio', 'Maple': 'maple', 'Custom': 'custom',
-    };
-    const slug = byName[cfg?.provider] || 'anthropic';
-    provSel.value = slug;
-    await populateModels(slug, cfg?.model);
-    updateKeyWarning(cfg);
-  }
+    // Hide the model dropdown + its label — per-provider model override
+    // now lives in Config. Simpler Chat UI: pick a provider, that's it.
+    if (modelSel) modelSel.style.display = 'none';
+    const modelLabelEl = modelSel?.previousElementSibling;
+    if (modelLabelEl) modelLabelEl.style.display = 'none';
 
-  async function populateModels(slug, preferred) {
-    const models = await modelsFor(slug);
-    modelSel.innerHTML = models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
-    if (preferred && models.includes(preferred)) modelSel.value = preferred;
-  }
+    const list = await api('/api/ai/providers').catch(() => null);
+    const configured = (list?.providers || []).filter(p => p.configured && p.type === 'api');
 
-  function updateKeyWarning(cfg) {
-    if (!cfg || cfg.configured) {
-      warnEl.style.display = 'none';
+    if (configured.length === 0) {
+      provSel.innerHTML = '<option value="">—</option>';
+      provSel.disabled = true;
+      hasConfiguredProvider = false;
+      showNoProviderCallout();
+      updateSendDisabled();
       return;
     }
-    warnEl.style.display = '';
-    warnEl.innerHTML = '';
-    warnEl.appendChild(document.createTextNode(`No API key — run: `));
-    const cmd = 'nostr-station keychain set ai-api-key';
-    const code = document.createElement('span');
-    code.className = 'cmd-inline'; code.textContent = cmd;
-    warnEl.appendChild(code);
-    warnEl.appendChild(copyBtn(cmd));
+
+    hasConfiguredProvider = true;
+    hideNoProviderCallout();
+    provSel.disabled = false;
+    // Option label includes the effective model for quick context —
+    // "OpenAI · gpt-4o". Users can switch models in Config.
+    provSel.innerHTML = configured.map(p => {
+      const label = p.model ? `${p.displayName} · ${p.model}` : p.displayName;
+      return `<option value="${escapeHtml(p.id)}">${escapeHtml(label)}</option>`;
+    }).join('');
+    // Preselect the chat default; fall back to the first configured entry
+    // if no default is set (shouldn't happen given auto-default on add,
+    // but defensive against hand-edited ai-config.json).
+    const activeId = list?.defaults?.chat && configured.find(p => p.id === list.defaults.chat)
+      ? list.defaults.chat
+      : configured[0].id;
+    provSel.value = activeId;
+    updateSendDisabled();
+  }
+
+  // Fallback message when zero API providers are configured. Rendered as
+  // a callout inside the chat-controls row — no separate modal, no page
+  // churn. Clicking takes the user to the Config panel.
+  function showNoProviderCallout() {
+    let el = document.getElementById('chat-no-provider');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'chat-no-provider';
+      el.className = 'chat-no-provider';
+      el.innerHTML = `
+        <span>No AI provider configured for Chat.</span>
+        <a href="#config">Add one in Config →</a>
+      `;
+      warnEl.parentElement.appendChild(el);
+    }
+    el.style.display = '';
+  }
+  function hideNoProviderCallout() {
+    const el = document.getElementById('chat-no-provider');
+    if (el) el.style.display = 'none';
+  }
+
+  function updateSendDisabled() {
+    send.disabled = busy || !hasConfiguredProvider;
   }
 
   async function persistSelection() {
+    // Switching providers in the dropdown updates defaults.chat so the
+    // choice sticks across tab switches + server restarts. No keychain
+    // touch — that's gated separately.
+    const id = provSel.value;
+    if (!id) return;
     try {
-      const result = await api('/api/config/set', {
+      await api('/api/ai/config', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ provider: provSel.value, model: modelSel.value }),
+        body: JSON.stringify({ defaults: { chat: id } }),
       });
-      if (!result.ok) throw new Error(result.error || 'save failed');
-      toast('Provider saved', `${provSel.value} · ${modelSel.value}`, 'ok');
-      await refreshHeader();
-      updateKeyWarning(window.__lastConfig);
-    } catch (e) {
-      // api() already toasted; no-op
-    }
+    } catch { /* api() already toasted */ }
   }
 
-  provSel.addEventListener('change', async () => {
-    await populateModels(provSel.value);
-    await persistSelection();
-  });
-  modelSel.addEventListener('change', persistSelection);
+  provSel.addEventListener('change', persistSelection);
   $('chat-clear').addEventListener('click', clearChat);
 
   input.addEventListener('input', () => {
@@ -1057,11 +1091,15 @@ const ChatPanel = (() => {
 
   async function sendMsg() {
     if (busy) return;
+    if (!hasConfiguredProvider) {
+      toast('No provider', 'Add an AI provider in Config', 'warn');
+      return;
+    }
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
     input.style.height = 'auto';
-    busy = true; send.disabled = true;
+    busy = true; updateSendDisabled();
 
     const history = currentHistory();
     history.push({ role: 'user', content: text });
@@ -1073,10 +1111,18 @@ const ChatPanel = (() => {
     let full = '';
 
     try {
-      const res = await fetch('/api/chat', {
+      // /api/ai/chat handles provider resolution + project context
+      // injection server-side. We pass provider explicitly so the user's
+      // dropdown choice wins over the stored chat default even before the
+      // persistSelection() round-trip lands.
+      const res = await fetch('/api/ai/chat', {
         method:  'POST',
         headers: { 'content-type': 'application/json', 'Authorization': `Bearer ${getSessionToken() || ''}` },
-        body:    JSON.stringify({ messages: history }),
+        body:    JSON.stringify({
+          messages: history,
+          provider: provSel.value || undefined,
+          projectId: activeProject?.id || undefined,
+        }),
       });
       if (!res.ok) throw new Error('server ' + res.status);
 
@@ -1113,19 +1159,15 @@ const ChatPanel = (() => {
     }
     cur.remove();
     if (full) history.push({ role: 'assistant', content: full });
-    busy = false; send.disabled = false;
+    busy = false; updateSendDisabled();
     input.focus();
   }
 
-  // Config panel emits this after a successful API-key save or provider
-  // switch — we re-poll /api/config and refresh the warning chip in place
-  // without requiring the user to leave/re-enter the Chat panel.
-  document.addEventListener('api-config-changed', async () => {
-    try {
-      const cfg = await api('/api/config');
-      window.__lastConfig = cfg;
-      updateKeyWarning(cfg);
-    } catch {}
+  // Config panel emits this after a successful provider add / key update /
+  // default change. Re-run populateProvider() so the Chat dropdown reflects
+  // the new state without the user having to leave + re-enter the panel.
+  document.addEventListener('api-config-changed', () => {
+    populateProvider();
   });
 
   let initialized = false;
