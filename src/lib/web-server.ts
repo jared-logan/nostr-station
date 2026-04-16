@@ -1772,6 +1772,177 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
+      // ── nsite discovery (kind 35128 site manifests) ────────────────────
+      //
+      // Tells the dashboard whether the station owner has published an
+      // nsite (a static site served via nostr) to their read relays, and
+      // where to reach it on the public nsite.lol gateway.
+      //
+      // Two URL forms are relevant (both served by nsite.lol):
+      //   - npubUrl: `https://<npub>.nsite.lol` — always resolvable from
+      //     just the pubkey; used as the "predicted" URL when no event is
+      //     on the read relays yet.
+      //   - d-tag URL: `https://<base36(pubkey)><d-tag>.nsite.lol` — the
+      //     nicer canonical URL once a 35128 site manifest exists (e.g.
+      //     `…6jaredlogan.nsite.lol` for d="jaredlogan"). The 50-char
+      //     prefix is the pubkey as a big-endian integer converted to
+      //     base36 and left-padded to 50 chars.
+      //
+      // Kind queried: **35128** — the modern nsite site-manifest
+      // convention (one aggregate event per site, parameterized-
+      // replaceable by a d-tag slug; `path` tags map file paths to
+      // blossom blob hashes). This supersedes the older per-file kind
+      // 34128 convention.
+      //
+      // Multiple sites: one pubkey can publish any number of 35128
+      // manifests under different d-tags. We collect all of them
+      // (keeping the freshest per d-tag) and return them as `sites[]`.
+      // `relayEvent` / `url` mirror the most recent site for simple
+      // consumers that want a single headline value.
+      //
+      // Security: mirrors /api/ngit/discover — nak is spawned via
+      // spawn() with a fixed argv (stdio 'ignore' on stdin to prevent the
+      // nak-stdin-hang pitfall documented in project memory), the pubkey
+      // is bech32-decoded via nostr-tools (never shelled out to nak), and
+      // every relay URL is validated against isValidRelayUrl.
+      if (url === '/api/nsite/discover' && method === 'GET') {
+        const ident = readIdentity();
+        if (!ident.npub) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            npubUrl: null, relayEvent: null, url: null, deployed: false,
+          }));
+          return;
+        }
+        let hex = '';
+        let npubBech32 = '';
+        if (/^[0-9a-f]{64}$/.test(ident.npub)) {
+          hex = ident.npub;
+          try { npubBech32 = nip19.npubEncode(hex); } catch {}
+        } else {
+          try {
+            const d = nip19.decode(ident.npub);
+            if (d.type === 'npub' && typeof d.data === 'string') {
+              hex = d.data;
+              npubBech32 = ident.npub;
+            }
+          } catch {}
+        }
+        if (!hex || !npubBech32) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'could not decode npub to hex' }));
+          return;
+        }
+        // Public gateway convention — matches the URLs printed by
+        // `nostr-station nsite publish` (see commands/Nsite.tsx). Always
+        // resolvable even if no kind 34128 events are on the user's read
+        // relays, so we can still show *something* while the relay query
+        // runs (or fails).
+        const npubUrl = `https://${npubBech32}.nsite.lol`;
+
+        const DEFAULT_DISCOVERY_RELAYS = ['wss://relay.damus.io', 'wss://relay.nostr.band'];
+        const relays = (ident.readRelays && ident.readRelays.length
+          ? ident.readRelays
+          : DEFAULT_DISCOVERY_RELAYS
+        ).filter(isValidRelayUrl).slice(0, 8);
+        if (relays.length === 0) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            npubUrl, relayEvent: null, url: npubUrl, deployed: false,
+          }));
+          return;
+        }
+
+        // Collects every 35128 event by d-tag (35128 is parameterized-
+        // replaceable, so the freshest event per d-tag wins). Returns
+        // when the relay query settles or the timeout fires.
+        const collectSites = (timeoutMs: number): Promise<Map<string, any>> =>
+          new Promise((resolve) => {
+            const args = ['req', '-k', '35128', '-a', hex, ...relays, '--stream'];
+            const child = spawn('nak', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+            const byDTag = new Map<string, any>();
+            let buf = '';
+            let done = false;
+            const finish = () => {
+              if (done) return;
+              done = true;
+              clearTimeout(timer);
+              try { child.kill('SIGTERM'); } catch {}
+              resolve(byDTag);
+            };
+            child.stdout.on('data', (chunk: Buffer) => {
+              buf += chunk.toString();
+              const lines = buf.split('\n');
+              buf = lines.pop() || '';
+              for (const line of lines) {
+                const s = line.trim();
+                if (!s) continue;
+                let ev: any;
+                try { ev = JSON.parse(s); } catch { continue; }
+                if (!ev || ev.kind !== 35128) continue;
+                // Defense in depth — the `-a <hex>` arg should make nak
+                // return only events by this author, but relays occasionally
+                // return extras. Reject anything whose pubkey doesn't match
+                // so we never display a stranger's nsite as the owner's.
+                if (typeof ev.pubkey !== 'string' || ev.pubkey.toLowerCase() !== hex.toLowerCase()) continue;
+                const dVal = Array.isArray(ev.tags)
+                  ? ev.tags.find((t: any[]) => Array.isArray(t) && t[0] === 'd')?.[1]
+                  : undefined;
+                if (typeof dVal !== 'string' || !dVal) continue;
+                const prev = byDTag.get(dVal);
+                if (!prev || Number(ev.created_at || 0) > Number(prev.created_at || 0)) {
+                  byDTag.set(dVal, ev);
+                }
+              }
+            });
+            const timer = setTimeout(finish, timeoutMs);
+            child.on('error', finish);
+            child.on('close', finish);
+            req.on('close', () => { try { child.kill('SIGTERM'); } catch {} });
+          });
+
+        const byDTag = await collectSites(8000);
+
+        // Build canonical nsite.lol URLs. Pubkey is a 256-bit big-endian
+        // integer rendered in base36 (lowercase), left-padded to 50 chars
+        // so the subdomain prefix is always a fixed width — verified
+        // against live examples on the gateway.
+        const base36 = BigInt('0x' + hex).toString(36).padStart(50, '0');
+        const sites = Array.from(byDTag.values())
+          // d-tags must be DNS-safe for the subdomain. Anything exotic is
+          // dropped rather than producing a broken URL.
+          .filter((ev) => {
+            const d = ev.tags.find((t: any[]) => t[0] === 'd')?.[1];
+            return typeof d === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(d);
+          })
+          .map((ev) => {
+            const d     = ev.tags.find((t: any[]) => t[0] === 'd')?.[1] as string;
+            const title = ev.tags.find((t: any[]) => t[0] === 'title')?.[1];
+            return {
+              d,
+              title: typeof title === 'string' && title ? title : d,
+              url:   `https://${base36}${d}.nsite.lol`,
+              publishedAt: Number(ev.created_at || 0),
+              event: ev,
+            };
+          })
+          // Freshest first — also the order the UI renders them.
+          .sort((a, b) => b.publishedAt - a.publishedAt);
+
+        const primary = sites[0] || null;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          npubUrl,
+          sites,
+          deployed:   sites.length > 0,
+          // Convenience mirrors of the primary (most recent) site so
+          // simple consumers don't have to re-pick from `sites`.
+          relayEvent: primary?.event || null,
+          url:        primary?.url || npubUrl,
+        }));
+        return;
+      }
+
       // ── ngit clone (streams `git clone <naddr> <path>`) ────────────────
       //
       // Pairs with /api/ngit/discover to give Projects → Discover a clean

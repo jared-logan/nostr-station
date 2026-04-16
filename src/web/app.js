@@ -467,6 +467,68 @@ function truncNpub(npub) {
 let __identity = null;
 let __profile  = null;
 
+// ── nsite discovery cache ───────────────────────────────────────────────
+//
+// Shared between the Identity drawer NSITE section and the Status panel
+// nsite card so both render consistent state without duplicate fetches.
+// /api/nsite/discover is cheap but blocks on a nak relay query (up to 8s),
+// so we cache results for 60s per spec.
+let __nsite = null;     // last payload from /api/nsite/discover
+let __nsiteAt = 0;      // ms timestamp of last successful fetch
+let __nsiteInflight = null;
+const NSITE_TTL_MS = 60_000;
+
+async function getNsiteDiscover({ force } = {}) {
+  if (!force && __nsite && (Date.now() - __nsiteAt) < NSITE_TTL_MS) {
+    return __nsite;
+  }
+  if (__nsiteInflight) return __nsiteInflight;
+  __nsiteInflight = (async () => {
+    try {
+      const r = await api('/api/nsite/discover');
+      __nsite = r;
+      __nsiteAt = Date.now();
+      return r;
+    } finally {
+      __nsiteInflight = null;
+    }
+  })();
+  return __nsiteInflight;
+}
+
+// Seed payload for ProjectDrawer.openAddPrefilled when "Add to Projects"
+// is clicked from the NSITE section or card. A specific `site` picks
+// that deployment's d-tag/title as the project name; otherwise we fall
+// back to the discover payload's primary URL (or the predicted npubUrl
+// when nothing is deployed yet).
+function buildNsiteSeed(discover, npub, site) {
+  const url = site?.url || discover?.url || discover?.npubUrl || '';
+  const lastDeployTs = site?.publishedAt ?? discover?.relayEvent?.created_at;
+  let name = site?.d || '';
+  if (!name) {
+    try {
+      if (url) {
+        const host = new URL(url).hostname;
+        // Raw npub-based hostnames (npub1…63chars.nsite.lol) are too long
+        // for a readable project name — fall through to truncNpub. Custom
+        // hostnames (e.g. user-chosen .nsite.pub) are kept as-is.
+        if (!host.endsWith('.nsite.lol') && host.length < 48) {
+          name = host;
+        }
+      }
+    } catch {}
+  }
+  if (!name) name = truncNpub(npub || '');
+  return {
+    name,
+    capabilities: { nsite: true },
+    nsite: {
+      url,
+      lastDeploy: lastDeployTs ? new Date(lastDeployTs * 1000).toISOString() : null,
+    },
+  };
+}
+
 async function refreshIdentityChip() {
   const chip = $('identity-chip');
   const avatar = $('identity-avatar');
@@ -590,6 +652,18 @@ const IdentityDrawer = (() => {
     `;
     body.appendChild(signing);
 
+    // NSITE — hydrated asynchronously from /api/nsite/discover. The
+    // section slot is rendered immediately so the drawer doesn't jump
+    // when results arrive.
+    const nsiteSec = document.createElement('div');
+    nsiteSec.className = 'drawer-section nsite-section';
+    nsiteSec.innerHTML = `
+      <h4>NSITE</h4>
+      <div class="nsite-body"><span class="spinner"></span><span class="muted" style="margin-left:8px">Checking read relays…</span></div>
+    `;
+    body.appendChild(nsiteSec);
+    renderNsiteSection(nsiteSec, cfg.npub);
+
     // Session — only shown when we have an actual session (i.e. not the
     // localhost exemption path, where there's nothing to sign out of).
     if (getSessionToken()) {
@@ -659,7 +733,7 @@ const IdentityDrawer = (() => {
       });
       if (!r.ok) throw new Error(r.error || 'save failed');
       toast('Identity saved', val, 'ok');
-      __identity = null; __profile = null;
+      __identity = null; __profile = null; __nsite = null; __nsiteAt = 0;
       document.dispatchEvent(new CustomEvent('identity-changed'));
       await refreshIdentityChip();
       render();
@@ -749,9 +823,85 @@ const IdentityDrawer = (() => {
   async function signOut() {
     try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
     clearSessionToken();
-    __identity = null; __profile = null;
+    __identity = null; __profile = null; __nsite = null; __nsiteAt = 0;
     close();
     AuthScreen.show();
+  }
+
+  async function renderNsiteSection(section, npub) {
+    const bodyEl = section.querySelector('.nsite-body');
+    let d;
+    try {
+      d = await getNsiteDiscover();
+    } catch (e) {
+      bodyEl.innerHTML = `<div class="muted">Could not reach read relays.</div>`;
+      return;
+    }
+    // The endpoint returns all-null when identity isn't configured, but
+    // this function only runs when cfg.npub is set. If that ever changes
+    // (e.g. identity revoked mid-session), hide the section entirely.
+    if (!d || !d.npubUrl) { section.style.display = 'none'; return; }
+
+    const sites = Array.isArray(d.sites) ? d.sites : [];
+
+    if (sites.length > 0) {
+      section.classList.add('deployed');
+      const multiLabel = sites.length > 1 ? `${sites.length} sites deployed` : null;
+      bodyEl.innerHTML = `
+        ${multiLabel ? `<div class="muted nsite-count">${escapeHtml(multiLabel)}</div>` : ''}
+        <div class="nsite-list"></div>
+      `;
+      const listEl = bodyEl.querySelector('.nsite-list');
+      for (const site of sites) {
+        const row = document.createElement('div');
+        row.className = 'nsite-row';
+        const whenMs = site.publishedAt ? site.publishedAt * 1000 : null;
+        const when = whenMs ? fmtAgoMs(whenMs) : 'just now';
+        const labelDiffers = site.title && site.title !== site.d;
+        row.innerHTML = `
+          <div class="nsite-row-head">
+            <span class="nsite-title">${escapeHtml(site.title || site.d)}</span>
+            ${labelDiffers ? `<span class="nsite-dtag muted">d=${escapeHtml(site.d)}</span>` : ''}
+          </div>
+          <div class="nsite-url-row">
+            <a href="${escapeHtml(site.url)}" target="_blank" rel="noreferrer" class="nsite-url-primary">${escapeHtml(site.url)}</a>
+            <button class="open-nsite" title="Open in new tab">Open ↗</button>
+          </div>
+          <div class="muted nsite-meta">Deployed ${escapeHtml(when)}</div>
+          <div class="nsite-actions">
+            <button class="primary add-to-projects">Add to Projects</button>
+          </div>
+        `;
+        row.querySelector('.open-nsite').addEventListener('click', () => {
+          window.open(site.url, '_blank', 'noopener');
+        });
+        row.querySelector('.add-to-projects').addEventListener('click', () => {
+          close();
+          ProjectDrawer.openAddPrefilled(buildNsiteSeed(d, npub, site));
+        });
+        listEl.appendChild(row);
+      }
+    } else {
+      section.classList.remove('deployed');
+      bodyEl.innerHTML = `
+        <div class="nsite-url-row">
+          <code class="nsite-predicted">${escapeHtml(d.npubUrl)}</code>
+          <span class="copy-slot"></span>
+        </div>
+        <div class="muted nsite-meta">Predicted URL — no deployment detected on read relays</div>
+        <div class="nsite-actions">
+          <button class="primary add-to-projects">Add to Projects</button>
+        </div>
+        <div class="muted nsite-hint">
+          Deploy via a project's nsite tab or <code>nostr-station nsite deploy</code>.
+        </div>
+      `;
+      bodyEl.querySelector('.copy-slot').appendChild(copyBtn(d.npubUrl));
+      bodyEl.querySelector('.add-to-projects').addEventListener('click', () => {
+        close();
+        ProjectDrawer.openAddPrefilled(buildNsiteSeed(d, npub));
+      });
+    }
   }
 
   $('identity-chip').addEventListener('click', open);
@@ -894,8 +1044,77 @@ const StatusPanel = {
       if (ctaRow.childElementCount > 0) card.appendChild(ctaRow);
       cards.appendChild(card);
     }
+    // The nsite card sits alongside the gatherStatus() services but is
+    // driven by its own endpoint (kind 34128 relay query), so we append
+    // it after the main loop. It hydrates asynchronously; the 60s cache
+    // inside getNsiteDiscover keeps refreshHealth() ticks cheap.
+    appendNsiteStatusCard(cards);
   },
 };
+
+async function appendNsiteStatusCard(container) {
+  const card = document.createElement('div');
+  card.className = 'card nsite-card';
+  card.dataset.service = 'nsite';
+  card.innerHTML = `
+    <div class="label">NSITE</div>
+    <div class="value"><span class="spinner"></span></div>
+  `;
+  container.appendChild(card);
+
+  let d = null;
+  try { d = await getNsiteDiscover(); } catch {}
+
+  // Identity not configured — endpoint returns all-null payload.
+  if (!d || !d.npubUrl) {
+    card.className = 'card nsite-card';
+    card.innerHTML = `
+      <div class="label">NSITE</div>
+      <div class="value muted">Configure identity to detect nsite</div>
+    `;
+    return;
+  }
+
+  const sites = Array.isArray(d.sites) ? d.sites : [];
+
+  if (sites.length > 0) {
+    card.className = 'card nsite-card ok';
+    const primary = sites[0];
+    const moreCount = sites.length - 1;
+    card.innerHTML = `
+      <div class="label">NSITE${sites.length > 1 ? ` · ${sites.length} sites` : ''}</div>
+      <div class="value"><a href="${escapeHtml(primary.url)}" target="_blank" rel="noreferrer">${escapeHtml(primary.url)}</a></div>
+      ${moreCount > 0 ? `<div class="hint">+${moreCount} more — see Identity drawer</div>` : ''}
+    `;
+    // Only offer "Add to Projects" when no existing project has the
+    // nsite capability enabled — avoids nagging once the user has
+    // already linked the deployment.
+    let hasNsiteProject = false;
+    try {
+      const projects = await api('/api/projects');
+      hasNsiteProject = Array.isArray(projects) && projects.some(p => p.capabilities?.nsite);
+    } catch {}
+    if (!hasNsiteProject) {
+      const cta = document.createElement('div');
+      cta.className = 'cta';
+      const btn = document.createElement('button');
+      btn.className = 'primary';
+      btn.textContent = 'Add to Projects';
+      btn.addEventListener('click', () => {
+        ProjectDrawer.openAddPrefilled(buildNsiteSeed(d, __identity?.npub, primary));
+      });
+      cta.appendChild(btn);
+      card.appendChild(cta);
+    }
+  } else {
+    card.className = 'card nsite-card';
+    card.innerHTML = `
+      <div class="label">NSITE</div>
+      <div class="value muted">${escapeHtml(d.npubUrl)}</div>
+      <div class="hint">Not yet deployed</div>
+    `;
+  }
+}
 
 $('status-refresh').addEventListener('click', () => refreshHealth());
 $('status-doctor').addEventListener('click', () => {
@@ -1627,23 +1846,29 @@ const ProjectDrawer = (() => {
     // non-expanded path into projects.json when the user skips the clone
     // step. The "Clone this repo" action on Step 1 populates draft.path
     // with an absolute path once the clone succeeds.
-    draft.noPath = false;
+    const nsiteCap = !!seed.capabilities?.nsite;
+    const gitCap   = !!seed.capabilities?.git;
+    const ngitCap  = !!seed.capabilities?.ngit;
+    // nsite-only seeds skip the local-path step — nsite deployments don't
+    // need a checkout. Git/ngit seeds still ask the user where to clone.
+    const nsiteOnly = nsiteCap && !gitCap && !ngitCap;
+    draft.noPath = nsiteOnly;
     draft.path = '';
-    draft.capabilities = {
-      git:   !!seed.capabilities?.git,
-      ngit:  !!seed.capabilities?.ngit,
-      nsite: false,
-    };
+    draft.capabilities = { git: gitCap, ngit: ngitCap, nsite: nsiteCap };
     draft.remotes = {
       github: seed.remotes?.github || '',
       ngit:   seed.remotes?.ngit   || '',
+    };
+    draft.nsite = {
+      url:        seed.nsite?.url || '',
+      lastDeploy: seed.nsite?.lastDeploy || null,
     };
     // Start on Step 1 so the user walks forward through the flow. Steps
     // 2–4 are already seeded — they just confirm and continue.
     expanded = 1;
     prefillNotice = {
       name: draft.name,
-      url:  draft.remotes.ngit || draft.remotes.github || '',
+      url:  draft.nsite.url || draft.remotes.ngit || draft.remotes.github || '',
     };
     try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
     show();
