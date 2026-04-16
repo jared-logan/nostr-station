@@ -102,19 +102,40 @@ if [[ -n "${SSH_CLIENT:-}" ]] || [[ -n "${SSH_TTY:-}" ]]; then
   fi
 fi
 
-# ── 7. Hand off to Ink wizard ─────────────────────────────────────────────────
+# ── 7. Hand off to onboard wizard ─────────────────────────────────────────────
+#
+# The TUI wizard still owns heavy installs (Rust toolchain, nostr-rs-relay,
+# systemd/launchd units). Once it completes successfully it marks
+# identity.setupComplete = true, so subsequent `nostr-station` invocations
+# skip the wizard and go straight to the dashboard.
+#
+# Power users who prefer the terminal can keep running `nostr-station
+# onboard` directly. Everyone else just runs `nostr-station` — it opens
+# the dashboard, or the web setup wizard at /setup if first-run state is
+# still missing.
 if [ -t 0 ]; then
   log "Launching onboard wizard..."
   echo ""
   # Pass any pre-set env vars through — wizard reads process.env
   "${STATION_CMD}" onboard
+  echo ""
+  ok "Setup complete."
+  echo ""
+  echo "  Next time, just run:"
+  echo "    nostr-station                    # opens the dashboard in your browser"
+  echo ""
+  echo "  Or for the terminal UI:"
+  echo "    nostr-station tui                # live events, logs, status"
+  echo "    nostr-station onboard            # re-run this wizard"
+  echo ""
 else
   echo ""
   ok "nostr-station installed"
   echo ""
   echo "  No interactive terminal detected."
-  echo "  To run the setup wizard, open a new terminal and run:"
-  echo "    nostr-station onboard"
+  echo "  To finish setup, open a terminal and run one of:"
+  echo "    nostr-station                    # web dashboard + first-run wizard"
+  echo "    nostr-station onboard            # terminal wizard"
   echo ""
   echo "  Or if connecting via SSH:"
   echo "    ssh -t user@host"

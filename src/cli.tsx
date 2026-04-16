@@ -391,10 +391,12 @@ function printHelp() {
   nostr-station — Nostr-native dev environment
 
   USAGE
+    nostr-station                    Open the web dashboard (or setup wizard on first run)
     nostr-station <command> [options]
 
   COMMANDS
-    onboard              First-time setup — installs relay, wires up AI provider + Amber signing
+    onboard              Terminal setup wizard — installs relay, wires up AI + Amber signing
+                         (web alternative: nostr-station → /setup)
     doctor               Check system health; --fix auto-repairs common problems
     status               Show relay, mesh, and service state
     update               Fetch and apply the latest versions of all components
