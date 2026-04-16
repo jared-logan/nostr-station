@@ -4707,6 +4707,7 @@ const SetupWizard = (() => {
     else if (stage === 'identity') renderIdentity();
     else if (stage === 'relay')    renderRelay();
     else if (stage === 'ai')       renderAi();
+    else if (stage === 'ngit')     renderNgit();
     else                           renderStub(stage);
   }
 
@@ -5136,19 +5137,140 @@ const SetupWizard = (() => {
     paint();
   }
 
-  // ── Stage stubs (built out in Steps 6.4–6.5) ─────────────────────────
-  function renderStub(stage) {
-    const titles = {
-      ngit: 'ngit signing', done: 'All set',
+  // ── ngit signing ─────────────────────────────────────────────────────
+  // Two jobs: stash the default ngit relay (used when initialising new
+  // repos) and hand off to the embedded terminal for `ngit account
+  // login`. The terminal drawer renders the nostrconnect QR — the user
+  // scans with Amber on their phone and the session completes in the
+  // same browser tab, no shell hand-off required.
+  async function renderNgit() {
+    // Pre-fill the relay field from whatever identity.json already has.
+    let existingRelay = '';
+    try {
+      const cfg = await fetch('/api/identity/config').then(r => r.ok ? r.json() : null);
+      if (cfg?.ngitRelay) existingRelay = cfg.ngitRelay;
+    } catch {}
+
+    const termAvailable = !!window.NSTerminal?.isAvailable?.();
+
+    root.innerHTML = shell(
+      'ngit signing via Amber',
+      'ngit publishes repo events to Nostr — signed by your phone.',
+      `
+        <div class="setup-field">
+          <label>Default ngit relay</label>
+          <div class="setup-row">
+            <input id="setup-ngit-relay" type="text"
+              placeholder="wss://relay.damus.io" value="${escapeHtml(existingRelay)}">
+          </div>
+          <div class="setup-hint muted">
+            Used when initialising new repos. Change later in Config → ngit.
+          </div>
+        </div>
+
+        <div class="setup-field">
+          <label>Amber signing</label>
+          ${termAvailable ? `
+            <div class="setup-ngit-amber">
+              <button class="primary" id="setup-ngit-amber-btn">Connect Amber →</button>
+              <div class="setup-hint muted" style="margin-top:8px">
+                Opens a terminal and runs <code>ngit account login</code>.
+                Scan the nostrconnect:// QR with Amber, approve on your phone,
+                then return here and continue.
+              </div>
+            </div>
+          ` : `
+            <div class="setup-hint muted">
+              Terminal PTY unavailable in this browser session — finish
+              Amber pairing later via Config → ngit → Re-login.
+            </div>
+          `}
+        </div>
+
+        <div class="setup-actions">
+          <button class="setup-back">← Back</button>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="setup-skip" id="setup-ngit-skip">Skip for now</button>
+            <button class="primary setup-next" id="setup-ngit-next">Save &amp; continue →</button>
+          </div>
+        </div>
+      `,
+    );
+
+    root.querySelector('.setup-back').addEventListener('click', back);
+    root.querySelector('#setup-ngit-skip').addEventListener('click', next);
+
+    const relayInput = $('setup-ngit-relay');
+    const saveRelay = async () => {
+      const val = relayInput.value.trim();
+      if (!val) return true;
+      // Basic shape check — server validates via isValidRelayUrl.
+      if (!/^wss?:\/\//i.test(val)) {
+        toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
+        return false;
+      }
+      try {
+        const r = await fetch('/api/identity/set', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ngitRelay: val }),
+        }).then(r => r.json());
+        if (!r.ok) throw new Error(r.error || 'save failed');
+        return true;
+      } catch (e) {
+        toast('Save failed', e.message, 'err');
+        return false;
+      }
     };
+
+    root.querySelector('#setup-ngit-next').addEventListener('click', async () => {
+      if (await saveRelay()) next();
+    });
+
+    const amberBtn = $('setup-ngit-amber-btn');
+    if (amberBtn) {
+      amberBtn.addEventListener('click', async () => {
+        if (!(await saveRelay())) return;
+        if (!window.NSTerminal?.isAvailable?.()) {
+          toast('Terminal unavailable', 'Use Config → ngit → Re-login after setup', 'warn');
+          return;
+        }
+        // Raise the terminal drawer above the wizard overlay so the QR
+        // is actually visible; a small "Return to setup" pill lets the
+        // user jump back without closing the terminal.
+        document.body.classList.add('setup-term-hoist');
+        window.NSTerminal.expand();
+        window.NSTerminal.open('ngit-login');
+        mountReturnPill();
+      });
+    }
+  }
+
+  function mountReturnPill() {
+    let pill = document.getElementById('setup-return-pill');
+    if (pill) return;
+    pill = document.createElement('button');
+    pill.id = 'setup-return-pill';
+    pill.className = 'setup-return-pill';
+    pill.textContent = '← Return to setup';
+    pill.addEventListener('click', () => {
+      document.body.classList.remove('setup-term-hoist');
+      window.NSTerminal?.collapse?.();
+      pill.remove();
+    });
+    document.body.appendChild(pill);
+  }
+
+  // ── Stage stubs (built out in Step 6.5) ──────────────────────────────
+  function renderStub(stage) {
+    const titles = { done: 'All set' };
     root.innerHTML = shell(
       titles[stage] || stage,
       'This stage lands in the next slice.',
       `
         <p class="setup-copy muted">
-          Placeholder — the ${escapeHtml(stage)} stage ships in Step 6.${
-            stage === 'ngit' ? '4' : '5'
-          }. Use Back to step through what's done so far.
+          Placeholder — the ${escapeHtml(stage)} stage ships in Step 6.5.
+          Use Back to step through what's done so far.
         </p>
         <div class="setup-actions">
           <button class="setup-back">← Back</button>

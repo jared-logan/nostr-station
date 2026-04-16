@@ -1898,6 +1898,35 @@ input:focus, textarea:focus, select:focus {
 }
 .setup-skip:hover { color: var(--text-bright); }
 
+/* ── Setup + terminal hoist ──
+   When the ngit stage hands off to the embedded terminal for QR scan,
+   we raise the terminal drawer above the setup overlay and lift it to
+   cover the full viewport; the wizard fades behind it. A "Return to
+   setup" pill lets the user jump back without closing the PTY. */
+body.setup-term-hoist .setup-root {
+  background: rgba(0, 0, 0, 0.7);
+}
+body.setup-term-hoist .setup-card { opacity: 0.15; pointer-events: none; }
+body.setup-term-hoist .term-shell { z-index: 1100; }
+
+.setup-return-pill {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 1200;
+  background: var(--accent);
+  color: var(--text-bright);
+  border: 1px solid var(--accent-bright);
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.setup-return-pill:hover { background: var(--accent-bright); }
+
+.setup-ngit-amber .primary { min-width: 220px; }
+
 .auth-card {
   width: 420px;
   max-width: 100%;
