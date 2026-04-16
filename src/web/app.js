@@ -1176,6 +1176,11 @@ const ChatPanel = (() => {
         body:    JSON.stringify({
           messages: history,
           provider: provSel.value || undefined,
+          // Explicit model wins over ai-config — the dropdown is the
+          // source of truth for the current send. persistModelChange
+          // writes in parallel so the next tab-switch / restart sees
+          // the same selection, but this avoids the race.
+          model:    modelSel?.value || undefined,
           projectId: activeProject?.id || undefined,
         }),
       });

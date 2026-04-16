@@ -2060,6 +2060,10 @@ export async function startWebServer(port: number): Promise<void> {
         catch { res.writeHead(400); res.end('bad json'); return; }
         const messages: Msg[] = Array.isArray(parsed.messages) ? parsed.messages : [];
         const explicit: string | null = typeof parsed.provider === 'string' ? parsed.provider : null;
+        const explicitModel: string | null = typeof parsed.model === 'string'
+          // Clamp defensively; registry models are <60 chars in practice.
+          ? parsed.model.slice(0, 160)
+          : null;
         const projectId: string | null = typeof parsed.projectId === 'string' ? parsed.projectId : null;
 
         // All failure modes emit SSE so the Chat pane's EventSource-like
@@ -2111,11 +2115,15 @@ export async function startWebServer(port: number): Promise<void> {
           }
         }
 
-        // Per-provider overrides from ai-config.json win over the registry
-        // defaults. Empty baseUrl only valid for anthropic-native.
+        // Resolution order for model + baseUrl:
+        //   explicit request field > ai-config override > registry default.
+        // Explicit model lets the Chat dropdown's current value take
+        // effect immediately — no race with the async persistModelChange
+        // POST that also updates ai-config. Empty baseUrl only valid for
+        // anthropic-native.
         const entry     = cfg.providers[providerId];
         const baseUrl   = entry?.baseUrl ?? provider.baseUrl;
-        const model     = entry?.model   ?? provider.defaultModel;
+        const model     = explicitModel ?? entry?.model ?? provider.defaultModel;
         const isAnth    = provider.flavor === 'anthropic';
 
         // Build the context block + merge with any caller-supplied system
