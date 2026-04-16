@@ -152,7 +152,7 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
 
       // nostr-vpn
       up(6, { status: 'running' });
-      const vpn = await installNostrVpn(platform.nvpnTarget);
+      const vpn = await installNostrVpn(platform);
       up(6, { status: vpn.ok ? 'done' : 'error', detail: vpn.detail });
 
       // ngit bunker

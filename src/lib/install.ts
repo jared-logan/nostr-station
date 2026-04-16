@@ -755,59 +755,97 @@ export async function installBlossom(homeDir: string): Promise<InstallResult> {
   return run('npm', ['--prefix', dest, 'run', 'build', '--quiet']);
 }
 
-export async function installNostrVpn(nvpnTarget: string): Promise<InstallResult> {
-  // Skip full reinstall if nvpn already exists and is working
+// Installs nvpn into the user-writable `${cargoBin}` slot (`~/.cargo/bin`),
+// same pattern as the relay + nak binaries. An earlier version of this
+// function delegated to upstream's `install.sh`, which:
+//   1. Targets /usr/local/bin by default and invokes `sudo install` internally
+//      to copy there. We spawned install.sh over a pipe with no TTY, so sudo
+//      couldn't prompt for a password and failed silently. On a fresh Linux
+//      box the nvpn binary never landed anywhere on PATH, and the follow-up
+//      `sudo nvpn service install` call crashed with "command not found".
+//   2. Couldn't work around this by passing --install-dir either — even
+//      /usr/local/bin is on root's PATH but not predictably on `sudo`'s
+//      sanitised PATH (secure_path resets it).
+//
+// Dropping the binary into ${cargoBin} avoids both issues: user-writable
+// (no sudo for the copy), already on the interactive user's PATH (rustup
+// adds it to the shell rc files), AND the `sudo nvpn service install` call
+// below uses the absolute path so sudo's sanitised PATH doesn't matter.
+export async function installNostrVpn(
+  platform: { nvpnTarget: string; cargoBin: string },
+): Promise<InstallResult> {
+  const nvpnBin = `${platform.cargoBin}/nvpn`;
+
+  // Short-circuit: if the binary is already present AND responds to --help,
+  // declare victory. We can't use `nvpn status --json` because `status`
+  // reaches out to the daemon and returns non-zero when disconnected, which
+  // would trigger an unnecessary reinstall on every onboard re-run.
   try {
-    await execa('nvpn', ['status', '--json'], { stdio: 'pipe', timeout: 5000 });
+    await execa(nvpnBin, ['--help'], { stdio: 'pipe', timeout: 5000 });
     return { ok: true, detail: 'already installed' };
   } catch {}
 
-  const url = `https://github.com/mmalmi/nostr-vpn/releases/latest/download/nvpn-${nvpnTarget}.tar.gz`;
+  const url = `https://github.com/mmalmi/nostr-vpn/releases/latest/download/nvpn-${platform.nvpnTarget}.tar.gz`;
   const tmp = `/tmp/nvpn-install-${Date.now()}`;
   const fs = await import('fs');
   fs.mkdirSync(tmp, { recursive: true });
 
-  // Download and extract
   const dl = await run('sh', ['-c', `curl -fsSL "${url}" | tar -xz -C "${tmp}"`]);
-  if (!dl.ok) return { ok: false, detail: `download failed: ${dl.detail}` };
-
-  // Confirm install.sh exists in the extracted archive
-  const installScript = `${tmp}/install.sh`;
-  const fsSync = await import('fs');
-  if (!fsSync.existsSync(installScript)) {
-    // Try one level deeper — some releases nest inside a subdirectory
-    const subdirs = fsSync.readdirSync(tmp);
-    const subdir = subdirs.find(d => fsSync.statSync(`${tmp}/${d}`).isDirectory());
-    if (subdir && fsSync.existsSync(`${tmp}/${subdir}/install.sh`)) {
-      const install = await run('bash', [`${tmp}/${subdir}/install.sh`]);
-      fs.rmSync(tmp, { recursive: true, force: true });
-      if (!install.ok) return install;
-    } else {
-      fs.rmSync(tmp, { recursive: true, force: true });
-      return { ok: false, detail: 'install.sh not found in release archive — check github.com/mmalmi/nostr-vpn/releases' };
-    }
-  } else {
-    const install = await run('bash', [installScript]);
+  if (!dl.ok) {
     fs.rmSync(tmp, { recursive: true, force: true });
-    if (!install.ok) return install;
+    return {
+      ok: false,
+      detail:
+        `download failed for ${platform.nvpnTarget} — upstream may not publish a prebuilt ` +
+        `for this platform (check github.com/mmalmi/nostr-vpn/releases): ${dl.detail ?? ''}`,
+    };
   }
 
-  // nvpn init — non-interactive, generates keypair if not already present
-  // --yes or equivalent varies by version; we pass it and ignore failure
-  // since some versions don't need it
+  // Tarball layout has shifted over time — earlier releases put `nvpn` at
+  // the root, recent ones nest it inside an `nvpn/` subdir alongside the
+  // README and install.sh. Probe both.
+  let binSrc = `${tmp}/nvpn`;
+  if (!fs.existsSync(binSrc) || fs.statSync(binSrc).isDirectory()) {
+    const nested = `${tmp}/nvpn/nvpn`;
+    if (fs.existsSync(nested)) {
+      binSrc = nested;
+    } else {
+      fs.rmSync(tmp, { recursive: true, force: true });
+      return { ok: false, detail: 'nvpn binary not found in release tarball' };
+    }
+  }
+
   try {
-    await execa('nvpn', ['init', '--yes'], { stdio: 'pipe', timeout: 10000 });
+    fs.mkdirSync(platform.cargoBin, { recursive: true });
+    fs.copyFileSync(binSrc, nvpnBin);
+    fs.chmodSync(nvpnBin, 0o755);
+  } catch (e: any) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return { ok: false, detail: `copy to ${nvpnBin} failed: ${e.message?.slice(0, 80) ?? 'unknown'}` };
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+
+  // nvpn init — non-interactive, generates keypair if not already present.
+  // --yes or equivalent varies by version; we pass it and ignore failure
+  // since some versions don't need it. Absolute path so PATH state doesn't
+  // matter (same rationale as the sudo call below).
+  try {
+    await execa(nvpnBin, ['init', '--yes'], { stdio: 'pipe', timeout: 10000 });
   } catch {
     try {
-      await execa('nvpn', ['init'], {
+      await execa(nvpnBin, ['init'], {
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 10000,
-        input: '\n', // send newline in case it prompts
+        input: '\n',
       });
     } catch {}
   }
 
-  return run('sudo', ['nvpn', 'service', 'install']);
+  // `sudo nvpn service install` bare would fail because sudo's secure_path
+  // doesn't include ~/.cargo/bin. Use the absolute path instead — the
+  // service-install step itself copies into /etc/systemd/system so it
+  // doesn't need nvpn on root's PATH afterwards either.
+  return run('sudo', [nvpnBin, 'service', 'install']);
 }
 
 export async function setupNgitBunker(bunker: string, cargoBin: string): Promise<InstallResult> {

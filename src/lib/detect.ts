@@ -100,9 +100,16 @@ export function detectPlatform(): Platform {
   const serviceBackend: ServiceBackend = osName === 'macos' ? 'launchd' : 'systemd';
   const homeDir = os.homedir();
 
+  // Upstream (mmalmi/nostr-vpn) publishes Rust-toolchain-style target triples.
+  // Linux builds are statically linked against musl so they run on any distro
+  // without glibc-version pins — there is NO `-gnu` asset, only `-musl`. An
+  // earlier version of this map used `-gnu` and silently 404'd on every Linux
+  // install. macOS x86_64 is unsupported upstream (no published asset); the
+  // x86_64-apple-darwin entry is kept as a placeholder so the URL fails with
+  // a clear message instead of an earlier undefined-template error.
   const nvpnTargetMap: Record<string, Record<string, string>> = {
-    macos:  { aarch64: 'aarch64-apple-darwin',       x86_64: 'x86_64-apple-darwin' },
-    linux:  { aarch64: 'aarch64-unknown-linux-gnu',   x86_64: 'x86_64-unknown-linux-gnu' },
+    macos:  { aarch64: 'aarch64-apple-darwin',         x86_64: 'x86_64-apple-darwin' },
+    linux:  { aarch64: 'aarch64-unknown-linux-musl',   x86_64: 'x86_64-unknown-linux-musl' },
   };
   const nvpnTarget = nvpnTargetMap[osName][arch];
 
