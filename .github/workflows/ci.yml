@@ -44,7 +44,12 @@ jobs:
         run: |
           output=$(nostr-station help)
           echo "$output"
-          for cmd in onboard doctor status update logs chat relay tui seed push keychain nsite setup-editor completion uninstall; do
+          # Match help output post-rename:
+          #   logs → folded into `relay logs`
+          #   push → publish
+          #   setup-editor → editor
+          # See commit ebeae84 for the rename.
+          for cmd in onboard doctor status update chat relay tui seed publish keychain nsite editor completion uninstall; do
             echo "$output" | grep -qw "$cmd" || { echo "❌ Missing from help: $cmd"; exit 1; }
           done
           echo "✓ All commands listed in help"
