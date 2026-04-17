@@ -61,7 +61,7 @@ import {
 } from './auth.js';
 import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
-  signWithBunkerUrl,
+  signWithBunkerUrl, silentBunkerSign,
 } from './auth-bunker.js';
 import {
   readProjects, getProject, createProject, updateProject, deleteProject,
@@ -1155,13 +1155,41 @@ export async function startWebServer(port: number): Promise<void> {
       }
 
       if (url === '/api/auth/bunker-connect' && method === 'POST') {
-        // Starts a nostrconnect:// (QR) flow. Returns the URI + QR SVG +
-        // ephemeral pubkey immediately; the actual relay subscription runs
-        // in the background until the remote signer answers or we time out.
+        // Tries silent re-auth first (saved bunker client from a previous
+        // sign-in). If that succeeds, Amber gives the user a push-and-tap
+        // approval flow and we return a session token directly — no QR,
+        // no "delete old bunker" shuffle. If there's no saved client, or
+        // the saved one is dead (user revoked, bunker offline, relays
+        // changed), we fall through to the QR flow. silentBunkerSign()
+        // clears stale saved state on its own, so a one-time failure
+        // doesn't get stuck retrying.
         const { challenge } = issueChallenge();
+
+        const silent = await silentBunkerSign(challenge, expectedDashboardUrl(req));
+        if (silent.ok && silent.signedEvent) {
+          const verify = verifyNip98({
+            challenge, event: silent.signedEvent,
+            expectedUrl: expectedDashboardUrl(req),
+          });
+          if (verify.ok) {
+            const ua = String(req.headers['user-agent'] || '').slice(0, 200);
+            const sess = createSession(verify.npub!, ua);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              mode: 'silent-ok',
+              token: sess.token, expiresAt: sess.expiresAt, npub: sess.npub,
+            }));
+            return;
+          }
+          // Signed event failed verification — fall through to QR. This
+          // is a near-impossible path (the bunker returned a validly
+          // shaped event that still doesn't match our challenge / url),
+          // but we'd rather give the user a working QR than a 401 dead end.
+        }
+
         const start = await startNostrConnect(challenge, expectedDashboardUrl(req));
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ...start, challenge }));
+        res.end(JSON.stringify({ mode: 'qr', ...start, challenge }));
         return;
       }
 

@@ -36,20 +36,28 @@ const toast = (() => {
   };
 })();
 
-// Session token lives in sessionStorage — cleared on tab close, never
-// persisted to localStorage so it isn't shared across tabs. See auth.js
-// for the server contract (Bearer <token>, 64-char hex).
+// Session token lives in localStorage so it survives tab close and browser
+// re-launch — the 8h server-side TTL (with 30m sliding window) is the
+// authoritative expiry, and forcing a bunker re-auth on every refresh was
+// burning through Amber approvals for no security win. Dashboard is bound
+// to 127.0.0.1 only, and the trust boundary is "local user" already; any
+// XSS in the dashboard page would also have access to the keychain via the
+// /api endpoints it's calling. Tabs sharing the token is a feature — one
+// sign-in covers every tab you open.
+//
+// When the server-side session does expire (or you sign out explicitly),
+// clearSessionToken() wipes localStorage and the auth screen shows.
 const SESSION_KEY         = 'ns-session-token';
 const SESSION_EXPIRES_KEY = 'ns-session-expires';
 
-function getSessionToken() { return sessionStorage.getItem(SESSION_KEY); }
+function getSessionToken() { return localStorage.getItem(SESSION_KEY); }
 function setSessionToken(token, expiresAt) {
-  sessionStorage.setItem(SESSION_KEY, token);
-  sessionStorage.setItem(SESSION_EXPIRES_KEY, String(expiresAt));
+  localStorage.setItem(SESSION_KEY, token);
+  localStorage.setItem(SESSION_EXPIRES_KEY, String(expiresAt));
 }
 function clearSessionToken() {
-  sessionStorage.removeItem(SESSION_KEY);
-  sessionStorage.removeItem(SESSION_EXPIRES_KEY);
+  localStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem(SESSION_EXPIRES_KEY);
 }
 
 // Drop-in fetch wrapper that surfaces non-2xx + network errors as toasts.
@@ -551,7 +559,7 @@ async function refreshIdentityChip() {
 
   // Session expiry tooltip — refreshed on each chip repaint. Silent when
   // there's no active session (localhost exemption, for example).
-  const exp = Number(sessionStorage.getItem(SESSION_EXPIRES_KEY) || 0);
+  const exp = Number(localStorage.getItem(SESSION_EXPIRES_KEY) || 0);
   if (exp > 0) {
     const rem = exp - Date.now();
     if (rem > 0) {
@@ -669,7 +677,7 @@ const IdentityDrawer = (() => {
     if (getSessionToken()) {
       const sessionSec = document.createElement('div');
       sessionSec.className = 'drawer-section';
-      const exp = Number(sessionStorage.getItem(SESSION_EXPIRES_KEY) || 0);
+      const exp = Number(localStorage.getItem(SESSION_EXPIRES_KEY) || 0);
       const remaining = exp ? formatRemaining(exp - Date.now()) : '—';
       sessionSec.innerHTML = `
         <h4>Session</h4>
@@ -4616,18 +4624,30 @@ AuthScreen = (() => {
     const res = await fetch('/api/auth/bunker-connect', { method: 'POST' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `${res.status}`);
+    // mode: 'silent-ok' means the server silently re-authed via a saved
+    // bunker client (Amber push + tap on the user's phone) and issued a
+    // session token directly — no QR needed. We complete sign-in on the
+    // spot and leave qrSession null so any subsequent renderQrTab would
+    // re-POST and try silent again. mode: 'qr' is the traditional flow.
+    if (data.mode === 'silent-ok' && data.token) {
+      completeSignIn(data);
+      return { silent: true };
+    }
     qrSession = data;
     return qrSession;
   }
 
   async function renderQrTab(body) {
-    body.innerHTML = `<div class="auth-status-line"><span class="pulse"></span>Generating connection code…</div>`;
+    body.innerHTML = `<div class="auth-status-line"><span class="pulse"></span>Sending sign-in request to your bunker…</div>`;
     let start;
     try { start = await ensureQrSession(); }
     catch (e) {
       body.innerHTML = `<div class="auth-status-line err"><span class="pulse"></span>${escapeHtml(e.message || 'failed')}</div>`;
       return;
     }
+    // Silent path already called completeSignIn — the auth screen is
+    // hidden and the dashboard is mounting. Nothing else to paint.
+    if (start?.silent) return;
 
     body.innerHTML = `
       <div class="auth-qr">

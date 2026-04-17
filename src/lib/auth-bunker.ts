@@ -21,9 +21,19 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 // @ts-expect-error — qrcode ships no types, CJS default export carries toString
 import QRCode from 'qrcode';
 import { readIdentity } from './identity.js';
+import {
+  readSavedBunkerClient, writeSavedBunkerClient, clearSavedBunkerClient,
+  type SavedBunkerClient,
+} from './bunker-storage.js';
 
 const CONNECT_TIMEOUT_MS = 120_000;
 const BUNKER_TIMEOUT_MS  = 30_000;
+// Silent re-auth uses the saved bunker client — the user is watching a
+// loading state, so we need to decide quickly whether Amber is going to
+// respond or we should fall back to QR. ~20s gives them enough time to
+// pick up their phone and tap approve without making the dashboard feel
+// stuck.
+const SILENT_BUNKER_TIMEOUT_MS = 20_000;
 
 // ── Relay resolution ────────────────────────────────────────────────────────
 
@@ -182,6 +192,12 @@ async function runNostrConnectFlow(
     const signed = await signer.signEvent(template);
     session.signedEvent = signed;
     session.status      = 'ok';
+    // Persist the client secret + bunker pointer so future sign-ins can
+    // silently reuse this Amber pairing instead of showing another QR.
+    // We only save on success; a partial / errored flow leaves any prior
+    // save untouched, which is the right behavior if the user's trying
+    // to recover from a broken pairing.
+    persistBunkerClient(secretKey, signer?.bp);
   } catch (e: any) {
     session.status = 'error';
     session.error  = e?.message || 'bunker sign_event failed';
@@ -233,9 +249,110 @@ export async function signWithBunkerUrl(
       content: challenge,
     };
     const signed = await withTimeout(signer.signEvent(template), BUNKER_TIMEOUT_MS, 'sign_event');
+    persistBunkerClient(secretKey, signer?.bp);
     return { ok: true, signedEvent: signed };
   } catch (e: any) {
     return { ok: false, error: e?.message || 'bunker flow failed' };
+  } finally {
+    try { await signer.close(); } catch {}
+  }
+}
+
+// ── Silent re-auth via saved bunker ─────────────────────────────────────────
+
+function persistBunkerClient(secretKey: Uint8Array, bp: any): void {
+  try {
+    if (!bp || typeof bp.pubkey !== 'string' || !Array.isArray(bp.relays)) return;
+    const clientSecretHex = Array.from(secretKey)
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    const ident = readIdentity();
+    if (!ident.npub) return;
+    writeSavedBunkerClient({
+      ownerNpub:       ident.npub,
+      clientSecretHex,
+      bunker: {
+        relays: bp.relays,
+        pubkey: bp.pubkey,
+        secret: bp.secret ?? null,
+      },
+      savedAt: Date.now(),
+    });
+  } catch { /* best-effort — only costs us silent re-auth next time */ }
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+export interface SilentBunkerResult {
+  ok:           boolean;
+  tried:        boolean;         // false = no saved bunker; caller should fall back to QR
+  signedEvent?: any;
+  error?:       string;
+}
+
+/**
+ * Attempts to silently re-authenticate using a previously-saved bunker
+ * client. Returns { tried: false } if no saved client exists — the caller
+ * should then fall back to the QR flow. On any other failure (connect
+ * timeout, user denies, relay unreachable), returns { ok: false, tried:
+ * true } and the caller should fall back to QR too; we clear the saved
+ * state so the next attempt doesn't try the same dead bunker.
+ *
+ * Success case: Amber already trusts this client pubkey, pushes the user
+ * a "Approve sign-in?" notification, they tap yes, signed event comes
+ * back in a few seconds — no QR, no bunker cleanup.
+ */
+export async function silentBunkerSign(
+  challenge: string, dashboardUrl: string,
+): Promise<SilentBunkerResult> {
+  const ident = readIdentity();
+  if (!ident.npub) return { ok: false, tried: false };
+
+  const saved = readSavedBunkerClient(ident.npub);
+  if (!saved) return { ok: false, tried: false };
+
+  const secretKey = hexToBytes(saved.clientSecretHex);
+  let signer: any;
+  try {
+    signer = BunkerSigner.fromBunker(secretKey, saved.bunker, {});
+  } catch (e: any) {
+    clearSavedBunkerClient();
+    return { ok: false, tried: true, error: e?.message || 'bunker init failed' };
+  }
+
+  const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label} timed out`)), ms)),
+    ]);
+
+  try {
+    await withTimeout(signer.connect(), SILENT_BUNKER_TIMEOUT_MS, 'connect');
+    const template = {
+      kind: 27235,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['u', dashboardUrl],
+        ['method', 'POST'],
+      ],
+      content: challenge,
+    };
+    const signed = await withTimeout(
+      signer.signEvent(template), SILENT_BUNKER_TIMEOUT_MS, 'sign_event',
+    );
+    return { ok: true, tried: true, signedEvent: signed };
+  } catch (e: any) {
+    // A failure here usually means the user revoked the bunker pairing
+    // in Amber, uninstalled the app, or the relays changed. Clear the
+    // saved state so the next attempt goes straight to the QR fallback
+    // instead of retrying a broken path.
+    clearSavedBunkerClient();
+    return { ok: false, tried: true, error: e?.message || 'silent bunker flow failed' };
   } finally {
     try { await signer.close(); } catch {}
   }
