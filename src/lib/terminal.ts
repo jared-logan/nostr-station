@@ -213,6 +213,24 @@ function normalizeCwd(raw: string | undefined): string | undefined {
   return raw;
 }
 
+// Where the bare-shell terminal tab should start. ~/projects is what onboard
+// creates + what NOSTR_STATION.md's CLAUDE.md symlink lives under, so `claude`
+// auto-loads station context and `ngit clone` lands alongside other projects.
+// Falls back to ~ when the projects dir doesn't exist (partial install,
+// user wiped it, pre-onboard state) so the shell still opens somewhere
+// sensible instead of node-pty's default (the web-server process cwd).
+function defaultShellCwd(): string | undefined {
+  const home = os.homedir();
+  const projects = path.join(home, 'projects');
+  try {
+    if (fs.statSync(projects).isDirectory()) return projects;
+  } catch { /* fall through */ }
+  try {
+    if (fs.statSync(home).isDirectory()) return home;
+  } catch { /* fall through */ }
+  return undefined;
+}
+
 export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
   const shell = process.env.SHELL || '/bin/bash';
   const cwd = normalizeCwd(opts.cwd);
@@ -234,8 +252,12 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
   switch (opts.key) {
     case 'shell':
       // Login shell so interactive tooling that relies on ~/.zshrc / ~/.bashrc
-      // (cargo, deno, pyenv shims) behaves as the user expects.
-      return { cmd: shell, args: ['-l'], cwd, label: path.basename(shell) };
+      // (cargo, deno, pyenv shims) behaves as the user expects. When no
+      // explicit cwd was requested (the sidebar Terminal button + drawer
+      // expand both open with empty opts), anchor to ~/projects so `claude`
+      // loads NOSTR_STATION.md context and `ngit clone` lands in the right
+      // place — see defaultShellCwd() for the ~ fallback.
+      return { cmd: shell, args: ['-l'], cwd: cwd ?? defaultShellCwd(), label: path.basename(shell) };
 
     case 'claude':
       return { cmd: 'claude', args: [], cwd, label: cwd ? `claude · ${path.basename(cwd)}` : 'claude' };
