@@ -4,7 +4,16 @@ import { fileURLToPath } from 'url';
 import type { Platform, Config } from './detect.js';
 import { COMPONENT_VERSIONS } from './versions.js';
 
-export type InstallResult = { ok: boolean; detail?: string };
+export type InstallResult = {
+  ok: boolean;
+  detail?: string;
+  // `warn` is a partial-success signal: the primary artifact landed but a
+  // follow-up step needs the user's involvement (e.g. a system-service
+  // install step that requires sudo credentials the TUI can't prompt for).
+  // Callers that render step status should show this as yellow/warn rather
+  // than red/error, since the component is already usable.
+  warn?: boolean;
+};
 
 async function run(cmd: string, args: string[]): Promise<InstallResult> {
   try {
@@ -908,10 +917,17 @@ export async function installNostrVpn(
     }
   }
 
-  // Systemd unit install. Uses the absolute path so sudo's secure_path
-  // doesn't need `~/.cargo/bin` — the service-install subcommand installs
-  // into /etc/systemd/system (or the distro equivalent) and doesn't need
-  // nvpn on root's PATH afterwards.
+  // System service install — installs a LaunchDaemon (macOS) or systemd unit
+  // (linux) for auto-start on boot. Uses the absolute nvpn path so sudo's
+  // secure_path doesn't need `~/.cargo/bin`.
+  //
+  // This step ALWAYS needs root — it writes /Library/LaunchDaemons/* or
+  // /etc/systemd/system/*. We run under `sudo -n` to fail fast if the cred
+  // cache is empty (TUI can't prompt). On fail, we return partial success:
+  // the binary is usable right now (`nvpn start --daemon` works as a user
+  // process), and the user just needs to rerun one command when they're
+  // ready for auto-start. Marking this as a hard error would misrepresent
+  // the state — nvpn IS installed, just not supervised yet.
   step('sudo nvpn service install');
   try {
     const { stdout, stderr } = await execa(
@@ -921,17 +937,24 @@ export async function installNostrVpn(
     append(`service install ok; stdout=${stdout.slice(0, 120)} stderr=${stderr.slice(0, 120)}`);
     return { ok: true, detail: `installed ${nvpnBin}` };
   } catch (e: any) {
-    const stderr = e?.stderr?.toString?.() || '';
-    // The binary IS installed at this point — only the systemd unit setup
-    // failed. Return partial success so Services.tsx shows a warn, not an
-    // error, and the user can rerun `sudo nvpn service install` by hand.
-    append(`service install FAILED: ${stderr.trim().slice(0, 240) || e.message?.slice(0, 240)}`);
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    const needsPassword = /password is required|sudo:.*required/i.test(stderr);
+    append(`service install FAILED: ${stderr.slice(0, 240) || e.message?.slice(0, 240)}`);
+
+    // Actionable next-step: tell the user exactly what to run and that
+    // they can use nvpn without this step if they want to skip auto-start.
+    // Separate phrasing for the password-cache miss (the expected path
+    // when onboard ran from an Ink TUI without fresh sudo) vs. any other
+    // reason the service install declined — both leave the user with a
+    // usable binary and a one-liner to finish setup.
+    const nextStep = needsPassword
+      ? `run \`sudo ${nvpnBin} service install\` when ready for auto-start — or start on demand with \`${nvpnBin} start --daemon\``
+      : `rerun \`sudo ${nvpnBin} service install\` to retry (error: ${stderr.slice(0, 100) || 'unknown'}) — or start manually with \`${nvpnBin} start --daemon\``;
+
     return {
       ok: false,
-      detail:
-        `binary installed at ${nvpnBin} — service install failed: ` +
-        `${stderr.trim().slice(0, 140) || e.message?.slice(0, 140) || 'unknown'} ` +
-        `(log: ${logPath})`,
+      warn: true,
+      detail: `binary installed — ${nextStep} (log: ${logPath})`,
     };
   }
 }

@@ -168,7 +168,15 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
       const vpn = await installNostrVpn(platform, (d) =>
         up(6, { status: 'running', detail: d }),
       );
-      up(6, { status: vpn.ok ? 'done' : 'error', detail: vpn.detail });
+      // `warn` here = binary installed but the root-owned service-install
+      // step couldn't complete (sudo cred miss, etc.). The detail string
+      // carries the specific next-step command; render as warn (yellow) so
+      // the user sees partial success instead of a red ✗ that implies
+      // nothing works.
+      up(6, {
+        status: vpn.ok ? 'done' : vpn.warn ? 'warn' : 'error',
+        detail: vpn.detail,
+      });
 
       // ngit bunker
       if (cfg.bunker) {
