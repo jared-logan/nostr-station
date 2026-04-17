@@ -11,12 +11,20 @@ interface StatusProps { json: boolean; }
 // distinguishes installed-but-down (warn) from not-installed (err).
 export type ServiceState = 'ok' | 'warn' | 'err';
 
+// `kind` lets the dashboard group entries in both the sidebar Service Health
+// list and the Status panel — services (daemons / scheduled jobs with a
+// running state) get colored dots; binaries (CLI tools that are installed or
+// not) get ✓/✗ glyphs, with a yellow ! reserved for the rare binary that has
+// a warn-worthy mid-state (ngit installed but no default relay configured).
+export type ServiceKind = 'service' | 'binary';
+
 export interface ServiceStatus {
   id:    string;
   label: string;
   value: string;
   ok:    boolean;
   state: ServiceState;
+  kind:  ServiceKind;
 }
 
 // Every shellout here is on the hot path for /api/status. A single blocking
@@ -77,24 +85,46 @@ export function gatherStatus(): ServiceStatus[] {
   const nakBin    = has('nak');
   const nakV      = nakBin ? cmd('nak --version 2>/dev/null') : null;
 
+  const stacksBin = has('stacks');
+  const stacksV   = stacksBin ? cmd('stacks --version 2>/dev/null') : null;
+
+  // Watchdog is a launchd interval job on macOS / systemd .timer on linux.
+  // No listening socket, no PID between fires — "loaded" is the only signal
+  // the OS offers us. On darwin, `launchctl list <label>` exits 0 when the
+  // plist is loaded (the interval will fire whenever its schedule hits).
+  // On linux, `systemctl --user is-enabled --quiet` confirms the timer is
+  // scheduled. Missing / unloaded → err; loaded → ok. No warn state: the
+  // "didn't fire recently" case belongs in the Logs panel's stale-log
+  // banner, not the sidebar health dot.
+  const watchdogLoaded = process.platform === 'darwin'
+    ? cmd('launchctl list com.nostr-station.watchdog', 1500) !== null
+    : cmd('systemctl --user is-enabled --quiet nostr-watchdog.timer', 1500) !== null;
+
   // Three-state mapping:
   //   ok   — running + configured
   //   warn — installed but not running/configured
   //   err  — not installed
-  const relayState: ServiceState = relayUp ? 'ok' : relayBin ? 'warn' : 'err';
-  const vpnState:   ServiceState = meshIp  ? 'ok' : nvpnBin  ? 'warn' : 'err';
-  const ngitState:  ServiceState = ngitBin && ngitRelay ? 'ok' : ngitBin ? 'warn' : 'err';
+  const relayState:    ServiceState = relayUp ? 'ok' : relayBin ? 'warn' : 'err';
+  const vpnState:      ServiceState = meshIp  ? 'ok' : nvpnBin  ? 'warn' : 'err';
+  const watchdogState: ServiceState = watchdogLoaded ? 'ok' : 'err';
+  const ngitState:     ServiceState = ngitBin && ngitRelay ? 'ok' : ngitBin ? 'warn' : 'err';
   const relayBinState: ServiceState = relayBin ? 'ok' : 'err';
   const claudeState:   ServiceState = claudeBin ? 'ok' : 'err';
   const nakState:      ServiceState = nakBin ? 'ok' : 'err';
+  const stacksState:   ServiceState = stacksBin ? 'ok' : 'err';
 
   return [
-    { id: 'relay',     label: 'Relay',       value: relayUp ? 'ws://localhost:8080 ✓' : relayBin ? 'installed (down)' : 'not installed', ok: relayUp,      state: relayState    },
-    { id: 'vpn',       label: 'nostr-vpn',   value: meshIp  ?? (nvpnBin  ? 'not connected' : 'not installed'),                            ok: !!meshIp,     state: vpnState      },
-    { id: 'ngit',      label: 'ngit',        value: ngitBin && ngitRelay ? `relay: ${ngitRelay.replace(/^wss?:\/\//, '')}` : ngitBin ? 'not configured' : 'not installed', ok: ngitBin && !!ngitRelay, state: ngitState     },
-    { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed',                                                           ok: !!claudeV,    state: claudeState   },
-    { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState      },
-    { id: 'relay-bin', label: 'relay bin',   value: relayV   ?? 'not installed',                                                           ok: !!relayV,     state: relayBinState },
+    // Services — daemons or scheduled jobs with a runtime state.
+    { id: 'relay',     label: 'Relay',       value: relayUp ? 'ws://localhost:8080 ✓' : relayBin ? 'installed (down)' : 'not installed', ok: relayUp,      state: relayState,    kind: 'service' },
+    { id: 'vpn',       label: 'nostr-vpn',   value: meshIp  ?? (nvpnBin  ? 'not connected' : 'not installed'),                            ok: !!meshIp,     state: vpnState,      kind: 'service' },
+    { id: 'watchdog',  label: 'watchdog',    value: watchdogLoaded ? 'scheduled · fires every 5m' : 'not installed',                     ok: watchdogLoaded, state: watchdogState, kind: 'service' },
+    // Binaries — CLI tools; installed or not. `ngit` is the lone binary with
+    // a warn state (installed but no default relay set — configure in Config).
+    { id: 'ngit',      label: 'ngit',        value: ngitBin && ngitRelay ? `relay: ${ngitRelay.replace(/^wss?:\/\//, '')}` : ngitBin ? 'not configured' : 'not installed', ok: ngitBin && !!ngitRelay, state: ngitState,    kind: 'binary' },
+    { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed',                                                           ok: !!claudeV,    state: claudeState,   kind: 'binary' },
+    { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState,      kind: 'binary' },
+    { id: 'relay-bin', label: 'relay bin',   value: relayV   ?? 'not installed',                                                           ok: !!relayV,     state: relayBinState, kind: 'binary' },
+    { id: 'stacks',    label: 'Stacks',      value: stacksV  ?? (stacksBin ? 'installed' : 'not installed'),                               ok: stacksBin,    state: stacksState,   kind: 'binary' },
   ];
 }
 

@@ -940,14 +940,35 @@ async function refreshHealth() {
 
     const health = $('health');
     health.innerHTML = '';
-    for (const s of status) {
+
+    // Group the same way the Status panel does: services first, binaries
+    // second, each under a subtle section header. Keeps the two surfaces
+    // visually parallel so users building a mental model ("Services are
+    // daemons, Binaries are tools") learn it once and see it everywhere.
+    const services = status.filter(s => s.kind === 'service');
+    const binaries = status.filter(s => s.kind === 'binary');
+
+    const addSectionHeader = (title) => {
+      const h = document.createElement('div');
+      h.className = 'health-section-head';
+      h.textContent = title;
+      health.appendChild(h);
+    };
+    const addRow = (s) => {
       const row = document.createElement('div');
       const interactive = s.state === 'warn' || s.state === 'err';
       row.className = 'row' + (interactive ? ' interactive' : '');
       row.dataset.service = s.id;
       row.title = healthTooltip(s);
-      row.innerHTML = `<span class="dot ${stateClass(s.state)}"></span>
-                       <span class="name">${escapeHtml(s.label)}</span>`;
+      // Sidebar uses the same indicator convention as the Status panel:
+      // dots for services, ✓/✗/! glyphs for binaries. Keeps the grammar
+      // consistent across the two lists.
+      const indicator = s.kind === 'binary'
+        ? `<span class="bin-indicator bin-indicator-${stateClass(s.state)}">${
+            s.state === 'ok' ? '✓' : s.state === 'warn' ? '!' : '✗'
+          }</span>`
+        : `<span class="dot ${stateClass(s.state)}"></span>`;
+      row.innerHTML = `${indicator}<span class="name">${escapeHtml(s.label)}</span>`;
       if (interactive) {
         row.addEventListener('click', () => {
           location.hash = '#status';
@@ -970,7 +991,10 @@ async function refreshHealth() {
         });
       }
       health.appendChild(row);
-    }
+    };
+
+    if (services.length) { addSectionHeader('Services'); services.forEach(addRow); }
+    if (binaries.length) { addSectionHeader('Binaries'); binaries.forEach(addRow); }
 
     if (currentPanel() === 'status') Panels.status.render(status);
     window.__lastStatus = status;
@@ -986,12 +1010,19 @@ setInterval(refreshHealth, 5000);
 // Install streams `/api/exec/install/<slug>` into the terminal modal.
 
 const SERVICE_CTAS = {
-  'relay':     { installSlug: 'relay',  configHint: 'nostr-station relay start' },
-  'vpn':       { installSlug: 'nvpn',   configHint: 'sudo nvpn service install' },
-  'ngit':      { installSlug: 'ngit',   configHint: null /* inline-form handled below */ },
-  'claude':    { installSlug: 'claude', configHint: null },
-  'nak':       { installSlug: 'nak',    configHint: null },
-  'relay-bin': { installSlug: 'relay',  configHint: 'nostr-station relay start' },
+  'relay':     { installSlug: 'relay',   configHint: 'nostr-station relay start' },
+  'vpn':       { installSlug: 'nvpn',    configHint: 'sudo nvpn service install' },
+  // Watchdog is installed as part of onboard, not via a standalone
+  // doctor --fix target — if it's missing, the right fix is re-running
+  // onboard so the plist/timer gets written and loaded with matching
+  // keypair + whitelist state. No install slug; the Status row falls
+  // through to the configHint path which surfaces the exact command.
+  'watchdog':  { installSlug: null,      configHint: 'nostr-station onboard' },
+  'ngit':      { installSlug: 'ngit',    configHint: null /* inline-form handled below */ },
+  'claude':    { installSlug: 'claude',  configHint: null },
+  'nak':       { installSlug: 'nak',     configHint: null },
+  'relay-bin': { installSlug: 'relay',   configHint: 'nostr-station relay start' },
+  'stacks':    { installSlug: 'stacks',  configHint: null },
 };
 
 // Human-friendly summary + deep-link target for each service. The summary
@@ -1031,6 +1062,16 @@ const SERVICE_DETAILS = {
     summaryOk:   s => `Binary version: <code class="cmd-inline">${escapeHtml(s.value)}</code>. See <em>Relay</em> row above for the running service state.`,
     summaryErr:  _ => '<code class="cmd-inline">nostr-rs-relay</code> isn\'t on this machine. Install unlocks the Relay row above.',
   },
+  'watchdog': {
+    summaryOk:   _ => 'Scheduled every 5 minutes. Probes the relay\'s listening socket and DMs you if it\'s down (via a throwaway keypair kept in your keychain).',
+    summaryErr:  _ => 'Watchdog isn\'t installed. Normally onboard writes the launchd timer + keychain keypair + whitelist entry; re-run onboard to restore it.',
+    panel: { hash: '#logs', label: 'Open Logs → watchdog' },
+  },
+  'stacks': {
+    summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Scaffold a Nostr React app with <code class="cmd-inline">stacks mkstack &lt;name&gt;</code>.`,
+    summaryErr:  _ => 'Stacks is Soapbox\'s Nostr app scaffolding CLI (ships the mkstack React template). Optional — install adds the <code class="cmd-inline">stacks</code> command to <code class="cmd-inline">~/.cargo/bin</code>.',
+    panel: { hash: '#projects', label: 'Open Projects' },
+  },
 };
 
 const StatusPanel = {
@@ -1050,7 +1091,9 @@ const StatusPanel = {
   },
   render(status) {
     const cards = $('status-cards');
-    const nextSig = status.map(s => `${s.id}:${s.state}:${s.value}`).join('|');
+    // Signature now includes kind so a future hotfix that re-categorizes
+    // an entry does force a re-render instead of silently sticking.
+    const nextSig = status.map(s => `${s.id}:${s.kind}:${s.state}:${s.value}`).join('|');
     if (nextSig === this._sig && cards.childElementCount > 0) return;
     this._sig = nextSig;
 
@@ -1064,10 +1107,28 @@ const StatusPanel = {
     );
 
     cards.innerHTML = '';
-    for (const s of status) {
-      const row = buildStatusRow(s);
-      if (wasOpen.has(s.id)) row.setAttribute('open', '');
-      cards.appendChild(row);
+    // Group by kind: services first (daemons, scheduled jobs), binaries
+    // second (CLI tools). Server already emits in this order today but
+    // the client enforces the split so the sections are stable even if
+    // the payload's sort drifts.
+    const services = status.filter(s => s.kind === 'service');
+    const binaries = status.filter(s => s.kind === 'binary');
+
+    if (services.length) {
+      cards.appendChild(buildSectionHeader('Services', 'Daemons + scheduled jobs — runtime state'));
+      for (const s of services) {
+        const row = buildStatusRow(s);
+        if (wasOpen.has(s.id)) row.setAttribute('open', '');
+        cards.appendChild(row);
+      }
+    }
+    if (binaries.length) {
+      cards.appendChild(buildSectionHeader('Binaries', 'CLI tools — installed or not'));
+      for (const s of binaries) {
+        const row = buildStatusRow(s);
+        if (wasOpen.has(s.id)) row.setAttribute('open', '');
+        cards.appendChild(row);
+      }
     }
     // The nsite row sits alongside the gatherStatus() services but is
     // driven by its own endpoint (kind 34128 relay query), so we append
@@ -1077,6 +1138,16 @@ const StatusPanel = {
   },
 };
 
+function buildSectionHeader(title, subtitle) {
+  const h = document.createElement('div');
+  h.className = 'status-section-head';
+  h.innerHTML = `
+    <span class="status-section-title">${escapeHtml(title)}</span>
+    <span class="status-section-sub">${escapeHtml(subtitle)}</span>
+  `;
+  return h;
+}
+
 // Build one expandable row. Summary line stays visible at all times
 // (matches the sidebar Service Health chip); the details panel drops a
 // service-specific blurb plus any CTAs the user would act on next.
@@ -1084,12 +1155,22 @@ function buildStatusRow(s) {
   const cta = SERVICE_CTAS[s.id] || {};
   const detail = SERVICE_DETAILS[s.id] || {};
   const row = document.createElement('details');
-  row.className = `status-row ${stateClass(s.state)}`;
+  row.className = `status-row status-row-${s.kind || 'service'} ${stateClass(s.state)}`;
   row.dataset.service = s.id;
+
+  // Services get a colored dot (ok/warn/err). Binaries get ✓ (installed +
+  // configured), ✗ (not installed), or ! (installed but warn — today only
+  // ngit with a missing relay config). Glyph-vs-dot makes the at-a-glance
+  // "am I missing a tool" vs "is a daemon healthy" call out visually.
+  const indicator = s.kind === 'binary'
+    ? `<span class="bin-indicator bin-indicator-${stateClass(s.state)}">${
+        s.state === 'ok' ? '✓' : s.state === 'warn' ? '!' : '✗'
+      }</span>`
+    : `<span class="dot ${stateClass(s.state)}"></span>`;
 
   const summary = document.createElement('summary');
   summary.innerHTML = `
-    <span class="dot ${stateClass(s.state)}"></span>
+    ${indicator}
     <div class="status-main">
       <div class="status-label">${escapeHtml(s.label)}</div>
       <div class="status-value">${escapeHtml(s.value)}</div>

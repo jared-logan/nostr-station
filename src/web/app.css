@@ -248,6 +248,41 @@ input:focus, textarea:focus, select:focus {
 }
 .health .row.interactive:hover .name { color: var(--text-bright); }
 
+/* Sidebar Service Health: section headers and binary ✓/✗/! glyphs.
+   Headers are subdued — tiny caps, tight margin — so they organize
+   without shouting. First header has no top margin (no prior
+   sibling). */
+.health .health-section-head {
+  font-size: 9px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 10px 0 2px;
+  padding-left: 2px;
+}
+.health .health-section-head:first-child { margin-top: 0; }
+
+/* ✓/✗/! glyph sits in the same 8px-wide slot as the service dot so the
+   label column lines up regardless of kind. Hard-coded width via
+   display:inline-block + min-width prevents a 1px shift between the
+   two variants. */
+.bin-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 12px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+.bin-indicator-ok   { color: var(--success); }
+.bin-indicator-warn { color: var(--warn);    }
+.bin-indicator-err  { color: var(--error);   }
+/* Larger glyph inside the Status panel's summary row — it's a primary
+   status affordance there, not just a sidebar micro-signal. */
+.status-row-binary .bin-indicator { min-width: 14px; font-size: 14px; }
+
 /* One-shot highlight pulse for a card that was jumped-to from the sidebar. */
 @keyframes status-card-pulse {
   0%   { box-shadow: 0 0 0 0 rgba(123, 180, 255, 0.55); }
@@ -388,6 +423,33 @@ input:focus, textarea:focus, select:focus {
   flex-direction: column;
   gap: 8px;
 }
+/* Section header for the Status panel's services/binaries split. Mirrors
+   the sidebar's health-section-head treatment — quiet, small caps — with
+   a subtitle to hint at what lives in the section. */
+.status-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 2px 4px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.status-section-head:first-child { margin-top: 0; }
+.status-section-head .status-section-title {
+  font-size: 10px;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+  color: var(--text);
+  font-weight: 600;
+}
+.status-section-head .status-section-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+/* Binaries lean on the ✓/✗/! glyph to communicate state; the 3px border
+   stripe is redundant + noisy for them. Hide it so the binary rows feel
+   distinct from the stripe-bearing service rows at a glance. */
+.status-row-binary { border-left-color: transparent !important; }
 .status-row {
   background: var(--bg-card);
   border: 1px solid var(--border);
