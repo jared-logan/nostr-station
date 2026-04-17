@@ -3412,7 +3412,8 @@ function clearLogsBadge() {
 }
 
 const LogsPanel = (() => {
-  const view = $('log-view');
+  const view   = $('log-view');
+  const banner = $('logs-status');
   let currentSvc = 'relay';
   let es = null;
   let paused = false;
@@ -3440,11 +3441,86 @@ const LogsPanel = (() => {
     while (view.childElementCount > 1000) view.removeChild(view.firstChild);
     if (autoScroll) view.scrollTop = view.scrollHeight;
   }
+
+  function humanAge(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 90)       return `${s}s`;
+    if (s < 3600)     return `${Math.floor(s / 60)}m`;
+    if (s < 86_400)   return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86_400)}d`;
+  }
+
+  // Map a ServiceHealth snapshot to a banner. `null` hides the banner
+  // entirely (healthy + fresh logs). The `hint` slot is for actionable
+  // guidance; it's the thing the old "connecting to relay…" stub was
+  // supposed to give you and didn't.
+  function statusToBanner(s) {
+    const svcLabel = s.service === 'vpn' ? 'nostr-vpn' : s.service;
+    if (!s.installed) {
+      const cmd = s.service === 'vpn' ? 'nostr-station onboard' : 'nostr-station onboard';
+      return {
+        level: 'err',
+        title: `${svcLabel} is not installed on this machine.`,
+        hint:  `Run <code>${cmd}</code> in a terminal to set it up. The log file will light up here once the service starts.`,
+      };
+    }
+    if (!s.running) {
+      const fix = s.service === 'relay' ? 'nostr-station relay start'
+                : s.service === 'watchdog' ? 'launchctl start com.nostr-station.watchdog'
+                : 'nvpn up';
+      return {
+        level: 'warn',
+        title: `${svcLabel} is installed but not running.`,
+        hint:  `Start it: <code>${fix}</code> — or use the Relay panel's start button.`,
+      };
+    }
+    if (!s.logExists) {
+      return {
+        level: 'warn',
+        title: `${svcLabel} is running but hasn't written a log yet.`,
+        hint:  `Expected at <code>${s.logPath}</code>. New lines will appear here as soon as the service logs something.`,
+      };
+    }
+    if (s.stale) {
+      const age = humanAge(Date.now() - s.logMtimeMs);
+      return {
+        level: 'warn',
+        title: `${svcLabel} log is stale — last write ${age} ago.`,
+        hint:  `The service is loaded but may be wedged. Check <code>nostr-station doctor</code>, or restart via the Relay panel.`,
+      };
+    }
+    return null;
+  }
+
+  function renderBanner(status) {
+    if (!banner) return;
+    const b = statusToBanner(status);
+    if (!b) {
+      banner.hidden = true;
+      banner.innerHTML = '';
+      banner.className = 'logs-status';
+      return;
+    }
+    banner.hidden = false;
+    banner.className = `logs-status ${b.level}`;
+    banner.innerHTML = `
+      <span class="logs-status-icon">${b.level === 'err' ? '✕' : '⚠'}</span>
+      <div class="logs-status-body">
+        <div class="logs-status-title"></div>
+        <div class="logs-status-hint"></div>
+      </div>`;
+    banner.querySelector('.logs-status-title').textContent = b.title;
+    // hint is trusted (server-side template — no user input), so innerHTML
+    // is fine for the <code> chips. If this ever starts incorporating
+    // user-controlled strings, switch to textContent + manual spans.
+    banner.querySelector('.logs-status-hint').innerHTML = b.hint;
+  }
+
   function disconnect() { if (es) { es.close(); es = null; } }
   function connect(svc) {
     disconnect();
     view.innerHTML = '';
-    append([`connecting to ${svc}…`]);
+    if (banner) { banner.hidden = true; banner.innerHTML = ''; }
     // EventSource can't set Authorization headers, so we pass the session
     // token as a query param. Server-side extractBearer() accepts both
     // Authorization and ?token= for exactly this reason.
@@ -3453,11 +3529,16 @@ const LogsPanel = (() => {
     es.addEventListener('message', (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.lines) append(data.lines);
-        if (data.error) append(['[error] ' + data.error]);
+        if (data.status) renderBanner(data.status);
+        if (data.lines)  append(data.lines);
+        if (data.error)  append(['[error] ' + data.error]);
       } catch {}
     });
-    es.addEventListener('error', () => append(['[stream closed]']));
+    // Don't render "[stream closed]" as a log line — the server holds the
+    // connection open with heartbeats when the log file is missing, so an
+    // onerror here almost always means a real network drop, not a missing
+    // service. The banner already explains service state.
+    es.addEventListener('error', () => {});
   }
 
   $$('#logs-tabs .tab').forEach(tab => {

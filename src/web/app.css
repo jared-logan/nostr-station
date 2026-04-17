@@ -598,6 +598,34 @@ input:focus, textarea:focus, select:focus {
 .log-line.ok   { color: var(--success); }
 .log-line.warn { color: var(--warn); }
 
+.logs-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 10px 24px 0;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid;
+}
+/* UA [hidden] rule loses to .logs-status's display:flex on specificity —
+   explicit override so JS setting el.hidden=true actually hides the box. */
+.logs-status[hidden] { display: none; }
+.logs-status .logs-status-icon { flex: 0 0 auto; font-weight: 600; }
+.logs-status .logs-status-body { flex: 1; }
+.logs-status .logs-status-title { font-weight: 600; margin-bottom: 2px; }
+.logs-status .logs-status-hint { color: var(--text-dim); }
+.logs-status code {
+  background: rgba(255,255,255,0.07);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.logs-status.err  { border-color: var(--error); background: color-mix(in srgb, var(--error) 10%, transparent); color: var(--error); }
+.logs-status.warn { border-color: var(--warn);  background: color-mix(in srgb, var(--warn)  10%, transparent); color: var(--warn); }
+.logs-status.ok   { border-color: var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); color: var(--success); }
+
 /* ── config panel ─────────────────────────────────────────────────────── */
 
 .config-sections {

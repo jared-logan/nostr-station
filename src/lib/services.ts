@@ -82,6 +82,13 @@ else
 fi
 `;
 
+// RUST_LOG=info is load-bearing: nostr-rs-relay uses tracing_subscriber with
+// an EnvFilter that defaults to ~warn+ when RUST_LOG is unset, which means a
+// healthy relay writes nothing on startup, connect, or publish. The Logs panel
+// tab then looks broken (blank). 'info' surfaces the startup banner
+// ("listening on 0.0.0.0:8080"), per-client connects, and the SQLite pool
+// setup — useful signal without being overwhelming. Drop to 'warn' if this
+// ever becomes noisy in prod.
 const LAUNCHD_RELAY = (p: Platform) => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -94,6 +101,10 @@ const LAUNCHD_RELAY = (p: Platform) => `<?xml version="1.0" encoding="UTF-8"?>
         <string>--config</string>
         <string>${p.configDir}/config.toml</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key><string>info</string>
+    </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>StandardOutPath</key><string>${p.logDir}/nostr-rs-relay.log</string>
@@ -125,6 +136,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=RUST_LOG=info
 ExecStart=${p.cargoBin}/nostr-rs-relay --config ${p.configDir}/config.toml
 Restart=always
 RestartSec=5

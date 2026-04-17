@@ -499,31 +499,130 @@ function serveRelayConfig(res: http.ServerResponse): void {
 
 // ── Logs (SSE live tail) ──────────────────────────────────────────────────────
 
-function streamLogs(
-  service: 'relay' | 'watchdog' | 'vpn',
-  res: http.ServerResponse,
-  req: http.IncomingMessage,
-): void {
-  const LOGS: Record<typeof service, string> = {
+type LogService = 'relay' | 'watchdog' | 'vpn';
+
+interface ServiceHealth {
+  service:    LogService;
+  installed:  boolean;         // unit file / binary present
+  running:    boolean;         // daemon actively loaded / running
+  logPath:    string;
+  logExists:  boolean;
+  logMtimeMs: number | null;   // last write timestamp
+  stale:      boolean;         // running but log hasn't been written recently
+}
+
+// Per-service staleness threshold, in ms. Only set for services with a known
+// write cadence; `undefined` means we never call the log stale based on mtime.
+//
+// - watchdog: fires every 5 min (launchd StartInterval=300) and always appends
+//   a line, so >10 min of silence while the job is loaded is a real wedge.
+// - relay / vpn: long-running daemons that are legitimately silent when idle
+//   (a fresh relay with no connected clients writes nothing for hours). PID
+//   presence via launchctl is the correct health signal for these; mtime-based
+//   staleness on the log file fires as a false positive on quiet boxes.
+const STALE_MS: Partial<Record<LogService, number>> = {
+  watchdog: 600_000,
+};
+
+function cmdOk(c: string): boolean {
+  try { execSync(c, { stdio: 'pipe', timeout: 1500, killSignal: 'SIGKILL' }); return true; }
+  catch { return false; }
+}
+
+// launchctl list <label> exits 0 when the job is loaded; its output's second
+// column is the PID (or '-' when not running). We need both bits of info so
+// the banner can distinguish "installed but not running" from "running fine".
+function launchctlState(label: string): { installed: boolean; running: boolean } {
+  try {
+    const out = execSync(`launchctl list ${label}`, { stdio: 'pipe', timeout: 1500 }).toString();
+    const pidLine = out.split('\n').find(l => l.includes('"PID"'));
+    const running = !!(pidLine && /"PID"\s*=\s*\d+/.test(pidLine));
+    return { installed: true, running };
+  } catch {
+    return { installed: false, running: false };
+  }
+}
+
+function probeServiceHealth(service: LogService): ServiceHealth {
+  const logPath = {
     relay:    path.join(os.homedir(), 'logs', 'nostr-rs-relay.log'),
     watchdog: path.join(os.homedir(), 'logs', 'watchdog.log'),
     vpn:      path.join(os.homedir(), 'logs', 'nvpn.log'),
-  };
-  const file = LOGS[service];
+  }[service];
 
+  let installed = false;
+  let running   = false;
+
+  if (process.platform === 'darwin') {
+    const label = service === 'relay'    ? 'com.nostr-station.relay'
+                : service === 'watchdog' ? 'com.nostr-station.watchdog'
+                : 'com.nostr-vpn';
+    if (service === 'vpn') {
+      // nvpn uses a com.nostr-vpn.* label set by its own installer; match
+      // loosely so an upstream rename doesn't break the probe silently.
+      const out = (() => {
+        try { return execSync('launchctl list', { stdio: 'pipe', timeout: 1500 }).toString(); }
+        catch { return ''; }
+      })();
+      const line = out.split('\n').find(l => /nostr-vpn/.test(l));
+      installed = !!line;
+      running   = !!(line && /^\d+\s/.test(line));
+    } else {
+      ({ installed, running } = launchctlState(label));
+    }
+  } else if (process.platform === 'linux') {
+    const unit = service === 'relay'    ? 'nostr-relay.service'
+               : service === 'watchdog' ? 'nostr-watchdog.timer'
+               : 'nvpn';
+    installed = cmdOk(`systemctl --user cat ${unit}`) || cmdOk(`systemctl cat ${unit}`);
+    running   = cmdOk(`systemctl --user is-active --quiet ${unit}`)
+             || cmdOk(`systemctl is-active --quiet ${unit}`);
+  }
+
+  let logMtimeMs: number | null = null;
+  let logExists = false;
+  try {
+    const st = fs.statSync(logPath);
+    logExists = true;
+    logMtimeMs = st.mtimeMs;
+  } catch { /* missing file — logExists stays false */ }
+
+  const threshold = STALE_MS[service];
+  const stale = threshold !== undefined
+    && running && logExists && logMtimeMs !== null
+    && (Date.now() - logMtimeMs) > threshold;
+
+  return { service, installed, running, logPath, logExists, logMtimeMs, stale };
+}
+
+function streamLogs(
+  service: LogService,
+  res: http.ServerResponse,
+  req: http.IncomingMessage,
+): void {
   res.writeHead(200, {
     'Content-Type':  'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection':    'keep-alive',
   });
 
-  if (!fs.existsSync(file)) {
-    res.write(`data: ${JSON.stringify({ error: `log not found: ${file} — service may not be running yet` })}\n\n`);
-    res.end();
+  const health = probeServiceHealth(service);
+  res.write(`data: ${JSON.stringify({ status: health })}\n\n`);
+
+  if (!health.logExists) {
+    // Keep the connection alive so the client can keep rendering its banner;
+    // closing here made the EventSource fire onerror and log "[stream closed]",
+    // which buried the status guidance under a false failure message.
+    const hb = setInterval(() => {
+      try { res.write(': heartbeat\n\n'); } catch { clearInterval(hb); }
+    }, 15_000);
+    const done = () => { clearInterval(hb); try { res.end(); } catch {} };
+    req.on('close', done);
+    req.on('error', done);
     return;
   }
 
-  const tail = spawn('tail', ['-f', '-n', '200', file], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const tail = spawn('tail', ['-f', '-n', '200', health.logPath], { stdio: ['ignore', 'pipe', 'pipe'] });
 
   const sendLines = (chunk: Buffer) => {
     const lines = chunk.toString().split('\n').filter(Boolean);
