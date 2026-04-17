@@ -4318,6 +4318,15 @@ const ConfigPanel = (() => {
         });
         if (!r.ok) throw new Error(r.error || 'save failed');
         toast('Provider added', id, 'ok');
+        // Notify the Chat panel so its populateProvider() re-runs. Without
+        // this, the Chat pane stays stuck on the "No AI provider configured"
+        // callout until the next full page reload — populateProvider is
+        // `initialized`-guarded so plain panel re-entry doesn't refresh.
+        // setAiDefault below also dispatches this, but only fires when
+        // there's no existing chat default (fresh install). A returning
+        // user adding a second key (or fixing a keyless entry from onboard
+        // that already set defaults.chat) needs the dispatch here too.
+        document.dispatchEvent(new CustomEvent('api-config-changed'));
         // If no chat default yet, this one becomes it so users with a
         // fresh install get working chat immediately after adding their
         // first API provider. Server-side rule would be stricter; client
