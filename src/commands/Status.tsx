@@ -19,9 +19,19 @@ export interface ServiceStatus {
   state: ServiceState;
 }
 
-function cmd(c: string): string | null {
-  try { return execSync(c, { stdio: 'pipe' }).toString().trim(); }
-  catch { return null; }
+// Every shellout here is on the hot path for /api/status. A single blocking
+// call (notably `nvpn status --json` when its daemon socket is wedged)
+// stalls the whole Node event loop and the dashboard sees a 10s+ hang.
+// Default 2s ceiling, SIGKILL on expiry — we'd rather report "not running"
+// than make the user wait.
+function cmd(c: string, timeoutMs = 2000): string | null {
+  try {
+    return execSync(c, {
+      stdio: 'pipe',
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+    }).toString().trim();
+  } catch { return null; }
 }
 
 function has(bin: string): boolean {
@@ -32,7 +42,10 @@ function has(bin: string): boolean {
 // Ink would otherwise write UI frames to stdout alongside the JSON payload,
 // corrupting any programmatic consumer piping stdout into a parser.
 export function gatherStatus(): ServiceStatus[] {
-  const relayUp   = cmd('nc -z localhost 8080') !== null;
+  // `-w 1` is a second belt-and-suspenders timeout — both BSD and GNU nc
+  // respect it. Protects against nc variants that ignore our execSync
+  // timeout (rare, but cheap insurance).
+  const relayUp   = cmd('nc -z -w 1 localhost 8080', 1500) !== null;
   const relayBin  = has('nostr-rs-relay');
   const relayV    = relayBin ? cmd('nostr-rs-relay --version 2>/dev/null') : null;
 
@@ -40,7 +53,10 @@ export function gatherStatus(): ServiceStatus[] {
   const meshIp    = (() => {
     if (!nvpnBin) return null;
     try {
-      const out = cmd('nvpn status --json');
+      // Tighter 1s cap: `nvpn status --json` talks to the nvpn daemon over
+      // IPC. On a fresh install the service may be installed but not yet
+      // running, which blocks the socket connect indefinitely.
+      const out = cmd('nvpn status --json', 1000);
       return out ? JSON.parse(out)?.tunnel_ip ?? null : null;
     } catch { return null; }
   })();
