@@ -595,11 +595,18 @@ input:focus, textarea:focus, select:focus {
   color: var(--muted);
 }
 .stat .v {
-  font-size: 20px;
+  font-size: 18px;
   color: var(--text-bright);
   margin-top: 2px;
   font-weight: 500;
+  /* Long values ("up · ws://localhost:8080", "24.5 MB · 50 events") can
+     exceed the 160px grid min-width and escape the card at the old 20px
+     size. Let them wrap anywhere instead of spilling past the border. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.25;
 }
+.stat { min-width: 0; }
 .stat .v.accent { color: var(--accent-bright); }
 
 .kinds {
