@@ -3,7 +3,7 @@
 All notable changes to nostr-station are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [0.0.5] — in progress
+## [0.0.5] — 2026-04-17
 ### Changed
 - **CLI command renames** — clearer, less collision-prone names across the top-level commands. Old names remain as deprecated aliases for one release cycle and print a one-line stderr warning when used.
   - `push` → `publish` (avoids the "does it also pull?" ambiguity of `sync`; signals that the command orchestrates git + ngit + any configured signer, not just `git push`)
@@ -11,6 +11,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `logs` → `relay logs` (folded under the `relay` subcommand group — `--service relay|watchdog|all` still works)
 
 ### Fixed
+- **`/api/status` event-loop hang on fresh Linux** — `gatherStatus()`'s six sync `execSync` calls had no timeout, and `nvpn status --json` blocks on the nvpn daemon IPC socket when the service hasn't fully come up on first boot. A single wedged probe stalled the Node event loop for every in-flight `/api/*` request (observed: curl getting 0 bytes in 10s on Mint). `cmd()` now runs `execSync` with a 2s ceiling + `SIGKILL`; `nc -z` takes `-w 1` and a 1.5s cap; `nvpn status --json` is tightened to 1s.
+- **Doctor conflated "nvpn daemon running" with "mesh connected"** — the check ran `nvpn status --json | grep -q connected`, which requires the mesh tunnel to be up, so a freshly-started daemon with no peers was flagged as a failure. Replaced with a platform-aware daemon probe (`systemctl is-active --quiet nvpn` on Linux, `launchctl list | grep nostr-vpn` on macOS). The fix suggestion changed from `sudo nvpn service install` (correct only when the unit is missing) to `sudo systemctl start nvpn` / `sudo launchctl kickstart` (idempotent; fails loudly if the unit is actually absent).
+- **Web wizard `POST /api/setup/relay/install` hang on locked GNOME keyring** — `ensureWatchdogKeypair()` shelled out to `secret-tool lookup` with no timeout; on fresh Linux Mint installs where gnome-keyring-daemon isn't up yet or the login keyring is locked, the DBus call blocks indefinitely, which stalled the whole wizard before any systemd unit file was written. Keychain retrieve/store are now bounded by a 5s `withTimeout()` wrapper, and `bootstrapRelayServices()` emits timestamped per-step START/OK/ERR lines to stderr with elapsed ms so the blocking step is identifiable from server logs.
+- **`nostr-station uninstall` now clears stored secrets** — previously left watchdog-nsec, legacy `ai-api-key`, and all per-provider `ai:<id>` slots in the system keychain after uninstall. Linux: `secret-tool clear service nostr-station` + `rm -f ~/.config/nostr-station/secrets` (encrypted-file fallback). macOS: `security delete-generic-password -s nostr-station` in a loop (capped at 64 iterations) since the command has no wildcard. `WHAT_GETS_REMOVED` preamble on the confirm screen updated accordingly.
 - **Onboard seeds `identity.json`** so the dashboard, ngit Service Health dot, and `Projects → ngit init` relay pre-fill all work on first run. If a prior file exists, missing fields are merged in without clobbering user customizations.
 - **`git push` preflight** in the dashboard streaming exec modal — if the project has no `origin` remote, the modal surfaces `No git remote named 'origin' — add one in project Settings.` instead of a cryptic git error.
 - **`npub`/hex helpers** in the web server now invoke `nak` via `execFileSync` with fixed argv arrays (no shell, no template literals). Not a live vuln — inputs are regex-validated — but sets the standard for argv hygiene pre-publish.
