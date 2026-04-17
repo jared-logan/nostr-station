@@ -11,26 +11,27 @@ function cmd(c: string): boolean {
   catch { return false; }
 }
 
-// Is the nvpn service installed + running? This is deliberately distinct
-// from "is the mesh tunnel connected" — a daemon can be up and idle with no
-// peers, and we don't want doctor to flag that as a failure. The old check
-// (`nvpn status --json | grep -q connected`) conflated the two, which
-// surfaced false-negatives on freshly-installed boxes whose daemon is
-// running but whose mesh hasn't been joined yet.
+// Is the nvpn daemon running? Distinct from "is the mesh tunnel connected"
+// (see getMeshIp) — a daemon can be up and idle with no peers, and we don't
+// want doctor to flag that as a failure.
+//
+// The probe is nvpn's own `status --json`, which reports `daemon.running`
+// regardless of install style. Earlier platform-specific checks
+// (`systemctl is-active nvpn`, `launchctl list | grep nostr-vpn`) assumed
+// nvpn was always managed by the init system's service supervisor, but
+// homebrew installs and `nvpn start --daemon` both run outside those
+// frameworks — producing a false ✗ for every user who didn't run
+// `sudo nvpn service install`. `nvpn status --json` is cross-platform and
+// authoritative.
 function isNvpnDaemonActive(): boolean {
-  if (process.platform === 'linux') {
-    // `is-active` exits 0 for "active", non-zero otherwise — no sudo needed
-    // for read. --quiet suppresses the word on stdout.
-    return cmd('systemctl is-active --quiet nvpn');
+  try {
+    const out = execSync('nvpn status --json', {
+      stdio: 'pipe', timeout: 2000, killSignal: 'SIGKILL',
+    }).toString();
+    return Boolean(JSON.parse(out)?.daemon?.running);
+  } catch {
+    return false;
   }
-  if (process.platform === 'darwin') {
-    // launchd doesn't have a friendly `is-active` equivalent; `launchctl list`
-    // prints the label when loaded. nvpn's service-install uses a
-    // com.nostr-vpn.* label — match loosely so a rename upstream doesn't
-    // break the check silently.
-    return cmd('launchctl list | grep -q nostr-vpn');
-  }
-  return false;
 }
 
 export function runChecks(): CheckResult[] {
