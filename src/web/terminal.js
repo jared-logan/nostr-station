@@ -64,8 +64,13 @@
 
   function getToken() {
     // app.js owns session storage and is loaded after us; reach through the
-    // same key contract it uses (see getSessionToken in app.js).
-    return sessionStorage.getItem('ns-session-token') || '';
+    // same key contract it uses (see getSessionToken in app.js). Reads from
+    // localStorage — app.js moved the token there so it survives tab close
+    // and browser relaunch. Missing the migration here caused the terminal
+    // capability probe to fire without a Bearer header, 401 out, and leave
+    // `available` null — every terminal-backed button ("Seed Events",
+    // "Open in Claude Code", etc.) would then show "Terminal unavailable".
+    return localStorage.getItem('ns-session-token') || '';
   }
 
   function authHeaders(extra) {
