@@ -136,10 +136,10 @@
       if (sub) { s.textContent = sub; s.hidden = false; }
       else     { s.textContent = '';  s.hidden = true;  }
     }
-    // Bar's × button closes the active tab; only meaningful when any tab
-    // is open. (The per-tab × button in the strip is always visible.)
-    const close = $('term-bar-close');
-    if (close) close.hidden = !sub;
+    // The per-tab × in the strip is the sole close control now — the
+    // bar-level × was redundant and visually competed with the expand
+    // chevron, so it's been removed. Kept this block as a no-op stub in
+    // case the button returns in a different spot later.
   }
 
   function refreshBarLabel() {
@@ -592,10 +592,6 @@
     showShell();
 
     $('term-bar-toggle')?.addEventListener('click', toggleExpand);
-    $('term-bar-close')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      closeActive();
-    });
     $('term-empty-shell')?.addEventListener('click', () => openKey('shell'));
 
     await restoreTabs();

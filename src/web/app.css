@@ -2912,18 +2912,20 @@ body:not(.term-expanded) .term-resize-handle {
 .term-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   height: var(--term-bar-h);
   padding: 0 12px;
-  gap: 8px;
   flex: 0 0 auto;
   font-size: 12px;
 }
+/* Three-column grid on the toggle itself: left cluster (icon/label/sub),
+   center chevron, and a balancing spacer on the right. That way the
+   chevron lands on the true horizontal center of the bar regardless of
+   the label width. */
 .term-bar-toggle {
-  flex: 1 1 auto;
-  display: flex;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 8px;
   padding: 0;
   background: transparent;
   border: none;
@@ -2931,18 +2933,29 @@ body:not(.term-expanded) .term-resize-handle {
   height: 100%;
   min-width: 0;
   cursor: pointer;
-  text-align: left;
 }
 .term-bar-toggle:hover { color: var(--text-bright); border: none; }
+.term-bar-toggle:hover .term-chevron { color: var(--text-bright); }
+.term-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  justify-self: start;
+  text-align: left;
+}
 .term-bar-toggle .term-chevron {
   display: inline-block;
-  font-size: 9px;
+  font-size: 12px;
   color: var(--text-dim);
-  transition: transform 180ms ease;
+  transition: transform 180ms ease, color 120ms;
+  justify-self: center;
 }
 body.term-expanded .term-bar-toggle .term-chevron {
   transform: rotate(180deg);
 }
+.term-bar-spacer { justify-self: end; }
 .term-bar-icon {
   display: inline-flex;
   align-items: center;
