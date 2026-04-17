@@ -250,14 +250,23 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
   });
 
   switch (opts.key) {
-    case 'shell':
+    case 'shell': {
       // Login shell so interactive tooling that relies on ~/.zshrc / ~/.bashrc
       // (cargo, deno, pyenv shims) behaves as the user expects. When no
       // explicit cwd was requested (the sidebar Terminal button + drawer
       // expand both open with empty opts), anchor to ~/projects so `claude`
       // loads NOSTR_STATION.md context and `ngit clone` lands in the right
       // place — see defaultShellCwd() for the ~ fallback.
-      return { cmd: shell, args: ['-l'], cwd: cwd ?? defaultShellCwd(), label: path.basename(shell) };
+      const shellCwd = cwd ?? defaultShellCwd();
+      // Label with the cwd basename so multiple shell tabs are
+      // distinguishable — "shell · projects" vs "shell · my-app" vs the
+      // shell name alone when we don't know where it's running (rare:
+      // defaultShellCwd returned undefined because both ~/projects and ~
+      // are missing or unstattable).
+      const shellName = path.basename(shell);
+      const label = shellCwd ? `${shellName} · ${path.basename(shellCwd)}` : shellName;
+      return { cmd: shell, args: ['-l'], cwd: shellCwd, label };
+    }
 
     case 'claude':
       return { cmd: 'claude', args: [], cwd, label: cwd ? `claude · ${path.basename(cwd)}` : 'claude' };
