@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, execSync, execFile, execFileSync } from 'child_process';
 import { nip19 } from 'nostr-tools';
+import { getPublicKey } from 'nostr-tools/pure';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { getKeychain } from './keychain.js';
@@ -509,6 +510,8 @@ interface ServiceHealth {
   logExists:  boolean;
   logMtimeMs: number | null;   // last write timestamp
   stale:      boolean;         // running but log hasn't been written recently
+  watchdogNpub?: string;       // watchdog service only — so the user knows
+                               // which identity to follow for relay-down DMs
 }
 
 // Per-service staleness threshold, in ms. Only set for services with a known
@@ -529,12 +532,23 @@ function cmdOk(c: string): boolean {
   catch { return false; }
 }
 
-// launchctl list <label> exits 0 when the job is loaded; its output's second
-// column is the PID (or '-' when not running). We need both bits of info so
-// the banner can distinguish "installed but not running" from "running fine".
-function launchctlState(label: string): { installed: boolean; running: boolean } {
+// launchctl list <label> exits 0 when the job is loaded; its output's PID
+// field is an integer while the job is executing and absent otherwise.
+//
+// For continuous daemons (relay, vpn) "running" = live PID. For interval
+// jobs (watchdog, StartInterval=300) there's no PID 99% of the time — it
+// fires, exits, and waits. Loaded-and-scheduled IS the running state for
+// those; gating on PID produced a permanent false-negative banner.
+function launchctlState(
+  label: string,
+  mode: 'continuous' | 'interval',
+): { installed: boolean; running: boolean } {
   try {
     const out = execSync(`launchctl list ${label}`, { stdio: 'pipe', timeout: 1500 }).toString();
+    if (mode === 'interval') {
+      // Just being loaded is enough — the next scheduled fire will run it.
+      return { installed: true, running: true };
+    }
     const pidLine = out.split('\n').find(l => l.includes('"PID"'));
     const running = !!(pidLine && /"PID"\s*=\s*\d+/.test(pidLine));
     return { installed: true, running };
@@ -568,7 +582,8 @@ function probeServiceHealth(service: LogService): ServiceHealth {
       installed = !!line;
       running   = !!(line && /^\d+\s/.test(line));
     } else {
-      ({ installed, running } = launchctlState(label));
+      const mode = service === 'watchdog' ? 'interval' : 'continuous';
+      ({ installed, running } = launchctlState(label, mode));
     }
   } else if (process.platform === 'linux') {
     const unit = service === 'relay'    ? 'nostr-relay.service'
@@ -595,11 +610,22 @@ function probeServiceHealth(service: LogService): ServiceHealth {
   return { service, installed, running, logPath, logExists, logMtimeMs, stale };
 }
 
-function streamLogs(
+async function deriveWatchdogNpub(): Promise<string | undefined> {
+  try {
+    const nsec = await getKeychain().retrieve('watchdog-nsec');
+    if (!nsec || !nsec.startsWith('nsec')) return undefined;
+    const d = nip19.decode(nsec);
+    if (d.type !== 'nsec') return undefined;
+    const pk = getPublicKey(d.data as Uint8Array);
+    return nip19.npubEncode(pk);
+  } catch { return undefined; }
+}
+
+async function streamLogs(
   service: LogService,
   res: http.ServerResponse,
   req: http.IncomingMessage,
-): void {
+): Promise<void> {
   res.writeHead(200, {
     'Content-Type':  'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -607,6 +633,9 @@ function streamLogs(
   });
 
   const health = probeServiceHealth(service);
+  if (service === 'watchdog') {
+    health.watchdogNpub = await deriveWatchdogNpub();
+  }
   res.write(`data: ${JSON.stringify({ status: health })}\n\n`);
 
   if (!health.logExists) {
@@ -2338,7 +2367,8 @@ export async function startWebServer(port: number): Promise<void> {
 
       const logsMatch = url.match(/^\/api\/logs\/(relay|watchdog|vpn)$/);
       if (logsMatch && method === 'GET') {
-        streamLogs(logsMatch[1] as 'relay' | 'watchdog' | 'vpn', res, req);
+        streamLogs(logsMatch[1] as 'relay' | 'watchdog' | 'vpn', res, req)
+          .catch(e => { try { res.end(); } catch {} ; process.stderr.write(`streamLogs error: ${e}\n`); });
         return;
       }
 

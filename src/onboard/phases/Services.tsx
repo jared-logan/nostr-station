@@ -6,7 +6,7 @@ import {
   writeRelayConfig, writeWatchdogScript, setupDirs,
   installRelayService, installWatchdogService,
   writeClaudeEnv, writeAiConfigFromOnboard,
-  generateWatchdogKeypair, writeContextFile,
+  ensureWatchdogKeypair, writeContextFile,
   EDITOR_FILENAMES,
 } from '../../lib/services.js';
 import { installNostrVpn, setupNgitBunker, generateSshKey } from '../../lib/install.js';
@@ -101,12 +101,21 @@ export const ServicesPhase: React.FC<ServicesPhaseProps> = ({ platform, config, 
         }
       } catch { /* non-fatal — dashboard will prompt if identity is missing */ }
 
-      // Watchdog keypair — nsec stored in keychain, not in script or config
+      // Watchdog keypair — nsec stored in keychain, not in script or config.
+      // ensureWatchdogKeypair is idempotent (reuses existing slot) and uses
+      // nostr-tools directly — no `nak` dependency. The older
+      // generateWatchdogKeypair helper shelled out to `nak keygen`, which was
+      // renamed to `nak key generate` in nak v0.18+; the rename went silent
+      // because the helper swallowed all errors, so the keychain write never
+      // happened and the watchdog logged "nsec not found" every 5 min.
       up(1, { status: 'running' });
       try {
-        const kp = await generateWatchdogKeypair(platform.cargoBin);
+        const kp = await ensureWatchdogKeypair();
         cfg = { ...cfg, watchdogNpub: kp.npub };
-        up(1, { status: 'done', detail: kp.npub ? `npub: ${kp.npub.slice(0, 12)}… → ${kp.backend}` : undefined });
+        up(1, {
+          status: 'done',
+          detail: `npub: ${kp.npub.slice(0, 12)}… ${kp.reused ? '(reused)' : '(generated)'} → ${kp.backend}`,
+        });
       } catch (e: any) { up(1, { status: 'error', detail: e.message }); }
 
       // Relay config — resolve hex pubkey now that nak is installed

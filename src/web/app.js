@@ -3414,6 +3414,7 @@ function clearLogsBadge() {
 const LogsPanel = (() => {
   const view   = $('log-view');
   const banner = $('logs-status');
+  const meta   = $('logs-meta');
   let currentSvc = 'relay';
   let es = null;
   let paused = false;
@@ -3492,6 +3493,33 @@ const LogsPanel = (() => {
     return null;
   }
 
+  function renderMeta(status) {
+    if (!meta) return;
+    // Watchdog tab: surface the watchdog npub so the user can follow it on
+    // their phone / preferred Nostr client and actually receive the
+    // relay-down DMs the watchdog is there to send. No other service has
+    // meta worth showing yet; this slot is ready for them when they do.
+    if (status.service === 'watchdog' && status.watchdogNpub) {
+      meta.hidden = false;
+      meta.innerHTML = `
+        <span class="logs-meta-label">watchdog identity</span>
+        <span class="logs-meta-value"></span>
+        <button class="logs-meta-copy" title="copy npub">copy</button>`;
+      meta.querySelector('.logs-meta-value').textContent = status.watchdogNpub;
+      const btn = meta.querySelector('.logs-meta-copy');
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(status.watchdogNpub).then(() => {
+          const prev = btn.textContent;
+          btn.textContent = 'copied';
+          setTimeout(() => { btn.textContent = prev; }, 1200);
+        }).catch(() => {});
+      });
+    } else {
+      meta.hidden = true;
+      meta.innerHTML = '';
+    }
+  }
+
   function renderBanner(status) {
     if (!banner) return;
     const b = statusToBanner(status);
@@ -3521,6 +3549,7 @@ const LogsPanel = (() => {
     disconnect();
     view.innerHTML = '';
     if (banner) { banner.hidden = true; banner.innerHTML = ''; }
+    if (meta)   { meta.hidden = true;   meta.innerHTML = ''; }
     // EventSource can't set Authorization headers, so we pass the session
     // token as a query param. Server-side extractBearer() accepts both
     // Authorization and ?token= for exactly this reason.
@@ -3529,7 +3558,7 @@ const LogsPanel = (() => {
     es.addEventListener('message', (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.status) renderBanner(data.status);
+        if (data.status) { renderBanner(data.status); renderMeta(data.status); }
         if (data.lines)  append(data.lines);
         if (data.error)  append(['[error] ' + data.error]);
       } catch {}
