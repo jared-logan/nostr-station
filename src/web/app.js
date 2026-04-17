@@ -953,11 +953,18 @@ async function refreshHealth() {
           location.hash = '#status';
           // Defer until the Status panel is rendered.
           setTimeout(() => {
-            const card = document.querySelector(`#status-cards .card[data-service="${CSS.escape(s.id)}"]`);
+            // Match either the new .status-row layout or the legacy .card
+            // (nsite still renders as a card; relay/vpn/etc. are rows).
+            const card = document.querySelector(`#status-cards [data-service="${CSS.escape(s.id)}"]`);
             if (card) {
               card.scrollIntoView({ behavior: 'smooth', block: 'center' });
               card.classList.add('highlight');
               setTimeout(() => card.classList.remove('highlight'), 1400);
+              // Expand the row if collapsed so the click-to-jump surfaces
+              // the detail content too.
+              if (card.tagName === 'DETAILS' && !card.hasAttribute('open')) {
+                card.setAttribute('open', '');
+              }
             }
           }, 60);
         });
@@ -987,7 +994,52 @@ const SERVICE_CTAS = {
   'relay-bin': { installSlug: 'relay',  configHint: 'nostr-station relay start' },
 };
 
+// Human-friendly summary + deep-link target for each service. The summary
+// is a sentence-level restatement of what `s.value` already says, pitched
+// at what the user would want to do next. `panelLink` shows up as a
+// follow-through hint so the expanded card is actionable without the user
+// having to remember which sidebar item to click.
+const SERVICE_DETAILS = {
+  'relay': {
+    summaryOk:   s => `Running at <code class="cmd-inline">${s.value.replace(/\s*✓\s*$/, '')}</code>. WebSocket publishing is live.`,
+    summaryWarn: _ => 'Binary is installed but the relay isn\'t listening on :8080. Start it from the Relay panel or via CLI.',
+    summaryErr:  _ => 'nostr-rs-relay isn\'t on this machine yet. Install sets up the service, config, and launch agent.',
+    panel: { hash: '#relay', label: 'Open Relay panel' },
+  },
+  'vpn': {
+    summaryOk:   s => `Connected to the nostr-mesh. Your tunnel IP is <code class="cmd-inline">${escapeHtml(s.value)}</code>.`,
+    summaryWarn: _ => 'nvpn binary is here but the daemon isn\'t routing traffic. Start it with the command below or see the Logs panel.',
+    summaryErr:  _ => 'nostr-vpn isn\'t installed. The mesh VPN lets other stations reach your relay over WireGuard.',
+    panel: { hash: '#logs', label: 'Open Logs → nostr-vpn' },
+  },
+  'ngit': {
+    summaryOk:   s => `Git-over-Nostr ready. Default ngit relay: <code class="cmd-inline">${escapeHtml(s.value.replace(/^relay:\s*/, ''))}</code>.`,
+    summaryWarn: _ => 'ngit is installed but no default relay is set — push/clone will prompt every time. Configure in the Config panel.',
+    summaryErr:  _ => 'ngit isn\'t installed. It lets you push signed git commits to Nostr relays instead of a central host.',
+    panel: { hash: '#config', label: 'Open Config → ngit' },
+  },
+  'claude': {
+    summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Launch from project cards or the sidebar Terminal.`,
+    summaryErr:  _ => 'Claude Code is Anthropic\'s CLI agent. Install hooks it up as the default AI editor for your projects.',
+    panel: { hash: '#projects', label: 'Open Projects' },
+  },
+  'nak': {
+    summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Used by <em>seed</em>, <em>watchdog</em>, and the whitelist helpers.`,
+    summaryErr:  _ => '<code class="cmd-inline">nak</code> is the Go CLI for signing, publishing, and querying Nostr events. The seed and watchdog flows depend on it.',
+  },
+  'relay-bin': {
+    summaryOk:   s => `Binary version: <code class="cmd-inline">${escapeHtml(s.value)}</code>. See <em>Relay</em> row above for the running service state.`,
+    summaryErr:  _ => '<code class="cmd-inline">nostr-rs-relay</code> isn\'t on this machine. Install unlocks the Relay row above.',
+  },
+};
+
 const StatusPanel = {
+  // Signature of the last payload we rendered. refreshHealth() ticks every
+  // 5s; the status rarely changes between ticks, and re-rendering on every
+  // tick was blowing away the user's <details> open state. Comparing
+  // signatures lets us short-circuit when the payload is unchanged — the
+  // DOM stays untouched, expanded rows stay expanded.
+  _sig: null,
   async onEnter() {
     try {
       const status = await api('/api/status');
@@ -998,67 +1050,125 @@ const StatusPanel = {
   },
   render(status) {
     const cards = $('status-cards');
+    const nextSig = status.map(s => `${s.id}:${s.state}:${s.value}`).join('|');
+    if (nextSig === this._sig && cards.childElementCount > 0) return;
+    this._sig = nextSig;
+
+    // Preserve which rows the user had expanded. Capture before wipe,
+    // reapply after the fresh build. Any new services (rare — payload
+    // shape is mostly static) just render collapsed.
+    const wasOpen = new Set(
+      Array.from(cards.querySelectorAll('.status-row[open]'))
+        .map(el => el.dataset.service)
+        .filter(Boolean)
+    );
+
     cards.innerHTML = '';
     for (const s of status) {
-      const cta = SERVICE_CTAS[s.id] || {};
-      const card = document.createElement('div');
-      card.className = `card ${stateClass(s.state)}`;
-      card.dataset.service = s.id;
-      card.innerHTML = `
-        <div class="label">${escapeHtml(s.label)}</div>
-        <div class="value">${escapeHtml(s.value)}</div>
-      `;
-      const ctaRow = document.createElement('div');
-      ctaRow.className = 'cta';
-      if (s.state === 'err' && cta.installSlug) {
-        const btn = document.createElement('button');
-        btn.className = 'primary';
-        btn.textContent = 'Install';
-        btn.addEventListener('click', () => {
-          openExecModal({
-            title: `Install ${s.label}`,
-            subtitle: 'Running doctor --fix to repair missing tools',
-            endpoint: `/api/exec/install/${cta.installSlug}`,
-          }).then(r => {
-            if (r.ok) toast(`${s.label} install finished`, '', 'ok');
-            else      toast(`${s.label} install exited ${r.code}`, '', 'err');
-            refreshHealth();
-          });
-        });
-        ctaRow.appendChild(btn);
-      } else if (s.state === 'warn' && cta.configHint) {
-        const meta = document.createElement('span');
-        meta.className = 'meta';
-        meta.innerHTML = `run: <span class="cmd-inline">${escapeHtml(cta.configHint)}</span>`;
-        ctaRow.appendChild(meta);
-        ctaRow.appendChild(copyBtn(cta.configHint));
-      } else if (s.state === 'warn' && s.id === 'ngit') {
-        const btn = document.createElement('button');
-        btn.className = 'primary';
-        btn.textContent = 'Configure in Config';
-        btn.addEventListener('click', () => {
-          location.hash = '#config';
-          setTimeout(() => {
-            const sec = document.getElementById('cfg-ngit-section');
-            if (sec) {
-              sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              const input = document.getElementById('cfg-ngit-relay-input');
-              if (input) input.focus();
-            }
-          }, 120);
-        });
-        ctaRow.appendChild(btn);
-      }
-      if (ctaRow.childElementCount > 0) card.appendChild(ctaRow);
-      cards.appendChild(card);
+      const row = buildStatusRow(s);
+      if (wasOpen.has(s.id)) row.setAttribute('open', '');
+      cards.appendChild(row);
     }
-    // The nsite card sits alongside the gatherStatus() services but is
+    // The nsite row sits alongside the gatherStatus() services but is
     // driven by its own endpoint (kind 34128 relay query), so we append
     // it after the main loop. It hydrates asynchronously; the 60s cache
     // inside getNsiteDiscover keeps refreshHealth() ticks cheap.
     appendNsiteStatusCard(cards);
   },
 };
+
+// Build one expandable row. Summary line stays visible at all times
+// (matches the sidebar Service Health chip); the details panel drops a
+// service-specific blurb plus any CTAs the user would act on next.
+function buildStatusRow(s) {
+  const cta = SERVICE_CTAS[s.id] || {};
+  const detail = SERVICE_DETAILS[s.id] || {};
+  const row = document.createElement('details');
+  row.className = `status-row ${stateClass(s.state)}`;
+  row.dataset.service = s.id;
+
+  const summary = document.createElement('summary');
+  summary.innerHTML = `
+    <span class="dot ${stateClass(s.state)}"></span>
+    <div class="status-main">
+      <div class="status-label">${escapeHtml(s.label)}</div>
+      <div class="status-value">${escapeHtml(s.value)}</div>
+    </div>
+  `;
+  row.appendChild(summary);
+
+  const details = document.createElement('div');
+  details.className = 'status-details';
+
+  const summaryFn = s.state === 'ok'   ? detail.summaryOk
+                  : s.state === 'warn' ? detail.summaryWarn
+                                       : detail.summaryErr;
+  if (summaryFn) {
+    const p = document.createElement('p');
+    p.innerHTML = summaryFn(s);
+    details.appendChild(p);
+  }
+
+  // CTA row — preserve every existing action path so clicking Install /
+  // Configure / Copy Hint behaves exactly as it did in the old grid.
+  const ctaRow = document.createElement('div');
+  ctaRow.className = 'status-cta';
+
+  if (s.state === 'err' && cta.installSlug) {
+    const btn = document.createElement('button');
+    btn.className = 'primary';
+    btn.textContent = 'Install';
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      openExecModal({
+        title: `Install ${s.label}`,
+        subtitle: 'Running doctor --fix to repair missing tools',
+        endpoint: `/api/exec/install/${cta.installSlug}`,
+      }).then(r => {
+        if (r.ok) toast(`${s.label} install finished`, '', 'ok');
+        else      toast(`${s.label} install exited ${r.code}`, '', 'err');
+        refreshHealth();
+      });
+    });
+    ctaRow.appendChild(btn);
+  } else if (s.state === 'warn' && cta.configHint) {
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.innerHTML = `run: <span class="cmd-inline">${escapeHtml(cta.configHint)}</span>`;
+    ctaRow.appendChild(meta);
+    ctaRow.appendChild(copyBtn(cta.configHint));
+  } else if (s.state === 'warn' && s.id === 'ngit') {
+    const btn = document.createElement('button');
+    btn.className = 'primary';
+    btn.textContent = 'Configure in Config';
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      location.hash = '#config';
+      setTimeout(() => {
+        const sec = document.getElementById('cfg-ngit-section');
+        if (sec) {
+          sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          const input = document.getElementById('cfg-ngit-relay-input');
+          if (input) input.focus();
+        }
+      }, 120);
+    });
+    ctaRow.appendChild(btn);
+  }
+
+  if (detail.panel) {
+    const link = document.createElement('a');
+    link.href = detail.panel.hash;
+    link.textContent = detail.panel.label + ' →';
+    link.style.marginLeft = ctaRow.childElementCount > 0 ? 'auto' : '0';
+    ctaRow.appendChild(link);
+  }
+
+  if (ctaRow.childElementCount > 0) details.appendChild(ctaRow);
+
+  row.appendChild(details);
+  return row;
+}
 
 async function appendNsiteStatusCard(container) {
   const card = document.createElement('div');

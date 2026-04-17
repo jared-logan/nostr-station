@@ -253,7 +253,8 @@ input:focus, textarea:focus, select:focus {
   0%   { box-shadow: 0 0 0 0 rgba(123, 180, 255, 0.55); }
   100% { box-shadow: 0 0 0 10px rgba(123, 180, 255, 0); }
 }
-.card.highlight {
+.card.highlight,
+.status-row.highlight {
   animation: status-card-pulse 1.3s ease-out;
   outline: 1px solid var(--accent-bright, #7bb4ff);
 }
@@ -380,13 +381,115 @@ input:focus, textarea:focus, select:focus {
   padding: 20px 24px;
 }
 
-/* ── cards (status panel) ─────────────────────────────────────────────── */
+/* ── status list (status panel) ───────────────────────────────────────── */
 
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+.status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.status-row {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  border-radius: var(--r);
+  transition: border-color 120ms;
+}
+.status-row.ok   { border-left-color: var(--success); }
+.status-row.warn { border-left-color: var(--warn); }
+.status-row.err  { border-left-color: var(--error); }
+.status-row:hover { border-color: var(--border-strong); }
+.status-row[open] { border-color: var(--border-strong); }
+
+.status-row > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
   gap: 12px;
 }
+.status-row > summary::-webkit-details-marker { display: none; }
+.status-row > summary::after {
+  content: '▸';
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 8px;
+  transition: transform 0.15s;
+  flex: 0 0 auto;
+}
+.status-row[open] > summary::after { transform: rotate(90deg); }
+
+.status-row > summary .dot { flex: 0 0 auto; }
+.status-row .status-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.status-row .status-label {
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.status-row .status-value {
+  font-size: 13px;
+  color: var(--text-bright);
+  word-break: break-all;
+}
+.status-row.err  .status-value { color: var(--error); }
+.status-row.warn .status-value { color: var(--warn); }
+
+.status-row .status-details {
+  padding: 4px 16px 14px;
+  border-top: 1px solid var(--border);
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.status-row .status-details p { margin: 0; line-height: 1.5; }
+.status-row .status-details a {
+  color: var(--accent-bright);
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+.status-row .status-details a:hover { color: var(--text-bright); }
+.status-row .status-detail-grid {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 4px 12px;
+  font-size: 11px;
+}
+.status-row .status-detail-grid dt { color: var(--muted); }
+.status-row .status-detail-grid dd { margin: 0; color: var(--text); word-break: break-all; }
+.status-row .status-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.status-row .status-cta button { font-size: 12px; }
+.status-row .status-cta .meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.status-row .status-cta .cmd-inline {
+  font-family: var(--mono, ui-monospace, monospace);
+  background: rgba(255,255,255,0.05);
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--text);
+}
+
+/* Keep legacy .card rules for the nsite tile until its renderer is
+   migrated — it's appended separately and still uses the card class. */
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -395,9 +498,7 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  transition: border-color 120ms;
 }
-.card:hover { border-color: var(--border-strong); }
 .card.ok   { border-left: 3px solid var(--success); }
 .card.warn { border-left: 3px solid var(--warn); }
 .card.err  { border-left: 3px solid var(--error); }
@@ -412,8 +513,6 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-bright);
   word-break: break-all;
 }
-.card.ok   .value { color: var(--text-bright); }
-.card.err  .value { color: var(--error); }
 .card .hint { font-size: 11px; color: var(--text-dim); }
 
 /* ── chat ─────────────────────────────────────────────────────────────── */
