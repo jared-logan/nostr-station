@@ -11,7 +11,16 @@ import {
 } from '../../lib/services.js';
 import { installNostrVpn, setupNgitBunker, generateSshKey } from '../../lib/install.js';
 import { execa } from 'execa';
-import { npubToHex } from '../../lib/detect.js';
+// Use the nostr-tools-backed npubToHex from relay-config, not detect's
+// nak-shell-out version. detect.npubToHex silently returns '' when nak
+// isn't on Node's PATH — a real failure mode on fresh macOS installs
+// where rustup has just added ~/.cargo/bin to ~/.cargo/env but the
+// running shell (and therefore the Node process it spawned) hasn't
+// picked it up yet. That empty hex meant the user's own npub never
+// made it into the relay whitelist, silently breaking their ability
+// to publish to their own relay. The relay-config version uses
+// nip19.decode directly — no PATH dependency, no exec, works inline.
+import { npubToHex } from '../../lib/relay-config.js';
 import {
   writeIdentity, readIdentity, identityExists, DEFAULT_READ_RELAYS,
 } from '../../lib/identity.js';
