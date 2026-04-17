@@ -165,13 +165,24 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
 };
 
 function getFix(label: string): string | undefined {
+  // For `nostr-vpn daemon` we surface the start command rather than
+  // `sudo nvpn service install`: on a fresh box the wizard already ran
+  // service install, so the unit is on disk — the common cause of a failing
+  // check is simply that the service is stopped. `systemctl start nvpn` is
+  // idempotent; if the unit is actually missing it'll fail with a clear
+  // error, which is a better signal than reinstalling the service every
+  // time doctor reports a miss.
+  const nvpnFix = process.platform === 'darwin'
+    ? 'sudo launchctl kickstart -k system/com.nostr-vpn.nvpn'
+    : 'sudo systemctl start nvpn';
+
   const fixes: Record<string, string> = {
     'Relay (localhost:8080)':
       process.platform === 'darwin'
         ? 'launchctl start com.nostr-station.relay'
         : 'systemctl --user start nostr-relay.service',
     'nostr-rs-relay binary':  'nostr-station update',
-    'nostr-vpn daemon':       'sudo nvpn service install',
+    'nostr-vpn daemon':       nvpnFix,
     'ngit binary':            'nostr-station update',
     'nak binary':             'nostr-station update',
     'claude-code binary':     'npm install -g @anthropic-ai/claude-code',
