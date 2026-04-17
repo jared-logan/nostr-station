@@ -519,10 +519,53 @@ input:focus, textarea:focus, select:focus {
 }
 .kind-badge .n { color: var(--text-bright); margin-left: 5px; font-weight: 600; }
 
+.events-collapse {
+  margin-top: 2px;
+}
+.events-collapse > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  transition: background 0.1s;
+}
+.events-collapse > summary:hover { background: var(--bg-card-hover, var(--bg-card)); color: var(--text); }
+.events-collapse > summary::-webkit-details-marker { display: none; }
+.events-collapse > summary::before {
+  content: '▸';
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.15s;
+  flex: 0 0 auto;
+}
+.events-collapse[open] > summary::before { transform: rotate(90deg); }
+.events-collapse[open] > summary {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+.events-collapse-title { flex: 1; font-weight: 500; color: var(--text); }
+.events-collapse-count {
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(255,255,255,0.04);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
 .events {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding-top: 8px;
 }
 .event {
   background: var(--bg-card);

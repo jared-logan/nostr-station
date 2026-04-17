@@ -1541,6 +1541,8 @@ const RelayPanel = (() => {
     if (ev.pubkey) pubkeys.add(ev.pubkey);
     $('relay-count').textContent   = Array.from(kindCounts.values()).reduce((a, b) => a + b, 0);
     $('relay-pubkeys').textContent = pubkeys.size;
+    const inline = $('relay-events-inline-count');
+    if (inline) inline.textContent = events.length;
     renderKinds(); renderEvents();
   }
   function renderKinds() {
@@ -1716,6 +1718,8 @@ const RelayPanel = (() => {
       pubkeys.clear();
       $('relay-count').textContent   = '0';
       $('relay-pubkeys').textContent = '0';
+      const inline = $('relay-events-inline-count');
+      if (inline) inline.textContent = '0';
       renderKinds();
       renderEvents();
       disconnect();

@@ -166,12 +166,18 @@
         </div>
 
         <div class="kinds" id="relay-kinds"></div>
-        <div class="events" id="relay-events">
-          <div class="empty-state">
-            Waiting for events…
-            <div class="hint">Publish one: <code>nak event -k 1 --sec &lt;nsec&gt; "hello" ws://localhost:8080</code></div>
+        <details class="events-collapse" id="relay-events-collapse">
+          <summary>
+            <span class="events-collapse-title">Recent events</span>
+            <span class="events-collapse-count"><span id="relay-events-inline-count">0</span> shown</span>
+          </summary>
+          <div class="events" id="relay-events">
+            <div class="empty-state">
+              Waiting for events…
+              <div class="hint">Publish one: <code>nak event -k 1 --sec &lt;nsec&gt; "hello" ws://localhost:8080</code></div>
+            </div>
           </div>
-        </div>
+        </details>
 
         <div class="whitelist-manager" id="relay-whitelist">
           <h4>Whitelist</h4>
