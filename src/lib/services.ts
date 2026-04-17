@@ -633,24 +633,60 @@ export async function generateWatchdogKeypair(cargoBin: string): Promise<{ npub:
 // identity. Falls back to generating a fresh keypair via nostr-tools (no
 // `nak` binary dependency) when the slot is empty or the stored value is
 // not a valid nsec.
+// Wrap a keychain op with a wall-clock timeout. The Linux backend shells out
+// to `secret-tool` which blocks on DBus when gnome-keyring-daemon is absent or
+// the login keyring is locked (common on SSH sessions, headless VMs, and fresh
+// Mint boxes before the user unlocks the keyring). Without a ceiling, the
+// entire web wizard hangs on POST /api/setup/relay/install. 5s is generous for
+// a healthy keychain and mercifully short on a broken one.
+async function withTimeout<T>(label: string, ms: number, p: Promise<T>): Promise<T> {
+  return await Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms).unref()
+    ),
+  ]);
+}
+
 export async function ensureWatchdogKeypair(): Promise<{ npub: string; reused: boolean; backend: string }> {
   const kc = getKeychain();
-  const existing = await kc.retrieve('watchdog-nsec');
+  const backend = getKeychainBackendName();
+  let t = blog('start', 'keychain.retrieve(watchdog-nsec)', undefined, `backend=${backend}`);
+  const existing = await withTimeout('keychain.retrieve', 5000, kc.retrieve('watchdog-nsec'));
+  blog('ok', 'keychain.retrieve(watchdog-nsec)', t, existing ? 'hit' : 'miss');
   if (existing && existing.startsWith('nsec')) {
     try {
       const decoded = nip19.decode(existing);
       if (decoded.type === 'nsec') {
         const sk = decoded.data as Uint8Array;
         const pk = getPublicKey(sk);
-        return { npub: nip19.npubEncode(pk), reused: true, backend: getKeychainBackendName() };
+        return { npub: nip19.npubEncode(pk), reused: true, backend };
       }
     } catch { /* malformed — fall through and regenerate */ }
   }
   const sk = generateSecretKey();
   const pk = getPublicKey(sk);
   const nsec = nip19.nsecEncode(sk);
-  await kc.store('watchdog-nsec', nsec);
-  return { npub: nip19.npubEncode(pk), reused: false, backend: getKeychainBackendName() };
+  t = blog('start', 'keychain.store(watchdog-nsec)', undefined, `backend=${backend}`);
+  await withTimeout('keychain.store', 5000, kc.store('watchdog-nsec', nsec));
+  blog('ok', 'keychain.store(watchdog-nsec)', t);
+  return { npub: nip19.npubEncode(pk), reused: false, backend };
+}
+
+// Step-level instrumentation for bootstrapRelayServices. Writes to stderr so
+// it survives being piped through the web-server process. Timestamps + elapsed
+// ms make it trivial to eyeball which step is hanging when POST
+// /api/setup/relay/install doesn't return (e.g. secret-tool blocking on a
+// locked GNOME keyring on a fresh Linux Mint box).
+function blog(phase: 'start' | 'ok' | 'err', name: string, startedMs?: number, detail?: string): number {
+  const now = Date.now();
+  const elapsed = startedMs ? `${now - startedMs}ms` : '';
+  const ts = new Date(now).toISOString();
+  const bits = [`[bootstrapRelay ${ts}]`, phase.toUpperCase(), name];
+  if (elapsed) bits.push(`(${elapsed})`);
+  if (detail)  bits.push(`— ${detail}`);
+  process.stderr.write(bits.join(' ') + '\n');
+  return now;
 }
 
 // ── Relay bootstrap (shared by web wizard + TUI) ──────────────────────────────
@@ -702,27 +738,36 @@ export async function bootstrapRelayServices(
   input: BootstrapRelayInput,
 ): Promise<BootstrapRelayResult> {
   const steps: BootstrapStep[] = [];
+  blog('start', 'bootstrapRelayServices', undefined, `platform=${platform.os} npub=${input.npub.slice(0, 12)}…`);
 
+  let t = blog('start', 'Validate npub');
   let hexPubkey: string;
   try {
     hexPubkey = npubToHexStrict(input.npub);
+    blog('ok', 'Validate npub', t);
   } catch (e: any) {
+    blog('err', 'Validate npub', t, e.message);
     steps.push({ name: 'Validate npub', ok: false, detail: e.message });
     return { ok: false, steps };
   }
 
+  t = blog('start', 'Directories');
   try {
     setupDirs(platform);
+    blog('ok', 'Directories', t);
     steps.push({ name: 'Directories', ok: true });
   } catch (e: any) {
+    blog('err', 'Directories', t, String(e.message ?? e));
     steps.push({ name: 'Directories', ok: false, detail: String(e.message ?? e) });
     return { ok: false, steps };
   }
 
+  t = blog('start', 'Watchdog keypair');
   let watchdogNpub = '';
   try {
     const kp = await ensureWatchdogKeypair();
     watchdogNpub = kp.npub;
+    blog('ok', 'Watchdog keypair', t, `${kp.reused ? 'reused' : 'generated'} → ${kp.backend}`);
     steps.push({
       name: 'Watchdog keypair',
       ok: true,
@@ -731,6 +776,7 @@ export async function bootstrapRelayServices(
   } catch (e: any) {
     // Non-fatal for the relay itself — the watchdog becomes inactive but
     // the relay still runs. Surface the error; don't abort the bootstrap.
+    blog('err', 'Watchdog keypair', t, String(e.message ?? e));
     steps.push({ name: 'Watchdog keypair', ok: false, detail: String(e.message ?? e) });
   }
 
@@ -754,16 +800,20 @@ export async function bootstrapRelayServices(
   // was generated still ends up with both keys whitelisted.
   const relayConfigPath = `${platform.configDir}/config.toml`;
   const configExisted = fs.existsSync(relayConfigPath);
+  t = blog('start', 'Relay config', undefined, configExisted ? 'existing → whitelist merge' : 'fresh write');
   try {
     if (configExisted) {
       if (hexPubkey)    addToWhitelist(hexPubkey, relayConfigPath);
       if (watchdogNpub) addToWhitelist(watchdogNpub, relayConfigPath);
+      blog('ok', 'Relay config', t, 'existing config preserved');
       steps.push({ name: 'Relay config', ok: true, detail: 'existing config preserved' });
     } else {
       writeRelayConfig(platform, cfg);
+      blog('ok', 'Relay config', t);
       steps.push({ name: 'Relay config', ok: true });
     }
   } catch (e: any) {
+    blog('err', 'Relay config', t, String(e.message ?? e));
     steps.push({ name: 'Relay config', ok: false, detail: String(e.message ?? e) });
     return { ok: false, steps };
   }
@@ -771,10 +821,13 @@ export async function bootstrapRelayServices(
   // Watchdog script — safe to rewrite; it's just a bash wrapper around
   // `nostr-station keychain get watchdog-nsec`, and the canonical content
   // is regenerated from the template each install.
+  t = blog('start', 'Watchdog script');
   try {
     writeWatchdogScript(platform, cfg);
+    blog('ok', 'Watchdog script', t);
     steps.push({ name: 'Watchdog script', ok: true });
   } catch (e: any) {
+    blog('err', 'Watchdog script', t, String(e.message ?? e));
     steps.push({ name: 'Watchdog script', ok: false, detail: String(e.message ?? e) });
   }
 
@@ -782,8 +835,11 @@ export async function bootstrapRelayServices(
   // `enable --now` step can fail independently (common on SSH sessions
   // without linger) — we record that distinction so callers can tell the
   // user "unit is on disk but systemd can't reach it" vs "unit is missing".
+  t = blog('start', 'Relay service');
   try {
     const r = installRelayService(platform);
+    blog(r.enable.ok ? 'ok' : 'err', 'Relay service', t,
+      r.enable.ok ? `unit=${r.unitPaths[0]}` : `wrote ${r.unitPaths[0]} — enable failed: ${r.enable.error}`);
     steps.push({
       name: 'Relay service',
       ok: r.enable.ok,
@@ -792,11 +848,15 @@ export async function bootstrapRelayServices(
         : `wrote ${r.unitPaths[0]} — enable failed: ${r.enable.error}`,
     });
   } catch (e: any) {
+    blog('err', 'Relay service', t, String(e.message ?? e));
     steps.push({ name: 'Relay service', ok: false, detail: String(e.message ?? e) });
   }
 
+  t = blog('start', 'Watchdog service');
   try {
     const r = installWatchdogService(platform);
+    blog(r.enable.ok ? 'ok' : 'err', 'Watchdog service', t,
+      r.enable.ok ? `units=${r.unitPaths.join(',')}` : `wrote ${r.unitPaths.join(', ')} — enable failed: ${r.enable.error}`);
     steps.push({
       name: 'Watchdog service',
       ok: r.enable.ok,
@@ -805,8 +865,12 @@ export async function bootstrapRelayServices(
         : `wrote ${r.unitPaths.join(', ')} — enable failed: ${r.enable.error}`,
     });
   } catch (e: any) {
+    blog('err', 'Watchdog service', t, String(e.message ?? e));
     steps.push({ name: 'Watchdog service', ok: false, detail: String(e.message ?? e) });
   }
 
-  return { ok: steps.every(s => s.ok), steps };
+  const allOk = steps.every(s => s.ok);
+  blog(allOk ? 'ok' : 'err', 'bootstrapRelayServices', undefined,
+    `${steps.filter(s => s.ok).length}/${steps.length} steps ok`);
+  return { ok: allOk, steps };
 }
