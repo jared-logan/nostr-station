@@ -1561,6 +1561,23 @@ const ChatPanel = (() => {
           try {
             const p = JSON.parse(d);
             if (p.error) throw new Error(p.error);
+            if (p.model) {
+              // Server emits this twice: once at stream-open with the
+              // requested model, and again if the upstream API returns a
+              // more fully-qualified id (Anthropic's message_start carries
+              // e.g. "claude-opus-4-6-20240229"). Always overwrite — the
+              // later value is the more accurate one.
+              const lbl = bodyEl.parentElement?.querySelector('.lbl');
+              if (lbl) {
+                let tag = lbl.querySelector('.model-tag');
+                if (!tag) {
+                  tag = document.createElement('span');
+                  tag.className = 'model-tag';
+                  lbl.appendChild(tag);
+                }
+                tag.textContent = p.model;
+              }
+            }
             if (p.content) {
               full += p.content;
               bodyEl.textContent = full;

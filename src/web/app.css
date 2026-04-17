@@ -541,6 +541,21 @@ input:focus, textarea:focus, select:focus {
 .msg.user .lbl  { color: var(--success); }
 .msg.asst .lbl  { color: var(--accent-bright); }
 .msg.error .lbl { color: var(--error); }
+/* Model identifier appended to the assistant label — e.g. "assistant
+   claude-opus-4-6". Lowercase, monospace, subdued so it reads as
+   metadata rather than competing with the ASSISTANT eyebrow. */
+.msg .lbl .model-tag {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+}
 .msg .body {
   white-space: pre-wrap;
   word-wrap: break-word;

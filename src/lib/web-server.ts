@@ -314,6 +314,15 @@ async function fetchOpenAICompatModels(
 async function streamAnthropic(
   messages: Msg[], system: string, cfg: ProviderConfig, res: http.ServerResponse,
 ): Promise<void> {
+  // Emit the requested model up front so the Chat pane can caption the
+  // reply bubble before Anthropic's own message_start event arrives.
+  // Anthropic's message_start carries the fully-qualified model id
+  // (e.g. "claude-opus-4-6-20240229") — we forward that too when it
+  // lands, and the client just overwrites its tag with the more
+  // specific value. If upstream drops the event, the user still sees
+  // the requested model, not a blank.
+  res.write(`data: ${JSON.stringify({ model: cfg.model })}\n\n`);
+
   const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -346,6 +355,9 @@ async function streamAnthropic(
       if (!data) continue;
       try {
         const parsed = JSON.parse(data);
+        if (parsed.type === 'message_start' && parsed.message?.model) {
+          res.write(`data: ${JSON.stringify({ model: parsed.message.model })}\n\n`);
+        }
         if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta') {
           res.write(`data: ${JSON.stringify({ content: parsed.delta.text })}\n\n`);
         }
@@ -366,6 +378,11 @@ async function streamOpenAICompat(
     headers['Authorization'] = `Bearer ${cfg.apiKey}`;
   }
 
+  // Same intent as streamAnthropic: caption the reply with the model
+  // name immediately, then refine with whatever upstream actually routed
+  // to (each OpenAI-compat chunk carries `model` at the top level).
+  res.write(`data: ${JSON.stringify({ model: cfg.model })}\n\n`);
+
   const apiRes = await fetch(url, {
     method: 'POST',
     headers,
@@ -380,6 +397,7 @@ async function streamOpenAICompat(
   const reader  = apiRes.body!.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  let modelForwarded = false;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -391,6 +409,10 @@ async function streamOpenAICompat(
       if (data === '[DONE]') return;
       try {
         const parsed  = JSON.parse(data);
+        if (!modelForwarded && typeof parsed.model === 'string' && parsed.model) {
+          res.write(`data: ${JSON.stringify({ model: parsed.model })}\n\n`);
+          modelForwarded = true;
+        }
         const content = parsed.choices?.[0]?.delta?.content;
         if (content) res.write(`data: ${JSON.stringify({ content })}\n\n`);
       } catch {}
