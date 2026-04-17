@@ -1161,13 +1161,44 @@ input:focus, textarea:focus, select:focus {
   font-size: 11px;
 }
 .whitelist-manager .item-row .npub {
-  flex: 1;
+  flex: 0 1 auto;
+  min-width: 0;
   word-break: break-all;
   color: var(--text-bright);
+}
+/* Badge hugs the npub; remove button pushes to the far right. */
+.whitelist-manager .item-row .npub-badge + button,
+.whitelist-manager .item-row .npub + button {
+  margin-left: auto;
 }
 .whitelist-manager .item-row button {
   padding: 2px 8px;
   font-size: 11px;
+}
+.whitelist-manager .npub-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.whitelist-manager .npub-badge-station {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent-bright);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.whitelist-manager .npub-badge-watchdog {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+}
+.whitelist-manager .npub-badge-seed {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
 }
 .whitelist-manager .add-row {
   display: flex;

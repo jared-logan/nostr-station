@@ -1626,10 +1626,23 @@ const RelayPanel = (() => {
         items.innerHTML = `<div style="color:var(--text-dim);font-size:11px;padding:6px 0">No entries — nobody can publish yet. Add an npub below.</div>`;
         return;
       }
+      // Reverse lookup: npub → role label. knownRoles is populated by the
+      // server from identity.json + keychain (watchdog-nsec, seed-nsec)
+      // so the labels stay correct as those rotate.
+      const roles = rc.knownRoles || {};
+      const byNpub = new Map();
+      if (roles.station)  byNpub.set(roles.station,  { cls: 'station',  text: 'You · station' });
+      if (roles.watchdog) byNpub.set(roles.watchdog, { cls: 'watchdog', text: 'Watchdog' });
+      if (roles.seed)     byNpub.set(roles.seed,     { cls: 'seed',     text: 'Seed' });
+
       for (const npub of rc.whitelist) {
         const row = document.createElement('div');
         row.className = 'item-row';
-        row.innerHTML = `<div class="npub">${escapeHtml(npub)}</div>`;
+        const role = byNpub.get(npub);
+        const badge = role
+          ? `<span class="npub-badge npub-badge-${role.cls}">${escapeHtml(role.text)}</span>`
+          : '';
+        row.innerHTML = `<div class="npub">${escapeHtml(npub)}</div>${badge}`;
         const rm = document.createElement('button');
         rm.className = 'danger'; rm.textContent = '×'; rm.title = 'remove';
         rm.addEventListener('click', () => handleRemove(npub));

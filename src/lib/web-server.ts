@@ -480,13 +480,13 @@ function wait(ms: number): Promise<void> {
 
 // ── Relay config (read-only) ──────────────────────────────────────────────────
 
-function serveRelayConfig(res: http.ServerResponse): void {
+async function serveRelayConfig(res: http.ServerResponse): Promise<void> {
   const s = readRelaySettings();
   if (!s) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       name: '', url: '', auth: false, dmAuth: false,
-      whitelist: [], dataDir: '', configPath: defaultConfigPath(),
+      whitelist: [], knownRoles: {}, dataDir: '', configPath: defaultConfigPath(),
       error: `config not found at ${defaultConfigPath()} — run nostr-station onboard`,
     }));
     return;
@@ -494,8 +494,25 @@ function serveRelayConfig(res: http.ServerResponse): void {
   // Prefer npub in the UI — hex is noise to humans. hexToNpub shells to `nak`
   // once per entry; whitelists are typically 1-10 entries so this is cheap.
   const whitelist = s.whitelist.map(h => hexToNpub(h));
+
+  // Role labels for the UI — lets the whitelist render "You · station",
+  // "Watchdog", "Seed" badges next to the nostr-station-managed entries
+  // without the user having to memorize truncated npub prefixes. Any of
+  // these may be undefined on a partial install (e.g. seed has never been
+  // run yet, so seed-nsec isn't in keychain); the client just renders no
+  // badge for missing roles.
+  const ident = readIdentity();
+  const [watchdogNpub, seedNpub] = await Promise.all([
+    deriveKeychainNpub('watchdog-nsec'),
+    deriveKeychainNpub('seed-nsec'),
+  ]);
+  const knownRoles: { station?: string; watchdog?: string; seed?: string } = {};
+  if (ident.npub) knownRoles.station = ident.npub;
+  if (watchdogNpub) knownRoles.watchdog = watchdogNpub;
+  if (seedNpub)     knownRoles.seed = seedNpub;
+
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ...s, whitelist }));
+  res.end(JSON.stringify({ ...s, whitelist, knownRoles }));
 }
 
 // ── Logs (SSE live tail) ──────────────────────────────────────────────────────
@@ -629,9 +646,11 @@ function probeServiceHealth(service: LogService): ServiceHealth {
   return { service, installed, running, logPath, logExists, logMtimeMs, stale };
 }
 
-async function deriveWatchdogNpub(): Promise<string | undefined> {
+async function deriveKeychainNpub(
+  slot: 'watchdog-nsec' | 'seed-nsec',
+): Promise<string | undefined> {
   try {
-    const nsec = await getKeychain().retrieve('watchdog-nsec');
+    const nsec = await getKeychain().retrieve(slot);
     if (!nsec || !nsec.startsWith('nsec')) return undefined;
     const d = nip19.decode(nsec);
     if (d.type !== 'nsec') return undefined;
@@ -639,6 +658,8 @@ async function deriveWatchdogNpub(): Promise<string | undefined> {
     return nip19.npubEncode(pk);
   } catch { return undefined; }
 }
+
+const deriveWatchdogNpub = () => deriveKeychainNpub('watchdog-nsec');
 
 async function streamLogs(
   service: LogService,
@@ -1342,7 +1363,7 @@ export async function startWebServer(port: number): Promise<void> {
       }
 
       if (url === '/api/relay-config' && method === 'GET') {
-        serveRelayConfig(res);
+        await serveRelayConfig(res);
         return;
       }
 
