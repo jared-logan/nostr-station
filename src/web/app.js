@@ -1703,6 +1703,24 @@ const RelayPanel = (() => {
       const r = await api('/api/relay/database/wipe', { method: 'POST' });
       if (!r.ok) throw new Error(r.error || 'wipe failed');
       toast('Database wiped', 'Relay restarted', 'ok');
+
+      // The server stops the relay, deletes the SQLite files, then
+      // restarts — but our in-memory view is still holding whatever
+      // events we saw before the wipe, and the WS that fed them is now
+      // a dead socket from the relay-stop. Clear client state and
+      // reconnect so the user sees an honest empty feed that fills in
+      // again as new events arrive. Mirrors what action('restart')
+      // does at the end of its handler.
+      events = [];
+      kindCounts.clear();
+      pubkeys.clear();
+      $('relay-count').textContent   = '0';
+      $('relay-pubkeys').textContent = '0';
+      renderKinds();
+      renderEvents();
+      disconnect();
+      setTimeout(() => connect(), 1200);
+
       refreshRelayStatus();
     } catch (e) {
       toast('Wipe failed', e.message, 'err');
