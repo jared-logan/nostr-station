@@ -1,9 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { execa } from 'execa';
+import { execSync } from 'child_process';
+import net from 'net';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { P } from '../onboard/components/palette.js';
 import { Select } from '../onboard/components/Select.js';
+import { getKeychain } from '../lib/keychain.js';
+import { addToWhitelist } from '../lib/relay-config.js';
 
 interface SeedProps {
   eventCount: number;
@@ -35,18 +39,45 @@ function randomContent(i: number): string {
 // discovering that. Passing `stdin: 'ignore'` closes stdin immediately so
 // nak skips the read and uses the --flag values directly. A 10s timeout
 // caps any remaining edge cases (unresponsive relay, network stall).
-async function nakPublish(args: string[]): Promise<boolean> {
+//
+// Rejection detection: nak writes the publish result to stdout/stderr and
+// exits 0 even when the relay returns `["OK", id, false, "<reason>"]`
+// ("blocked: pubkey is not allowed", "auth-required", etc.). Earlier
+// versions of this helper trusted the exit code alone, and seed would
+// cheerfully report "✓ Seeded 50 events" while the relay dropped every
+// one. We now scan the combined output for the textual failure markers
+// nak prints — "failed:", "NOTICE: blocked", "auth-required" — and treat
+// a matching string as a non-success.
+const NAK_REJECT_RE = /failed:|\bblocked\b|auth-required|restricted|rate-limit/i;
+
+async function nakPublish(args: string[]): Promise<{ ok: boolean; reason?: string }> {
   try {
-    await execa('nak', args, { stdin: 'ignore', timeout: 10_000 });
-    return true;
-  } catch {
-    return false;
+    const { stdout, stderr } = await execa('nak', args, {
+      stdin: 'ignore', timeout: 10_000, reject: false,
+    });
+    const combined = `${stdout}\n${stderr}`;
+    const match = combined.match(NAK_REJECT_RE);
+    if (match) {
+      // Try to extract the "msg: <reason>" tail nak prints so errors are
+      // actionable ("blocked: pubkey is not allowed to publish") rather
+      // than just "rejected". Falls back to the match itself.
+      const msg = combined.match(/failed:\s*msg:\s*([^\n]+)/i)?.[1]
+               ?? combined.match(/NOTICE:[^\n]+/i)?.[0]
+               ?? match[0];
+      return { ok: false, reason: msg.trim().slice(0, 160) };
+    }
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, reason: (e?.shortMessage || e?.message || 'exec failed').slice(0, 160) };
   }
 }
 
-async function relayEventCount(): Promise<number> {
+async function relayEventCount(authNsec: string): Promise<number> {
   try {
-    const { stdout } = await execa('nak', ['count', RELAY_URL], { stdin: 'ignore', timeout: 3000 });
+    const { stdout } = await execa(
+      'nak', ['count', '--auth', authNsec, RELAY_URL],
+      { stdin: 'ignore', timeout: 3000 },
+    );
     const n = parseInt(stdout.trim(), 10);
     return isNaN(n) ? 0 : n;
   } catch {
@@ -54,34 +85,135 @@ async function relayEventCount(): Promise<number> {
   }
 }
 
-function generateSeedKeypair(): { nsec: string; npub: string } {
-  // Previously shelled to `nak keygen`, which nak renamed to `nak key
-  // generate` + changed output to raw hex. Going through nostr-tools
-  // (already a dep) is both simpler and insulates us from further nak
-  // CLI churn. Throws are impossible in practice — generateSecretKey uses
-  // crypto.randomBytes — but callers still guard for a defensive empty
-  // result since the UI path depends on it.
-  try {
-    const sk = generateSecretKey();
-    return {
-      nsec: nip19.nsecEncode(sk),
-      npub: nip19.npubEncode(getPublicKey(sk)),
-    };
-  } catch {
-    return { nsec: '', npub: '' };
+// ── Seed identity ──────────────────────────────────────────────────────────
+//
+// Seed uses a single stable keypair stored in the OS keychain (slot
+// `seed-nsec`). First run generates + stores; every subsequent run
+// retrieves and reuses. The npub is auto-whitelisted on the local relay
+// so NIP-42-gated publishing succeeds without the user having to
+// `relay whitelist --add` by hand. One relay restart on first seed;
+// zero on subsequent runs.
+async function ensureSeedIdentity(): Promise<{ nsec: string; npub: string; freshlyGenerated: boolean }> {
+  const kc = getKeychain();
+  const existing = await kc.retrieve('seed-nsec');
+  if (existing && existing.startsWith('nsec')) {
+    try {
+      const d = nip19.decode(existing);
+      if (d.type === 'nsec') {
+        const pk = getPublicKey(d.data as Uint8Array);
+        return {
+          nsec: existing,
+          npub: nip19.npubEncode(pk),
+          freshlyGenerated: false,
+        };
+      }
+    } catch { /* malformed — fall through and regenerate */ }
   }
+  const sk = generateSecretKey();
+  const nsec = nip19.nsecEncode(sk);
+  const npub = nip19.npubEncode(getPublicKey(sk));
+  await kc.store('seed-nsec', nsec);
+  return { nsec, npub, freshlyGenerated: true };
+}
+
+// ── Relay lifecycle helpers ────────────────────────────────────────────────
+
+function serviceCmd(action: 'start' | 'stop'): string {
+  const isMac = process.platform === 'darwin';
+  const label = 'com.nostr-station.relay';
+  if (isMac) return `launchctl ${action} ${label}`;
+  return `systemctl --user ${action} nostr-relay.service`;
+}
+
+async function waitForRelayListening(port = 8080, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const up = await new Promise<boolean>(resolve => {
+      const sock = net.createConnection({ host: '127.0.0.1', port }, () => {
+        sock.end();
+        resolve(true);
+      });
+      sock.on('error', () => resolve(false));
+      sock.setTimeout(500, () => { sock.destroy(); resolve(false); });
+    });
+    if (up) return true;
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return false;
+}
+
+async function restartRelay(): Promise<boolean> {
+  try { execSync(serviceCmd('stop'), { stdio: 'pipe', timeout: 5000 }); } catch { /* idempotent */ }
+  await new Promise(r => setTimeout(r, 500));
+  try { execSync(serviceCmd('start'), { stdio: 'pipe', timeout: 5000 }); }
+  catch { return false; }
+  return waitForRelayListening();
 }
 
 export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
-  const [phase, setPhase] = useState<'checking' | 'confirm' | 'seeding' | 'done' | 'error'>('checking');
+  const [phase, setPhase] = useState<
+    'preparing' | 'checking' | 'confirm' | 'seeding' | 'done' | 'error'
+  >('preparing');
+  const [prepareStatus, setPrepareStatus] = useState('Looking up seed identity…');
   const [existingCount, setExistingCount] = useState(0);
   const [published, setPublished] = useState(0);
+  const [failed, setFailed] = useState(0);
+  const [firstFailReason, setFirstFailReason] = useState('');
   const [total, setTotal] = useState(0);
   const [errorMsg, setErrorMsg] = useState('');
+  const [seedNsec, setSeedNsec] = useState('');
+  const [seedNpub, setSeedNpub] = useState('');
 
   useEffect(() => {
     (async () => {
-      const count = await relayEventCount();
+      // 1. Ensure the seed identity exists (retrieve or generate+store).
+      let ident;
+      try {
+        ident = await ensureSeedIdentity();
+      } catch (e: any) {
+        setErrorMsg(`Could not set up seed identity: ${e?.message ?? 'unknown'}`);
+        setPhase('error');
+        return;
+      }
+      setSeedNsec(ident.nsec);
+      setSeedNpub(ident.npub);
+
+      // 2. Ensure the npub is in the relay whitelist. Idempotent — returns
+      // already:true if it was already there (common path on runs 2+).
+      setPrepareStatus('Whitelisting seed identity…');
+      let restartNeeded = ident.freshlyGenerated;
+      try {
+        const r = addToWhitelist(ident.npub);
+        if (!r.ok) {
+          setErrorMsg(`Could not whitelist seed identity: ${r.hex}`);
+          setPhase('error');
+          return;
+        }
+        if (!r.already) restartNeeded = true;
+      } catch (e: any) {
+        setErrorMsg(`Whitelist write failed: ${e?.message ?? 'unknown'}`);
+        setPhase('error');
+        return;
+      }
+
+      // 3. If the whitelist file just changed, the relay needs to reload
+      // the config — nostr-rs-relay only reads config.toml at startup.
+      // Subsequent seed runs skip this step entirely.
+      if (restartNeeded) {
+        setPrepareStatus('Restarting relay to pick up whitelist…');
+        const ok = await restartRelay();
+        if (!ok) {
+          setErrorMsg('Relay restart failed. Try `nostr-station relay restart` and re-run seed.');
+          setPhase('error');
+          return;
+        }
+      }
+
+      // 4. Now that we can reach the relay with an authenticated,
+      // whitelisted identity, see how many events it already has — the
+      // confirm prompt depends on this count.
+      setPrepareStatus('Counting existing events…');
+      const count = await relayEventCount(ident.nsec);
       setExistingCount(count);
       setPhase('confirm');
     })();
@@ -95,12 +227,15 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
   }, [phase, existingCount]);
 
   // Propagate error phase as non-zero exit — runSeed hits 'error' when
-  // nak is missing or the keypair can't be generated, and users running
-  // `nostr-station seed && nostr-station tui` need that failure to stop
-  // the chain.
+  // the seed identity can't be set up or the relay won't restart. Also
+  // exit non-zero if seeding "completed" but the relay rejected every
+  // event: users running `nostr-station seed && nostr-station tui` need
+  // that failure to stop the chain instead of being misled by the
+  // Ink-only warn row.
   useEffect(() => {
     if (phase === 'error') process.exitCode = 1;
-  }, [phase]);
+    if (phase === 'done' && published === 0 && failed > 0) process.exitCode = 1;
+  }, [phase, published, failed]);
 
   // Non-TTY safety: the <Select> confirmation prompt below uses useInput,
   // which needs raw-mode stdin and hard-crashes on piped/redirected input.
@@ -121,9 +256,10 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
   }, [phase, existingCount]);
 
   const runSeed = async () => {
-    const { nsec, npub } = generateSeedKeypair();
-    if (!nsec) {
-      setErrorMsg('Could not generate keypair — is nak installed? (nostr-station doctor --fix)');
+    const nsec = seedNsec;
+    const npub = seedNpub;
+    if (!nsec || !npub) {
+      setErrorMsg('Seed identity not initialized — this is a bug. Please re-run.');
       setPhase('error');
       return;
     }
@@ -134,11 +270,24 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
     setPhase('seeding');
 
     let count = 0;
+    let fails = 0;
+    const recordResult = (r: { ok: boolean; reason?: string }) => {
+      if (r.ok) { count++; setPublished(count); }
+      else      { fails++; setFailed(fails); if (fails === 1 && r.reason) setFirstFailReason(r.reason); }
+    };
+
+    // Every call passes both --sec (to sign the event) AND --auth (to
+    // answer the relay's NIP-42 AUTH challenge with the same key). These
+    // are the two halves the previous version was missing — no --auth
+    // meant the relay dropped the publish with "auth-required", and
+    // signing with a non-whitelisted key would have been rejected even
+    // after auth. With the seed npub now whitelisted (prepare phase) and
+    // --auth present, publishes actually land.
 
     // kind:0 profile (--full only)
     if (full) {
-      const ok = await nakPublish([
-        'event', '--sec', nsec,
+      recordResult(await nakPublish([
+        'event', '--sec', nsec, '--auth', nsec,
         '-k', '0',
         '--content', JSON.stringify({
           name: 'seed-user',
@@ -146,44 +295,40 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
           picture: '',
         }),
         RELAY_URL,
-      ]);
-      if (ok) { count++; setPublished(count); }
+      ]));
     }
 
     // kind:1 notes
     for (let i = 0; i < targetCount; i++) {
-      const ok = await nakPublish([
-        'event', '--sec', nsec,
+      recordResult(await nakPublish([
+        'event', '--sec', nsec, '--auth', nsec,
         '-k', '1',
         '--content', randomContent(i),
         RELAY_URL,
-      ]);
-      if (ok) { count++; setPublished(count); }
+      ]));
     }
 
     // kind:3 contact list (--full only)
     if (full) {
-      const ok = await nakPublish([
-        'event', '--sec', nsec,
+      recordResult(await nakPublish([
+        'event', '--sec', nsec, '--auth', nsec,
         '-k', '3',
         '--content', '{}',
         '-t', `p:${npub}`,
         RELAY_URL,
-      ]);
-      if (ok) { count++; setPublished(count); }
+      ]));
     }
 
     // kind:7 reactions on a sample of notes (--full only)
     if (full) {
       const reactionCount = Math.floor(targetCount / 3);
       for (let i = 0; i < reactionCount; i++) {
-        const ok = await nakPublish([
-          'event', '--sec', nsec,
+        recordResult(await nakPublish([
+          'event', '--sec', nsec, '--auth', nsec,
           '-k', '7',
           '--content', '+',
           RELAY_URL,
-        ]);
-        if (ok) { count++; setPublished(count); }
+        ]));
       }
     }
 
@@ -198,6 +343,10 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
         {full && <Text color={P.muted}> --full</Text>}
       </Box>
       <Text color={P.accentDim}>{'─────────────────────────────'}</Text>
+
+      {phase === 'preparing' && (
+        <Text color={P.muted}>{prepareStatus}</Text>
+      )}
 
       {phase === 'checking' && (
         <Text color={P.muted}>Checking relay…</Text>
@@ -236,7 +385,19 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
 
       {phase === 'done' && (
         <Box marginTop={1} flexDirection="column">
-          <Text color={P.success}>✓ Seeded relay with {published} events</Text>
+          {failed === 0 ? (
+            <Text color={P.success}>✓ Seeded relay with {published} events</Text>
+          ) : published > 0 ? (
+            <Text color={P.warn}>⚠ Published {published}/{total} events — {failed} rejected</Text>
+          ) : (
+            <Text color={P.error}>✗ All {total} events rejected by the relay</Text>
+          )}
+          {firstFailReason && (
+            <Box marginTop={1}>
+              <Text color={P.muted}>Reason: </Text>
+              <Text color={P.warn}>{firstFailReason}</Text>
+            </Box>
+          )}
           <Box marginTop={1}>
             <Text color={P.muted}>Verify: </Text>
             <Text>nak req -k 1 -l 5 {RELAY_URL}</Text>
