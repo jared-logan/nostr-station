@@ -557,8 +557,38 @@ function launchctlState(
   }
 }
 
+// nvpn owns its own daemon lifecycle — it's launched via `nvpn start --daemon`
+// (or `nvpn service install` on systems that want a platform-managed service),
+// homebrew's post-install, or a user's own supervisor. That means launchd /
+// systemd labels are unreliable predictors of install state: a perfectly fine
+// homebrew install has no launchd agent, but the daemon is running and we
+// should tail it. `nvpn status --json` is the authoritative signal — it
+// reports `daemon.running` and the actual `log_file` path nvpn writes to,
+// which is nvpn's Application Support dir, NOT our ~/logs convention.
+function probeNvpn(): { installed: boolean; running: boolean; logPath: string } {
+  const defaultLogPath = path.join(os.homedir(), 'logs', 'nvpn.log');
+  const hasBinary = cmdOk('command -v nvpn');
+  if (!hasBinary) return { installed: false, running: false, logPath: defaultLogPath };
+
+  try {
+    const out = execSync('nvpn status --json', { stdio: 'pipe', timeout: 2000 }).toString();
+    const data: any = JSON.parse(out);
+    const logFile = data?.daemon?.log_file;
+    return {
+      installed: true,
+      running:   Boolean(data?.daemon?.running),
+      logPath:   (typeof logFile === 'string' && logFile) ? logFile : defaultLogPath,
+    };
+  } catch {
+    // Binary exists but status failed — daemon probably not running (nvpn
+    // errors out when it can't reach its socket). Report installed + not
+    // running; banner will tell the user how to start it.
+    return { installed: true, running: false, logPath: defaultLogPath };
+  }
+}
+
 function probeServiceHealth(service: LogService): ServiceHealth {
-  const logPath = {
+  let logPath = {
     relay:    path.join(os.homedir(), 'logs', 'nostr-rs-relay.log'),
     watchdog: path.join(os.homedir(), 'logs', 'watchdog.log'),
     vpn:      path.join(os.homedir(), 'logs', 'nvpn.log'),
@@ -567,28 +597,17 @@ function probeServiceHealth(service: LogService): ServiceHealth {
   let installed = false;
   let running   = false;
 
-  if (process.platform === 'darwin') {
-    const label = service === 'relay'    ? 'com.nostr-station.relay'
-                : service === 'watchdog' ? 'com.nostr-station.watchdog'
-                : 'com.nostr-vpn';
-    if (service === 'vpn') {
-      // nvpn uses a com.nostr-vpn.* label set by its own installer; match
-      // loosely so an upstream rename doesn't break the probe silently.
-      const out = (() => {
-        try { return execSync('launchctl list', { stdio: 'pipe', timeout: 1500 }).toString(); }
-        catch { return ''; }
-      })();
-      const line = out.split('\n').find(l => /nostr-vpn/.test(l));
-      installed = !!line;
-      running   = !!(line && /^\d+\s/.test(line));
-    } else {
-      const mode = service === 'watchdog' ? 'interval' : 'continuous';
-      ({ installed, running } = launchctlState(label, mode));
-    }
+  if (service === 'vpn') {
+    const s = probeNvpn();
+    installed = s.installed;
+    running   = s.running;
+    logPath   = s.logPath;  // nvpn's own log location, from its status JSON
+  } else if (process.platform === 'darwin') {
+    const label = service === 'relay' ? 'com.nostr-station.relay' : 'com.nostr-station.watchdog';
+    const mode  = service === 'watchdog' ? 'interval' : 'continuous';
+    ({ installed, running } = launchctlState(label, mode));
   } else if (process.platform === 'linux') {
-    const unit = service === 'relay'    ? 'nostr-relay.service'
-               : service === 'watchdog' ? 'nostr-watchdog.timer'
-               : 'nvpn';
+    const unit = service === 'relay' ? 'nostr-relay.service' : 'nostr-watchdog.timer';
     installed = cmdOk(`systemctl --user cat ${unit}`) || cmdOk(`systemctl cat ${unit}`);
     running   = cmdOk(`systemctl --user is-active --quiet ${unit}`)
              || cmdOk(`systemctl is-active --quiet ${unit}`);

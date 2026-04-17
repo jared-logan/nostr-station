@@ -3468,11 +3468,14 @@ const LogsPanel = (() => {
     if (!s.running) {
       const fix = s.service === 'relay' ? 'nostr-station relay start'
                 : s.service === 'watchdog' ? 'launchctl start com.nostr-station.watchdog'
-                : 'nvpn up';
+                : 'nvpn start --daemon';
+      const tail = s.service === 'vpn'
+        ? ' — or <code>nvpn service install</code> for a supervised system service.'
+        : ' — or use the Relay panel\'s start button.';
       return {
         level: 'warn',
         title: `${svcLabel} is installed but not running.`,
-        hint:  `Start it: <code>${fix}</code> — or use the Relay panel's start button.`,
+        hint:  `Start it: <code>${fix}</code>${tail}`,
       };
     }
     if (!s.logExists) {
