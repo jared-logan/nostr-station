@@ -21,6 +21,7 @@ const WHAT_GETS_REMOVED = [
   'relay config (~/.config/nostr-rs-relay/)',
   'log files (~/logs/nostr-rs-relay*, ~/logs/watchdog*)',
   'watchdog script (~/scripts/relay-watchdog.sh)',
+  'stored secrets (system keychain: service=nostr-station)',
   'npm global: nostr-station',
 ];
 
@@ -53,6 +54,7 @@ export const Uninstall: React.FC<UninstallProps> = ({ yes }) => {
       { label: 'Remove relay config',    status: 'pending' as StepStatus },
       { label: 'Remove log files',       status: 'pending' as StepStatus },
       { label: 'Remove watchdog script', status: 'pending' as StepStatus },
+      { label: 'Clear stored secrets',   status: 'pending' as StepStatus },
       { label: 'Uninstall npm package',  status: 'pending' as StepStatus },
     ];
     setSteps(initial);
@@ -108,10 +110,40 @@ export const Uninstall: React.FC<UninstallProps> = ({ yes }) => {
     shell(`rm -f "${HOME}/scripts/relay-watchdog.sh"`);
     up(5, 'done');
 
-    // npm package
+    // Stored secrets — wipe every slot keychain.ts wrote under
+    // `service=nostr-station` (watchdog-nsec, demo-nsec, legacy
+    // ai-api-key, and all ai:<provider-id> slots).
+    //
+    // Linux: `secret-tool clear` accepts an attribute filter and removes
+    // every matching item in one call.
+    //
+    // macOS: `security delete-generic-password` has no wildcard — it
+    // removes one match per invocation and exits non-zero when nothing is
+    // left. We loop until it fails, capped at 64 iterations as a safety
+    // net in case deletion ever appears to succeed without actually
+    // removing the item (would otherwise spin forever).
+    //
+    // Encrypted-file fallback (Linux without libsecret-tools or DBus):
+    // unconditionally rm the file — keychain.ts writes it as the single
+    // JSON store `~/.config/nostr-station/secrets`. Safe to run even when
+    // the real keyring was active; a missing file is a no-op.
     up(6, 'running');
-    shell('npm uninstall -g nostr-station --quiet');
+    if (IS_MAC) {
+      shell(
+        'for i in $(seq 1 64); do ' +
+        'security delete-generic-password -s nostr-station >/dev/null 2>&1 || break; ' +
+        'done'
+      );
+    } else {
+      shell('secret-tool clear service nostr-station 2>/dev/null');
+      shell(`rm -f "${HOME}/.config/nostr-station/secrets"`);
+    }
     up(6, 'done');
+
+    // npm package
+    up(7, 'running');
+    shell('npm uninstall -g nostr-station --quiet');
+    up(7, 'done');
 
     setStage('done');
   };
