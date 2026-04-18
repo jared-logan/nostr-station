@@ -1099,7 +1099,12 @@ const StatusPanel = {
     const cards = $('status-cards');
     // Signature now includes kind so a future hotfix that re-categorizes
     // an entry does force a re-render instead of silently sticking.
-    const nextSig = status.map(s => `${s.id}:${s.kind}:${s.state}:${s.value}`).join('|');
+    const nextSig = status.map(s => {
+      const pluginSig = Array.isArray(s.plugins)
+        ? s.plugins.map(p => `${p.id}=${p.installed ? p.version || 'yes' : 'no'}`).join(',')
+        : '';
+      return `${s.id}:${s.kind}:${s.state}:${s.value}:${pluginSig}`;
+    }).join('|');
     if (nextSig === this._sig && cards.childElementCount > 0) return;
     this._sig = nextSig;
 
@@ -1253,8 +1258,72 @@ function buildStatusRow(s) {
 
   if (ctaRow.childElementCount > 0) details.appendChild(ctaRow);
 
+  // Claude Code plugins are nested here rather than promoted to top-level
+  // Status rows / sidebar dots. They're only usable inside a Claude Code
+  // session, so "is claude installed" is the precondition — surfacing them
+  // underneath keeps the sidebar lean and makes the nesting self-evident.
+  if (s.id === 'claude' && Array.isArray(s.plugins) && s.plugins.length > 0) {
+    details.appendChild(buildPluginsBlock(s.plugins));
+  }
+
   row.appendChild(details);
   return row;
+}
+
+function buildPluginsBlock(plugins) {
+  const block = document.createElement('div');
+  block.className = 'status-plugins';
+
+  const head = document.createElement('div');
+  head.className = 'status-plugins-head';
+  head.textContent = 'Plugins';
+  block.appendChild(head);
+
+  const list = document.createElement('div');
+  list.className = 'status-plugins-list';
+  for (const p of plugins) {
+    const row = document.createElement('div');
+    row.className = 'status-plugin ' + (p.installed ? 'ok' : 'err');
+
+    const glyph = p.installed ? '✓' : '✗';
+    const indicator = `<span class="bin-indicator bin-indicator-${p.installed ? 'ok' : 'err'}">${glyph}</span>`;
+    const versionChip = p.installed && p.version
+      ? `<span class="status-plugin-version">v${escapeHtml(p.version)}</span>`
+      : '';
+    const about = p.about
+      ? `<div class="status-plugin-about">${escapeHtml(p.about)}</div>`
+      : '';
+
+    row.innerHTML = `
+      ${indicator}
+      <div class="status-plugin-main">
+        <div class="status-plugin-head">
+          <span class="status-plugin-name">${escapeHtml(p.name)}</span>
+          ${versionChip}
+        </div>
+        ${about}
+      </div>
+    `;
+
+    if (!p.installed && p.installHint) {
+      const hint = document.createElement('div');
+      hint.className = 'status-plugin-hint';
+      const label = document.createElement('span');
+      label.className = 'muted';
+      label.textContent = 'run: ';
+      const code = document.createElement('code');
+      code.className = 'cmd-inline';
+      code.textContent = p.installHint;
+      hint.appendChild(label);
+      hint.appendChild(code);
+      hint.appendChild(copyBtn(p.installHint));
+      row.querySelector('.status-plugin-main').appendChild(hint);
+    }
+
+    list.appendChild(row);
+  }
+  block.appendChild(list);
+  return block;
 }
 
 async function appendNsiteStatusCard(container) {

@@ -550,6 +550,69 @@ input:focus, textarea:focus, select:focus {
   color: var(--text);
 }
 
+/* Nested plugin list inside the Claude Code status card. Uses a dashed
+   divider + uppercase section head to signal "sub-items" without building
+   a whole new tier in the visual hierarchy. */
+.status-row .status-plugins {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.status-row .status-plugins-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.status-row .status-plugins-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.status-row .status-plugin {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 12px;
+}
+.status-row .status-plugin .bin-indicator {
+  min-width: 14px;
+  font-size: 13px;
+  margin-top: 1px;
+}
+.status-row .status-plugin-main { flex: 1; min-width: 0; }
+.status-row .status-plugin-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.status-row .status-plugin-name {
+  color: var(--text);
+  font-weight: 500;
+}
+.status-row .status-plugin-version {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.status-row .status-plugin-about {
+  color: var(--text-dim);
+  margin-top: 2px;
+  line-height: 1.45;
+}
+.status-row .status-plugin-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
 /* Keep legacy .card rules for the nsite tile until its renderer is
    migrated — it's appended separately and still uses the card class. */
 .card {

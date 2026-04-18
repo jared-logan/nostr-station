@@ -2,6 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { P } from '../onboard/components/palette.js';
 import { execSync } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { readIdentity } from '../lib/identity.js';
 
 interface StatusProps { json: boolean; }
@@ -25,6 +28,84 @@ export interface ServiceStatus {
   ok:    boolean;
   state: ServiceState;
   kind:  ServiceKind;
+  // Claude Code plugins are nested under the `claude` row in the dashboard
+  // Status panel — they're not real binaries on PATH so they don't warrant
+  // sidebar Service Health rows of their own, but users still need to see
+  // whether the ones we pitch in onboard (llm-wiki today) are actually
+  // installed. Populated only on the 'claude' entry.
+  plugins?: ClaudePlugin[];
+}
+
+export interface ClaudePlugin {
+  id:          string;          // registry key, e.g. 'wiki@llm-wiki'
+  name:        string;          // display name
+  version:     string | null;   // from installed_plugins.json when installed
+  installed:   boolean;
+  recommended: boolean;         // we suggest this one in onboard
+  installHint?: string;         // exact slash-command to run when missing
+  about?:       string;         // one-line blurb for the expanded card
+}
+
+// Plugins we render even when absent, so "not installed" states carry the
+// exact command the user should run. Reconciled against Claude Code's own
+// ~/.claude/plugins/installed_plugins.json (key = "<name>@<marketplace>").
+const RECOMMENDED_PLUGINS: ReadonlyArray<{
+  id: string;
+  name: string;
+  installHint: string;
+  about: string;
+}> = [
+  {
+    id:          'wiki@llm-wiki',
+    name:        'llm-wiki',
+    installHint: '/install-plugin github:nvk/llm-wiki',
+    about:       'LLM-compiled knowledge base — research, compile, and query Nostr docs in-session.',
+  },
+];
+
+function gatherClaudePlugins(): ClaudePlugin[] {
+  const registryPath = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
+  let installed: Record<string, Array<{ version?: string }>> = {};
+  try {
+    installed = JSON.parse(fs.readFileSync(registryPath, 'utf8'))?.plugins ?? {};
+  } catch { /* registry missing — nothing installed, rows stay 'not installed' */ }
+
+  const rows: ClaudePlugin[] = [];
+  const seen = new Set<string>();
+
+  // Claude Code's registry writes 'unknown' for plugins whose source lacks
+  // a version tag — render it as "no version" instead of a literal "v unknown".
+  const normalizeVersion = (v: string | undefined): string | null =>
+    (v && v !== 'unknown') ? v : null;
+
+  for (const rec of RECOMMENDED_PLUGINS) {
+    const entry = installed[rec.id]?.[0];
+    rows.push({
+      id:          rec.id,
+      name:        rec.name,
+      version:     normalizeVersion(entry?.version),
+      installed:   !!entry,
+      recommended: true,
+      installHint: rec.installHint,
+      about:       rec.about,
+    });
+    seen.add(rec.id);
+  }
+
+  for (const [id, entries] of Object.entries(installed)) {
+    if (seen.has(id)) continue;
+    const entry = entries?.[0];
+    if (!entry) continue;
+    rows.push({
+      id,
+      name:        id.split('@')[0],
+      version:     normalizeVersion(entry.version),
+      installed:   true,
+      recommended: false,
+    });
+  }
+
+  return rows;
 }
 
 // Every shellout here is on the hot path for /api/status. A single blocking
@@ -121,7 +202,7 @@ export function gatherStatus(): ServiceStatus[] {
     // Binaries — CLI tools; installed or not. `ngit` is the lone binary with
     // a warn state (installed but no default relay set — configure in Config).
     { id: 'ngit',      label: 'ngit',        value: ngitBin && ngitRelay ? `relay: ${ngitRelay.replace(/^wss?:\/\//, '')}` : ngitBin ? 'not configured' : 'not installed', ok: ngitBin && !!ngitRelay, state: ngitState,    kind: 'binary' },
-    { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed',                                                           ok: !!claudeV,    state: claudeState,   kind: 'binary' },
+    { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed',                                                           ok: !!claudeV,    state: claudeState,   kind: 'binary', plugins: gatherClaudePlugins() },
     { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState,      kind: 'binary' },
     { id: 'relay-bin', label: 'relay bin',   value: relayV   ?? 'not installed',                                                           ok: !!relayV,     state: relayBinState, kind: 'binary' },
     { id: 'stacks',    label: 'Stacks',      value: stacksV  ?? (stacksBin ? 'installed' : 'not installed'),                               ok: stacksBin,    state: stacksState,   kind: 'binary' },
