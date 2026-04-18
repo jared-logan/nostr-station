@@ -737,23 +737,13 @@ export async function installClaudeCode(): Promise<InstallResult> {
 }
 
 // Stacks by Soapbox — @getstacks/stacks — Nostr app scaffolding via MKStack
-// Docs: getstacks.dev  |  Usage after install: stacks mkstack (per project)
-//
-// Post-install we also widen Stacks's default relay set with a few large
-// general-purpose relays. The mkstack template event lives primarily on
-// relay.nostr.band — when that relay is slow, `stacks mkstack` spins for
-// minutes before timing out. Adding nos.lol / damus / wine / snort as
-// additional discovery candidates makes first-hit reliable. Best-effort:
-// failures here don't fail the install.
+// Docs: getstacks.dev  |  Usage: `stacks agent` for the Dork AI coding loop
+// in any project directory. `stacks mkstack` is no longer invoked by our
+// scaffold — see project_mkstack_naddr_broken memory — but users who want
+// to use Stacks for anything else (agent, aliases, etc.) still benefit
+// from having the binary installed.
 export async function installStacks(): Promise<InstallResult> {
-  const r = await run('npm', ['install', '-g', '@getstacks/stacks', '--quiet']);
-  if (r.ok) {
-    try {
-      const { ensureStacksRelays } = await import('./project-scaffold.js');
-      ensureStacksRelays();
-    } catch { /* helper missing or write failed — non-fatal */ }
-  }
-  return r;
+  return run('npm', ['install', '-g', '@getstacks/stacks', '--quiet']);
 }
 
 // nsyte — Deno rewrite of nsite-cli with first-class NIP-46 bunker support

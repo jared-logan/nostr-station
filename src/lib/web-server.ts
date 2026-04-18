@@ -1579,9 +1579,24 @@ export async function startWebServer(port: number): Promise<void> {
           res.end(JSON.stringify({ error: 'bad json' }));
           return;
         }
-        const name     = String(parsed.name || '');
-        const template = parsed.template === 'empty' ? 'empty' : 'mkstack';
-        await scaffoldProject(name, template, res);
+        const name = String(parsed.name || '');
+
+        // Two source types here: 'local-only' (plain git init) and
+        // 'git-url' (git clone + freshen). ngit clones go through the
+        // dedicated /api/ngit/clone path because they validate the
+        // nostr:// / naddr1 URL format and use the existing Scan flow.
+        // Default to local-only on unknown / missing source so we never
+        // accidentally shell out to something unexpected.
+        const src = parsed.source;
+        let source: import('./project-scaffold.js').ScaffoldSource = { type: 'local-only' };
+        if (src && typeof src === 'object') {
+          if (src.type === 'git-url' && typeof src.url === 'string') {
+            source = { type: 'git-url', url: src.url };
+          } else if (src.type === 'local-only') {
+            source = { type: 'local-only' };
+          }
+        }
+        await scaffoldProject(name, source, res);
         return;
       }
 
@@ -2431,6 +2446,104 @@ export async function startWebServer(port: number): Promise<void> {
           res.end(JSON.stringify({ error: 'url must be a nostr:// URL or naddr1… value' }));
           return;
         }
+        // Resolving a naddr to a git-cloneable URL happens in two stages:
+        //
+        //  (1) Decode the naddr (pubkey hex + d-tag + optional relay hints).
+        //      A bare naddr can't be handed to `git clone` directly —
+        //      git-remote-nostr only accepts `nostr://<npub>/<d-tag>`.
+        //
+        //  (2) Fetch the kind-30617 repo announcement from the naddr's
+        //      embedded relay hints (plus the user's read relays as
+        //      fallback). That announcement carries `clone` tags with
+        //      real transport URLs — usually https://git.shakespeare.diy
+        //      or https://relay.ngit.dev — which we prefer because
+        //      git-remote-nostr can't always find the event via whatever
+        //      relays ngit has configured globally.
+        //
+        // If step (2) finds clone URLs, we hand the https one to `git
+        // clone`. If nothing comes back, we fall back to the reconstructed
+        // `nostr://<npub>/<d-tag>` and let git-remote-nostr try its luck.
+        // The client still records `remotes.ngit = <naddr or nostr://>`
+        // so the ngit chip stays correct regardless of transport.
+        let cloneUrl = rawUrl;
+        if (rawUrl.startsWith('naddr1')) {
+          let pubkeyHex = '';
+          let dTag = '';
+          let relayHints: string[] = [];
+          try {
+            const decoded = nip19.decode(rawUrl);
+            if (decoded.type !== 'naddr' || decoded.data.kind !== 30617) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'naddr must reference a kind-30617 ngit repo announcement' }));
+              return;
+            }
+            pubkeyHex = decoded.data.pubkey;
+            dTag = decoded.data.identifier;
+            relayHints = Array.isArray(decoded.data.relays) ? decoded.data.relays : [];
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `could not decode naddr: ${e?.message ?? 'invalid encoding'}` }));
+            return;
+          }
+
+          // Build the relay set. naddr hints go first (the publisher told
+          // us where this event lives); user read relays as fallback so
+          // we've got some breadth. Cap at 6 to keep nak's connection
+          // fanout bounded — one slow relay shouldn't block the rest.
+          const ident = readIdentity();
+          const userReadRelays = (ident.readRelays || []).filter(isValidRelayUrl);
+          const relays = [...relayHints, ...userReadRelays]
+            .filter(isValidRelayUrl)
+            .filter((r, i, a) => a.indexOf(r) === i) // dedupe preserving order
+            .slice(0, 6);
+
+          // Fetch the announcement. nak requires `stdin: 'ignore'` — its
+          // req subcommand otherwise blocks on stdin EOF (see memory
+          // project_nak_stdin_hang).
+          const httpsCloneUrl = await new Promise<string>((resolve) => {
+            if (relays.length === 0) { resolve(''); return; }
+            const args = ['req', '-k', '30617', '-a', pubkeyHex, '-t', `d=${dTag}`, '-l', '1', ...relays];
+            const child = spawn('nak', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+            let chunks = '';
+            let resolved = false;
+            const done = (url: string) => { if (resolved) return; resolved = true; clearTimeout(timer); try { child.kill('SIGTERM'); } catch {} resolve(url); };
+            const timer = setTimeout(() => done(''), 10_000);
+            child.stdout.on('data', (b: Buffer) => {
+              chunks += b.toString();
+              const lines = chunks.split('\n');
+              chunks = lines.pop() || '';
+              for (const line of lines) {
+                const s = line.trim();
+                if (!s) continue;
+                let ev: any;
+                try { ev = JSON.parse(s); } catch { continue; }
+                if (!ev || ev.kind !== 30617 || !Array.isArray(ev.tags)) continue;
+                const cloneTags = ev.tags
+                  .filter((t: any[]) => t[0] === 'clone')
+                  .flatMap((t: any[]) => t.slice(1).filter((x: any) => typeof x === 'string' && x));
+                // Prefer HTTPS — most reliable transport and doesn't
+                // require git-remote-nostr to find the event again.
+                const https = cloneTags.find((u: string) => /^https:\/\//i.test(u));
+                if (https) { done(https); return; }
+                const anyGit = cloneTags.find((u: string) => /^(git|https?|ssh):\/\//i.test(u));
+                if (anyGit) { done(anyGit); return; }
+              }
+            });
+            child.on('error', () => done(''));
+            child.on('close', () => done(''));
+          });
+
+          if (httpsCloneUrl) {
+            cloneUrl = httpsCloneUrl;
+          } else {
+            // No announcement reachable (or no clone URLs in it).
+            // Fall back to nostr:// and let git-remote-nostr try — if
+            // the user's ngit relay config can find the event there's
+            // still a chance.
+            const npub = nip19.npubEncode(pubkeyHex);
+            cloneUrl = `nostr://${npub}/${dTag}`;
+          }
+        }
         // repoName becomes the last segment of the clone target — reject
         // any path separators, dotfile patterns, or traversal attempts.
         // Allowed characters mirror what git itself accepts for repo dir
@@ -2460,7 +2573,7 @@ export async function startWebServer(port: number): Promise<void> {
         // can call /api/projects/detect and store the absolute path in
         // projects.json — detect does not expand "~".
         streamExec(
-          { bin: 'git', args: ['clone', rawUrl, target], env: { NO_COLOR: '1', TERM: 'dumb' } },
+          { bin: 'git', args: ['clone', cloneUrl, target], env: { NO_COLOR: '1', TERM: 'dumb' } },
           res, req, undefined,
           { info: 'resolvedPath', value: target },
         );

@@ -136,8 +136,17 @@ export function getProject(id: string): Project | null {
 
 function validateInput(input: Partial<Project>, existing?: Project): { ok: true } | { ok: false; error: string } {
   const caps = input.capabilities ?? existing?.capabilities;
-  if (caps && !caps.git && !caps.ngit && !caps.nsite) {
-    return { ok: false, error: 'enable at least one capability (git, ngit, or nsite)' };
+  const resolvedPath = input.path !== undefined ? input.path : existing?.path;
+
+  // A project must have SOME reason to exist. Two legitimate shapes:
+  //   1. Local-only (folder on disk, no capabilities yet) — path required.
+  //   2. Has at least one capability — git/ngit require a path (checked
+  //      below); nsite-only can be path-less.
+  // Before local-only was first-class, zero-capability projects were
+  // rejected outright. Now they're valid as long as there's a path.
+  const anyCap = caps && (caps.git || caps.ngit || caps.nsite);
+  if (caps && !anyCap && !resolvedPath) {
+    return { ok: false, error: 'project needs a local path or a capability (git, ngit, or nsite)' };
   }
 
   const ident = input.identity;
@@ -172,12 +181,11 @@ function validateInput(input: Partial<Project>, existing?: Project): { ok: true 
     return { ok: false, error: 'project name too long (max 64 chars)' };
   }
 
-  // nsite-only is the only combo that may skip a local path.
-  const resolvedPath = input.path !== undefined ? input.path : existing?.path;
-  if (caps && !resolvedPath) {
-    if (caps.git || caps.ngit) {
-      return { ok: false, error: 'git and ngit projects require a local path' };
-    }
+  // nsite-only is the only combo that may skip a local path — git and
+  // ngit both need one. `resolvedPath` is hoisted above for the
+  // no-capabilities check; reuse it here.
+  if (caps && !resolvedPath && (caps.git || caps.ngit)) {
+    return { ok: false, error: 'git and ngit projects require a local path' };
   }
 
   return { ok: true };

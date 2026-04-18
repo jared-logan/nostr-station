@@ -1503,6 +1503,119 @@ input:focus, textarea:focus, select:focus {
   text-decoration: underline;
 }
 
+/* Shared form rules for the Import Repository modal — same field shape as
+ * the New Project form, just add the selector to the existing rules. */
+.import-repo-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.import-repo-form .np-field { display: flex; flex-direction: column; gap: 6px; }
+.import-repo-form .np-label {
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.import-repo-form input[type="text"] {
+  font-size: 14px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-bright);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.import-repo-form input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.import-repo-form .np-preview {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.import-repo-form .np-preview code {
+  color: var(--accent-bright);
+  background: rgba(255,255,255,0.04);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.import-repo-form .ir-url-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.import-repo-form .ir-url-actions button {
+  font-size: 11px;
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.import-repo-form .ir-url-actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent-bright);
+}
+
+/* Helper text shown under a form. Subtle, explains the why of the flow. */
+.new-project-form .np-hint,
+.import-repo-form .np-hint {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  padding: 10px 12px;
+  border-left: 2px solid var(--border-strong);
+  background: rgba(255,255,255,0.02);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.new-project-form .np-hint code,
+.import-repo-form .np-hint code {
+  background: rgba(255,255,255,0.04);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+/* ── Add Project chooser modal ────────────────────────────────────────── */
+
+.add-source-chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.add-source-card {
+  display: block;
+  text-align: left;
+  width: 100%;
+  padding: 14px 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: border-color 120ms, background 120ms, transform 80ms;
+  color: inherit;
+  font: inherit;
+}
+.add-source-card:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-elev));
+}
+.add-source-card:active { transform: translateY(1px); }
+.add-source-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 4px;
+}
+.add-source-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
 /* ── help cards (relay panel) ─────────────────────────────────────────── */
 
 .help-card {

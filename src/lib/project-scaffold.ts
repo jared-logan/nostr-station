@@ -1,16 +1,24 @@
 /**
  * Project scaffolding for the dashboard's "New Project" flow.
  *
- * Two templates supported today:
- *   - mkstack — shells to `stacks mkstack <slug>` (Soapbox's Nostr React
- *     scaffolder). Requires the `stacks` binary; caller should gate the
- *     template option in the UI and the server refuses if stacks is
- *     missing so no half-baked directory is created.
- *   - empty — creates an empty dir, runs `git init`, writes a tiny
- *     README. Zero external deps, always available.
+ * Two source types supported:
+ *   - local-only — creates a fresh ~/projects/<slug> with `git init -b main`,
+ *     a minimal README and .gitignore, and an initial commit. Zero external
+ *     deps. This is the blank-canvas path; the user plugs in whatever AI /
+ *     editor / build system they want afterward.
+ *   - git-url — shells to `git clone <url> <target>` for any standard git
+ *     URL (github, gitlab, codeberg, self-hosted). After clone, git history
+ *     is reset to a single root commit owned by the user so the project
+ *     doesn't carry the template's upstream history or remote.
  *
- * Both paths live under ~/projects/<slug> and register into projects.json
- * via createProject() so the Projects panel shows them immediately.
+ * ngit clones (nostr:// / naddr1…) live in /api/ngit/clone — separate from
+ * this scaffold because they use the existing Scan flow's orchestration
+ * (git clone + detect + register). No ngit init happens at scaffold time:
+ * ngit init publishes a repo announcement to nostr relays and belongs in
+ * the user-initiated Publish flow, not automatically on creation.
+ *
+ * Both scaffold paths land at ~/projects/<slug> and register into
+ * projects.json via createProject() so the Projects panel shows them.
  */
 
 import fs from 'fs';
@@ -20,7 +28,9 @@ import { spawn, execSync } from 'child_process';
 import type http from 'http';
 import { createProject } from './projects.js';
 
-export type ScaffoldTemplate = 'mkstack' | 'empty';
+export type ScaffoldSource =
+  | { type: 'local-only' }
+  | { type: 'git-url'; url: string };
 
 // Slug rules: lower-case, replace runs of non-alphanumerics with a single
 // dash, trim leading/trailing dashes, cap at 40 chars. "My Cool App!" →
@@ -56,59 +66,6 @@ export function checkCollision(name: string): CollisionReport {
   return { exists: fs.existsSync(p), path: p, slug };
 }
 
-// ── Stacks relay resilience ───────────────────────────────────────────────
-//
-// Stacks ships with three Nostr relays in its default config —
-// ditto.pub/relay, relay.nostr.band, relay.primal.net. The mkstack
-// template event (kind 30717 by pubkey 0461fcbe…) appears to live
-// primarily on relay.nostr.band; when nostr.band is slow or wedged,
-// `stacks mkstack` spins for minutes before timing out. Adding a
-// handful of large general-purpose relays as additional discovery
-// candidates dramatically improves first-hit reliability — Soapbox's
-// own publishes typically reach nos.lol, relay.damus.io, etc.
-//
-// Helper is idempotent: reads Stacks's config, appends any of our
-// recommended relays that aren't already there, writes back. Called
-// once at install time AND on every mkstack scaffold attempt — the
-// double-call costs nothing on the steady state (no diff = no write)
-// but means existing users get the patch on their next click without
-// a reinstall.
-const STACKS_RECOMMENDED_RELAYS = [
-  'wss://nos.lol',
-  'wss://relay.damus.io',
-  'wss://nostr.wine',
-  'wss://relay.snort.social',
-];
-
-export function ensureStacksRelays(): { patched: boolean; path: string | null } {
-  const candidates = [
-    path.join(os.homedir(), 'Library', 'Preferences', 'stacks', 'config.json'),
-    path.join(os.homedir(), '.config', 'stacks', 'config.json'),
-  ];
-  for (const p of candidates) {
-    let raw: string;
-    try { raw = fs.readFileSync(p, 'utf8'); }
-    catch { continue; /* not at this path */ }
-    let cfg: any;
-    try { cfg = JSON.parse(raw); }
-    catch { return { patched: false, path: p }; /* corrupt — leave alone */ }
-
-    const existing: string[] = Array.isArray(cfg.nostrRelays) ? cfg.nostrRelays.slice() : [];
-    const seen = new Set(existing);
-    const additions = STACKS_RECOMMENDED_RELAYS.filter(r => !seen.has(r));
-    if (additions.length === 0) return { patched: false, path: p };
-
-    cfg.nostrRelays = [...existing, ...additions];
-    try {
-      fs.writeFileSync(p, JSON.stringify(cfg, null, '\t') + '\n');
-      return { patched: true, path: p };
-    } catch {
-      return { patched: false, path: p };
-    }
-  }
-  return { patched: false, path: null };
-}
-
 // ── Scaffold flow (SSE-streamed) ──────────────────────────────────────────
 //
 // Emits the same line/done/info frame shape as /api/exec/install/* so the
@@ -127,15 +84,15 @@ function writeDone(res: http.ServerResponse, code: number): void {
   try { res.end(); } catch {}
 }
 
-// Reset a freshly-scaffolded project's git history to a single root commit
-// owned by the user. Templates cloned via `stacks mkstack` (or our gitlab
-// fallback) carry Soapbox's full upstream history + a remote pointing at
-// soapbox-pub/mkstack — accidents waiting to happen. After scaffold we
-// always rm -rf .git, git init, and commit. If git user.name/email aren't
-// set we still wipe and re-init but skip the commit so we don't fail with
-// "please tell me who you are"; the user can commit themselves once they
-// configure git. Best-effort throughout — failures here don't fail the
-// scaffold (the project files are already correct on disk).
+// Reset a freshly-cloned project's git history to a single root commit
+// owned by the user. Repos cloned from any git URL carry the upstream's
+// full history + a remote pointing at the source — if the user pushes
+// naively they could end up pushing to someone else's repo. After clone
+// we always rm -rf .git, git init, and commit. If git user.name/email
+// aren't set we still wipe and re-init but skip the commit so we don't
+// fail with "please tell me who you are"; the user can commit themselves
+// once they configure git. Best-effort throughout — failures here don't
+// fail the scaffold (the project files are already correct on disk).
 async function freshenGitRepo(target: string, message: string, res: http.ServerResponse): Promise<void> {
   // Wipe inherited history. Safe even if the dir was created without one.
   try { fs.rmSync(path.join(target, '.git'), { recursive: true, force: true }); }
@@ -193,13 +150,12 @@ async function runStreamed(
 
 // Spinner / cursor-control aware line emitter.
 //
-// Tools like `stacks mkstack` (and most ora / clack / ink CLIs) animate a
+// Tools like `git clone` (and most ora / clack / ink CLIs) animate a
 // "working…" indicator using ANSI cursor-control sequences (\x1b[999D to
 // jump the cursor home, \x1b[J to clear forward) instead of newlines.
 // When piped through SSE the cursor controls become invisible to the
-// browser but the redraws still come through as duplicate "frames" — the
-// user saw thousands of "◓  Cloning stack..." lines instead of one
-// updating line.
+// browser but the redraws still come through as duplicate "frames" —
+// without dedup the user sees thousands of identical lines.
 //
 // This emitter:
 //   1. Treats every CSI sequence and bare \r as a logical newline so the
@@ -232,9 +188,35 @@ function makeLineEmitter(res: http.ServerResponse, stream: Stream) {
   };
 }
 
+// Minimum-surface starter for a local-only project. Just a README with
+// the project name so the folder isn't empty. No .gitignore (meaningless
+// without git), no framework, no npm init. Local-only means literally a
+// folder of files — git/ngit are opt-in later via the project card.
+function writeLocalStarter(target: string, name: string): void {
+  const readme = `# ${name}\n\nCreated by nostr-station.\n`;
+  fs.writeFileSync(path.join(target, 'README.md'), readme, { mode: 0o644 });
+}
+
+// Validate a URL we're about to hand to `git clone`. We allow http/https
+// and git-over-ssh. We explicitly reject `nostr://` and bare naddr values
+// — those route through /api/ngit/clone, not here. Rejecting early gives
+// the client a clear error instead of a confusing `git clone` failure.
+function validateGitUrl(url: string): string | null {
+  const u = url.trim();
+  if (!u) return 'url is required';
+  if (u.startsWith('nostr://') || u.startsWith('naddr1')) {
+    return 'nostr URLs belong to the ngit clone flow, not git-url';
+  }
+  if (/^https?:\/\//i.test(u))           return null;
+  if (/^git@[\w.-]+:[\w./-]+$/i.test(u)) return null;
+  if (/^ssh:\/\//i.test(u))              return null;
+  if (/^git:\/\//i.test(u))              return null;
+  return 'url must be http(s), ssh, or git@host:path';
+}
+
 export async function scaffoldProject(
   name: string,
-  template: ScaffoldTemplate,
+  source: ScaffoldSource,
   res: http.ServerResponse,
 ): Promise<void> {
   res.writeHead(200, {
@@ -259,24 +241,12 @@ export async function scaffoldProject(
     return writeDone(res, 2);
   }
 
-  // mkstack requires the binary. Fail fast with a clear message rather
-  // than letting spawn emit an obscure ENOENT.
-  if (template === 'mkstack') {
-    let hasStacks = false;
-    try {
-      execSync('command -v stacks', { stdio: 'pipe', timeout: 1500 });
-      hasStacks = true;
-    } catch { /* not on PATH */ }
-    if (!hasStacks) {
-      writeLine(res, 'stderr', '`stacks` binary not found. Install it from Status → Binaries → Stacks, then retry.');
+  // Per-source validation up front. Fail fast before touching the fs.
+  if (source.type === 'git-url') {
+    const err = validateGitUrl(source.url);
+    if (err) {
+      writeLine(res, 'stderr', err);
       return writeDone(res, 3);
-    }
-
-    // Best-effort: widen Stacks's relay set for template discovery.
-    // Surfaces the patch as a "sys" line so the user sees what we did.
-    const patch = ensureStacksRelays();
-    if (patch.patched) {
-      writeLine(res, 'sys', `Added discovery relays to ${patch.path} for faster mkstack lookup.`);
     }
   }
 
@@ -287,45 +257,57 @@ export async function scaffoldProject(
     return writeDone(res, 4);
   }
 
-  let code = 0;
-  if (template === 'mkstack') {
-    writeLine(res, 'sys', `Scaffolding mkstack template into ${target}…`);
-    code = await runStreamed('stacks', ['mkstack', slug], dir, res);
-    if (code !== 0) {
-      writeLine(res, 'stderr', `stacks mkstack exited with code ${code}`);
-      return writeDone(res, code);
-    }
-  } else {
-    writeLine(res, 'sys', `Creating empty git repo at ${target}…`);
+  // Remotes we record on the project after scaffolding. Populated per
+  // source so the future multi-remote UI has real data to render.
+  let githubRemote: string | null = null;
+  // "git" capability means "has a traditional git remote (github/gitlab/
+  // self-hosted)", NOT "is a .git directory on disk." Local-only starts
+  // without either. A git-url import starts with git=true because the
+  // traditional remote is inherent to the clone.
+  let gitCapability = false;
+
+  if (source.type === 'local-only') {
+    // Folder of files, period. No git init, no initial commit, no
+    // .gitignore. Matches shakespeare's "no version control until you
+    // pick a sync destination" model. User can initialize git later from
+    // the project card (or their own terminal) when they're ready to
+    // start tracking history.
+    writeLine(res, 'sys', `Creating local project at ${target}…`);
     try {
       fs.mkdirSync(target, { recursive: true });
-      fs.writeFileSync(
-        path.join(target, 'README.md'),
-        `# ${name.trim()}\n\nCreated by nostr-station.\n`,
-        { mode: 0o644 },
-      );
+      writeLocalStarter(target, name.trim());
     } catch (e: any) {
       writeLine(res, 'stderr', `could not write to ${target}: ${e?.message ?? 'unknown'}`);
       return writeDone(res, 4);
     }
+  } else {
+    // git-url — clone the remote into the target dir, then freshen the
+    // git history so the initial commit is the user's and the upstream
+    // remote pointer is dropped (prevents accidental push-to-source).
+    writeLine(res, 'sys', `Cloning ${source.url} into ${target}…`);
+    const code = await runStreamed('git', ['clone', source.url, target], dir, res);
+    if (code !== 0) {
+      writeLine(res, 'stderr', `git clone exited with code ${code}`);
+      return writeDone(res, code);
+    }
+    // Record github/gitlab/etc. as the github remote so it's visible on
+    // the project card. The multi-remote UI (future) will generalize
+    // this field name to support arbitrary named remotes.
+    if (/^https?:\/\//i.test(source.url)) githubRemote = source.url;
+    gitCapability = true;
+    await freshenGitRepo(target, `Initial commit`, res);
   }
 
-  // Reset git history so the project starts at the user's commit 1, not
-  // Soapbox's mkstack template history. Single code path for both
-  // templates — the empty branch lands here without an existing .git
-  // (freshenGitRepo's rm is a no-op then), the mkstack branch lands
-  // with Soapbox's clone (which freshenGitRepo wipes and re-inits).
-  await freshenGitRepo(target, `Initial commit from ${template} template`, res);
-
-  // Adopt into projects.json. git capability is always on (we either ran
-  // git init or mkstack, which scaffolds as a git repo). ngit + nsite are
-  // follow-ups the user can enable from the project card.
+  // Adopt into projects.json. Capabilities map to the visible chips on
+  // the project card — local-only shows no version-control chip, git-url
+  // shows "git". ngit + nsite are explicit follow-ups the user enables
+  // from the project card (via Publish flow — never auto-published).
   const created = createProject({
     name: name.trim(),
     path: target,
-    capabilities: { git: true, ngit: false, nsite: false },
+    capabilities: { git: gitCapability, ngit: false, nsite: false },
     identity: { useDefault: true, npub: null, bunkerUrl: null },
-    remotes:  { github: null, ngit: null },
+    remotes:  { github: githubRemote, ngit: null },
     nsite:    { url: null, lastDeploy: null },
   });
 

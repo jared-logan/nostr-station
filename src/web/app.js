@@ -237,7 +237,13 @@ function openExecModal({ title, subtitle, endpoint, body }) {
     const span = document.createElement('span');
     span.className = 'line ' + cls;
     span.textContent = text + '\n';
-    term.insertBefore(span, cursor);
+    // Cursor gets removed once the stream ends. After that, insertBefore
+    // throws (cursor isn't a child of term anymore). Fall back to append.
+    if (cursor.parentNode === term) {
+      term.insertBefore(span, cursor);
+    } else {
+      term.appendChild(span);
+    }
     if (autoscrollCb.checked) term.scrollTop = term.scrollHeight;
   };
 
@@ -2738,23 +2744,11 @@ const ProjectsPanel = (() => {
     title.textContent = 'Projects';
     subtitle.textContent = 'Your Nostr development projects';
     headActions.innerHTML = '';
-    const discoverBtn = document.createElement('button');
-    discoverBtn.textContent = 'Scan ngit';
-    discoverBtn.title = 'Find ngit repos published under your npub';
-    discoverBtn.addEventListener('click', () => openDiscoverModal());
-    headActions.appendChild(discoverBtn);
-
-    const newBtn = document.createElement('button');
-    newBtn.textContent = 'New project';
-    newBtn.title = 'Scaffold a new project in ~/projects';
-    newBtn.addEventListener('click', () => openNewProjectModal());
-    headActions.appendChild(newBtn);
-
     const addBtn = document.createElement('button');
     addBtn.className = 'primary';
-    addBtn.textContent = 'Add project';
-    addBtn.title = 'Adopt an existing directory as a project';
-    addBtn.addEventListener('click', () => ProjectDrawer.openAdd());
+    addBtn.textContent = '+ Add project';
+    addBtn.title = 'New local, adopt existing, or import from a repository';
+    addBtn.addEventListener('click', () => openAddProjectChooserModal());
     headActions.appendChild(addBtn);
 
     if (projects.length === 0) {
@@ -2766,7 +2760,7 @@ const ProjectsPanel = (() => {
           <button class="primary empty-add">Add project</button>
         </div>
       `;
-      body.querySelector('.empty-add').addEventListener('click', () => ProjectDrawer.openAdd());
+      body.querySelector('.empty-add').addEventListener('click', () => openAddProjectChooserModal());
       return;
     }
 
@@ -2788,8 +2782,12 @@ const ProjectsPanel = (() => {
 
   function projectCardState(p) {
     // Path-missing or capability-less ⇒ red; partial config ⇒ yellow; else default.
+    // "Local-only git repo with no github remote" is a valid, first-class
+    // state — not a configuration warning. We only warn when the user has
+    // explicitly enabled ngit but the nostr remote URL is still missing,
+    // since that's actually an incomplete setup (ngit needs the naddr to
+    // push/fetch).
     if (p.path && !fileExistsHint(p)) return 'err';
-    if (p.capabilities.git && !p.remotes.github) return 'warn';
     if (p.capabilities.ngit && !p.remotes.ngit)  return 'warn';
     return '';
   }
@@ -3708,13 +3706,18 @@ const ProjectsPanel = (() => {
     `;
   }
 
-  // ── New Project flow ───────────────────────────────────────────────────
+  // ── Add Project flow ───────────────────────────────────────────────────
   //
-  // Scaffolds a new project directly into ~/projects/<slug> via one of
-  // two templates: mkstack (Soapbox's Nostr React scaffolder) or an
-  // empty git repo. Collision-handling routes to Add Project when the
-  // target path already exists, so the user gets a useful path forward
-  // instead of a dead-end error.
+  // Three source paths, picked via the chooser:
+  //   - New local project   — fresh ~/projects/<slug>, git init, minimal
+  //                           README + .gitignore, initial commit. No
+  //                           template, no AI; bring your own stack.
+  //   - Existing local      — adopt a directory that's already on disk
+  //                           (ProjectDrawer.openAdd, unchanged).
+  //   - Import repository   — clone any git URL (github/gitlab/ngit).
+  //                           nostr URLs route to /api/ngit/clone; other
+  //                           git URLs route to /api/projects/new with a
+  //                           git-url source.
 
   function slugifyClient(raw) {
     return String(raw || '')
@@ -3726,17 +3729,57 @@ const ProjectsPanel = (() => {
       .slice(0, 40);
   }
 
-  async function openNewProjectModal() {
-    // Probe Stacks availability so the mkstack radio can be disabled with
-    // a clear reason when the binary is missing. Cheap — /api/status is
-    // already polled every 5s, so the request usually comes out of cache
-    // at the network layer.
-    let stacksInstalled = false;
-    try {
-      const s = await api('/api/status');
-      stacksInstalled = !!s.find(e => e.id === 'stacks' && e.state === 'ok');
-    } catch {}
+  // Small helper: render a full-width choice card for the chooser. Each
+  // card is a self-contained button with a title + description; avoids
+  // building a dropdown component for a three-option picker.
+  function chooserCard(title, desc) {
+    return `
+      <button class="add-source-card" type="button">
+        <div class="add-source-title">${escapeHtml(title)}</div>
+        <div class="add-source-desc">${escapeHtml(desc)}</div>
+      </button>
+    `;
+  }
 
+  // Chooser modal — first click of "+ Add project" lands here. Picks one
+  // of three paths, then dismisses itself and opens the specific modal.
+  // Matches shakespeare.diy's "+ New Project ▾" dropdown in spirit but
+  // uses a light modal so each option gets real title + description
+  // space (dropdowns truncate; we want users to understand the choice).
+  function openAddProjectChooserModal() {
+    const body = document.createElement('div');
+    body.className = 'add-source-chooser';
+    body.innerHTML = `
+      ${chooserCard(
+        'New local project',
+        'Fresh directory with git init, initial commit. BYO stack and AI agent.'
+      )}
+      ${chooserCard(
+        'Existing local project',
+        'Adopt a directory that already exists on disk. Nothing on disk is modified.'
+      )}
+      ${chooserCard(
+        'Import repository',
+        'Clone from any git URL — GitHub, GitLab, ngit (nostr://… or naddr1…).'
+      )}
+    `;
+
+    const modal = openModal({
+      title: 'Add a project',
+      subtitle: 'Pick how you want to get started',
+      body,
+    });
+
+    const cards = body.querySelectorAll('.add-source-card');
+    cards[0].addEventListener('click', () => { modal.close(); openNewProjectModal(); });
+    cards[1].addEventListener('click', () => { modal.close(); ProjectDrawer.openAdd(); });
+    cards[2].addEventListener('click', () => { modal.close(); openImportRepositoryModal(); });
+  }
+
+  // New local project — name-only scaffold. POSTs source:{type:'local-only'}.
+  // Keeps the collision handoff: if ~/projects/<slug> exists, offer to
+  // adopt via ProjectDrawer.openAddPrefilled instead of failing.
+  async function openNewProjectModal() {
     const body = document.createElement('div');
     body.className = 'new-project-form';
     body.innerHTML = `
@@ -3747,36 +3790,11 @@ const ProjectsPanel = (() => {
           Path: <code id="np-path-preview">${escapeHtml(`${(window.__homeDir || '~')}/projects/…`)}</code>
         </div>
       </label>
-      <fieldset class="np-templates">
-        <legend class="np-label">Template</legend>
-        <label class="np-template ${stacksInstalled ? '' : 'disabled'}">
-          <input type="radio" name="np-template" value="mkstack"
-                 ${stacksInstalled ? 'checked' : 'disabled'}>
-          <div>
-            <div class="np-template-title">mkstack <span class="np-template-tag">recommended</span></div>
-            <div class="np-template-desc">
-              Build Nostr clients with React. Ships with complete Nostr integration out of the box —
-              social media, blogging, AI-powered apps. If you're not sure, pick this.
-            </div>
-            ${stacksInstalled ? '' : `
-              <div class="np-template-missing">
-                ⚠ <code>stacks</code> binary isn't installed.
-                Install it from <a href="#status">Status → Binaries → Stacks</a>, then reopen this.
-              </div>
-            `}
-          </div>
-        </label>
-        <label class="np-template">
-          <input type="radio" name="np-template" value="empty"
-                 ${stacksInstalled ? '' : 'checked'}>
-          <div>
-            <div class="np-template-title">Empty git repo</div>
-            <div class="np-template-desc">
-              A fresh directory with <code>git init</code> and a starter README. Bring your own stack.
-            </div>
-          </div>
-        </label>
-      </fieldset>
+      <div class="np-hint">
+        Creates a fresh git repo with a minimal README and <code>.gitignore</code>.
+        Use any editor or AI agent from there — Claude Code, Dork, aider, whatever.
+        Push to ngit or another git host from the project card when you're ready.
+      </div>
     `;
 
     const foot = document.createElement('div');
@@ -3794,8 +3812,8 @@ const ProjectsPanel = (() => {
     foot.appendChild(createBtn);
 
     const modal = openModal({
-      title: 'New project',
-      subtitle: 'Scaffold a project in ~/projects',
+      title: 'New local project',
+      subtitle: 'Create a fresh project in ~/projects',
       body,
       footer: foot,
     });
@@ -3813,8 +3831,6 @@ const ProjectsPanel = (() => {
     nameInput.focus();
     cancelBtn.addEventListener('click', () => modal.close());
 
-    // Enter in the name field submits if the button is enabled — matches
-    // the rest of the dashboard's form ergonomics.
     nameInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !createBtn.disabled) { e.preventDefault(); createBtn.click(); }
     });
@@ -3822,13 +3838,8 @@ const ProjectsPanel = (() => {
     createBtn.addEventListener('click', async () => {
       const name = nameInput.value.trim();
       if (!name) return;
-      const template = body.querySelector('input[name="np-template"]:checked')?.value || 'empty';
-
-      // Pre-flight collision check. If ~/projects/<slug> already exists
-      // we don't want to kick off a scaffold only to have it abort; we
-      // also don't want to silently overwrite. Handoff to Add Project
-      // with the path prefilled so the user can adopt it instead.
       createBtn.disabled = true;
+
       let coll;
       try {
         coll = await api('/api/projects/new/check', {
@@ -3843,9 +3854,6 @@ const ProjectsPanel = (() => {
       }
 
       if (coll.exists) {
-        // Swap the modal body for the collision prompt. Keep the modal
-        // open so the user doesn't lose context; only close when they
-        // pick an action.
         body.innerHTML = `
           <p style="margin:0 0 12px 0; color: var(--text);">
             A directory already exists at <code>${escapeHtml(coll.path)}</code>.
@@ -3876,92 +3884,249 @@ const ProjectsPanel = (() => {
         return;
       }
 
-      // No collision — close the form modal and hand off to the exec
-      // modal for the streaming scaffold. The exec modal surfaces npm
-      // install's log output (mkstack can take 30-60s on first run) so
-      // users see progress rather than a spinner hanging.
       modal.close();
       const result = await openExecModal({
         title: `Creating ${coll.slug}`,
-        subtitle: `Scaffolding ${template} template into ${coll.path}`,
+        subtitle: `Local project at ${coll.path}`,
         endpoint: '/api/projects/new',
-        body: { name, template },
+        body: { name, source: { type: 'local-only' } },
       });
 
       if (result.ok && result.info?.project) {
         toast('Project created', result.info.project.name, 'ok');
         await reload();
-        // For mkstack scaffolds specifically, ask the user if they want
-        // to jump straight into the Dork/dev workflow. Skips for empty
-        // repos — there's nothing to dev-serve and no Stacks agent
-        // to run. Lifts shakespeare.diy's "type-name-and-start-prompting"
-        // pattern into the local dashboard.
-        if (template === 'mkstack' && window.NSTerminal?.isAvailable?.()) {
-          openPostScaffoldPrompt(result.info.project);
-        } else {
-          // Empty repo path — no dev/agent loop to offer; just land on
-          // the project detail view so the user sees their card.
-          try { openDetail(result.info.project.id); } catch {}
-        }
+        try { openDetail(result.info.project.id); } catch {}
       } else if (!result.ok) {
         toast('Create failed', `exit ${result.code}`, 'err');
       }
     });
   }
 
-  function openPostScaffoldPrompt(project) {
+  // Import repository — one modal for both ngit and standard git URLs.
+  // URL sniffing decides the downstream endpoint:
+  //   nostr://… | naddr1…   → /api/ngit/clone + detect + register
+  //   https/git/ssh git URL → /api/projects/new with source:'git-url'
+  //
+  // The "Use MKStack" button quick-fills the gitlab URL for Soapbox's
+  // MKStack React template — the same URL shakespeare.diy clones. This
+  // bypasses the broken stacks-mkstack nostr-lookup flow entirely.
+  //
+  // "Scan my ngit repos" closes this modal and opens the Discover flow
+  // — slightly faster than pasting an naddr for users who just want to
+  // pick from their own published repos.
+  const MKSTACK_URL = 'https://gitlab.com/soapbox-pub/mkstack.git';
+
+  function isNostrCloneUrl(s) {
+    const v = String(s || '').trim();
+    return v.startsWith('nostr://') || v.startsWith('naddr1');
+  }
+
+  function isStandardGitUrl(s) {
+    const v = String(s || '').trim();
+    if (!v) return false;
+    return /^https?:\/\//i.test(v)
+      || /^git@[\w.-]+:[\w./-]+$/i.test(v)
+      || /^ssh:\/\//i.test(v)
+      || /^git:\/\//i.test(v);
+  }
+
+  // After an ngit clone succeeds we still need to detect caps and
+  // register the project in projects.json — /api/ngit/clone only clones.
+  // One-shot orchestration keeps the UX tight: user pastes naddr, clicks
+  // Import, and lands on the ready project card.
+  //
+  // Capability note: "git" means "has a traditional git remote
+  // (github/gitlab/self-hosted)", not "is a git repo on disk." An ngit
+  // clone always creates .git locally (git-remote-nostr's doing), but we
+  // only set capabilities.git when the repo's ngit announcement event
+  // also lists a github-style mirror URL. Otherwise it's ngit-only →
+  // only the "ngit" chip shows on the card.
+  async function registerAfterNgitClone(resolvedPath, name, ngitUrl) {
+    let caps = { git: false, ngit: true, nsite: false };
+    let githubRemote = null;
+    let ngitRemote = ngitUrl;
+    try {
+      const d = await api('/api/projects/detect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: resolvedPath }),
+      });
+      if (d && d.exists && d.isGitRepo) {
+        caps = {
+          git:   !!d.githubRemote,
+          ngit:  true,
+          nsite: !!d.hasNsyte,
+        };
+        if (d.githubRemote) githubRemote = d.githubRemote;
+        if (d.ngitRemote)   ngitRemote   = d.ngitRemote;
+      }
+    } catch { /* detect failed — fall back to defaults computed above */ }
+
+    const body = {
+      name,
+      path: resolvedPath,
+      capabilities: caps,
+      identity: { useDefault: true, npub: null, bunkerUrl: null },
+      remotes:  { github: githubRemote, ngit: ngitRemote },
+      nsite:    { url: null, lastDeploy: null },
+    };
+    return await api('/api/projects', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  async function openImportRepositoryModal() {
     const body = document.createElement('div');
-    body.style.fontSize = '13px';
-    body.style.color = 'var(--text)';
+    body.className = 'import-repo-form';
     body.innerHTML = `
-      <p style="margin: 0 0 8px 0;">
-        <strong>${escapeHtml(project.name)}</strong> is ready at
-        <code class="cmd-inline">${escapeHtml(project.path)}</code>.
-      </p>
-      <p style="margin: 0; color: var(--text-dim); font-size: 12px;">
-        Pick how you'd like to start. The Dork agent is Stacks's built-in
-        AI coding loop; the dev server runs on localhost:5173 (we shift
-        from MKStack's default 8080 so it doesn't collide with the relay).
-      </p>
+      <label class="np-field">
+        <span class="np-label">Project name</span>
+        <input id="ir-name" type="text" autocomplete="off" placeholder="my-app" />
+        <div class="np-preview">
+          Path: <code id="ir-path-preview">${escapeHtml(`${(window.__homeDir || '~')}/projects/…`)}</code>
+        </div>
+      </label>
+      <label class="np-field">
+        <span class="np-label">Repository URL</span>
+        <input id="ir-url" type="text" autocomplete="off"
+               placeholder="https://github.com/you/repo.git  ·  nostr://…  ·  naddr1…" />
+        <div class="ir-url-actions">
+          <button type="button" class="ir-quick-mkstack">Use MKStack</button>
+          <button type="button" class="ir-quick-scan">Scan my ngit repos…</button>
+        </div>
+      </label>
+      <div class="np-hint">
+        Any git URL works — GitHub, GitLab, self-hosted, or a Nostr-native ngit address.
+        After import, history is reset so the initial commit is yours (stops you
+        accidentally pushing back to the source).
+      </div>
     `;
+
     const foot = document.createElement('div');
     foot.style.display = 'flex';
     foot.style.gap = '8px';
     foot.style.justifyContent = 'flex-end';
-    foot.style.flexWrap = 'wrap';
     foot.style.width = '100%';
-
-    const skip = document.createElement('button');
-    skip.textContent = 'Skip — just open the card';
-    const dev = document.createElement('button');
-    dev.textContent = 'Run dev server';
-    const dork = document.createElement('button');
-    dork.className = 'primary';
-    dork.textContent = 'Open Dork now';
-    foot.appendChild(skip);
-    foot.appendChild(dev);
-    foot.appendChild(dork);
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    const createBtn = document.createElement('button');
+    createBtn.className = 'primary';
+    createBtn.textContent = 'Import';
+    createBtn.disabled = true;
+    foot.appendChild(cancelBtn);
+    foot.appendChild(createBtn);
 
     const modal = openModal({
-      title: 'Project ready',
-      subtitle: 'Start the Stacks workflow',
+      title: 'Import repository',
+      subtitle: 'Clone from a git URL or ngit address',
       body,
       footer: foot,
     });
 
-    skip.addEventListener('click', () => {
-      modal.close();
-      try { openDetail(project.id); } catch {}
+    const nameInput = body.querySelector('#ir-name');
+    const urlInput  = body.querySelector('#ir-url');
+    const preview   = body.querySelector('#ir-path-preview');
+    const mkstackBtn = body.querySelector('.ir-quick-mkstack');
+    const scanBtn    = body.querySelector('.ir-quick-scan');
+
+    const updateState = () => {
+      const slug = slugifyClient(nameInput.value);
+      preview.textContent = slug ? `~/projects/${slug}` : '~/projects/…';
+      const url = urlInput.value.trim();
+      const urlOk = isNostrCloneUrl(url) || isStandardGitUrl(url);
+      createBtn.disabled = !slug || !urlOk;
+    };
+    nameInput.addEventListener('input', updateState);
+    urlInput.addEventListener('input',  updateState);
+    nameInput.focus();
+
+    cancelBtn.addEventListener('click', () => modal.close());
+    mkstackBtn.addEventListener('click', () => {
+      urlInput.value = MKSTACK_URL;
+      if (!nameInput.value.trim()) nameInput.value = 'mkstack-app';
+      updateState();
+      nameInput.focus();
     });
-    dev.addEventListener('click', () => {
+    scanBtn.addEventListener('click', () => {
       modal.close();
-      window.NSTerminal.open('stacks-dev', { projectId: project.id });
-      try { openDetail(project.id); } catch {}
+      openDiscoverModal();
     });
-    dork.addEventListener('click', () => {
+
+    [nameInput, urlInput].forEach(el => el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !createBtn.disabled) { e.preventDefault(); createBtn.click(); }
+    }));
+
+    createBtn.addEventListener('click', async () => {
+      const name = nameInput.value.trim();
+      const url  = urlInput.value.trim();
+      if (!name || !url) return;
+      createBtn.disabled = true;
+
+      // Collision pre-flight against the final slug. ngit clone uses
+      // repoName=slug, scaffold endpoint uses name→slug on the server —
+      // same target path in both cases.
+      let coll;
+      try {
+        coll = await api('/api/projects/new/check', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+      } catch (e) {
+        toast('Check failed', e.message, 'err');
+        createBtn.disabled = false;
+        return;
+      }
+      if (coll.exists) {
+        toast('Path exists', `${coll.path} already exists — pick a different name`, 'err');
+        createBtn.disabled = false;
+        return;
+      }
+
       modal.close();
-      window.NSTerminal.open('stacks-agent', { projectId: project.id });
-      try { openDetail(project.id); } catch {}
+
+      if (isNostrCloneUrl(url)) {
+        // ngit path — use existing /api/ngit/clone endpoint + post-clone
+        // detect + register. repoName is the slug; server owns the
+        // absolute path construction.
+        const result = await openExecModal({
+          title: `Importing ${coll.slug}`,
+          subtitle: `git clone ${url} → ${coll.path}`,
+          endpoint: '/api/ngit/clone',
+          body: { url, repoName: coll.slug },
+        });
+        if (!result.ok) {
+          toast('Import failed', `exit ${result.code}`, 'err');
+          return;
+        }
+        const resolved = result.info?.resolvedPath || coll.path;
+        try {
+          const project = await registerAfterNgitClone(resolved, name, url);
+          toast('Project imported', project.name, 'ok');
+          await reload();
+          try { openDetail(project.id); } catch {}
+        } catch (e) {
+          toast('Registration failed', e.message, 'err');
+        }
+      } else {
+        // Standard git URL — goes through the scaffold endpoint which
+        // clones, wipes inherited history, and registers in one shot.
+        const result = await openExecModal({
+          title: `Importing ${coll.slug}`,
+          subtitle: `git clone ${url} → ${coll.path}`,
+          endpoint: '/api/projects/new',
+          body: { name, source: { type: 'git-url', url } },
+        });
+        if (result.ok && result.info?.project) {
+          toast('Project imported', result.info.project.name, 'ok');
+          await reload();
+          try { openDetail(result.info.project.id); } catch {}
+        } else if (!result.ok) {
+          toast('Import failed', `exit ${result.code}`, 'err');
+        }
+      }
     });
   }
 
