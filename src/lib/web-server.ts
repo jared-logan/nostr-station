@@ -175,7 +175,7 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boole
   const ext  = path.extname(resolved).toLowerCase();
   const mime = MIME[ext] ?? 'application/octet-stream';
   const headers: Record<string, string> = { 'Content-Type': mime, 'Cache-Control': 'no-cache' };
-  if (mime === 'text/html') Object.assign(headers, HTML_SECURITY_HEADERS);
+  if (mime.startsWith('text/html')) Object.assign(headers, HTML_SECURITY_HEADERS);
   res.writeHead(200, headers);
   fs.createReadStream(resolved).pipe(res);
   return true;
