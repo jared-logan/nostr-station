@@ -127,6 +127,57 @@ function writeDone(res: http.ServerResponse, code: number): void {
   try { res.end(); } catch {}
 }
 
+// Reset a freshly-scaffolded project's git history to a single root commit
+// owned by the user. Templates cloned via `stacks mkstack` (or our gitlab
+// fallback) carry Soapbox's full upstream history + a remote pointing at
+// soapbox-pub/mkstack — accidents waiting to happen. After scaffold we
+// always rm -rf .git, git init, and commit. If git user.name/email aren't
+// set we still wipe and re-init but skip the commit so we don't fail with
+// "please tell me who you are"; the user can commit themselves once they
+// configure git. Best-effort throughout — failures here don't fail the
+// scaffold (the project files are already correct on disk).
+async function freshenGitRepo(target: string, message: string, res: http.ServerResponse): Promise<void> {
+  // Wipe inherited history. Safe even if the dir was created without one.
+  try { fs.rmSync(path.join(target, '.git'), { recursive: true, force: true }); }
+  catch (e: any) {
+    writeLine(res, 'stderr', `(git reset) could not remove .git: ${e?.message ?? 'unknown'}`);
+    return;
+  }
+
+  // Fresh init. -b main names the branch so we don't get the legacy
+  // "master" default + the noisy hint git prints with no override.
+  const initCode = await runStreamed('git', ['init', '-b', 'main'], target, res);
+  if (initCode !== 0) {
+    writeLine(res, 'stderr', `(git reset) git init failed (code ${initCode})`);
+    return;
+  }
+
+  // Check for git identity. Without name+email, `git commit` aborts with
+  // a multi-line "please tell me who you are" error that adds nothing
+  // useful to the modal. Skip the commit silently; the user gets a
+  // staged-and-ready repo to commit themselves once they configure git.
+  let hasIdentity = true;
+  try {
+    execSync('git config user.name && git config user.email', {
+      cwd: target, stdio: 'pipe', timeout: 1500,
+    });
+  } catch { hasIdentity = false; }
+
+  if (!hasIdentity) {
+    writeLine(res, 'sys',
+      'Note: git user.name / user.email not set — skipping initial commit. ' +
+      'Configure git, then `git add . && git commit -m "Initial commit"` in the project dir.');
+    return;
+  }
+
+  const addCode = await runStreamed('git', ['add', '.'], target, res);
+  if (addCode !== 0) return;
+  const commitCode = await runStreamed('git', ['commit', '-m', message], target, res);
+  if (commitCode === 0) {
+    writeLine(res, 'sys', 'Reset git history — project starts at commit 1.');
+  }
+}
+
 async function runStreamed(
   cmd: string, args: string[], cwd: string, res: http.ServerResponse,
 ): Promise<number> {
@@ -257,12 +308,14 @@ export async function scaffoldProject(
       writeLine(res, 'stderr', `could not write to ${target}: ${e?.message ?? 'unknown'}`);
       return writeDone(res, 4);
     }
-    code = await runStreamed('git', ['init'], target, res);
-    if (code !== 0) {
-      writeLine(res, 'stderr', `git init exited with code ${code}`);
-      return writeDone(res, code);
-    }
   }
+
+  // Reset git history so the project starts at the user's commit 1, not
+  // Soapbox's mkstack template history. Single code path for both
+  // templates — the empty branch lands here without an existing .git
+  // (freshenGitRepo's rm is a no-op then), the mkstack branch lands
+  // with Soapbox's clone (which freshenGitRepo wipes and re-inits).
+  await freshenGitRepo(target, `Initial commit from ${template} template`, res);
 
   // Adopt into projects.json. git capability is always on (we either ran
   // git init or mkstack, which scaffolds as a git repo). ngit + nsite are
