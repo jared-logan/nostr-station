@@ -1484,14 +1484,20 @@ export async function startWebServer(port: number): Promise<void> {
 
       // ── Projects ───────────────────────────────────────────────────────
       if (url === '/api/projects' && method === 'GET') {
-        // Annotate each project with derived `stacksProject` so the UI
-        // can gate Stacks-specific actions (Open in Dork, dev server,
-        // deploy) without re-checking every render. Cheap fs.statSync
-        // per project — list size is single-digit on every install
-        // we've seen, so no concern about hot-path cost.
+        // Annotate each project with two derived flags:
+        //   - stacksProject — has stack.json (gates Dork/dev/deploy).
+        //   - pathMissing   — path was recorded but the dir no longer
+        //                     exists on disk (user deleted the folder
+        //                     outside nostr-station, or scaffold
+        //                     failed between mkdir and register). The
+        //                     UI uses this to paint the card red and
+        //                     guide the user toward Remove.
+        // Both are cheap fs checks — list size is single-digit on any
+        // install we've seen.
         const annotated = readProjects().map(p => ({
           ...p,
           stacksProject: isStacksProject(p),
+          pathMissing:   !!p.path && !fs.existsSync(p.path),
         }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(annotated));
@@ -1634,6 +1640,61 @@ export async function startWebServer(port: number): Promise<void> {
           const r = deleteProject(id);
           res.writeHead(r.ok ? 200 : 404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: r.ok }));
+          return;
+        }
+
+        // Hard delete: rm -rf the project path, then unregister. POST
+        // (not DELETE) because the operation is irreversible and the
+        // UI path uses a type-to-confirm dialog. Safety guardrails:
+        //   - path must be set (nsite-only projects have none; refuse)
+        //   - path must be under the user's HOME (refuse system paths)
+        //   - path must not BE the home directory itself
+        //   - path must be a real directory that resolves without
+        //     escaping via symlinks (realpath check + prefix match)
+        // Failures surface as 4xx with a message; the rm itself is
+        // best-effort — even if it partially fails, we unregister so
+        // the user isn't stuck with a broken card pointing at a
+        // now-partial path. Unusual but the path of least surprise.
+        if (tail === 'purge' && method === 'POST') {
+          const target = project.path || '';
+          const home = process.env.HOME || os.homedir();
+          if (!target) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'project has no local path to delete' }));
+            return;
+          }
+          // Resolve both sides to absolute real paths. If realpath
+          // fails (target missing), fall back to the raw path — the
+          // under-HOME check still protects against nonsense input,
+          // and rm -rf on a missing path is a no-op.
+          let realTarget = target;
+          let realHome   = home;
+          try { realTarget = fs.realpathSync(target); } catch {}
+          try { realHome   = fs.realpathSync(home);   } catch {}
+          const normalizedTarget = path.resolve(realTarget);
+          const normalizedHome   = path.resolve(realHome);
+          if (normalizedTarget === normalizedHome
+              || !normalizedTarget.startsWith(normalizedHome + path.sep)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error: `refusing to delete ${normalizedTarget}: path must be under ${normalizedHome}`,
+            }));
+            return;
+          }
+          let rmError: string | null = null;
+          try {
+            fs.rmSync(normalizedTarget, { recursive: true, force: true });
+          } catch (e: any) {
+            rmError = e?.message || 'rm failed';
+          }
+          const r = deleteProject(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok:          r.ok,
+            unregistered: r.ok,
+            removedPath:  rmError ? null : normalizedTarget,
+            rmError,
+          }));
           return;
         }
 

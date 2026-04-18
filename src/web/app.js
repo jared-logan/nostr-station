@@ -2781,21 +2781,18 @@ const ProjectsPanel = (() => {
   }
 
   function projectCardState(p) {
-    // Path-missing or capability-less ⇒ red; partial config ⇒ yellow; else default.
-    // "Local-only git repo with no github remote" is a valid, first-class
-    // state — not a configuration warning. We only warn when the user has
-    // explicitly enabled ngit but the nostr remote URL is still missing,
-    // since that's actually an incomplete setup (ngit needs the naddr to
-    // push/fetch).
-    if (p.path && !fileExistsHint(p)) return 'err';
-    if (p.capabilities.ngit && !p.remotes.ngit)  return 'warn';
+    // Red = path-missing (server sets `pathMissing` when the recorded
+    // path doesn't exist on disk anymore — dir deleted externally,
+    // failed scaffold mid-flight, etc.). User needs to either Remove
+    // the orphan registration or restore the dir.
+    //
+    // Yellow = incomplete config worth a nudge. Local-only projects
+    // (no capabilities, no remotes) are intentional and get default
+    // styling; only "enabled ngit but missing naddr URL" triggers warn.
+    if (p.pathMissing) return 'err';
+    if (p.capabilities.ngit && !p.remotes.ngit) return 'warn';
     return '';
   }
-
-  // Client-side fs check isn't possible; we rely on a `pathMissing` hint if
-  // the server adds one later. For now, only err when path is explicitly null
-  // for non-nsite-only projects (which validation should've caught).
-  function fileExistsHint(_p) { return true; }
 
   function renderProjectCard(p) {
     const card = document.createElement('div');
@@ -3377,6 +3374,19 @@ const ProjectsPanel = (() => {
           </div>
           <button class="danger remove-btn">remove</button>
         </div>
+        ${p.path ? `
+          <div class="row">
+            <div>
+              <div>Delete on disk</div>
+              <div class="desc">
+                ${p.pathMissing
+                  ? `Files at <code>${escapeHtml(p.path)}</code> are already gone. Use Remove to unregister the orphan entry.`
+                  : `Removes the project from nostr-station <em>and</em> deletes <code>${escapeHtml(p.path)}</code> and all its contents. This is irreversible.`}
+              </div>
+            </div>
+            <button class="danger delete-btn" ${p.pathMissing ? 'disabled' : ''}>delete on disk</button>
+          </div>
+        ` : ''}
       </div>
     `;
 
@@ -3479,6 +3489,36 @@ const ProjectsPanel = (() => {
         reload();
       } catch {}
     });
+
+    // Delete on disk — destructive. Type-to-confirm dialog (reuses the
+    // existing confirmDestructive helper) matches the gravity of rm -rf.
+    // Button is hidden entirely for nsite-only projects (no path) and
+    // disabled when the path is already missing (orphaned registration —
+    // Remove is the right action, not Delete).
+    const deleteBtn = container.querySelector('.delete-btn');
+    if (deleteBtn && !deleteBtn.disabled) {
+      deleteBtn.addEventListener('click', async () => {
+        const ok = await confirmDestructive({
+          title: 'Delete project on disk',
+          description: `This removes the project from nostr-station AND deletes ${p.path} and all its contents. This cannot be undone.`,
+          typeToConfirm: p.name,
+          confirmLabel: 'Delete on disk',
+        });
+        if (!ok) return;
+        try {
+          const r = await api(`/api/projects/${p.id}/purge`, { method: 'POST' });
+          if (r.rmError) {
+            toast('Deleted registration — filesystem cleanup failed', r.rmError, 'warn');
+          } else {
+            toast('Project deleted', `${p.name} · ${r.removedPath}`, 'ok');
+          }
+          state.view = 'list'; state.projectId = null;
+          reload();
+        } catch (e) {
+          toast('Delete failed', e.message, 'err');
+        }
+      });
+    }
   }
 
   async function patchAndReload(id, patch) {

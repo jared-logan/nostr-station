@@ -1669,11 +1669,24 @@ input:focus, textarea:focus, select:focus {
 .danger-zone .row {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  padding: 6px 0;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 10px 0;
   font-size: 12px;
 }
-.danger-zone .row .desc { color: var(--text-dim); font-size: 11px; }
+.danger-zone .row + .row {
+  border-top: 1px solid var(--border);
+}
+.danger-zone .row > div:first-child { flex: 1; min-width: 0; }
+.danger-zone .row .desc { color: var(--text-dim); font-size: 11px; line-height: 1.55; margin-top: 2px; }
+.danger-zone .row .desc code {
+  background: rgba(255,255,255,0.04);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  word-break: break-all;
+}
+.danger-zone .row button { flex-shrink: 0; align-self: center; }
 
 /* ── toggle switch (config flags) ─────────────────────────────────────── */
 
