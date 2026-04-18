@@ -198,6 +198,27 @@ export interface CreateInput {
 export function createProject(input: CreateInput): { ok: true; project: Project } | { ok: false; error: string } {
   const v = validateInput(input);
   if (!v.ok) return v;
+
+  // Reject duplicate-path adds. Without this, hitting Add Project twice
+  // for the same dir (or scaffold-then-adopt) silently appended a second
+  // entry with the new capabilities — leaving the user with two cards
+  // pointing at the same checkout. If the user wants to enable additional
+  // capabilities on an existing project, they should edit the existing
+  // entry, not add a new one. Path normalization is intentionally
+  // shallow — exact-string match on the trimmed input. Path comparison
+  // doesn't try to canonicalize symlinks or trailing slashes; if a user
+  // wants to add /foo and /foo/ as separate projects, that's their call.
+  const incomingPath = (input.path ?? '').trim();
+  if (incomingPath) {
+    const existing = readProjects().find(p => p.path === incomingPath);
+    if (existing) {
+      return {
+        ok: false,
+        error: `A project at ${incomingPath} already exists ("${existing.name}"). Edit it to enable additional capabilities instead of adding a duplicate.`,
+      };
+    }
+  }
+
   const now = new Date().toISOString();
   const project: Project = {
     id:   crypto.randomUUID(),
