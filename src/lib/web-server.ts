@@ -1183,7 +1183,7 @@ export async function startWebServer(port: number): Promise<void> {
         }
         const r = verifyNip98({
           challenge, event,
-          expectedUrl: expectedDashboardUrl(req),
+          expectedUrl: expectedDashboardUrl(req, port),
         });
         if (!r.ok) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -1210,11 +1210,11 @@ export async function startWebServer(port: number): Promise<void> {
         // doesn't get stuck retrying.
         const { challenge } = issueChallenge();
 
-        const silent = await silentBunkerSign(challenge, expectedDashboardUrl(req));
+        const silent = await silentBunkerSign(challenge, expectedDashboardUrl(req, port));
         if (silent.ok && silent.signedEvent) {
           const verify = verifyNip98({
             challenge, event: silent.signedEvent,
-            expectedUrl: expectedDashboardUrl(req),
+            expectedUrl: expectedDashboardUrl(req, port),
           });
           if (verify.ok) {
             const ua = String(req.headers['user-agent'] || '').slice(0, 200);
@@ -1232,7 +1232,7 @@ export async function startWebServer(port: number): Promise<void> {
           // but we'd rather give the user a working QR than a 401 dead end.
         }
 
-        const start = await startNostrConnect(challenge, expectedDashboardUrl(req));
+        const start = await startNostrConnect(challenge, expectedDashboardUrl(req, port));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ mode: 'qr', ...start, challenge }));
         return;
@@ -1262,7 +1262,7 @@ export async function startWebServer(port: number): Promise<void> {
         const verify = verifyNip98({
           challenge:   s.challenge,
           event:       s.signedEvent,
-          expectedUrl: expectedDashboardUrl(req),
+          expectedUrl: expectedDashboardUrl(req, port),
         });
         consumeBunkerSession(eph);
         if (!verify.ok) {
@@ -1291,7 +1291,7 @@ export async function startWebServer(port: number): Promise<void> {
           return;
         }
         const { challenge } = issueChallenge();
-        const bunkerRes = await signWithBunkerUrl(bunkerUrl, challenge, expectedDashboardUrl(req));
+        const bunkerRes = await signWithBunkerUrl(bunkerUrl, challenge, expectedDashboardUrl(req, port));
         if (!bunkerRes.ok) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: bunkerRes.error || 'bunker sign failed' }));
@@ -1299,7 +1299,7 @@ export async function startWebServer(port: number): Promise<void> {
         }
         const verify = verifyNip98({
           challenge, event: bunkerRes.signedEvent,
-          expectedUrl: expectedDashboardUrl(req),
+          expectedUrl: expectedDashboardUrl(req, port),
         });
         if (!verify.ok) {
           res.writeHead(401, { 'Content-Type': 'application/json' });

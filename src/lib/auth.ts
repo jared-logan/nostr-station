@@ -293,12 +293,12 @@ export function requireSession(
   return session;
 }
 
-// Dashboard URL the client is expected to have signed against. We read the
-// Host header (Origin isn't sent for every fetch) and reconstruct an origin
-// string. Port differences break verification by design — a token from one
-// host is not valid on another.
-export function expectedDashboardUrl(req: http.IncomingMessage): string {
-  const host = String(req.headers['host'] || '127.0.0.1');
-  // Dashboard is always served over plain HTTP on loopback.
-  return `http://${host}`;
+// Dashboard URL the client is expected to have signed against. The caller
+// passes the bound loopback port — we do NOT derive it from req.headers.host
+// because that header is attacker-controlled (DNS rebinding). The HTTP
+// dispatcher rejects non-loopback Host headers upstream, so by the time we
+// get here the request is known to have been sent to our socket; we return
+// a canonical URL pinned to the actual bound port.
+export function expectedDashboardUrl(_req: http.IncomingMessage, boundPort: number): string {
+  return `http://127.0.0.1:${boundPort}`;
 }
