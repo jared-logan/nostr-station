@@ -2721,6 +2721,14 @@ const ProjectsPanel = (() => {
     if (state.view === 'list' || state.view === 'detail') render();
   });
 
+  // bootDashboard() activates the panel BEFORE NSTerminal.init() resolves,
+  // so the first render gates Stacks Dork/dev + Open in <terminalAi>
+  // buttons on isAvailable() === false. When init finishes, repaint so
+  // those buttons appear without the user needing to switch tabs.
+  document.addEventListener('terminal-available', () => {
+    if (state.view === 'list' || state.view === 'detail') render();
+  });
+
   function render() {
     if (state.view === 'detail') renderDetail();
     else renderList();
@@ -6308,6 +6316,15 @@ function bootDashboard(localhostExempt) {
     // dashboard with a live ngit/Claude session resumes without user action.
     // Fire-and-forget; terminal.js owns its own error surfacing.
     window.NSTerminal?.init?.().then(() => {
+      // Tell any panel that gates buttons on NSTerminal availability to
+      // re-render. activatePanel() runs BEFORE this init resolves, so
+      // panels (Projects in particular — Stacks Dork/dev buttons +
+      // Open in Claude Code button) paint with isAvailable() returning
+      // false. Without a re-render, those buttons stay hidden until the
+      // user manually switches panels and back. Custom event keeps the
+      // coupling loose; ProjectsPanel adds the listener in its own
+      // closure (alongside the existing api-config-changed listener).
+      document.dispatchEvent(new CustomEvent('terminal-available'));
       // Unhide the sidebar Terminal nav item once we know node-pty is
       // available. Checked AFTER init so the async capability probe has
       // settled — panels using a click-time check don't need this, but
