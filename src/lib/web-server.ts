@@ -1150,10 +1150,81 @@ export async function startWebServer(port: number): Promise<void> {
       .catch(e => process.stderr.write(`[ai-config] migration failed: ${e?.message || e}\n`));
   };
 
+  // Loopback host:port variants we accept for Host / Origin / Referer.
+  // Anything else in these headers is either a misconfigured proxy or an
+  // active attack (DNS rebinding, cross-origin page trying to talk to us).
+  const allowedHosts = new Set([
+    `127.0.0.1:${port}`,
+    `localhost:${port}`,
+    `[::1]:${port}`,
+  ]);
+  const isLoopbackUrl = (u: string | undefined | null): boolean => {
+    if (!u) return false;
+    try {
+      const parsed = new URL(u);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'ws:') return false;
+      if (parsed.port !== String(port)) return false;
+      const h = parsed.hostname;
+      return h === '127.0.0.1' || h === 'localhost' || h === '[::1]' || h === '::1';
+    } catch { return false; }
+  };
+
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       const url    = (req.url || '/').split('?')[0];
       const method = req.method || 'GET';
+
+      // ── H1: Reject non-loopback Host headers ──────────────────────────
+      // Without this check, a DNS-rebinding attacker (evil.com resolving to
+      // 127.0.0.1:<port>) can reach the dispatcher and have NIP-98 events
+      // signed against a forged `u` tag. Since the dashboard only ever
+      // listens on loopback, any other Host value is either a
+      // misconfiguration or an attack — either way, refuse.
+      const hostHeader = String(req.headers['host'] || '').toLowerCase();
+      if (!allowedHosts.has(hostHeader)) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('bad host');
+        return;
+      }
+
+      // ── H2: CSRF — require loopback Origin/Referer on mutations ───────
+      // `localhostExempt` (auth.ts) deliberately drops session checks for
+      // localhost during the wizard and when the user sets requireAuth:false.
+      // That window is exploitable from any tab open in the same browser
+      // unless we also verify the request actually came from our own origin.
+      // Applies to all state-changing methods; missing both headers is
+      // treated as hostile (browsers always send at least Referer on a
+      // form/fetch POST to a different origin; CLI clients can opt in by
+      // passing -H "Origin: http://127.0.0.1:<port>").
+      const isMutation = method === 'POST' || method === 'PATCH' || method === 'DELETE'
+                       || method === 'PUT';
+      if (isMutation) {
+        const origin  = typeof req.headers.origin  === 'string' ? req.headers.origin  : '';
+        const referer = typeof req.headers.referer === 'string' ? req.headers.referer : '';
+        const ok = isLoopbackUrl(origin) || isLoopbackUrl(referer);
+        if (!ok) {
+          res.writeHead(403, { 'Content-Type': 'text/plain' });
+          res.end('bad origin');
+          return;
+        }
+      }
+
+      // Token-fallback paths (EventSource, WebSocket upgrade handshake,
+      // `<a download>`) carry the session token in the query string because
+      // browsers can't set Authorization on those APIs. That's safe on
+      // loopback, but only IF the request also originates from our origin —
+      // otherwise a cross-origin EventSource to /api/logs?token=… would
+      // happily stream subprocess output into an attacker page.
+      if (method === 'GET' && /[?&]token=[a-f0-9]{64}(?:&|$)/.test(req.url || '')) {
+        const origin  = typeof req.headers.origin  === 'string' ? req.headers.origin  : '';
+        const referer = typeof req.headers.referer === 'string' ? req.headers.referer : '';
+        const ok = isLoopbackUrl(origin) || isLoopbackUrl(referer);
+        if (!ok) {
+          res.writeHead(403, { 'Content-Type': 'text/plain' });
+          res.end('bad origin');
+          return;
+        }
+      }
 
       // ── Auth endpoints (public) ──────────────────────────────────────
       if (url === '/api/auth/status' && method === 'GET') {
@@ -3198,6 +3269,23 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
       const sessionId = match[1];
+
+      // Mirror the HTTP Host + Origin checks at the WebSocket layer.
+      // Browsers always send Origin on upgrade handshakes, so rejecting
+      // missing/foreign Origin blocks cross-origin WS attempts (e.g. a
+      // malicious page trying to attach to a live terminal session).
+      const hostHeader = String(req.headers['host'] || '').toLowerCase();
+      if (!allowedHosts.has(hostHeader)) {
+        socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      const wsOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+      if (!isLoopbackUrl(wsOrigin)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
 
       // Auth check using the same primitives as the REST middleware.
       let authed = localhostExempt(req);
