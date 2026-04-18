@@ -1,6 +1,6 @@
 import os from 'os';
 import fs from 'fs';
-import { execSync } from 'child_process';
+import path from 'path';
 
 export type OS = 'macos' | 'linux';
 export type Arch = 'aarch64' | 'x86_64';
@@ -74,14 +74,43 @@ export interface Installed {
   nsyte: boolean;
 }
 
-function cmd(c: string): string | null {
-  try { return execSync(c, { stdio: 'pipe' }).toString().trim(); }
-  catch { return null; }
+// Known install targets checked ahead of process.env.PATH. On fresh Linux
+// installs, the Node process inherits a restricted PATH that doesn't yet
+// include ~/.cargo/bin — so every cargo-installed or prebuilt-downloaded
+// binary (nak, ngit, nostr-rs-relay, nvpn) reads as "not installed" until
+// the user opens a new login shell. Walking a curated dir list catches
+// them regardless of shell state.
+function augmentedBinDirs(): string[] {
+  const home = os.homedir();
+  return [
+    `${home}/.cargo/bin`,    // cargo install target + our prebuilt drop dir
+    `${home}/.local/bin`,    // pipx / manual installs
+    '/opt/homebrew/bin',     // Apple Silicon Homebrew
+    '/usr/local/bin',        // Intel Homebrew + common manual installs
+    '/usr/bin',
+    '/bin',
+  ];
 }
 
-function has(bin: string): boolean {
-  return cmd(`command -v ${bin}`) !== null;
+export function findBin(name: string): string | null {
+  const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  // Curated dirs first so we don't care what the calling shell had on PATH.
+  for (const dir of [...augmentedBinDirs(), ...pathDirs]) {
+    const abs = path.join(dir, name);
+    try {
+      fs.accessSync(abs, fs.constants.X_OK);
+      return abs;
+    } catch { /* not there, keep looking */ }
+  }
+  return null;
 }
+
+export function hasBin(name: string): boolean {
+  return findBin(name) !== null;
+}
+
+// Local alias — keeps detectPlatform / detectInstalled call sites terse.
+const has = hasBin;
 
 export function detectPlatform(): Platform {
   const rawOs = process.platform;
@@ -152,11 +181,6 @@ export function detectInstalled(): Installed {
     blossom: fs.existsSync(`${os.homedir()}/blossom-server`),
     nsyte:   has('nsyte'),
   };
-}
-
-export function npubToHex(npub: string): string {
-  if (!has('nak')) return '';
-  return cmd(`nak decode ${npub}`) ?? '';
 }
 
 // Probe local AI servers — called during config phase

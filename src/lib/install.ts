@@ -284,6 +284,11 @@ export async function installRust(): Promise<InstallResult> {
 export async function installCargoBin(
   pkg: string,
   onProgress: (detail: string) => void,
+  // Optional durable sink — when provided, receives every cargo stderr
+  // line untruncated. The TUI still gets the 60-char last-line summary
+  // via onProgress. Lets ~/logs/install.log capture the actual compile
+  // error after the user's terminal scrolls past it.
+  appendLog?: (line: string) => void,
 ): Promise<InstallResult> {
   const start = Date.now();
   const pinnedVersion = COMPONENT_VERSIONS[pkg as keyof typeof COMPONENT_VERSIONS];
@@ -298,6 +303,8 @@ export async function installCargoBin(
     ? ['install', pkg, '--version', pinnedVersion]
     : ['install', pkg];
 
+  appendLog?.(`cargo[${pkg}] argv: cargo ${cargoArgs.join(' ')}`);
+
   try {
     const proc = execa('cargo', cargoArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -305,7 +312,13 @@ export async function installCargoBin(
     });
 
     proc.stderr?.on('data', (chunk: Buffer) => {
-      const line = chunk.toString().trim().split('\n').pop() ?? '';
+      const text = chunk.toString();
+      if (appendLog) {
+        for (const raw of text.split('\n')) {
+          if (raw) appendLog(`cargo[${pkg}]: ${raw}`);
+        }
+      }
+      const line = text.trim().split('\n').pop() ?? '';
       if (line) onProgress(line.slice(0, 60));
     });
 
@@ -315,7 +328,9 @@ export async function installCargoBin(
     return { ok: true, detail: `${elapsed}s` };
   } catch (e: any) {
     clearInterval(ticker);
-    return { ok: false, detail: (e as any).stderr?.toString().slice(0, 120) };
+    const full = (e as any).stderr?.toString() ?? '';
+    if (appendLog && full) appendLog(`cargo[${pkg}] FAILED:\n${full}`);
+    return { ok: false, detail: full.slice(0, 120) };
   }
 }
 
@@ -342,11 +357,16 @@ export async function installCargoBin(
 export async function installRelayPrebuilt(
   cargoBin: string,
   onProgress: (detail: string) => void,
+  // Threaded straight into installCargoBin's optional appendLog so the
+  // cargo fallback path (5 different triggers below: no pin, unsupported
+  // arch, download fail, checksum mismatch, etc.) also captures full
+  // cargo stderr in ~/logs/install.log.
+  appendLog?: (line: string) => void,
 ): Promise<InstallResult> {
   const pinnedVersion = COMPONENT_VERSIONS['nostr-rs-relay'];
   if (!pinnedVersion) {
     // No pin → no corresponding prebuilt release exists to target.
-    return installCargoBin('nostr-rs-relay', onProgress);
+    return installCargoBin('nostr-rs-relay', onProgress, appendLog);
   }
 
   const dest = `${cargoBin}/nostr-rs-relay`;
@@ -381,13 +401,13 @@ export async function installRelayPrebuilt(
   const arch = archMap[process.arch];
   if (!os || !arch) {
     onProgress(`unsupported platform ${process.platform}/${process.arch} — compiling`);
-    return installCargoBin('nostr-rs-relay', onProgress);
+    return installCargoBin('nostr-rs-relay', onProgress, appendLog);
   }
   const supported = new Set(['linux-x86_64', 'darwin-arm64']);
   const targetKey = `${os}-${arch}`;
   if (!supported.has(targetKey)) {
     onProgress(`no prebuilt for ${targetKey} — compiling`);
-    return installCargoBin('nostr-rs-relay', onProgress);
+    return installCargoBin('nostr-rs-relay', onProgress, appendLog);
   }
 
   const tag     = `relay-prebuilts-v${pinnedVersion}`;
@@ -402,7 +422,7 @@ export async function installRelayPrebuilt(
   const dl = await run('curl', ['-fsSL', binUrl, '-o', dest]);
   if (!dl.ok) {
     onProgress('prebuilt download failed — compiling');
-    return installCargoBin('nostr-rs-relay', onProgress);
+    return installCargoBin('nostr-rs-relay', onProgress, appendLog);
   }
 
   // (3) Checksum verification. We intentionally use the node-side fetch for
@@ -424,7 +444,7 @@ export async function installRelayPrebuilt(
     try { fs.unlinkSync(dest); } catch {}
     const msg = (e as Error).message ?? 'verify failed';
     onProgress(`${msg} — compiling`);
-    return installCargoBin('nostr-rs-relay', onProgress);
+    return installCargoBin('nostr-rs-relay', onProgress, appendLog);
   }
 
   try {

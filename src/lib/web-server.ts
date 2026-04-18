@@ -847,22 +847,6 @@ interface Profile {
 const PROFILE_CACHE = new Map<string, Profile>();
 const PROFILE_TTL_MS = 5 * 60 * 1000;
 
-function npubToHexLocal(npub: string): string {
-  if (/^[0-9a-f]{64}$/.test(npub)) return npub;
-  try {
-    const out = execFileSync('nak', ['decode', npub], { stdio: 'pipe' }).toString().trim();
-    return /^[0-9a-f]{64}$/.test(out) ? out : '';
-  } catch { return ''; }
-}
-
-function hexToNpubLocal(hex: string): string {
-  if (/^npub1/.test(hex)) return hex;
-  try {
-    const out = execFileSync('nak', ['encode', 'npub', hex], { stdio: 'pipe' }).toString().trim();
-    return out || hex;
-  } catch { return hex; }
-}
-
 async function fetchNip05(name: string, domain: string, expectedHex: string): Promise<boolean> {
   try {
     const url = `https://${domain}/.well-known/nostr.json?name=${encodeURIComponent(name)}`;
@@ -913,9 +897,9 @@ function fetchKind0FromRelay(relayUrl: string, hex: string, timeoutMs: number): 
 }
 
 async function lookupProfile(npubOrHex: string, relays: string[]): Promise<Profile> {
-  const hex = npubToHexLocal(npubOrHex);
+  const hex = npubToHex(npubOrHex);
   if (!hex) throw new Error('could not resolve npub/hex');
-  const npub = hexToNpubLocal(hex);
+  const npub = hexToNpub(hex);
   const cacheKey = hex;
 
   const cached = PROFILE_CACHE.get(cacheKey);

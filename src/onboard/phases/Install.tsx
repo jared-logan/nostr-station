@@ -9,6 +9,8 @@ import {
   installNodePtyPrebuilt,
   installClaudeCode, installGitHubCLI, installStacks, installBlossom, installNsyte,
 } from '../../lib/install.js';
+import type { InstallResult } from '../../lib/install.js';
+import { openInstallLog } from '../../lib/install-log.js';
 
 interface StepState {
   label: string;
@@ -86,6 +88,48 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
     setFinished(false);
     setSteps(initial);
     (async () => {
+      // Durable post-mortem for the Install phase. Every step's progress
+      // updates, final status, and — for cargo compiles — the full stderr
+      // land here. When ngit silently fails on fresh Mint boxes, the user
+      // can cat this file instead of asking us what went wrong.
+      const log = openInstallLog();
+      log.append('── install phase start ──');
+      log.append(`platform=${platform.os}/${platform.arch} pkgMgr=${platform.pkgMgr} cargoBin=${platform.cargoBin}`);
+
+      // Single wrapper for all 11 install steps. Hides the `update + await
+      // + update-with-result` boilerplate and guarantees every step is
+      // mirrored to the log. `runner` can stream progress + append raw
+      // stderr lines (the latter is what rescues A6 — ngit cargo compile
+      // failures were previously invisible beyond the 120-char slice).
+      async function instrumentStep(
+        label: string,
+        idx: number,
+        runner: (
+          onProgress: (detail: string) => void,
+          appendLog: (line: string) => void,
+        ) => Promise<InstallResult>,
+        opts: {
+          initialDetail?: string;
+          // node-pty decorates its error with " — terminal panel disabled".
+          formatDetail?: (r: InstallResult) => string | undefined;
+        } = {},
+      ): Promise<InstallResult> {
+        update(idx, { status: 'running', detail: opts.initialDetail });
+        log.append(`── ${label} start ──`);
+        const onProgress = (detail: string): void => {
+          update(idx, { detail });
+          log.append(`${label}: ${detail}`);
+        };
+        const appendLog = (line: string): void => log.append(`${label}: ${line}`);
+        const r = await runner(onProgress, appendLog);
+        const detail = opts.formatDetail ? opts.formatDetail(r) : r.detail;
+        update(idx, { status: r.ok ? 'done' : 'error', detail });
+        log.append(
+          `${label}: ${r.ok ? `DONE${detail ? ` (${detail})` : ''}` : `FAIL ${detail ?? '(no detail)'}`}`,
+        );
+        return r;
+      }
+
       // System deps — stream apt/brew progress so the user sees
       // "Reading package lists…" / "Unpacking libssl-dev…" instead of a
       // frozen spinner. Without streaming, a healthy apt run on a cold
@@ -95,106 +139,82 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
       // system packages pre-Ink to dodge the sudo-inside-Ink hang; in
       // that case the initial row is already 'done' and we skip the call.
       if (!systemDepsPreInstalled) {
-        update(IDX.sys, { status: 'running', detail: 'starting…' });
-        const sys = await installSystemDeps(platform, (detail) => {
-          update(IDX.sys, { detail });
-        });
-        update(IDX.sys, { status: sys.ok ? 'done' : 'error', detail: sys.detail });
+        await instrumentStep('System packages', IDX.sys,
+          (onProgress) => installSystemDeps(platform, onProgress),
+          { initialDetail: 'starting…' });
       }
 
       // Rust
-      update(IDX.rust, { status: 'running' });
-      const rust = await installRust();
-      update(IDX.rust, { status: rust.ok ? 'done' : 'error', detail: rust.detail });
+      await instrumentStep('Rust toolchain', IDX.rust, () => installRust());
 
       // nostr-rs-relay — try the prebuilt from this repo's releases, fall
       // back to cargo compile on any failure. installRelayPrebuilt owns the
       // decision; we just render whatever detail it reports (which will
       // flip to "compiling…" with live cargo output during fallback).
-      update(IDX.relay, { status: 'running', detail: 'resolving…' });
-      const relay = await installRelayPrebuilt(platform.cargoBin, (detail) => {
-        update(IDX.relay, { detail });
-      });
-      update(IDX.relay, {
-        status: relay.ok ? 'done' : 'error',
-        detail: relay.detail,
-      });
+      await instrumentStep('nostr-rs-relay', IDX.relay,
+        (onProgress, appendLog) => installRelayPrebuilt(platform.cargoBin, onProgress, appendLog),
+        { initialDetail: 'resolving…' });
 
       // Cargo bins (just ngit now) — streams live compiler progress.
+      // appendLog threads the full cargo stderr into ~/logs/install.log,
+      // rescuing A6: the "unknown error" ngit compile failures now leave
+      // a post-mortem instead of scrolling off the TUI.
       for (const { pkg, label } of CARGO_BINS) {
-        const idx = IDX.ngit;
-        update(idx, { status: 'running', label, detail: 'starting…' });
-
-        const r = await installCargoBin(pkg, (detail) => {
-          update(idx, { detail });
-        });
-
-        update(idx, {
-          label: pkg,   // clean label once done
-          status: r.ok ? 'done' : 'error',
-          detail: r.detail,
-        });
+        const r = await instrumentStep(label, IDX.ngit,
+          (onProgress, appendLog) => installCargoBin(pkg, onProgress, appendLog),
+          { initialDetail: 'starting…' });
+        update(IDX.ngit, { label: pkg });  // clean label once done
         if (!r.ok) break;
       }
 
       // nak — prebuilt Go binary from GitHub Releases (NOT a cargo install).
       // Runs independently of the cargo loop above: even if relay/ngit failed
       // to compile, we can still lay down nak.
-      update(IDX.nak, { status: 'running', detail: 'downloading…' });
-      const nak = await installNak(platform.cargoBin);
-      update(IDX.nak, { status: nak.ok ? 'done' : 'error', detail: nak.detail });
+      await instrumentStep('nak', IDX.nak,
+        () => installNak(platform.cargoBin),
+        { initialDetail: 'downloading…' });
 
       // node-pty — native PTY addon powering the dashboard terminal panel.
       // Prebuilt-first (hosted on this repo's releases), compile fallback on
       // any failure. Non-fatal: if node-pty can't be installed, the terminal
       // panel is simply disabled; the rest of the dashboard works unchanged.
-      update(IDX.nodePty, { status: 'running', detail: 'resolving…' });
-      const pty = await installNodePtyPrebuilt((detail) => {
-        update(IDX.nodePty, { detail });
-      });
-      update(IDX.nodePty, {
-        status: pty.ok ? 'done' : 'error',
-        detail: pty.ok ? pty.detail : `${pty.detail ?? 'failed'} — terminal panel disabled`,
-      });
+      await instrumentStep('Web terminal', IDX.nodePty,
+        (onProgress) => installNodePtyPrebuilt(onProgress),
+        {
+          initialDetail: 'resolving…',
+          formatDetail: (r) => r.ok ? r.detail : `${r.detail ?? 'failed'} — terminal panel disabled`,
+        });
 
       // Claude Code — only if using Anthropic or Claude Code as editor
       const shouldInstallClaudeCode = config.aiProvider === 'anthropic' || config.editor === 'claude-code';
       if (shouldInstallClaudeCode) {
-        update(IDX.claude, { status: 'running' });
-        const cc = await installClaudeCode();
-        update(IDX.claude, { status: cc.ok ? 'done' : 'error', detail: cc.detail });
+        await instrumentStep('Claude Code', IDX.claude, () => installClaudeCode());
       } else {
         update(IDX.claude, { label: 'Claude Code   (not needed for your configuration)', status: 'skip' });
+        log.append('Claude Code: SKIP (not needed for this configuration)');
       }
 
       // GitHub CLI
       if (config.versionControl !== 'ngit') {
-        update(IDX.gh, { status: 'running' });
-        const gh = await installGitHubCLI(platform);
-        update(IDX.gh, { status: gh.ok ? 'done' : 'error', detail: gh.detail });
+        await instrumentStep('GitHub CLI', IDX.gh, () => installGitHubCLI(platform));
       }
 
       // Stacks
       if (config.installStacks) {
-        update(IDX.stacks, { status: 'running' });
-        const st = await installStacks();
-        update(IDX.stacks, { status: st.ok ? 'done' : 'error', detail: st.detail });
+        await instrumentStep('Stacks', IDX.stacks, () => installStacks());
       }
 
       // Blossom
       if (config.installBlossom) {
-        update(IDX.blossom, { status: 'running' });
-        const bl = await installBlossom(platform.homeDir);
-        update(IDX.blossom, { status: bl.ok ? 'done' : 'error', detail: bl.detail });
+        await instrumentStep('Blossom server', IDX.blossom, () => installBlossom(platform.homeDir));
       }
 
       // nsyte
       if (config.installNsyte) {
-        update(IDX.nsyte, { status: 'running' });
-        const ns = await installNsyte();
-        update(IDX.nsyte, { status: ns.ok ? 'done' : 'error', detail: ns.detail });
+        await instrumentStep('nsyte', IDX.nsyte, () => installNsyte());
       }
 
+      log.append('── install phase end ──');
       setFinished(true);
     })();
   }, [retryCount]);
@@ -222,7 +242,8 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
       .map(s => `  - ${s.label}${s.detail ? `: ${s.detail}` : ''}`)
       .join('\n');
     process.stderr.write(
-      `\n[install] one or more steps failed (non-interactive, skipping recovery prompt):\n${failures}\n`,
+      `\n[install] one or more steps failed (non-interactive, skipping recovery prompt):\n${failures}\n`
+      + `[install] full log: ~/logs/install.log\n`,
     );
     onDone();
   }, [hasError, canPrompt]);
@@ -244,6 +265,9 @@ export const InstallPhase: React.FC<InstallPhaseProps> = ({
       )}
       {hasError && canPrompt && (
         <Box marginTop={1} flexDirection="column">
+          <Text color={P.muted}>
+            {'Full log: ~/logs/install.log'}
+          </Text>
           <Select
             label="One or more steps failed — what would you like to do?"
             options={[

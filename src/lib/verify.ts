@@ -1,4 +1,5 @@
 import { execSync } from 'child_process';
+import { hasBin } from './detect.js';
 
 export interface CheckResult {
   label: string;
@@ -35,6 +36,10 @@ function isNvpnDaemonActive(): boolean {
 }
 
 export function runChecks(): CheckResult[] {
+  // Binary presence goes through hasBin (absolute-path walk) rather than
+  // `command -v`, which relies on the Node process's PATH. On fresh Linux
+  // installs, ~/.cargo/bin isn't on that PATH yet — `command -v ngit`
+  // returns non-zero even though cargo just laid it down there.
   return [
     {
       label: 'Relay (localhost:8080)',
@@ -42,7 +47,7 @@ export function runChecks(): CheckResult[] {
     },
     {
       label: 'nostr-rs-relay binary',
-      ok: cmd('command -v nostr-rs-relay'),
+      ok: hasBin('nostr-rs-relay'),
     },
     {
       label: 'nostr-vpn daemon',
@@ -50,15 +55,15 @@ export function runChecks(): CheckResult[] {
     },
     {
       label: 'ngit binary',
-      ok: cmd('command -v ngit'),
+      ok: hasBin('ngit'),
     },
     {
       label: 'nak binary',
-      ok: cmd('command -v nak'),
+      ok: hasBin('nak'),
     },
     {
       label: 'claude-code binary',
-      ok: cmd('command -v claude'),
+      ok: hasBin('claude'),
     },
     {
       label: 'Relay NIP-11 response',

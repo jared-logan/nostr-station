@@ -6,6 +6,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { readIdentity } from '../lib/identity.js';
+import { findBin, hasBin } from '../lib/detect.js';
 
 interface StatusProps { json: boolean; }
 
@@ -123,10 +124,6 @@ function cmd(c: string, timeoutMs = 2000): string | null {
   } catch { return null; }
 }
 
-function has(bin: string): boolean {
-  return cmd(`command -v ${bin}`) !== null;
-}
-
 // Exported so cli.tsx can call it directly for --json mode, bypassing Ink.
 // Ink would otherwise write UI frames to stdout alongside the JSON payload,
 // corrupting any programmatic consumer piping stdout into a parser.
@@ -135,22 +132,26 @@ export function gatherStatus(): ServiceStatus[] {
   // respect it. Protects against nc variants that ignore our execSync
   // timeout (rare, but cheap insurance).
   const relayUp   = cmd('nc -z -w 1 localhost 8080', 1500) !== null;
-  const relayBin  = has('nostr-rs-relay');
-  const relayV    = relayBin ? cmd('nostr-rs-relay --version 2>/dev/null') : null;
+  // Binary presence goes through findBin (absolute-path walk) so a fresh
+  // Linux install where ~/.cargo/bin isn't on the Node PATH still shows
+  // ✓ for installed tools. Version probes spawn the resolved absolute
+  // path directly rather than relying on shell PATH lookup.
+  const relayPath = findBin('nostr-rs-relay');
+  const relayV    = relayPath ? cmd(`${relayPath} --version 2>/dev/null`) : null;
 
-  const nvpnBin   = has('nvpn');
+  const nvpnPath  = findBin('nvpn');
   const meshIp    = (() => {
-    if (!nvpnBin) return null;
+    if (!nvpnPath) return null;
     try {
       // Tighter 1s cap: `nvpn status --json` talks to the nvpn daemon over
       // IPC. On a fresh install the service may be installed but not yet
       // running, which blocks the socket connect indefinitely.
-      const out = cmd('nvpn status --json', 1000);
+      const out = cmd(`${nvpnPath} status --json`, 1000);
       return out ? JSON.parse(out)?.tunnel_ip ?? null : null;
     } catch { return null; }
   })();
 
-  const ngitBin   = has('ngit');
+  const ngitBin   = hasBin('ngit');
   // Station-level "configured" signal is the default nostr relay the user
   // saved in identity.json — set via Config → NGIT in the dashboard. This
   // matches what the dashboard can act on; project-specific ngit remotes
@@ -160,14 +161,15 @@ export function gatherStatus(): ServiceStatus[] {
     catch { return ''; }
   })();
 
-  const claudeBin = has('claude');
-  const claudeV   = claudeBin ? cmd('claude --version 2>/dev/null') : null;
+  const claudePath = findBin('claude');
+  const claudeV    = claudePath ? cmd(`${claudePath} --version 2>/dev/null`) : null;
 
-  const nakBin    = has('nak');
-  const nakV      = nakBin ? cmd('nak --version 2>/dev/null') : null;
+  const nakPath   = findBin('nak');
+  const nakV      = nakPath ? cmd(`${nakPath} --version 2>/dev/null`) : null;
 
-  const stacksBin = has('stacks');
-  const stacksV   = stacksBin ? cmd('stacks --version 2>/dev/null') : null;
+  const stacksPath = findBin('stacks');
+  const stacksBin  = stacksPath !== null;
+  const stacksV    = stacksPath ? cmd(`${stacksPath} --version 2>/dev/null`) : null;
 
   // Watchdog is a launchd interval job on macOS / systemd .timer on linux.
   // No listening socket, no PID between fires — "loaded" is the only signal
@@ -180,6 +182,11 @@ export function gatherStatus(): ServiceStatus[] {
   const watchdogLoaded = process.platform === 'darwin'
     ? cmd('launchctl list com.nostr-station.watchdog', 1500) !== null
     : cmd('systemctl --user is-enabled --quiet nostr-watchdog.timer', 1500) !== null;
+
+  const relayBin  = relayPath !== null;
+  const nvpnBin   = nvpnPath !== null;
+  const claudeBin = claudePath !== null;
+  const nakBin    = nakPath !== null;
 
   // Three-state mapping:
   //   ok   — running + configured
