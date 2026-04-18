@@ -138,6 +138,32 @@ const MIME: Record<string, string> = {
   '.json': 'application/json',
 };
 
+// Security headers applied only to HTML responses (index.html, /setup SPA
+// route). JSON/SSE responses are framework-style content, not documents, so
+// applying CSP to them just adds noise in devtools. The policy allows inline
+// <script>/<style> because the current dashboard uses them and innerHTML
+// throughout; tightening to nonces is a future pass. `connect-src` covers the
+// loopback WebSocket and any outbound nostr relay (wss://). frame-ancestors
+// 'none' prevents clickjacking; X-Frame-Options is kept as a belt-and-braces
+// for older browsers.
+const HTML_SECURITY_HEADERS: Record<string, string> = {
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "connect-src 'self' ws://127.0.0.1:* ws://localhost:* wss:",
+    "img-src 'self' data: https:",
+    "font-src 'self' data:",
+  ].join('; '),
+};
+
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const urlPath = (req.url || '/').split('?')[0];
   const rel = urlPath === '/' ? '/index.html' : urlPath;
@@ -148,7 +174,9 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boole
 
   const ext  = path.extname(resolved).toLowerCase();
   const mime = MIME[ext] ?? 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
+  const headers: Record<string, string> = { 'Content-Type': mime, 'Cache-Control': 'no-cache' };
+  if (mime === 'text/html') Object.assign(headers, HTML_SECURITY_HEADERS);
+  res.writeHead(200, headers);
   fs.createReadStream(resolved).pipe(res);
   return true;
 }
@@ -3232,7 +3260,11 @@ export async function startWebServer(port: number): Promise<void> {
       if (method === 'GET' && url === '/setup') {
         const indexPath = path.join(WEB_DIR, 'index.html');
         if (fs.existsSync(indexPath)) {
-          res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' });
+          res.writeHead(200, {
+            'Content-Type': 'text/html',
+            'Cache-Control': 'no-cache',
+            ...HTML_SECURITY_HEADERS,
+          });
           fs.createReadStream(indexPath).pipe(res);
           return;
         }
