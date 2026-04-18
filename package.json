@@ -15,7 +15,8 @@
     "build": "tsc && node scripts/copy-web.mjs",
     "prepublishOnly": "tsc && node scripts/copy-web.mjs",
     "dev": "tsx src/cli.tsx",
-    "onboard": "tsx src/cli.tsx onboard"
+    "onboard": "tsx src/cli.tsx onboard",
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
