@@ -149,7 +149,12 @@ const MIME: Record<string, string> = {
 const HTML_SECURITY_HEADERS: Record<string, string> = {
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
-  'Referrer-Policy': 'no-referrer',
+  // `same-origin` (not `no-referrer`) is intentional: browsers don't always
+  // send Origin on same-origin GETs, but they DO send Referer under this
+  // policy, which the `?token=` fetch-guard needs to distinguish a
+  // dashboard-initiated EventSource from a cross-origin attacker request.
+  // Cross-origin requests get zero Referer info, same as `no-referrer`.
+  'Referrer-Policy': 'same-origin',
   'Content-Security-Policy': [
     "default-src 'self'",
     "frame-ancestors 'none'",
