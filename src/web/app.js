@@ -2736,9 +2736,16 @@ const ProjectsPanel = (() => {
     discoverBtn.addEventListener('click', () => openDiscoverModal());
     headActions.appendChild(discoverBtn);
 
+    const newBtn = document.createElement('button');
+    newBtn.textContent = 'New project';
+    newBtn.title = 'Scaffold a new project in ~/projects';
+    newBtn.addEventListener('click', () => openNewProjectModal());
+    headActions.appendChild(newBtn);
+
     const addBtn = document.createElement('button');
     addBtn.className = 'primary';
     addBtn.textContent = 'Add project';
+    addBtn.title = 'Adopt an existing directory as a project';
     addBtn.addEventListener('click', () => ProjectDrawer.openAdd());
     headActions.appendChild(addBtn);
 
@@ -2843,6 +2850,38 @@ const ProjectsPanel = (() => {
         `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M2 12h20M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>`);
       deployBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectDeploy(p); });
       actionsEl.appendChild(deployBtn);
+    }
+
+    // Stacks/MKStack-specific actions — Dork agent, Vite dev server,
+    // NostrDeploy publish. Only shown when the project has a stack.json
+    // (server-derived `stacksProject` flag). Each spawns into the
+    // terminal panel except deploy, which uses the streaming exec
+    // modal so the success URL stays visible after the run completes.
+    if (p.stacksProject && p.path && window.NSTerminal?.isAvailable?.()) {
+      const dorkBtn = iconBtn('dork', 'Open in Dork (Stacks agent)',
+        `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>`);
+      dorkBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.NSTerminal.open('stacks-agent', { projectId: p.id });
+      });
+      actionsEl.appendChild(dorkBtn);
+
+      const devBtn = iconBtn('stacks-dev', 'Run dev server (localhost:5173)',
+        `<svg viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg>`);
+      devBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.NSTerminal.open('stacks-dev', { projectId: p.id });
+      });
+      actionsEl.appendChild(devBtn);
+    }
+    if (p.stacksProject && p.path) {
+      const stacksDeployBtn = iconBtn('stacks-deploy', 'Deploy to NostrDeploy',
+        `<svg viewBox="0 0 24 24"><path d="M4 12l8-8 8 8M12 4v16"/></svg>`);
+      stacksDeployBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        runStacksDeploy(p);
+      });
+      actionsEl.appendChild(stacksDeployBtn);
     }
 
     card.addEventListener('click', () => openDetail(p.id));
@@ -3502,6 +3541,23 @@ const ProjectsPanel = (() => {
       if (state.view === 'detail' && state.projectId === p.id) render();
     });
   }
+  async function runStacksDeploy(p) {
+    const ok = await confirmDestructive({
+      title: `Deploy ${p.name} to NostrDeploy`,
+      description: 'Runs `npm run deploy` in this project — bundles, uploads to Blossom servers, publishes Nostr metadata. Returns a live URL.',
+      confirmLabel: 'Deploy',
+    });
+    if (!ok) return;
+    openExecModal({
+      title: `Stacks deploy · ${p.name}`,
+      subtitle: p.path || '',
+      endpoint: `/api/projects/${p.id}/stacks/deploy`,
+    }).then(r => {
+      if (r.ok) toast('Deploy complete', 'Look for the live URL in the log above', 'ok');
+      else      toast('Deploy failed', `exit ${r.code}`, 'err');
+    });
+  }
+
   async function runProjectDeploy(p) {
     const ok = await confirmDestructive({
       title: `Deploy · ${p.name}`,
@@ -3642,6 +3698,263 @@ const ProjectsPanel = (() => {
         </div>
       </div>
     `;
+  }
+
+  // ── New Project flow ───────────────────────────────────────────────────
+  //
+  // Scaffolds a new project directly into ~/projects/<slug> via one of
+  // two templates: mkstack (Soapbox's Nostr React scaffolder) or an
+  // empty git repo. Collision-handling routes to Add Project when the
+  // target path already exists, so the user gets a useful path forward
+  // instead of a dead-end error.
+
+  function slugifyClient(raw) {
+    return String(raw || '')
+      .trim()
+      .toLowerCase()
+      .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40);
+  }
+
+  async function openNewProjectModal() {
+    // Probe Stacks availability so the mkstack radio can be disabled with
+    // a clear reason when the binary is missing. Cheap — /api/status is
+    // already polled every 5s, so the request usually comes out of cache
+    // at the network layer.
+    let stacksInstalled = false;
+    try {
+      const s = await api('/api/status');
+      stacksInstalled = !!s.find(e => e.id === 'stacks' && e.state === 'ok');
+    } catch {}
+
+    const body = document.createElement('div');
+    body.className = 'new-project-form';
+    body.innerHTML = `
+      <label class="np-field">
+        <span class="np-label">Project name</span>
+        <input id="np-name" type="text" autocomplete="off" placeholder="My cool app" />
+        <div class="np-preview">
+          Path: <code id="np-path-preview">${escapeHtml(`${(window.__homeDir || '~')}/projects/…`)}</code>
+        </div>
+      </label>
+      <fieldset class="np-templates">
+        <legend class="np-label">Template</legend>
+        <label class="np-template ${stacksInstalled ? '' : 'disabled'}">
+          <input type="radio" name="np-template" value="mkstack"
+                 ${stacksInstalled ? 'checked' : 'disabled'}>
+          <div>
+            <div class="np-template-title">mkstack <span class="np-template-tag">recommended</span></div>
+            <div class="np-template-desc">
+              Build Nostr clients with React. Ships with complete Nostr integration out of the box —
+              social media, blogging, AI-powered apps. If you're not sure, pick this.
+            </div>
+            ${stacksInstalled ? '' : `
+              <div class="np-template-missing">
+                ⚠ <code>stacks</code> binary isn't installed.
+                Install it from <a href="#status">Status → Binaries → Stacks</a>, then reopen this.
+              </div>
+            `}
+          </div>
+        </label>
+        <label class="np-template">
+          <input type="radio" name="np-template" value="empty"
+                 ${stacksInstalled ? '' : 'checked'}>
+          <div>
+            <div class="np-template-title">Empty git repo</div>
+            <div class="np-template-desc">
+              A fresh directory with <code>git init</code> and a starter README. Bring your own stack.
+            </div>
+          </div>
+        </label>
+      </fieldset>
+    `;
+
+    const foot = document.createElement('div');
+    foot.style.display = 'flex';
+    foot.style.gap = '8px';
+    foot.style.justifyContent = 'flex-end';
+    foot.style.width = '100%';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    const createBtn = document.createElement('button');
+    createBtn.className = 'primary';
+    createBtn.textContent = 'Create';
+    createBtn.disabled = true;
+    foot.appendChild(cancelBtn);
+    foot.appendChild(createBtn);
+
+    const modal = openModal({
+      title: 'New project',
+      subtitle: 'Scaffold a project in ~/projects',
+      body,
+      footer: foot,
+    });
+
+    const nameInput = body.querySelector('#np-name');
+    const preview   = body.querySelector('#np-path-preview');
+    const updatePreview = () => {
+      const slug = slugifyClient(nameInput.value);
+      preview.textContent = slug
+        ? `~/projects/${slug}`
+        : '~/projects/…';
+      createBtn.disabled = !slug;
+    };
+    nameInput.addEventListener('input', updatePreview);
+    nameInput.focus();
+    cancelBtn.addEventListener('click', () => modal.close());
+
+    // Enter in the name field submits if the button is enabled — matches
+    // the rest of the dashboard's form ergonomics.
+    nameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !createBtn.disabled) { e.preventDefault(); createBtn.click(); }
+    });
+
+    createBtn.addEventListener('click', async () => {
+      const name = nameInput.value.trim();
+      if (!name) return;
+      const template = body.querySelector('input[name="np-template"]:checked')?.value || 'empty';
+
+      // Pre-flight collision check. If ~/projects/<slug> already exists
+      // we don't want to kick off a scaffold only to have it abort; we
+      // also don't want to silently overwrite. Handoff to Add Project
+      // with the path prefilled so the user can adopt it instead.
+      createBtn.disabled = true;
+      let coll;
+      try {
+        coll = await api('/api/projects/new/check', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+      } catch (e) {
+        toast('Check failed', e.message, 'err');
+        createBtn.disabled = false;
+        return;
+      }
+
+      if (coll.exists) {
+        // Swap the modal body for the collision prompt. Keep the modal
+        // open so the user doesn't lose context; only close when they
+        // pick an action.
+        body.innerHTML = `
+          <p style="margin:0 0 12px 0; color: var(--text);">
+            A directory already exists at <code>${escapeHtml(coll.path)}</code>.
+          </p>
+          <p style="margin:0; color: var(--text-dim); font-size: 12px;">
+            Would you like to adopt the existing directory as a project instead?
+            Adopting won't modify any files inside it.
+          </p>
+        `;
+        foot.innerHTML = '';
+        const back = document.createElement('button');
+        back.textContent = 'Change name';
+        back.addEventListener('click', () => { modal.close(); openNewProjectModal(); });
+        const adopt = document.createElement('button');
+        adopt.className = 'primary';
+        adopt.textContent = 'Adopt existing';
+        adopt.addEventListener('click', () => {
+          modal.close();
+          ProjectDrawer.openAddPrefilled({
+            name,
+            capabilities: { git: true, ngit: false, nsite: false },
+            remotes: {},
+            path: coll.path,
+          });
+        });
+        foot.appendChild(back);
+        foot.appendChild(adopt);
+        return;
+      }
+
+      // No collision — close the form modal and hand off to the exec
+      // modal for the streaming scaffold. The exec modal surfaces npm
+      // install's log output (mkstack can take 30-60s on first run) so
+      // users see progress rather than a spinner hanging.
+      modal.close();
+      const result = await openExecModal({
+        title: `Creating ${coll.slug}`,
+        subtitle: `Scaffolding ${template} template into ${coll.path}`,
+        endpoint: '/api/projects/new',
+        body: { name, template },
+      });
+
+      if (result.ok && result.info?.project) {
+        toast('Project created', result.info.project.name, 'ok');
+        await reload();
+        // For mkstack scaffolds specifically, ask the user if they want
+        // to jump straight into the Dork/dev workflow. Skips for empty
+        // repos — there's nothing to dev-serve and no Stacks agent
+        // to run. Lifts shakespeare.diy's "type-name-and-start-prompting"
+        // pattern into the local dashboard.
+        if (template === 'mkstack' && window.NSTerminal?.isAvailable?.()) {
+          openPostScaffoldPrompt(result.info.project);
+        } else {
+          // Empty repo path — no dev/agent loop to offer; just land on
+          // the project detail view so the user sees their card.
+          try { openDetail(result.info.project.id); } catch {}
+        }
+      } else if (!result.ok) {
+        toast('Create failed', `exit ${result.code}`, 'err');
+      }
+    });
+  }
+
+  function openPostScaffoldPrompt(project) {
+    const body = document.createElement('div');
+    body.style.fontSize = '13px';
+    body.style.color = 'var(--text)';
+    body.innerHTML = `
+      <p style="margin: 0 0 8px 0;">
+        <strong>${escapeHtml(project.name)}</strong> is ready at
+        <code class="cmd-inline">${escapeHtml(project.path)}</code>.
+      </p>
+      <p style="margin: 0; color: var(--text-dim); font-size: 12px;">
+        Pick how you'd like to start. The Dork agent is Stacks's built-in
+        AI coding loop; the dev server runs on localhost:5173 (we shift
+        from MKStack's default 8080 so it doesn't collide with the relay).
+      </p>
+    `;
+    const foot = document.createElement('div');
+    foot.style.display = 'flex';
+    foot.style.gap = '8px';
+    foot.style.justifyContent = 'flex-end';
+    foot.style.flexWrap = 'wrap';
+    foot.style.width = '100%';
+
+    const skip = document.createElement('button');
+    skip.textContent = 'Skip — just open the card';
+    const dev = document.createElement('button');
+    dev.textContent = 'Run dev server';
+    const dork = document.createElement('button');
+    dork.className = 'primary';
+    dork.textContent = 'Open Dork now';
+    foot.appendChild(skip);
+    foot.appendChild(dev);
+    foot.appendChild(dork);
+
+    const modal = openModal({
+      title: 'Project ready',
+      subtitle: 'Start the Stacks workflow',
+      body,
+      footer: foot,
+    });
+
+    skip.addEventListener('click', () => {
+      modal.close();
+      try { openDetail(project.id); } catch {}
+    });
+    dev.addEventListener('click', () => {
+      modal.close();
+      window.NSTerminal.open('stacks-dev', { projectId: project.id });
+      try { openDetail(project.id); } catch {}
+    });
+    dork.addEventListener('click', () => {
+      modal.close();
+      window.NSTerminal.open('stacks-agent', { projectId: project.id });
+      try { openDetail(project.id); } catch {}
+    });
   }
 
   return { onEnter, reload, openDetail };
@@ -4068,6 +4381,27 @@ const ConfigPanel = (() => {
         </div>
       </div>
 
+      <div class="config-section" id="cfg-stacks-section">
+        <h3>Stacks AI (Dork)</h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+          Stacks ships its own AI provider config (separate from the providers above) at
+          <code>~/Library/Preferences/stacks/config.json</code>. The Dork agent that runs inside
+          mkstack projects uses this. Provider list is decided by Stacks itself —
+          <code>stacks configure</code> shows the current options (Anthropic, OpenRouter,
+          Routstr, PayPerQ, etc.).
+        </div>
+        <div class="config-row" style="margin-bottom:10px">
+          <div class="k">Status</div>
+          <div class="v" id="cfg-stacks-status">checking…</div>
+        </div>
+        <div class="keyrow">
+          <button id="cfg-stacks-configure">Configure Stacks AI</button>
+          <span style="font-size:11px;color:var(--muted);align-self:center">
+            opens <code>stacks configure</code> in a terminal tab
+          </span>
+        </div>
+      </div>
+
       <div class="config-section">
         <h3>System</h3>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
@@ -4099,6 +4433,40 @@ const ConfigPanel = (() => {
           window.NSTerminal?.getUnavailableReason?.() || 'Run update from your own shell: `nostr-station update --wizard`',
           'err');
       }
+    });
+
+    // Stacks AI → Configure — runs `stacks configure` in a terminal tab.
+    // Stacks's configure flow is interactive (provider picker + key entry
+    // + Lightning/Cashu options for Routstr/PayPerQ), so terminal-only.
+    $('cfg-stacks-configure')?.addEventListener('click', () => {
+      if (window.NSTerminal?.isAvailable?.()) {
+        window.NSTerminal.open('stacks-configure');
+      } else {
+        toast('Terminal unavailable',
+          window.NSTerminal?.getUnavailableReason?.() || 'Run from your shell: `stacks configure`',
+          'err');
+      }
+    });
+
+    // Stacks AI → status line. Reads ~/Library/Preferences/stacks/config.json
+    // server-side and shows configured provider ids (no keys leak through
+    // the API). Refreshable by re-rendering the panel — Stacks doesn't
+    // emit a change event when configure exits, so the user has to switch
+    // tabs and back, or we poll. For now, fetch on render is enough; if
+    // it becomes a friction point a one-shot post-terminal-close refresh
+    // would be the next step.
+    api('/api/stacks/config').then(r => {
+      const el = $('cfg-stacks-status');
+      if (!el) return;
+      if (r.configured) {
+        el.innerHTML = `<span style="color:var(--success)">✓ configured</span>` +
+          ` <span style="color:var(--text-dim);font-size:11px">— ${escapeHtml(r.providers.join(', '))}</span>`;
+      } else {
+        el.innerHTML = `<span style="color:var(--text-dim)">not configured yet</span>`;
+      }
+    }).catch(() => {
+      const el = $('cfg-stacks-status');
+      if (el) el.textContent = '—';
     });
 
     // Copy button on the identity npub row — only rendered when an npub is

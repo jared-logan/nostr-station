@@ -274,6 +274,33 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
     case 'opencode':
       return { cmd: 'opencode', args: [], cwd, label: cwd ? `opencode · ${path.basename(cwd)}` : 'opencode' };
 
+    // Stacks Dork agent — the AI coding loop that ships with mkstack.
+    // Run inside the project dir (cwd is required). Uses Stacks' own
+    // AI provider config at ~/Library/Preferences/stacks/config.json
+    // (configure via `stacks configure` or the dashboard's Stacks AI
+    // section in Config).
+    case 'stacks-agent':
+      return { cmd: 'stacks', args: ['agent'], cwd, label: cwd ? `dork · ${path.basename(cwd)}` : 'dork' };
+
+    // Vite dev server for mkstack projects. We force --port 5173 so it
+    // doesn't collide with the relay on :8080 (mkstack templates ship
+    // with vite.config setting port to 8080, which conflicts on every
+    // nostr-station install). The leading -- separates npm script args
+    // from npm's own args.
+    case 'stacks-dev':
+      return {
+        cmd: 'npm', args: ['run', 'dev', '--', '--port', '5173'], cwd,
+        label: cwd ? `dev · ${path.basename(cwd)}` : 'dev',
+      };
+
+    // Stacks's own AI provider config flow — interactive picker for
+    // OpenRouter / Routstr / PayPerQ + key/Cashu/Lightning setup. Writes
+    // to ~/Library/Preferences/stacks/config.json. Distinct from
+    // nostr-station's ai-config; the Config panel surfaces this as the
+    // "Stacks AI" section's Configure button.
+    case 'stacks-configure':
+      return { cmd: 'stacks', args: ['configure'], cwd, label: 'stacks configure' };
+
     // ngit login — the canonical first-wire trigger. --interactive forces
     // the nostrconnect QR flow (vs. the `--nsec` / `--bunker-url` shortcuts),
     // which is what we actually want users doing from the dashboard.

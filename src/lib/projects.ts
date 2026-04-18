@@ -110,6 +110,19 @@ export function readProjects(): Project[] {
   }
 }
 
+// Derived check — Stacks projects have a `stack.json` at their root
+// (created by `stacks mkstack` and `stacks init`). Returns false for
+// projects with no local path or whose path is missing/inaccessible.
+// Cheap (one statSync per call) and intentionally NOT cached: users
+// can convert a non-Stacks dir into one with `stacks init` between
+// dashboard refreshes, and we want the next /api/projects GET to
+// reflect that without a server restart.
+export function isStacksProject(p: Project): boolean {
+  if (!p.path) return false;
+  try { return fs.statSync(`${p.path}/stack.json`).isFile(); }
+  catch { return false; }
+}
+
 function writeProjects(projects: Project[]): void {
   fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 });
   fs.writeFileSync(projectsPath(), JSON.stringify(projects, null, 2), { mode: 0o600 });

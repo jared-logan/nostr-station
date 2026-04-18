@@ -553,15 +553,22 @@ Deploy built web apps to Nostr/Blossom. Each project has its own config.
     → Titan browser: https://github.com/btcjt/titan
     Without a registered name, nsite:// resolves by full npub only.
 
-` : ''}${c.installStacks ? `### Stacks / NostrDeploy — rapid Nostr app prototyping
-Soapbox's MKStack template — rapid Nostr app scaffolding. Separate from this environment —
-has its own AI provider config and deploys to NostrDeploy.com, not nsite.
+` : ''}${c.installStacks ? `### Stacks / MKStack / Dork — Nostr app prototyping
+Soapbox's MKStack template — React + Vite + ShadCN UI + 50+ NIPs pre-wired.
+Comes with the Dork AI agent (\`stacks agent\`) and one-command NostrDeploy publishing.
+Stacks has its own AI provider config (OpenRouter / Routstr / PayPerQ) at
+~/Library/Preferences/stacks/config.json — separate from nostr-station's ai-config.
 
-  New project:        mkdir my-app && cd my-app && stacks mkstack
-  Run locally:        npm run dev          (localhost:5173)
-  Deploy:             npm run deploy       (→ NostrDeploy.com)
-  Stacks agent:       stacks agent
-  Change AI config:   stacks configure     (separate from nostr-station's AI setup)
+  New project:        cd ~/projects && stacks mkstack <name>
+  Run dev server:     npm run dev -- --port 5173    # 8080 collides with the relay
+  Open Dork agent:    stacks agent                  # prompts for code, refactors live
+  Deploy:             npm run deploy                # → NostrDeploy.com (Blossom + relays)
+  Configure Stacks:   stacks configure              # picker for AI provider + key
+  List templates:     stacks list
+
+The dashboard surfaces all of these as buttons on Stacks-project cards
+(Projects panel) — \`stack.json\` presence flips the project into Stacks
+mode automatically.
 
 ` : ''}
 ## Relay NIP support (nostr-rs-relay)

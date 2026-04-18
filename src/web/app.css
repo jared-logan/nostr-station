@@ -1393,6 +1393,116 @@ input:focus, textarea:focus, select:focus {
   font-size: 11px;
 }
 
+/* ── new-project modal ────────────────────────────────────────────────── */
+
+.new-project-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.new-project-form .np-field { display: flex; flex-direction: column; gap: 6px; }
+.new-project-form .np-label {
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.new-project-form input[type="text"] {
+  font-size: 14px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-bright);
+}
+.new-project-form input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.new-project-form .np-preview {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.new-project-form .np-preview code {
+  color: var(--accent-bright);
+  background: rgba(255,255,255,0.04);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
+.new-project-form .np-templates {
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.new-project-form .np-templates legend { padding: 0; margin-bottom: 6px; }
+
+.new-project-form .np-template {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: border-color 120ms;
+}
+.new-project-form .np-template:hover { border-color: var(--border-strong); }
+.new-project-form .np-template input[type="radio"] {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+.new-project-form .np-template.disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.new-project-form .np-template.disabled:hover { border-color: var(--border); }
+
+.new-project-form .np-template-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 4px;
+}
+.new-project-form .np-template-tag {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent-bright);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.new-project-form .np-template-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.new-project-form .np-template-desc code {
+  background: rgba(255,255,255,0.04);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.new-project-form .np-template-missing {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--warn);
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+}
+.new-project-form .np-template-missing a {
+  color: var(--warn);
+  text-decoration: underline;
+}
+
 /* ── help cards (relay panel) ─────────────────────────────────────────── */
 
 .help-card {

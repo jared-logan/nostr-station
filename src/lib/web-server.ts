@@ -66,8 +66,10 @@ import {
 import {
   readProjects, getProject, createProject, updateProject, deleteProject,
   detectPath, projectGitStatus, projectGitLog, resolveProjectContext,
+  isStacksProject,
   type Project,
 } from './projects.js';
+import { checkCollision, scaffoldProject } from './project-scaffold.js';
 
 // ── Static assets ─────────────────────────────────────────────────────────────
 //
@@ -1482,8 +1484,17 @@ export async function startWebServer(port: number): Promise<void> {
 
       // ── Projects ───────────────────────────────────────────────────────
       if (url === '/api/projects' && method === 'GET') {
+        // Annotate each project with derived `stacksProject` so the UI
+        // can gate Stacks-specific actions (Open in Dork, dev server,
+        // deploy) without re-checking every render. Cheap fs.statSync
+        // per project — list size is single-digit on every install
+        // we've seen, so no concern about hot-path cost.
+        const annotated = readProjects().map(p => ({
+          ...p,
+          stacksProject: isStacksProject(p),
+        }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(readProjects()));
+        res.end(JSON.stringify(annotated));
         return;
       }
       if (url === '/api/projects' && method === 'POST') {
@@ -1510,6 +1521,70 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
+      // New-project scaffold flow — two endpoints. /check is a cheap
+      // synchronous pre-flight the client uses to decide whether to open
+      // the collision modal ("directory exists — adopt it instead?") or
+      // proceed to the streaming scaffold. /new itself runs long (npm
+      // install inside mkstack) so it emits SSE in the same frame shape
+      // as /api/exec/install/* — openExecModal can render it directly.
+      // Sanitized read of Stacks's config — exposes which providers
+      // have a configured key (id only — never the key itself) so the
+      // Config panel's Stacks AI section can show "configured" status
+      // without the user needing to leave the dashboard. Stacks stores
+      // its config at ~/Library/Preferences/stacks/config.json on macOS;
+      // path differs on linux but stacks resolves it itself when the
+      // user runs stacks configure.
+      if (url === '/api/stacks/config' && method === 'GET') {
+        const candidates = [
+          path.join(os.homedir(), 'Library', 'Preferences', 'stacks', 'config.json'),
+          path.join(os.homedir(), '.config', 'stacks', 'config.json'),
+        ];
+        let cfg: any = null;
+        let foundAt: string | null = null;
+        for (const p of candidates) {
+          try {
+            const raw = fs.readFileSync(p, 'utf8');
+            cfg = JSON.parse(raw);
+            foundAt = p;
+            break;
+          } catch { /* try next */ }
+        }
+        const providers = cfg && cfg.providers && typeof cfg.providers === 'object'
+          ? Object.keys(cfg.providers)
+          : [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          configured: providers.length > 0,
+          providers,                  // ids only — no keys, no baseURLs
+          configPath: foundAt,
+          recentModels: Array.isArray(cfg?.recentModels) ? cfg.recentModels : [],
+        }));
+        return;
+      }
+
+      if (url === '/api/projects/new/check' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400); res.end('bad json'); return; }
+        const report = checkCollision(String(parsed.name || ''));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(report));
+        return;
+      }
+      if (url === '/api/projects/new' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad json' }));
+          return;
+        }
+        const name     = String(parsed.name || '');
+        const template = parsed.template === 'empty' ? 'empty' : 'mkstack';
+        await scaffoldProject(name, template, res);
+        return;
+      }
+
       const projMatch = url.match(/^\/api\/projects\/([a-f0-9-]{10,})(?:\/(.*))?$/);
       if (projMatch) {
         const id = projMatch[1];
@@ -1523,7 +1598,7 @@ export async function startWebServer(port: number): Promise<void> {
 
         if (tail === '' && method === 'GET') {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(project));
+          res.end(JSON.stringify({ ...project, stacksProject: isStacksProject(project) }));
           return;
         }
         if (tail === '' && method === 'PATCH') {
@@ -1588,6 +1663,29 @@ export async function startWebServer(port: number): Promise<void> {
             res.writeHead(400); res.end('no push-capable capability enabled'); return;
           }
           streamExec(spec, res, req, project.path);
+          return;
+        }
+
+        if (tail === 'stacks/deploy' && method === 'POST') {
+          if (!project.path) {
+            streamExecError(res, req, 'project has no local path');
+            return;
+          }
+          if (!isStacksProject(project)) {
+            streamExecError(res, req, 'not a Stacks project (no stack.json found)');
+            return;
+          }
+          // `npm run deploy` is mkstack's deploy script — bundles, uploads
+          // to Blossom, publishes Nostr metadata, returns a NostrDeploy
+          // URL. We stream the output as-is; URL parsing + persisting to
+          // project.nsite.url is deferred to a follow-up once we've seen
+          // the exact stdout format on a real deploy. For now, the user
+          // sees the live URL in the exec modal output.
+          streamExec(
+            { bin: 'npm', args: ['run', 'deploy'] },
+            res, req, project.path,
+            { line: `$ npm run deploy  (cwd: ${project.path})`, stream: 'stdout' },
+          );
           return;
         }
 
