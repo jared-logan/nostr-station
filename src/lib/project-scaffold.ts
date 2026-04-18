@@ -32,6 +32,18 @@ export type ScaffoldSource =
   | { type: 'local-only' }
   | { type: 'git-url'; url: string };
 
+export interface ScaffoldIdentity {
+  useDefault: boolean;
+  npub:       string | null;
+  bunkerUrl:  string | null;
+}
+
+const DEFAULT_IDENTITY: ScaffoldIdentity = {
+  useDefault: true,
+  npub:       null,
+  bunkerUrl:  null,
+};
+
 // Slug rules: lower-case, replace runs of non-alphanumerics with a single
 // dash, trim leading/trailing dashes, cap at 40 chars. "My Cool App!" →
 // "my-cool-app". Matches common npm/GitHub slugging conventions so users
@@ -218,6 +230,7 @@ export async function scaffoldProject(
   name: string,
   source: ScaffoldSource,
   res: http.ServerResponse,
+  identity: ScaffoldIdentity = DEFAULT_IDENTITY,
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type':  'text/event-stream',
@@ -302,11 +315,23 @@ export async function scaffoldProject(
   // the project card — local-only shows no version-control chip, git-url
   // shows "git". ngit + nsite are explicit follow-ups the user enables
   // from the project card (via Publish flow — never auto-published).
+  // Identity: station default unless the caller passed a project-specific
+  // one. validateInput in projects.ts rejects nsec in the npub field and
+  // validates bunker URL format, so bad input gets caught at the boundary
+  // and we don't need to guard here.
+  const projectIdentity = identity.useDefault
+    ? { useDefault: true, npub: null, bunkerUrl: null }
+    : {
+        useDefault: false,
+        npub:       identity.npub || null,
+        bunkerUrl:  identity.bunkerUrl || null,
+      };
+
   const created = createProject({
     name: name.trim(),
     path: target,
     capabilities: { git: gitCapability, ngit: false, nsite: false },
-    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    identity: projectIdentity,
     remotes:  { github: githubRemote, ngit: null },
     nsite:    { url: null, lastDeploy: null },
   });

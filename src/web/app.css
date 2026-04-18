@@ -1579,6 +1579,91 @@ input:focus, textarea:focus, select:focus {
   font-size: 11px;
 }
 
+/* ── Advanced section (identity picker in lightweight modals) ─────────── */
+
+.np-advanced {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.np-advanced > summary {
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 4px 0;
+  list-style: none;
+  user-select: none;
+  transition: color 120ms;
+}
+.np-advanced > summary:hover { color: var(--text-dim); }
+.np-advanced > summary::-webkit-details-marker { display: none; }
+.np-advanced > summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 120ms;
+}
+.np-advanced[open] > summary::before { transform: rotate(90deg); }
+.np-advanced[open] > summary { color: var(--text-bright); }
+
+.np-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.np-advanced-body .radio-row {
+  display: flex;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: border-color 120ms;
+}
+.np-advanced-body .radio-row:hover { border-color: var(--border-strong); }
+.np-advanced-body .radio-row input[type="radio"] {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+.np-advanced-body .radio-row .radio-sub {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.np-ident-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.02);
+  border-radius: var(--r-sm);
+  margin-top: 2px;
+}
+.np-ident-fields input[type="text"] {
+  font-size: 13px;
+  padding: 7px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-bright);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.np-ident-fields input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.np-ident-err {
+  font-size: 11px;
+  color: var(--error);
+  min-height: 14px;
+}
+.np-ident-err:empty { display: none; }
+
 /* ── Add Project chooser modal ────────────────────────────────────────── */
 
 .add-source-chooser {

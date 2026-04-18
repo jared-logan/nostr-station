@@ -1602,7 +1602,22 @@ export async function startWebServer(port: number): Promise<void> {
             source = { type: 'local-only' };
           }
         }
-        await scaffoldProject(name, source, res);
+        // Identity: station-default unless the client explicitly opts
+        // the project into a project-specific npub + optional bunker.
+        // scaffoldProject + projects.validateInput own the validation
+        // (nsec rejection, bunker URL format); we just shape the object.
+        let identity: import('./project-scaffold.js').ScaffoldIdentity = {
+          useDefault: true, npub: null, bunkerUrl: null,
+        };
+        const rawIdent = parsed.identity;
+        if (rawIdent && typeof rawIdent === 'object' && rawIdent.useDefault === false) {
+          identity = {
+            useDefault: false,
+            npub:       typeof rawIdent.npub === 'string'      ? rawIdent.npub.trim()      : null,
+            bunkerUrl:  typeof rawIdent.bunkerUrl === 'string' ? rawIdent.bunkerUrl.trim() : null,
+          };
+        }
+        await scaffoldProject(name, source, res, identity);
         return;
       }
 

@@ -3769,6 +3769,98 @@ const ProjectsPanel = (() => {
       .slice(0, 40);
   }
 
+  // Shared "Advanced → signer identity" block for the New Project and
+  // Import Repository modals. Collapsed by default — most users stick
+  // with station identity; expanding surfaces the project-specific
+  // npub + bunker fields, matching what the full ProjectDrawer already
+  // offers. Mutates `ident` in place as the user edits; the modal reads
+  // the final state on submit.
+  //
+  // `uid` scopes the radio group so two modals can coexist (no
+  // cross-contamination of selected state if both were ever open).
+  function renderIdentitySection(ident, ownerNpub, uid) {
+    const ownerDisplay = ownerNpub ? truncNpub(ownerNpub) : '(station identity not configured)';
+    const groupName = `np-ident-${uid}`;
+    return `
+      <details class="np-advanced">
+        <summary>Advanced — signer identity</summary>
+        <div class="np-advanced-body">
+          <label class="radio-row">
+            <input type="radio" name="${groupName}" value="default" ${ident.useDefault ? 'checked' : ''}>
+            <div>
+              <div class="radio-title">Use station identity</div>
+              <div class="radio-sub">${escapeHtml(ownerDisplay)} · signs publish / push operations for this project.</div>
+            </div>
+          </label>
+          <label class="radio-row">
+            <input type="radio" name="${groupName}" value="project" ${ident.useDefault ? '' : 'checked'}>
+            <div>
+              <div class="radio-title">Project-specific identity</div>
+              <div class="radio-sub">Publish this project as a different npub. Useful for brands, shops, or client work.</div>
+            </div>
+          </label>
+          <div class="np-ident-fields" style="${ident.useDefault ? 'display:none' : ''}">
+            <label class="field-label">npub</label>
+            <input type="text" class="np-ident-npub" placeholder="npub1… or 64-char hex" value="${escapeHtml(ident.npub || '')}">
+            <div class="np-ident-err err"></div>
+            <label class="field-label">Bunker URL <span class="muted">(optional)</span></label>
+            <input type="text" class="np-ident-bunker" placeholder="bunker://…" value="${escapeHtml(ident.bunkerUrl || '')}">
+            <div class="muted">Amber prompts on first signing if left empty.</div>
+          </div>
+        </div>
+      </details>
+    `;
+  }
+
+  // Wire up the identity section's radios + inputs. Mutates `ident`.
+  function wireIdentitySection(container, ident) {
+    const fieldsEl = container.querySelector('.np-ident-fields');
+    if (!fieldsEl) return;
+    container.querySelectorAll('input[type="radio"]').forEach(r => {
+      if (!r.name.startsWith('np-ident-')) return;
+      r.addEventListener('change', () => {
+        ident.useDefault = (r.value === 'default');
+        fieldsEl.style.display = ident.useDefault ? 'none' : '';
+      });
+    });
+    const npubInput = container.querySelector('.np-ident-npub');
+    const npubErr = container.querySelector('.np-ident-err');
+    if (npubInput) {
+      npubInput.addEventListener('input', () => {
+        const v = npubInput.value.trim();
+        ident.npub = v;
+        npubErr.textContent = v.startsWith('nsec')
+          ? 'nsec detected — nostr-station never stores private keys'
+          : '';
+      });
+    }
+    const bunkerInput = container.querySelector('.np-ident-bunker');
+    if (bunkerInput) {
+      bunkerInput.addEventListener('input', (e) => { ident.bunkerUrl = e.target.value.trim(); });
+    }
+  }
+
+  // Pre-submit validation for the identity draft. Matches what the
+  // server's validateInput enforces, so we can surface errors without
+  // round-tripping. nsec rejection is the safety-critical one.
+  function validateIdentityDraft(ident) {
+    if (ident.useDefault) return { ok: true };
+    if (!ident.npub) return { ok: false, error: 'project-specific identity requires an npub' };
+    if (ident.npub.startsWith('nsec')) return { ok: false, error: 'nsec detected — nostr-station never stores private keys' };
+    return { ok: true };
+  }
+
+  // Shape the identity draft for POST payloads. Empty strings collapse
+  // to nulls so validateInput on the server sees "unset" cleanly.
+  function identityPayload(ident) {
+    if (ident.useDefault) return { useDefault: true, npub: null, bunkerUrl: null };
+    return {
+      useDefault: false,
+      npub:      ident.npub || null,
+      bunkerUrl: ident.bunkerUrl || null,
+    };
+  }
+
   // Small helper: render a full-width choice card for the chooser. Each
   // card is a self-contained button with a title + description; avoids
   // building a dropdown component for a three-option picker.
@@ -3820,6 +3912,10 @@ const ProjectsPanel = (() => {
   // Keeps the collision handoff: if ~/projects/<slug> exists, offer to
   // adopt via ProjectDrawer.openAddPrefilled instead of failing.
   async function openNewProjectModal() {
+    const identity = { useDefault: true, npub: '', bunkerUrl: '' };
+    let ownerNpub = null;
+    try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
+
     const body = document.createElement('div');
     body.className = 'new-project-form';
     body.innerHTML = `
@@ -3831,10 +3927,12 @@ const ProjectsPanel = (() => {
         </div>
       </label>
       <div class="np-hint">
-        Creates a fresh git repo with a minimal README and <code>.gitignore</code>.
-        Use any editor or AI agent from there — Claude Code, Dork, aider, whatever.
-        Push to ngit or another git host from the project card when you're ready.
+        Creates a folder with a minimal README. No git init — opt into version
+        control when you're ready. Use any AI agent (Claude Code, Dork, aider)
+        or editor from there. Sync to ngit or another git host via the project
+        card's Publish action when you want to push.
       </div>
+      ${renderIdentitySection(identity, ownerNpub, 'new')}
     `;
 
     const foot = document.createElement('div');
@@ -3871,6 +3969,8 @@ const ProjectsPanel = (() => {
     nameInput.focus();
     cancelBtn.addEventListener('click', () => modal.close());
 
+    wireIdentitySection(body, identity);
+
     nameInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !createBtn.disabled) { e.preventDefault(); createBtn.click(); }
     });
@@ -3878,6 +3978,11 @@ const ProjectsPanel = (() => {
     createBtn.addEventListener('click', async () => {
       const name = nameInput.value.trim();
       if (!name) return;
+      const identityCheck = validateIdentityDraft(identity);
+      if (!identityCheck.ok) {
+        toast('Identity invalid', identityCheck.error, 'err');
+        return;
+      }
       createBtn.disabled = true;
 
       let coll;
@@ -3929,7 +4034,11 @@ const ProjectsPanel = (() => {
         title: `Creating ${coll.slug}`,
         subtitle: `Local project at ${coll.path}`,
         endpoint: '/api/projects/new',
-        body: { name, source: { type: 'local-only' } },
+        body: {
+          name,
+          source: { type: 'local-only' },
+          identity: identityPayload(identity),
+        },
       });
 
       if (result.ok && result.info?.project) {
@@ -3981,7 +4090,7 @@ const ProjectsPanel = (() => {
   // only set capabilities.git when the repo's ngit announcement event
   // also lists a github-style mirror URL. Otherwise it's ngit-only →
   // only the "ngit" chip shows on the card.
-  async function registerAfterNgitClone(resolvedPath, name, ngitUrl) {
+  async function registerAfterNgitClone(resolvedPath, name, ngitUrl, identity) {
     let caps = { git: false, ngit: true, nsite: false };
     let githubRemote = null;
     let ngitRemote = ngitUrl;
@@ -4006,7 +4115,7 @@ const ProjectsPanel = (() => {
       name,
       path: resolvedPath,
       capabilities: caps,
-      identity: { useDefault: true, npub: null, bunkerUrl: null },
+      identity: identityPayload(identity),
       remotes:  { github: githubRemote, ngit: ngitRemote },
       nsite:    { url: null, lastDeploy: null },
     };
@@ -4018,6 +4127,10 @@ const ProjectsPanel = (() => {
   }
 
   async function openImportRepositoryModal() {
+    const identity = { useDefault: true, npub: '', bunkerUrl: '' };
+    let ownerNpub = null;
+    try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
+
     const body = document.createElement('div');
     body.className = 'import-repo-form';
     body.innerHTML = `
@@ -4042,6 +4155,7 @@ const ProjectsPanel = (() => {
         After import, history is reset so the initial commit is yours (stops you
         accidentally pushing back to the source).
       </div>
+      ${renderIdentitySection(identity, ownerNpub, 'import')}
     `;
 
     const foot = document.createElement('div');
@@ -4098,10 +4212,17 @@ const ProjectsPanel = (() => {
       if (e.key === 'Enter' && !createBtn.disabled) { e.preventDefault(); createBtn.click(); }
     }));
 
+    wireIdentitySection(body, identity);
+
     createBtn.addEventListener('click', async () => {
       const name = nameInput.value.trim();
       const url  = urlInput.value.trim();
       if (!name || !url) return;
+      const identityCheck = validateIdentityDraft(identity);
+      if (!identityCheck.ok) {
+        toast('Identity invalid', identityCheck.error, 'err');
+        return;
+      }
       createBtn.disabled = true;
 
       // Collision pre-flight against the final slug. ngit clone uses
@@ -4143,7 +4264,7 @@ const ProjectsPanel = (() => {
         }
         const resolved = result.info?.resolvedPath || coll.path;
         try {
-          const project = await registerAfterNgitClone(resolved, name, url);
+          const project = await registerAfterNgitClone(resolved, name, url, identity);
           toast('Project imported', project.name, 'ok');
           await reload();
           try { openDetail(project.id); } catch {}
@@ -4157,7 +4278,11 @@ const ProjectsPanel = (() => {
           title: `Importing ${coll.slug}`,
           subtitle: `git clone ${url} → ${coll.path}`,
           endpoint: '/api/projects/new',
-          body: { name, source: { type: 'git-url', url } },
+          body: {
+            name,
+            source: { type: 'git-url', url },
+            identity: identityPayload(identity),
+          },
         });
         if (result.ok && result.info?.project) {
           toast('Project imported', result.info.project.name, 'ok');
