@@ -59,6 +59,7 @@ import {
   getSession, deleteSession, extractBearer, verifyNip98, authStatus,
   isPublicApi, requireSession, expectedDashboardUrl, localhostExempt,
 } from './auth.js';
+import { safeHttpUrl } from './url-safety.js';
 import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
   signWithBunkerUrl, silentBunkerSign,
@@ -2091,8 +2092,12 @@ export async function startWebServer(port: number): Promise<void> {
         }
         try {
           const p = await lookupProfile(raw, DEFAULT_READ_RELAYS.slice());
+          // Scheme-gate the attacker-controlled `picture` URL so a hostile
+          // kind-0 can't land `javascript:` / `data:image/svg+xml` into an
+          // <img src>. Defense-in-depth alongside the CSP img-src allowlist.
+          const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture) };
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(p));
+          res.end(JSON.stringify(sanitized));
         } catch (e: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: String(e.message || e) }));
@@ -2109,8 +2114,9 @@ export async function startWebServer(port: number): Promise<void> {
         }
         try {
           const p = await lookupProfile(ident.npub, ident.readRelays);
+          const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture) };
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(p));
+          res.end(JSON.stringify(sanitized));
         } catch (e: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: String(e.message || e) }));
@@ -2403,7 +2409,10 @@ export async function startWebServer(port: number): Promise<void> {
               name: String(dTag),
               description: String(descTag),
               clone: cloneTags,
-              web: String(webTag),
+              // Relay-authored `web` tag is rendered inside an <a href>
+              // on the client. Allowlist to http(s) so `javascript:` (and
+              // friends) can't ride in as clickable script payloads.
+              web: safeHttpUrl(webTag),
               naddr,
               cloneUrl,
               published_at: Number(ev.created_at || 0),

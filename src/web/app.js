@@ -594,7 +594,7 @@ async function refreshIdentityChip() {
     if (p && !p.empty) {
       __profile = p;
       if (p.picture) {
-        avatar.innerHTML = `<img src="${p.picture}" alt="">`;
+        avatar.innerHTML = `<img src="${escapeHtml(p.picture)}" alt="">`;
         // If the image 404s, fall back to the pixel art.
         const img = avatar.querySelector('img');
         img.addEventListener('error', () => { avatar.innerHTML = pixelAvatar(cfg.npub); });
