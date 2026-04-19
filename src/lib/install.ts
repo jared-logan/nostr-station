@@ -2,6 +2,7 @@ import { execa, type ExecaError } from 'execa';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import type { Platform, Config } from './detect.js';
+import { findBin } from './detect.js';
 import { COMPONENT_VERSIONS } from './versions.js';
 
 export type InstallResult = {
@@ -293,6 +294,23 @@ export async function installCargoBin(
   const start = Date.now();
   const pinnedVersion = COMPONENT_VERSIONS[pkg as keyof typeof COMPONENT_VERSIONS];
 
+  // Resolve cargo absolutely via the same curated-dirs walk that detect uses.
+  // The TUI may inherit a stripped PATH that doesn't include ~/.cargo/bin —
+  // especially right after rustup has just finished installing in the same
+  // session — and spawning by bare name then fails ~instantly with empty
+  // stderr (Mint, April 2026 regression). Spawning by absolute path makes
+  // the resolution deterministic and lets us log exactly which cargo we
+  // chose for the post-mortem.
+  const cargoPath = findBin('cargo');
+  appendLog?.(`cargo[${pkg}] which cargo: ${cargoPath ?? '<not found>'}`);
+  if (!cargoPath) {
+    appendLog?.(`cargo[${pkg}] FAILED: cargo binary not found on PATH or in ~/.cargo/bin`);
+    return {
+      ok: false,
+      detail: 'cargo not found on PATH or ~/.cargo/bin — install rust first',
+    };
+  }
+
   const ticker = setInterval(() => {
     const secs = Math.floor((Date.now() - start) / 1000);
     const mins = Math.floor(secs / 60);
@@ -303,10 +321,10 @@ export async function installCargoBin(
     ? ['install', pkg, '--version', pinnedVersion]
     : ['install', pkg];
 
-  appendLog?.(`cargo[${pkg}] argv: cargo ${cargoArgs.join(' ')}`);
+  appendLog?.(`cargo[${pkg}] argv: ${cargoPath} ${cargoArgs.join(' ')}`);
 
   try {
-    const proc = execa('cargo', cargoArgs, {
+    const proc = execa(cargoPath, cargoArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, CARGO_TERM_COLOR: 'never' },
     });
@@ -328,9 +346,32 @@ export async function installCargoBin(
     return { ok: true, detail: `${elapsed}s` };
   } catch (e: any) {
     clearInterval(ticker);
-    const full = (e as any).stderr?.toString() ?? '';
-    if (appendLog && full) appendLog(`cargo[${pkg}] FAILED:\n${full}`);
-    return { ok: false, detail: full.slice(0, 120) };
+    // Spawn-time failures (ENOENT, EACCES, env stripping, rustup shim race)
+    // throw before any stderr reaches the proc.stderr listener — so logging
+    // only e.stderr leaves an empty "FAILED" line and the actual root cause
+    // invisible (Mint A6 regression). Capture the full execa error surface
+    // so the post-mortem in ~/logs/install.log is diagnostic on its own.
+    const stderrFull = e?.stderr?.toString?.() ?? '';
+    const stdoutFull = e?.stdout?.toString?.() ?? '';
+    const code       = e?.code      ?? '<none>';
+    const exitCode   = e?.exitCode  ?? '<none>';
+    const signal     = e?.signal    ?? '<none>';
+    const message    = e?.shortMessage ?? e?.message ?? '<none>';
+    if (appendLog) {
+      appendLog(`cargo[${pkg}] FAILED:`);
+      appendLog(`  code=${code} exitCode=${exitCode} signal=${signal}`);
+      appendLog(`  message: ${message}`);
+      appendLog(stderrFull
+        ? `  stderr (last 400): ${stderrFull.slice(-400)}`
+        : `  stderr: <empty>`);
+      if (stdoutFull) appendLog(`  stdout (last 400): ${stdoutFull.slice(-400)}`);
+    }
+    // Surface a meaningful one-line detail in the TUI even when stderr is
+    // empty — empty FAIL lines were the original A6 symptom.
+    const detail = stderrFull.slice(0, 120)
+      || (typeof message === 'string' ? message.slice(0, 120) : '')
+      || `${code} (exit ${exitCode})`;
+    return { ok: false, detail };
   }
 }
 
