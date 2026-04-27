@@ -1,12 +1,12 @@
 /**
  * Project-scoped context builder for the Chat pane's system prompt.
  *
- * The spec calls for a fixed-format block injected server-side into every
- * /api/ai/chat request:
+ * The block injected server-side into every /api/ai/chat request:
  *   - path
  *   - detected capabilities
  *   - last 10 git commits
  *   - README excerpt (first 500 chars)
+ *   - project-context.md overlay (developer-authored, no truncation)
  *
  * When no project is selected, the block falls back to a station-level
  * description — nostr-station's version + a hint that doctor/config/relay
@@ -15,7 +15,23 @@
  *
  * Reads are fresh per chat turn (git log is the most volatile input, so
  * caching it would just stale). Costs are tiny (~one git invocation + a
- * 500-byte file read).
+ * 500-byte file read + a single project-context.md slurp).
+ *
+ * ── Developer note: project-context.md conventions ─────────────────────
+ *
+ * `project-context.md` is a developer-authored overlay — placed at the
+ * project root, read on every chat turn, never auto-created or auto-
+ * truncated. Stable conventions for anything we read out of it (when
+ * future code wants more than the raw passthrough we do today):
+ *
+ *   ## Wiki namespaces
+ *   - nostr-protocol
+ *   - nostr-apps
+ *
+ * Developers can add a `## Wiki namespaces` section to signal which
+ * llm-wiki namespaces Nori should query for that project specifically.
+ * Today we just splice the whole file; a future pass can parse this
+ * section and feed it into the wiki-lookup hint at request time.
  */
 
 import fs from 'fs';
@@ -38,6 +54,36 @@ function formatCapabilities(p: Project): string {
   if (p.capabilities.ngit)  active.push('ngit');
   if (p.capabilities.nsite) active.push('nsite');
   return active.length ? active.join(', ') : '(none detected)';
+}
+
+/**
+ * Reads the developer-authored `project-context.md` from the project
+ * root. Returns null when the file is missing, empty, or unreadable —
+ * the caller silently omits the overlay block in that case (the file
+ * is intentional; we never auto-create one).
+ *
+ * No truncation. The README excerpt is capped because READMEs are
+ * often book-length and most projects have one whether or not it's
+ * meant for AI consumption. `project-context.md` is the opposite —
+ * a developer wrote it specifically as AI-facing context and the
+ * length they chose is the length they meant. Splicing it verbatim
+ * keeps the contract simple and predictable.
+ *
+ * Exported for testability — returns the raw file contents (sans
+ * trailing whitespace) so tests can assert end-to-end without
+ * driving a full Project + buildAiContext round-trip.
+ */
+export function readProjectContext(projectPath: string): string | null {
+  const filePath = path.join(projectPath, 'project-context.md');
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+  const trimmed = raw.trimEnd();
+  if (!trimmed) return null;
+  return trimmed;
 }
 
 function readReadmeExcerpt(projectPath: string): string | null {
@@ -112,6 +158,23 @@ function projectContext(p: Project): AiContext {
       lines.push('');
       lines.push('## README excerpt');
       lines.push(readme);
+    }
+  }
+
+  // Per-project overlay — developer-authored guidance file at the
+  // project root. Spliced verbatim AFTER the README so the most
+  // intentional guidance lands closest to the prompt boundary
+  // (system prompts get truncated by the model from the top in
+  // pathological-length cases; tail content has the best survival
+  // odds). Silently omitted when the file is missing.
+  if (p.path) {
+    const overlay = readProjectContext(p.path);
+    if (overlay) {
+      lines.push('');
+      lines.push('## Project context overlay');
+      lines.push('*(from `project-context.md` at the project root)*');
+      lines.push('');
+      lines.push(overlay);
     }
   }
 
