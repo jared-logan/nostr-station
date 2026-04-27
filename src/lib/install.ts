@@ -272,6 +272,38 @@ export async function installRust(): Promise<InstallResult> {
   }
 }
 
+// Verify a cargo-installed binary actually landed on disk (A12).
+//
+// Cargo's `install` flow can exit 0 without producing a binary in two
+// well-known shapes: (1) `~/.cargo/.crates2.json` claims the crate is
+// already installed and cargo's "already installed" shortcut fires while
+// the actual file is gone (manual rm, restored-from-backup partial home,
+// migrated machine); (2) the prebuilt-drop path overwrote the file but
+// the state file still records the old version, and a subsequent
+// `cargo install --version <pinned>` no-ops without re-laying it down.
+// Either way: install reports success, Status's findBin probe reports
+// missing, and the TUI looks self-contradictory.
+//
+// Returns null on success (binary visible to the same walker Status uses),
+// or an error detail string on failure. Logs to the durable sink when one
+// is provided so ~/logs/install.log captures the "exit 0 but missing"
+// case that's invisible in cargo's own stderr.
+//
+// Exported so tests can exercise the branches without driving a real
+// cargo install.
+export function verifyCargoBinaryLanded(
+  pkg: string,
+  appendLog?: (line: string) => void,
+): string | null {
+  const installedPath = findBin(pkg);
+  if (installedPath) {
+    appendLog?.(`cargo[${pkg}] verified at ${installedPath}`);
+    return null;
+  }
+  appendLog?.(`cargo[${pkg}] FAILED: cargo exited 0 but binary not found on disk`);
+  return `cargo reported installed but ${pkg} binary missing — try \`cargo install ${pkg} --force\``;
+}
+
 // Cargo bins compile from source — can take 10-15 min on a cold machine.
 // We stream stderr and tick elapsed time so the UI shows progress, not silence.
 // Installs a pinned version from COMPONENT_VERSIONS if available, otherwise latest.
@@ -344,6 +376,19 @@ export async function installCargoBin(
     await proc;
     clearInterval(ticker);
     const elapsed = Math.floor((Date.now() - start) / 1000);
+
+    // A12: post-install binary verification.
+    //
+    // Cargo's "already installed" shortcut reads ~/.cargo/.crates2.json and
+    // exits 0 without writing the binary. When the file lies (rm'd binary,
+    // chmod-stripped target, partial uninstall, prebuilt-side overwrite that
+    // didn't update the state file), the user sees a green ✓ from this
+    // function and an "✗ not installed" from Status's findBin probe in the
+    // same dashboard frame — looks like our bug. Verify with the SAME walker
+    // Status uses so the two surfaces can never disagree.
+    const verifyError = verifyCargoBinaryLanded(pkg, appendLog);
+    if (verifyError) return { ok: false, detail: verifyError };
+
     return { ok: true, detail: `${elapsed}s` };
   } catch (e: any) {
     clearInterval(ticker);
