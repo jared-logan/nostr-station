@@ -67,7 +67,7 @@ import {
 import {
   readProjects, getProject, createProject, updateProject, deleteProject,
   detectPath, projectGitStatus, projectGitLog, resolveProjectContext,
-  isStacksProject,
+  isStacksProject, validateProjectPath,
   type Project,
 } from './projects.js';
 import { checkCollision, scaffoldProject } from './project-scaffold.js';
@@ -1749,39 +1749,30 @@ export async function startWebServer(port: number): Promise<void> {
 
         // Hard delete: rm -rf the project path, then unregister. POST
         // (not DELETE) because the operation is irreversible and the
-        // UI path uses a type-to-confirm dialog. Safety guardrails:
-        //   - path must be set (nsite-only projects have none; refuse)
-        //   - path must be under the user's HOME (refuse system paths)
+        // UI path uses a type-to-confirm dialog. Safety guardrails are
+        // delegated to `validateProjectPath` (src/lib/projects.ts):
+        //   - path must be absolute
+        //   - path must be inside the user's home directory (after
+        //     symlink + `..` collapse)
         //   - path must not BE the home directory itself
-        //   - path must be a real directory that resolves without
-        //     escaping via symlinks (realpath check + prefix match)
         // Failures surface as 4xx with a message; the rm itself is
         // best-effort — even if it partially fails, we unregister so
         // the user isn't stuck with a broken card pointing at a
-        // now-partial path. Unusual but the path of least surprise.
+        // now-partial path.
         if (tail === 'purge' && method === 'POST') {
           const target = project.path || '';
-          const home = process.env.HOME || os.homedir();
           if (!target) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'project has no local path to delete' }));
             return;
           }
-          // Resolve both sides to absolute real paths. If realpath
-          // fails (target missing), fall back to the raw path — the
-          // under-HOME check still protects against nonsense input,
-          // and rm -rf on a missing path is a no-op.
-          let realTarget = target;
-          let realHome   = home;
-          try { realTarget = fs.realpathSync(target); } catch {}
-          try { realHome   = fs.realpathSync(home);   } catch {}
-          const normalizedTarget = path.resolve(realTarget);
-          const normalizedHome   = path.resolve(realHome);
-          if (normalizedTarget === normalizedHome
-              || !normalizedTarget.startsWith(normalizedHome + path.sep)) {
+          let normalizedTarget: string;
+          try {
+            normalizedTarget = validateProjectPath(target);
+          } catch (e) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
-              error: `refusing to delete ${normalizedTarget}: path must be under ${normalizedHome}`,
+              error: `refusing to delete ${target}: ${(e as Error).message}`,
             }));
             return;
           }

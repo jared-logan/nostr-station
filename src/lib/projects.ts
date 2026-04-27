@@ -55,6 +55,86 @@ export interface Project {
 function configDir(): string {
   return path.join(os.homedir(), '.config', 'nostr-station');
 }
+
+// ── Path validation (B2) ───────────────────────────────────────────────────
+//
+// Project paths come from the client (POST /api/projects, PATCH
+// /api/projects/:id) and downstream are read by `resolveProjectContext`,
+// which reads README.md / CLAUDE.md / NOSTR_STATION.md and forwards their
+// content into the chat system prompt. An untrusted path = arbitrary file
+// read into chat. The guard below rejects anything that resolves outside
+// the user's home directory.
+//
+// `fs.realpathSync` only succeeds on existing paths. createProject sees
+// directories that may be about to be scaffolded but don't exist yet, so
+// `resolveSafeAbsolute` walks up to the longest existing ancestor, realpaths
+// THAT (so symlink escapes in the existing prefix are caught), then
+// re-attaches the unresolved tail. path.resolve on the way back collapses
+// any `..` segments in the tail relative to the resolved head — so
+// `~jared/../jared-evil/x` where the first segment exists and is a symlink
+// to `/etc` ends up canonicalized as `/etc/jared-evil/x`, which the
+// relative-to-home check then rejects.
+//
+// We use `path.relative(home, resolved)` and reject when the result is
+// empty (= home itself) or starts with `..`. We do NOT use
+// `startsWith(home + path.sep)` because the prefix-string check has bugs
+// on directories like `/home/jared` vs `/home/jared-evil`.
+export function resolveSafeAbsolute(p: string): string {
+  let head = path.resolve(p);
+  const tail: string[] = [];
+  // Bounded loop — `path.dirname` converges to the root within a handful
+  // of iterations; the cap protects against degenerate inputs.
+  for (let i = 0; i < 4096; i++) {
+    try {
+      const real = fs.realpathSync(head);
+      return tail.length ? path.resolve(real, ...tail) : real;
+    } catch { /* head doesn't exist on disk — strip a segment and retry */ }
+    const parent = path.dirname(head);
+    if (parent === head) break;
+    tail.unshift(path.basename(head));
+    head = parent;
+  }
+  // Truly unreachable on a real filesystem (the root always exists), but
+  // fall back to the literal absolute path so we never silently accept an
+  // unresolvable input.
+  return path.resolve(p);
+}
+
+/**
+ * Throws on invalid input, returns the resolved absolute path on valid.
+ * Invariants on the returned path:
+ *   - absolute
+ *   - inside the user's home directory (after symlink + `..` collapse)
+ *   - never equal to home itself
+ *
+ * Trims surrounding whitespace before validation so a stray newline doesn't
+ * tip an otherwise-valid path into the rejection branch.
+ */
+export function validateProjectPath(p: string): string {
+  if (typeof p !== 'string') {
+    throw new Error('project path must be a string');
+  }
+  const trimmed = p.trim();
+  if (!trimmed) {
+    throw new Error('project path must be non-empty');
+  }
+  if (!path.isAbsolute(trimmed)) {
+    throw new Error(`project path must be absolute, got "${trimmed}"`);
+  }
+  const resolved = resolveSafeAbsolute(trimmed);
+  let realHome: string;
+  try { realHome = fs.realpathSync(os.homedir()); }
+  catch { realHome = path.resolve(os.homedir()); }
+
+  const rel = path.relative(realHome, resolved);
+  if (rel === '' || rel === '.') {
+    throw new Error('project path cannot be the home directory itself');
+  }
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`project path must be inside ${realHome}, got "${trimmed}"`);
+  }
+  return resolved;
+}
 function projectsPath(): string {
   return path.join(configDir(), 'projects.json');
 }
@@ -218,6 +298,15 @@ export function createProject(input: CreateInput): { ok: true; project: Project 
   // wants to add /foo and /foo/ as separate projects, that's their call.
   const incomingPath = (input.path ?? '').trim();
   if (incomingPath) {
+    // Path-traversal guard (B2). Refuse anything outside ~/. Without this,
+    // a malicious POST could register a path like `/etc` and downstream
+    // `resolveProjectContext` would happily read /etc/README.md (or any
+    // CLAUDE.md / NOSTR_STATION.md it found) into the chat system prompt
+    // — turning the registry into an arbitrary-file-read primitive over
+    // the chat surface.
+    try { validateProjectPath(incomingPath); }
+    catch (e) { return { ok: false, error: (e as Error).message }; }
+
     const existing = readProjects().find(p => p.path === incomingPath);
     if (existing) {
       return {
@@ -263,6 +352,16 @@ export function updateProject(id: string, patch: UpdateInput): { ok: true; proje
   const idx = projects.findIndex(p => p.id === id);
   if (idx < 0) return { ok: false, error: 'project not found' };
   const current = projects[idx];
+
+  // Path-traversal guard (B2): only run when the patch actually changes
+  // the path. PATCHes that only update name / capabilities / identity must
+  // not retroactively reject pre-existing rows whose paths happen to fall
+  // outside HOME (legacy entries seeded by older versions, or by tests
+  // before this guard existed).
+  if (patch.path !== undefined && patch.path !== null && patch.path !== '') {
+    try { validateProjectPath(patch.path); }
+    catch (e) { return { ok: false, error: (e as Error).message }; }
+  }
 
   const merged: Project = {
     ...current,
