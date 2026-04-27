@@ -7,13 +7,42 @@
 
 Sets up a local relay, mesh VPN, Nostr-native git with Amber signing, and the AI coding tools of your choice — on macOS or Linux. A browser-based wizard walks you through first-run configuration, and the same URL becomes a full web control center with chat, an embedded terminal, a projects panel, service health, and live relay state.
 
+> v0.0.6 — macOS (Apple Silicon + Intel) and Linux (apt / dnf / pacman).
+
+## Install
+
+### Prerequisites
+
+- macOS 12+ or Linux (Debian/Ubuntu/Mint, Fedora, Arch)
+- `git` installed
+- An internet connection
+
+Everything else (Node 22+, Rust toolchain, system service files, all the Nostr binaries) installs automatically.
+
+**Distro prep one-liners** — run once before the install command if you don't already have build tools:
+
+```bash
+# Debian / Ubuntu / Mint
+sudo apt install -y git build-essential
+
+# Fedora
+sudo dnf install -y git gcc-c++ make
+
+# Arch
+sudo pacman -S --needed git base-devel
+```
+
+macOS comes with its own toolchain (Xcode Command Line Tools — installed on first `git` invocation if needed), so no prep step is required.
+
+### For users — `curl | bash`
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/install.sh | bash
 ```
 
 After install, run `nostr-station` with no arguments — a browser opens at `http://localhost:3000/setup` for first-run configuration, or drops you at the dashboard if the station is already configured. Prefer a terminal-only flow? `nostr-station onboard` still launches the Ink TUI wizard and reaches the same end-state.
 
-### Contributors / pre-release testing
+### For contributors / pre-release testing — `git clone` + `npm link`
 
 To run from source against an unpublished commit:
 
@@ -26,8 +55,6 @@ npm link            # exposes `nostr-station` on your PATH from this checkout
 ```
 
 > ⚠ **`nostr-station uninstall` on a source build removes the global symlink.** It calls `npm uninstall -g nostr-station`, which also unlinks the `npm link` you just created — `nostr-station` will read as "not found" until you re-run `npm link` from the project root.
-
-> v0.0.5 — macOS (Apple Silicon + Intel) and Linux (apt / dnf / pacman).
 
 ---
 
@@ -321,14 +348,13 @@ Choose during onboard — or mix and match:
 
 ---
 
-## Requirements
+## System notes
 
-- macOS 12+ or Linux (Debian/Ubuntu, Fedora, Arch)
-- Node.js 22+ (installed automatically via nvm if missing)
-- ~2 GB free disk space (Rust toolchain + compiled binaries)
-- Internet connection for first install
+(See **[Install → Prerequisites](#prerequisites)** for the supported-platform list and required prep steps.)
 
-Prebuilt relay binaries target `linux-x86_64` (glibc ≥ 2.31) and `darwin-arm64`. On Intel Macs and older Linux distros, the relay falls back to `cargo install` and compiles locally (~10–15 min on modest hardware).
+- Node.js 22+ is installed automatically via nvm if missing.
+- ~2 GB free disk space for the Rust toolchain + compiled binaries.
+- Prebuilt relay binaries target `linux-x86_64` (glibc ≥ 2.31) and `darwin-arm64`. On Intel Macs and older Linux distros, the relay falls back to `cargo install` and compiles locally (~10–15 min on modest hardware).
 
 ---
 
