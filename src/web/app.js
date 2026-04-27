@@ -2,6 +2,8 @@
 // No framework, no build step. Organized as per-panel modules + shared
 // utilities (toast, modal, copy-button) at the bottom.
 
+import { previewRetryDecision } from './preview-retry.js';
+
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
@@ -5841,6 +5843,25 @@ const SetupWizard = (() => {
   let stageIdx = 0;
   const state = { npub: '', profile: null };
 
+  // Preview retry state (A2). Lives at module scope — NOT inside
+  // renderIdentity — because every renderIdentity() call replaces the
+  // form's DOM, which would otherwise reset the closure on every render
+  // and re-fire the auto-fetch into a storm.
+  //
+  // Pre-A2, a 500ing /api/identity/profile/preview triggered the loop:
+  // runPreview → fetch fails → render() → component remounts → on-mount
+  // auto-fetch fires → fetch fails → render() → … 33k+ requests in
+  // short windows, fans-on, devtools-locked. The fix is two pieces:
+  //   1. don't render() on the failure path itself (only on success or
+  //      when the circuit ultimately breaks);
+  //   2. gate the on-mount auto-fetch on `!previewBroken`.
+  const previewRetry = {
+    attempt:     0,        // consecutive failures for `lastNpub`
+    broken:      false,    // circuit broken — only manual click re-arms
+    lastNpub:    '',       // npub the counter is scoped to
+    pendingTimer: null,    // pending setTimeout id for the next retry
+  };
+
   async function show() {
     // If the station is already set up AND the viewer is authenticated,
     // there's nothing for the wizard to do — redirect to dashboard. We
@@ -5971,6 +5992,12 @@ const SetupWizard = (() => {
               ${nip05Line}
               <div class="npub muted">${escapeHtml(truncNpub(state.npub))}</div>
             </div>
+          ` : previewRetry.broken ? `
+            <div class="muted">
+              Couldn't load profile preview after 3 retries.
+              The npub is still saveable — this only affects the avatar shown above.
+            </div>
+            <button class="setup-preview-retry">Retry preview</button>
           ` : `
             <div class="muted">Paste an npub above to preview your profile.</div>
           `}
@@ -5990,21 +6017,79 @@ const SetupWizard = (() => {
 
     // Debounced profile preview — fires ~400ms after the user stops
     // typing so we don't spam the relay query on every keystroke.
+    //
+    // Failure handling (A2): on a 500/network error we backoff (1 s,
+    // 3 s, 10 s) and circuit-break after 3 attempts. We deliberately
+    // do NOT call render() inside the failure path — render() remounts
+    // the component which fires the on-mount auto-preview, which would
+    // immediately reissue the failed fetch. Only the success path and
+    // the final circuit-break call render(). See preview-retry.js for
+    // the decision helper.
     let previewTimer = null;
-    const runPreview = async () => {
+    const runPreview = async (opts = {}) => {
       const val = input.value.trim();
       state.npub = val;
       saveBtn.disabled = !val;
+
+      // Reset retry budget when the user changes the npub. A fresh
+      // subject deserves a fresh circuit.
+      if (val !== previewRetry.lastNpub) {
+        previewRetry.attempt = 0;
+        previewRetry.broken = false;
+        previewRetry.lastNpub = val;
+        if (previewRetry.pendingTimer) {
+          clearTimeout(previewRetry.pendingTimer);
+          previewRetry.pendingTimer = null;
+        }
+      }
+
       if (!val || !/^(npub1|[0-9a-f]{64})/i.test(val)) {
         state.profile = null;
         return render();
       }
+
+      // Circuit broken — auto-retry is disabled. Only an explicit user
+      // click (opts.manual=true, e.g. the Retry button) re-arms it.
+      if (previewRetry.broken && !opts.manual) return;
+      if (opts.manual) {
+        previewRetry.attempt = 0;
+        previewRetry.broken = false;
+      }
+
       try {
-        const p = await fetch(`/api/identity/profile/preview?npub=${encodeURIComponent(val)}`)
-          .then(r => r.ok ? r.json() : null);
-        if (p && !p.error) { state.profile = p; }
-      } catch { /* leave profile as-is; partial render is fine */ }
-      render();
+        const res = await fetch(`/api/identity/profile/preview?npub=${encodeURIComponent(val)}`);
+        if (!res.ok) throw new Error(`http ${res.status}`);
+        const p = await res.json();
+        if (p && !p.error) {
+          state.profile = p;
+          previewRetry.attempt = 0;
+          previewRetry.broken = false;
+          render();
+          return;
+        }
+        // Body present but flagged error / empty — treat as failure so
+        // the user gets feedback rather than a quiet stuck-on-blank.
+        throw new Error(p?.error || 'empty preview');
+      } catch {
+        const decision = previewRetryDecision(previewRetry.attempt);
+        if (decision.action === 'break') {
+          previewRetry.broken = true;
+          // ONE render at break time so the user sees the error state
+          // and the manual Retry button. The on-mount guard below skips
+          // the auto-fetch because previewRetry.broken is now true.
+          render();
+          return;
+        }
+        previewRetry.attempt = decision.nextAttempt;
+        previewRetry.pendingTimer = setTimeout(() => {
+          previewRetry.pendingTimer = null;
+          // Re-fire only if the input still shows the npub we were
+          // retrying (user may have edited mid-backoff).
+          if (input.value.trim() === val && !previewRetry.broken) {
+            runPreview();
+          }
+        }, decision.delayMs);
+      }
     };
 
     input.addEventListener('input', () => {
@@ -6048,8 +6133,15 @@ const SetupWizard = (() => {
     });
 
     // Auto-run preview on mount if we already have an npub in state
-    // (re-entering this stage via Back).
-    if (state.npub && !state.profile) runPreview();
+    // (re-entering this stage via Back). Skip when the circuit is
+    // broken — only a manual Retry click should re-fire from here on.
+    if (state.npub && !state.profile && !previewRetry.broken) runPreview();
+
+    // Retry button — only present in the broken-circuit branch below.
+    // Manual clicks re-arm the circuit and start fresh from attempt 0.
+    root.querySelector('.setup-preview-retry')?.addEventListener('click', () => {
+      runPreview({ manual: true });
+    });
   }
 
   // ── Relay ────────────────────────────────────────────────────────────
