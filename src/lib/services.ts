@@ -506,143 +506,180 @@ export const EDITOR_FILENAMES: Record<string, string> = {
 // Switch tools any time: nostr-station editor
 const CONTEXT_FILENAME = 'NOSTR_STATION.md';
 
-function buildContextContent(p: Platform, c: Config): string {
-  return `# Nostr Station — Dev Environment
+// Sentinel comments fenced around a region of NOSTR_STATION.md that
+// belongs to the user. Anything between these markers survives every
+// regeneration verbatim — never overwritten under any condition.
+//
+// We use HTML-style comment tokens so the markers don't render in
+// rendered Markdown views (the dashboard's chat pane renders this
+// content as text, but anything that does parse Markdown will treat
+// these as invisible). Markers are matched LITERALLY — substring
+// equality, no regex flexibility — to keep the contract simple.
+export const USER_REGION_BEGIN = '<!-- BEGIN USER EDITS — preserved across regeneration -->';
+export const USER_REGION_END   = '<!-- END USER EDITS -->';
 
-## Relay
-- Local: \`ws://localhost:8080\` (private — whitelist only)
-- Check: \`nc -z localhost 8080 && echo "up"\`
-- Relay auth: NIP-42 enabled — clients must authenticate before publishing
-- Add a test keypair: \`nostr-station relay whitelist --add <npub>\`
-- List whitelisted npubs: \`nostr-station relay whitelist\`
-- Restart: \`nostr-station relay restart\`
-- Logs: \`nostr-station relay logs --follow\`
+/**
+ * Returns the content between the two user-region markers, with
+ * leading/trailing whitespace stripped. Returns an empty string when:
+ *   - either marker is missing
+ *   - markers appear out of order
+ *   - either marker appears more than once (ambiguous file — refuse
+ *     to guess; the developer should re-run `nostr-station editor`
+ *     against the canonical NOSTR_STATION.md to reset)
+ *
+ * Pure: input string in, output string out. Easy to unit-test.
+ */
+export function extractUserRegion(existing: string): string {
+  if (typeof existing !== 'string' || !existing) return '';
+  // Marker uniqueness guard — if a user (or a buggy editor) ever
+  // duplicated a marker, we refuse to splice rather than picking the
+  // wrong region. The next regeneration will re-emit empty markers,
+  // which is recoverable.
+  const beginCount = existing.split(USER_REGION_BEGIN).length - 1;
+  const endCount   = existing.split(USER_REGION_END).length - 1;
+  if (beginCount !== 1 || endCount !== 1) return '';
+  const beginIdx = existing.indexOf(USER_REGION_BEGIN);
+  const endIdx   = existing.indexOf(USER_REGION_END);
+  if (beginIdx < 0 || endIdx < 0 || endIdx <= beginIdx) return '';
+  const inner = existing.slice(beginIdx + USER_REGION_BEGIN.length, endIdx);
+  return inner.replace(/^\s*\n/, '').replace(/\n\s*$/, '');
+}
 
-## Publishing & deployment
+/**
+ * Builds NOSTR_STATION.md — the Nori persona + dynamic environment
+ * snapshot that the dashboard's chat pane (and external AI coding
+ * tools via the editor symlink) read as a system prompt.
+ *
+ * `userRegion` is the developer-authored prose preserved from a
+ * prior write. Empty string is fine on first generation. Every other
+ * section is regenerated from `p` + `c` so a re-run of `nostr-station
+ * editor` (or onboarding) refreshes the environment block without
+ * touching user edits.
+ */
+function buildContextContent(p: Platform, c: Config, userRegion: string = ''): string {
+  // ── Section 2: environment block ──────────────────────────────────
+  // Built up as a list rather than inline templates so each toggle
+  // (versionControl, installNsyte, …) reads as one self-contained
+  // chunk. Runs of falsy entries don't produce empty whitespace.
+  const installedTools: string[] = [];
+  if (c.versionControl !== 'github') installedTools.push('ngit');
+  installedTools.push('nak');
+  if (c.installNsyte) installedTools.push('nsyte');
+  if (c.installStacks) installedTools.push('stacks');
+  installedTools.push('nvpn');
 
-All signing uses Amber on your phone — nsec never touches this machine.
-Amber prompts you to approve each push or publish event.
+  const aiLabel = (() => {
+    switch (c.aiProvider) {
+      case 'ollama':     return `Ollama (local) — model: ${c.ollamaModel ?? 'llama3'} — ${c.ollamaBase ?? 'http://localhost:11434'}`;
+      case 'lmstudio':   return `LM Studio (local) — model: ${c.lmstudioModel ?? 'local-model'} — ${c.lmstudioBase ?? 'http://localhost:1234'}`;
+      case 'openrouter': return `OpenRouter — model: ${c.openrouterModel ?? 'anthropic/claude-sonnet-4'}`;
+      case 'routstr':    return 'Routstr ⚡ (Lightning/Cashu)';
+      case 'ppq':        return 'PayPerQ ⚡ (ppq.ai)';
+      case 'custom':     return `Custom endpoint: ${c.customApiBase ?? ''}`;
+      default:           return 'Anthropic (Claude)';
+    }
+  })();
 
-${c.versionControl !== 'github' ? `### ngit — Nostr-native source repos
-Push code signed by Amber to Nostr relays instead of (or alongside) GitHub.
+  const sigLine = c.bunker
+    ? 'Signer: Amber NIP-46 bunker configured — your nsec stays on your phone, never on this machine.'
+    : 'Signer: configure an Amber bunker URL to sign without exposing your nsec — `nostr-station onboard` walks you through it.';
 
-  First-time setup:   ngit login --bunker <bunker-string>
-  Clone a repo:       ngit clone <naddr>
-  Push + sign:        ngit push   → Amber prompts on phone → approve
+  // Wiki guidance — only when the developer opted into the llm-wiki
+  // plugin. Goes in Section 3 (role) so Nori knows to use it before
+  // training data, AND Section 5 mentions the lookup syntax so the
+  // user can reach for it manually.
+  const wikiRoleLine = c.installLlmWiki
+    ? '- When asked about specific NIPs or Nostr protocol details, query the knowledge base first: `/wiki:lookup <topic> --wiki nostr-protocol`. Prefer wiki answers over training data for NIP specifications.'
+    : '';
 
-` : ''}${c.versionControl !== 'ngit' ? `### GitHub — standard source repos
-  Authenticate:       gh auth login
-  Clone:              gh repo clone <owner>/<repo>
-  Create PR:          gh pr create
-  List PRs:           gh pr list
+  // Stacks/Dork boundary section — only emitted when stacks is
+  // installed. Spec is explicit that Nori must NOT absorb Dork's
+  // role; this section pins the boundary in the persona itself.
+  const stacksBoundary = c.installStacks ? `
+## Stacks agent (Dork)
+Dork (\`stacks agent\`) is a separate tool with its own identity and AI provider config. It is not Nori. When a user asks about Stacks scaffolding or NostrDeploy, point them to \`stacks agent\` — don't absorb its role.
+` : '';
 
-` : ''}${c.installNsyte ? `### nsite — static app publishing
-Deploy built web apps to Nostr/Blossom. Each project has its own config.
+  return `# Nori — nostr-station's AI assistant
 
-  One-time setup:     nsyte bunker connect <bunker-url>
-  Initialize project: nostr-station nsite init   (creates .nsite/project.json)
-  Deploy:             nsyte upload ./dist
+You are Nori, the assistant for nostr-station — an open-source CLI that sets up a complete Nostr development environment. You help developers build on the Nostr protocol. You are direct, practical, and privacy-aware. You prefer terminal-first approaches. When a dashboard UI exists for a task, point there before suggesting shell commands. Ask before any destructive operation (rm, force push, relay wipe, whitelist changes).
 
-  Access — immediate, no registration:
-    https://<npub>.nsite.lol         web gateway, any browser
-    https://<npub>.nostr.hu          alternative gateway
+## Environment
+- Local relay: \`ws://localhost:8080\` (private, NIP-42 auth required, whitelist-only).
+- AI provider: ${aiLabel}
+- ${sigLine}
+- Installed tools: ${installedTools.join(', ')}
+${c.installLlmWiki ? '- llm-wiki plugin: configured. Wiki namespaces queryable via `/wiki:lookup`.' : ''}
 
-  Access — human-readable name (external step, requires Titan):
-    nsite://<name>                   resolved in Titan browser via Bitcoin OP_RETURN
-    Registration is an on-chain Bitcoin transaction — external to nostr-station.
-    → Titan browser: https://github.com/btcjt/titan
-    Without a registered name, nsite:// resolves by full npub only.
+## Your role
+- Help with Nostr app development — drafting events, designing relay queries, wiring up signers.
+- git, ngit, and nsite are first-class backends. Match the backend the user is using; don't flatten ngit and git into "git" generically.
+- When a dashboard UI exists for a task (Status panel, Relay panel, Logs panel, Chat panel, Projects panel), point there before suggesting shell commands.
+- Ask before destructive operations: \`rm -rf\`, force push, relay database wipe, whitelist removals, uninstall.
+${wikiRoleLine}
 
-` : ''}${c.installStacks ? `### Stacks / MKStack / Dork — Nostr app prototyping
-Soapbox's MKStack template — React + Vite + ShadCN UI + 50+ NIPs pre-wired.
-Comes with the Dork AI agent (\`stacks agent\`) and one-command NostrDeploy publishing.
-Stacks has its own AI provider config (OpenRouter / Routstr / PayPerQ) at
-~/Library/Preferences/stacks/config.json — separate from nostr-station's ai-config.
+## Nostr / NIP reference
+- NIP-01 — basic protocol (events, signatures, REQ/EVENT/CLOSE).
+- NIP-02 — contact lists.
+- NIP-04 — encrypted DMs.
+- NIP-09 — event deletion.
+- NIP-11 — relay info document.
+- NIP-12 — generic tag queries.
+- NIP-15 — end of stored events.
+- NIP-19 — bech32 entities (npub, nsec, naddr, nprofile, nevent).
+- NIP-20 — command results.
+- NIP-22 — event created_at limits.
+- NIP-23 — long-form content.
+- NIP-26 — delegated event signing.
+- NIP-28 — public chat.
+- NIP-33 — parameterized replaceable events.
+- NIP-34 — git over Nostr (kind 30617 repo announcements, kind 1617 patches).
+- NIP-40 — expiration timestamp.
+- NIP-42 — auth (ENABLED on the local relay — required to publish).
+- NIP-45 — count results.
+- NIP-46 — remote signing (Amber bunker).
+- NIP-50 — full-text search.
+- NIP-57 — zaps (NOT supported on local relay; requires lightning node).
+- NIP-65 — relay list metadata.
+- NIP-98 — HTTP auth (used by the dashboard's session sign-in).
 
-  New project:        cd ~/projects && stacks mkstack <name>
-  Run dev server:     npm run dev -- --port 5173    # 8080 collides with the relay
-  Open Dork agent:    stacks agent                  # prompts for code, refactors live
-  Deploy:             npm run deploy                # → NostrDeploy.com (Blossom + relays)
-  Configure Stacks:   stacks configure              # picker for AI provider + key
-  List templates:     stacks list
-
-The dashboard surfaces all of these as buttons on Stacks-project cards
-(Projects panel) — \`stack.json\` presence flips the project into Stacks
-mode automatically.
-
-` : ''}
-## Relay NIP support (nostr-rs-relay)
-### Supported
-NIP-01 basic protocol, NIP-02 contact lists, NIP-04 encrypted DMs,
-NIP-09 event deletion, NIP-11 relay info, NIP-12 generic tag queries,
-NIP-15 end of stored events, NIP-16 event treatment, NIP-20 command results,
-NIP-22 event created_at limits, NIP-26 delegated event signing,
-NIP-28 public chat, NIP-33 parameterized replaceable events,
-NIP-40 expiration timestamp, NIP-42 authentication (ENABLED — required),
-NIP-45 count results, NIP-50 search, NIP-65 relay list metadata
-
-### Not supported by local relay
-NIP-05 DNS mapping (requires external DNS), NIP-57 zaps (requires lightning node)
-
-### Auth
-NIP-42 is enabled and required on this relay.
-Clients must authenticate before publishing.
-Add test keypairs to whitelist: \`nostr-station relay whitelist --add <npub>\`
-
-## Testing the relay
-\`\`\`bash
-# Publish a test note
-nak event -k 1 --sec <test-nsec> "hello" ws://localhost:8080
-
-# Query recent notes
-nak req -k 1 -l 5 ws://localhost:8080
-
-# Test with auth (NIP-42)
-nak req -k 1 --auth <nsec> ws://localhost:8080
-\`\`\`
-
-## Key commands
+## Available commands
 | Task | Command |
 |------|---------|
 | Start AI coding tool | \`${EDITOR_START_COMMANDS[c.editor] ?? c.editor}\` |
-| Clone a Nostr repo | \`ngit clone <naddr>\` |
-| Push + sign | \`ngit push\` (Amber approves) |
-| Relay status | \`nostr-station status\` |
+| Switch AI editor target | \`nostr-station editor\` |
+| Open dashboard | \`nostr-station\` (or \`nostr-station chat\`) |
 | Health check | \`nostr-station doctor\` |
-| Live dashboard | \`nostr-station tui\` |
-| Switch AI editor | \`nostr-station editor\` |
+| Status snapshot | \`nostr-station status\` |
+| Live TUI dashboard | \`nostr-station tui\` |
+| Relay logs | \`nostr-station relay logs --follow\` |
+| Relay restart | \`nostr-station relay restart\` |
+| Add npub to whitelist | \`nostr-station relay whitelist --add <npub>\` |
+${c.versionControl !== 'github' ? '| Clone a Nostr repo | `ngit clone <naddr>` |\n| Push + sign via Amber | `ngit push` |\n' : ''}${c.versionControl !== 'ngit' ? '| Clone a GitHub repo | `gh repo clone <owner>/<repo>` |\n| Create PR | `gh pr create` |\n' : ''}${c.installNsyte ? '| Initialize an nsite project | `nostr-station nsite init` |\n| Deploy a static site | `nsyte upload ./dist` |\n' : ''}
+**Editor target files.** Switch which file your AI coding tool reads with \`nostr-station editor\`. The canonical content lives at \`${p.projectsDir}/${CONTEXT_FILENAME}\` and the editor command symlinks the tool-specific filename to it (\`CLAUDE.md\` for Claude Code, \`AGENTS.md\` for Codex / Stacks Dork / generic agents, \`.cursorrules\`, \`.windsurfrules\`, \`.github/copilot-instructions.md\`, \`CONVENTIONS.md\` for aider). Codex / Dork in particular use \`AGENTS.md\` to pick up environmental awareness — relay URL, signer status, NIPs available — without overriding their own identity.
 
-## AI provider
-${(() => {
-  switch (c.aiProvider) {
-    case 'ollama':   return `Ollama (local) — model: ${c.ollamaModel ?? 'llama3'} — ${c.ollamaBase ?? 'http://localhost:11434'}`;
-    case 'lmstudio': return `LM Studio (local) — model: ${c.lmstudioModel ?? 'local-model'} — ${c.lmstudioBase ?? 'http://localhost:1234'}`;
-    case 'openrouter': return `OpenRouter — model: ${c.openrouterModel ?? 'anthropic/claude-sonnet-4'}`;
-    case 'routstr':  return 'Routstr ⚡ (Lightning/Cashu)';
-    case 'ppq':      return 'PayPerQ ⚡ (ppq.ai)';
-    case 'custom':   return `Custom endpoint: ${c.customApiBase ?? ''}`;
-    default:         return 'Anthropic (Claude)';
-  }
-})()}
-${c.aiProvider !== 'anthropic' ? '- Config: `source ~/.claude_env` (add to your shell profile)' : ''}
-${c.installLlmWiki ? `
-## Knowledge base (llm-wiki)
-Seed after your first session:
-\`\`\`
-/wiki:research "nostr relay architecture NIP specifications" --wiki nostr-protocol
-/wiki:research "nostr app development patterns" --wiki nostr-apps
-/wiki:assess ./ --wiki nostr-apps
-\`\`\`
-` : ''}
+**Per-project context.** Add a \`project-context.md\` file to any project root to inject project-specific guidance — NIP targets, conventions, architecture notes. Nori reads it on every chat turn. The file is developer-authored and never auto-created.${stacksBoundary}
+
+${USER_REGION_BEGIN}
+${userRegion ? userRegion + '\n' : ''}${USER_REGION_END}
+
 ---
-*Context file for your AI coding tool. Switch editors: \`nostr-station editor\`*
-*Source: ${p.projectsDir}/${CONTEXT_FILENAME}*
+*Source: \`${p.projectsDir}/${CONTEXT_FILENAME}\` — switch editor target with \`nostr-station editor\`.*
 `;
 }
 
 export function writeContextFile(p: Platform, c: Config): string {
   const canonicalPath = `${p.projectsDir}/${CONTEXT_FILENAME}`;
-  write(canonicalPath, buildContextContent(p, c));
+  // Preserve any developer-authored content between the user-region
+  // markers across regeneration. Reading happens BEFORE write —
+  // there's no atomicity issue since this whole flow is the only
+  // writer and runs synchronously.
+  let userRegion = '';
+  try {
+    const existing = fs.readFileSync(canonicalPath, 'utf8');
+    userRegion = extractUserRegion(existing);
+  } catch { /* file missing — first-time generation, empty region */ }
+  write(canonicalPath, buildContextContent(p, c, userRegion));
   symlinkEditorFile(p, c.editor);
   return canonicalPath;
 }
