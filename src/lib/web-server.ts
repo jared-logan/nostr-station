@@ -20,13 +20,13 @@ import { spawn, execSync } from 'child_process';
 import { nip19 } from 'nostr-tools';
 import { getPublicKey } from 'nostr-tools/pure';
 import { fileURLToPath } from 'url';
-import { WebSocketServer } from 'ws';
 import { getKeychain } from './keychain.js';
+// Most terminal helpers moved alongside their HTTP routes + the WS
+// upgrade handler — see routes/terminal.ts. We still need `loadPty`
+// for the warm-up at server-listen time and `destroyAllSessions` to
+// clean up on `server.close`.
 import {
-  loadPty, createSession as createTerminal, attachClient as attachTerminal,
-  detachClient as detachTerminal, destroySession as destroyTerminal,
-  writeInput as writeTerminalInput, resizeSession as resizeTerminal,
-  listSessions as listTerminals, destroyAllSessions as destroyAllTerminals,
+  loadPty, destroyAllSessions as destroyAllTerminals,
 } from './terminal.js';
 // AI provider registry / multi-provider config / context-builder all
 // moved alongside their route handler — see routes/ai.ts. The legacy
@@ -47,8 +47,8 @@ import {
 } from './identity.js';
 import {
   clearAllSessions, issueChallenge, consumeChallenge, createSession,
-  getSession, deleteSession, extractBearer, verifyNip98, authStatus,
-  isPublicApi, requireSession, expectedDashboardUrl, localhostExempt,
+  deleteSession, extractBearer, verifyNip98, authStatus,
+  isPublicApi, requireSession, expectedDashboardUrl,
 } from './auth.js';
 import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
@@ -76,6 +76,7 @@ import {
   streamAnthropic, streamOpenAICompat,
   type Msg, type ProviderConfig,
 } from './routes/ai.js';
+import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 
 // ── Static assets ─────────────────────────────────────────────────────────────
 //
@@ -1411,71 +1412,12 @@ export async function startWebServer(port: number): Promise<void> {
       }
 
 
-      // ── Terminal panel (xterm.js + node-pty) ──────────────────────────
-      //
-      // Capability probe — tells the client whether the terminal bar can be
-      // enabled. Lives at a stable URL so the client can render a degraded
-      // "install python3 + build tools" hint without having to create a
-      // session to find out.
-      if (url === '/api/terminal/capability' && method === 'GET') {
-        const pty = await loadPty();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          available: pty !== null,
-          reason: pty === null
-            ? 'node-pty not installed — run `nostr-station doctor --fix` or reinstall with build tools available'
-            : undefined,
-        }));
-        return;
-      }
-
-      // List active sessions — supports the client reconnect path: on boot
-      // it checks stored session ids against this list, only rejoining ones
-      // the server still knows about.
-      if (url === '/api/terminal' && method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ sessions: listTerminals() }));
-        return;
-      }
-
-      // Create a new PTY session. Body shape: { key, cwd?, projectId? }.
-      // `key` is one of the whitelisted strings in terminal.ts resolveCmd().
-      // `projectId`, if given, is looked up server-side and its path used
-      // as cwd — clients never pass raw paths here.
-      if (url === '/api/terminal/create' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const key = String(parsed.key || '');
-        let cwd: string | undefined;
-        const pid = parsed.projectId ? String(parsed.projectId) : '';
-        if (pid) {
-          const p = getProject(pid);
-          if (!p) {
-            res.writeHead(404, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'project not found' }));
-            return;
-          }
-          if (p.path) cwd = p.path;
-        }
-        const r = await createTerminal({ key, cwd }, CLI_SPAWN);
-        if (!r.ok) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: r.error }));
-          return;
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ id: r.id, label: r.label }));
-        return;
-      }
-
-      const termDelMatch = url.match(/^\/api\/terminal\/([a-f0-9]{16,})$/);
-      if (termDelMatch && method === 'DELETE') {
-        const ok = destroyTerminal(termDelMatch[1], 'client-close');
-        res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok }));
-        return;
-      }
+      // ── Terminal HTTP surface (extracted to routes/terminal.ts) ───────
+      // Covers /api/terminal/capability, /api/terminal, /api/terminal/create,
+      // and DELETE /api/terminal/:id. The matching WebSocket upgrade is
+      // wired below via mountTerminalWebSocket() so it shares this
+      // request handler's allowedHosts / isLoopbackUrl primitives.
+      if (await handleTerminal(req, res, url, method)) return;
 
       // Static fallback — vendor libs first (fast path, strict whitelist),
       // then the regular src/web tree.
@@ -1502,95 +1444,12 @@ export async function startWebServer(port: number): Promise<void> {
       res.end('Not found');
     });
 
-    // ── Terminal WebSocket upgrade ────────────────────────────────────
-    //
-    // URL: /api/terminal/ws/:id?token=<bearer>
-    // Auth: browser WebSockets can't set Authorization headers, so we accept
-    // the session token as a query param. localhostExempt() still wins for
-    // the identity.json requireAuth:false case, same as the REST surface.
-    //
-    // Client → server messages (JSON text frames):
-    //   { type: 'input',  data: '<string>' }
-    //   { type: 'resize', cols: 80, rows: 24 }
-    // Server → client messages:
-    //   - Raw PTY output as text frames (no wrapping; written straight to
-    //     xterm.js via term.write()).
-    //   - Control frames are prefixed with a NUL byte (\x00) followed by
-    //     JSON. Clients split on the first byte to demux. We use NUL
-    //     because no legitimate PTY stream contains it and xterm.js handles
-    //     seeing one gracefully if we ever slip up.
-    const wss = new WebSocketServer({ noServer: true });
-
-    server.on('upgrade', (req, socket, head) => {
-      const url = req.url || '';
-      const match = url.match(/^\/api\/terminal\/ws\/([a-f0-9]{16,})(?:\?.*)?$/);
-      if (!match) {
-        socket.destroy();
-        return;
-      }
-      const sessionId = match[1];
-
-      // Mirror the HTTP Host + Origin checks at the WebSocket layer.
-      // Browsers always send Origin on upgrade handshakes, so rejecting
-      // missing/foreign Origin blocks cross-origin WS attempts (e.g. a
-      // malicious page trying to attach to a live terminal session).
-      const hostHeader = String(req.headers['host'] || '').toLowerCase();
-      if (!allowedHosts.has(hostHeader)) {
-        socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-      const wsOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
-      if (!isLoopbackUrl(wsOrigin)) {
-        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-
-      // Auth check using the same primitives as the REST middleware.
-      let authed = localhostExempt(req);
-      if (!authed) {
-        // Extract token from ?token= query string.
-        const qIdx = url.indexOf('?');
-        const qs   = qIdx >= 0 ? new URLSearchParams(url.slice(qIdx + 1)) : null;
-        const tok  = qs?.get('token') || '';
-        if (tok && getSession(tok)) authed = true;
-      }
-      if (!authed) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        const sess = attachTerminal(sessionId, ws);
-        if (!sess) {
-          // Session vanished between create and WS open. Emit a JSON control
-          // frame so the client can show a clean "session expired" state,
-          // then close. Useful after long sleeps where the grace timer fired.
-          try { ws.send(`\x00${JSON.stringify({ type: 'closed', reason: 'unknown-session' })}`); } catch {}
-          try { ws.close(4404, 'unknown session'); } catch {}
-          return;
-        }
-
-        ws.on('message', (raw) => {
-          // PTY input is high-rate; parse defensively and drop anything we
-          // don't recognize. Max 64KiB per frame guards against a misbehaving
-          // client streaming MBs of data into our event loop.
-          if ((raw as Buffer).length > 64 * 1024) return;
-          let parsed: any;
-          try { parsed = JSON.parse(raw.toString()); } catch { return; }
-          if (parsed?.type === 'input' && typeof parsed.data === 'string') {
-            writeTerminalInput(sessionId, parsed.data);
-          } else if (parsed?.type === 'resize') {
-            resizeTerminal(sessionId, Number(parsed.cols), Number(parsed.rows));
-          }
-        });
-
-        ws.on('close', () => detachTerminal(sessionId, ws));
-        ws.on('error', () => detachTerminal(sessionId, ws));
-      });
-    });
+    // ── Terminal WebSocket upgrade (extracted to routes/terminal.ts) ──
+    // Mounted as a closure-receiving function so the WS layer reuses
+    // this request handler's `allowedHosts` + `isLoopbackUrl` primitives
+    // for H1 (DNS rebinding) and H2 (CSRF) checks. See the route module
+    // for the full URL grammar + control-frame protocol.
+    mountTerminalWebSocket(server, { allowedHosts, isLoopbackUrl });
 
     // PID file management (B3): write once we're bound, drop on graceful
     // exit. The file lets `nostr-station uninstall` refuse to nuke services
