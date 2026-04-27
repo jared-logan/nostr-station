@@ -3023,6 +3023,26 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .cap-chip.cap-ngit  { background: var(--accent-soft); color: var(--accent-bright); border: 1px solid var(--accent-dim); }
 .cap-chip.cap-nsite { background: rgba(30, 200, 190, 0.10); color: #47d6c8; border: 1px solid rgba(30, 200, 190, 0.3); }
 
+/* Per-card git-state badge — populated by ProjectsPanel's git-state
+   poller. Lives alongside the capability chips on the .pc-badges row.
+   `hidden` attribute is honored (display: none) so local-only cards
+   render no badge. Color mapping mirrors the brief: muted = up to
+   date, amber = dirty, blue = ahead/behind, red = diverged. */
+.pc-state[hidden] { display: none; }
+.pc-state {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  text-transform: lowercase;
+}
+.pc-state.pcs-up-to-date  { background: rgba(180,180,200,0.08); color: var(--text-dim);    border: 1px solid rgba(180,180,200,0.18); }
+.pc-state.pcs-dirty       { background: rgba(255, 184, 0, 0.10); color: var(--warn);       border: 1px solid rgba(255, 184, 0, 0.32); }
+.pc-state.pcs-ahead-behind{ background: var(--accent-soft);     color: var(--accent-bright); border: 1px solid var(--accent-dim); }
+.pc-state.pcs-diverged    { background: rgba(255, 80, 80, 0.10); color: var(--error);      border: 1px solid rgba(255, 80, 80, 0.32); }
+
 /* Project detail view */
 
 #projects-title .detail-back {

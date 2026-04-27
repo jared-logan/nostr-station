@@ -2807,6 +2807,10 @@ const ProjectsPanel = (() => {
       projects = [];
     }
     render();
+    // Kick off git-state polling now that cards are in the DOM. The
+    // helper is idempotent — repeat reloads (Add Project, capability
+    // toggle) replace the existing interval rather than stacking.
+    startGitStatePolling();
   }
 
   function onEnter() { reload(); }
@@ -2826,6 +2830,89 @@ const ProjectsPanel = (() => {
   document.addEventListener('terminal-available', () => {
     if (state.view === 'list' || state.view === 'detail') render();
   });
+
+  // ── git-state badge polling (Item 3) ───────────────────────────────────
+  //
+  // Each card carries a `.pc-state` pill that renders the GitState label
+  // returned by GET /api/projects/:id/git-state. Polling rules:
+  //
+  //   - On reload() success: fire one round immediately so cards show
+  //     state on first paint instead of "(blank → 30 s later → label)".
+  //   - Every 30 s thereafter while the panel is mounted.
+  //   - On `visibilitychange` → 'visible' so a tab-switch refresh happens
+  //     even between interval ticks. We never fetch while hidden.
+  //   - In-flight dedup per project — if a fetch is still pending when
+  //     the next tick arrives, that project is skipped this cycle.
+  //   - Local-only projects skip the fetch entirely (no remote story
+  //     to render — the brief explicitly says no badge for local-only).
+  //   - Path-missing projects skip too (no repo to query). The existing
+  //     red `pathMissing` border is the actionable signal there.
+  //
+  // No CSP / WS surface change — pure REST polling against the new
+  // sync endpoint. 30 s × N projects is comfortably below any rate
+  // anyone would care about; the dedup keeps a slow `git fetch` from
+  // stacking calls.
+  const inFlightGitState = new Set();
+  let gitStateInterval = null;
+  let visibilityHookInstalled = false;
+  const stateClassFor = (gs) => {
+    // Backend-aware: local-only projects always render no badge, so we
+    // never get here for them. The label string drives the colour
+    // class — match the brief's mapping verbatim:
+    //   up to date → muted, dirty → amber, ahead/behind → blue,
+    //   diverged → red. We key on the GitState boolean fields so the
+    //   class doesn't drift with future label string tweaks.
+    if (gs.dirty)              return 'pcs-dirty';
+    if (gs.diverged)           return 'pcs-diverged';
+    if (gs.ahead || gs.behind) return 'pcs-ahead-behind';
+    return 'pcs-up-to-date';
+  };
+  async function pollGitStateOne(projectId) {
+    if (inFlightGitState.has(projectId)) return;
+    inFlightGitState.add(projectId);
+    try {
+      const gs = await api(`/api/projects/${projectId}/git-state`);
+      if (!gs) return;
+      const cardEl = body.querySelector(`.project-card[data-id="${projectId}"] .pc-state`);
+      if (!cardEl) return;  // user navigated away mid-fetch
+      if (gs.backend === 'local-only') {
+        cardEl.hidden = true;
+        cardEl.textContent = '';
+        return;
+      }
+      cardEl.hidden = false;
+      cardEl.textContent = gs.label;
+      cardEl.title = `${gs.branch || 'no branch'} · ${gs.label}`;
+      cardEl.className = `pc-state ${stateClassFor(gs)}`;
+    } catch {
+      // Endpoint failed — silent. The badge stays in whatever state
+      // the previous successful poll left it in. A persistent failure
+      // surfaces via the existing red pathMissing pill if relevant.
+    } finally {
+      inFlightGitState.delete(projectId);
+    }
+  }
+  function pollGitStateAll() {
+    if (state.view !== 'list') return;  // detail view doesn't show cards
+    if (document.visibilityState !== 'visible') return;
+    for (const p of projects) {
+      if (!p.path || p.pathMissing) continue;
+      pollGitStateOne(p.id);
+    }
+  }
+  function startGitStatePolling() {
+    // First fire happens after render; wait one tick so the card DOM
+    // exists by the time the fetch resolves and we go to write into it.
+    setTimeout(pollGitStateAll, 0);
+    if (gitStateInterval !== null) clearInterval(gitStateInterval);
+    gitStateInterval = setInterval(pollGitStateAll, 30_000);
+    if (!visibilityHookInstalled) {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') pollGitStateAll();
+      });
+      visibilityHookInstalled = true;
+    }
+  }
 
   function render() {
     if (state.view === 'detail') renderDetail();
@@ -2902,7 +2989,7 @@ const ProjectsPanel = (() => {
         <div class="pc-actions"></div>
       </div>
       <div class="pc-path">${p.path ? `<code>${escapeHtml(p.path)}</code>` : '<em class="muted">no local path</em>'}</div>
-      <div class="pc-badges">${projectCapBadges(p.capabilities)}</div>
+      <div class="pc-badges">${projectCapBadges(p.capabilities)}<span class="pc-state" hidden></span></div>
       <div class="pc-meta">
         <div class="pc-meta-row"><span class="k">identity</span><span class="v">${escapeHtml(projectIdentityLabel(p))}</span></div>
         <div class="pc-meta-row"><span class="k">last activity</span><span class="v pc-last-activity">${lastAct}</span></div>
