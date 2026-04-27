@@ -13,6 +13,20 @@ curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/inst
 
 After install, run `nostr-station` with no arguments — a browser opens at `http://localhost:3000/setup` for first-run configuration, or drops you at the dashboard if the station is already configured. Prefer a terminal-only flow? `nostr-station onboard` still launches the Ink TUI wizard and reaches the same end-state.
 
+### Contributors / pre-release testing
+
+To run from source against an unpublished commit:
+
+```bash
+git clone https://github.com/jared-logan/nostr-station
+cd nostr-station
+npm install
+npm run build
+npm link            # exposes `nostr-station` on your PATH from this checkout
+```
+
+> ⚠ **`nostr-station uninstall` on a source build removes the global symlink.** It calls `npm uninstall -g nostr-station`, which also unlinks the `npm link` you just created — `nostr-station` will read as "not found" until you re-run `npm link` from the project root.
+
 > v0.0.5 — macOS (Apple Silicon + Intel) and Linux (apt / dnf / pacman).
 
 ---
