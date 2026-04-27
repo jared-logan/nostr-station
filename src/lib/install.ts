@@ -3,7 +3,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import type { Platform, Config } from './detect.js';
 import { findBin } from './detect.js';
-import { COMPONENT_VERSIONS } from './versions.js';
+import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
+import { verifyFileSha256 } from './checksum.js';
 
 export type InstallResult = {
   ok: boolean;
@@ -719,6 +720,13 @@ async function installNodePtyCompile(root: string, version: string): Promise<Ins
 // Asset naming as of v0.19.x: nak-v{tag}-{os}-{arch}
 //   os:   darwin | linux
 //   arch: amd64  | arm64
+//
+// Integrity: nak does NOT publish a SHA256SUMS file alongside its release
+// assets, so we pin per-target sums in src/lib/versions.ts and hard-fail on
+// mismatch. There is no fallback path — an MITM or CDN swap surfaces as a
+// failed install, never as a silent-RCE binary written to disk. Bump the
+// version + sums together (see BINARY_SHA256 doc comment for the refresh
+// recipe).
 export async function installNak(cargoBin: string): Promise<InstallResult> {
   const osMap: Record<string, string>   = { darwin: 'darwin', linux: 'linux' };
   const archMap: Record<string, string> = { x64: 'amd64', arm64: 'arm64' };
@@ -728,24 +736,22 @@ export async function installNak(cargoBin: string): Promise<InstallResult> {
     return { ok: false, detail: `unsupported platform for nak: ${process.platform}/${process.arch}` };
   }
 
-  // Resolve latest release tag from the GitHub API.
-  // We use /releases/latest (not a fixed /download/latest URL) because the
-  // asset filenames embed the version, so we have to read the tag first.
-  let tag: string;
-  try {
-    const res = await fetch('https://api.github.com/repos/fiatjaf/nak/releases/latest', {
-      headers: { 'User-Agent': 'nostr-station' },
-    });
-    if (!res.ok) return { ok: false, detail: `github api ${res.status}` };
-    const data = await res.json() as { tag_name?: string };
-    if (!data.tag_name) return { ok: false, detail: 'no tag_name in release response' };
-    tag = data.tag_name;
-  } catch (e) {
-    const msg = (e as Error).message ?? 'fetch failed';
-    return { ok: false, detail: `github api fetch failed: ${msg.slice(0, 80)}` };
+  const pinnedVersion = COMPONENT_VERSIONS['nak'];
+  if (!pinnedVersion) {
+    return { ok: false, detail: 'no pinned nak version in versions.ts' };
   }
 
-  const assetName = `nak-${tag}-${os}-${arch}`;
+  const targetKey = `${os}-${arch}`;
+  const expectedSha = BINARY_SHA256.nak?.[targetKey];
+  if (!expectedSha) {
+    return {
+      ok: false,
+      detail: `no checksum pinned for nak ${targetKey} — refusing unverified install`,
+    };
+  }
+
+  const tag = `v${pinnedVersion}`;
+  const assetName = `nak-${tag}-${targetKey}`;
   const url  = `https://github.com/fiatjaf/nak/releases/download/${tag}/${assetName}`;
   const dest = `${cargoBin}/nak`;
 
@@ -756,6 +762,24 @@ export async function installNak(cargoBin: string): Promise<InstallResult> {
 
   const dl = await run('curl', ['-fsSL', url, '-o', dest]);
   if (!dl.ok) return { ok: false, detail: `download failed: ${dl.detail}` };
+
+  // Verify before chmod — never leave an unverified executable on disk.
+  // Mismatch deletes the file and hard-fails so the user sees a real error
+  // rather than getting an attacker-controlled `nak` shimmed onto their PATH.
+  let verified = false;
+  try {
+    verified = verifyFileSha256(dest, expectedSha);
+  } catch (e) {
+    try { fs.unlinkSync(dest); } catch {}
+    return { ok: false, detail: `checksum read failed: ${(e as Error).message?.slice(0, 80)}` };
+  }
+  if (!verified) {
+    try { fs.unlinkSync(dest); } catch {}
+    return {
+      ok: false,
+      detail: `nak SHA256 mismatch for ${assetName} — install aborted (expected ${expectedSha.slice(0, 12)}…)`,
+    };
+  }
 
   try {
     fs.chmodSync(dest, 0o755);
@@ -884,11 +908,30 @@ export async function installNostrVpn(
     return { ok: true, detail: 'already installed' };
   } catch { /* fall through to install */ }
 
-  const url = `https://github.com/mmalmi/nostr-vpn/releases/latest/download/nvpn-${platform.nvpnTarget}.tar.gz`;
+  // Resolve pinned version + per-target SHA256 from versions.ts. We refuse
+  // to download from `/releases/latest/download/...` (the old behavior)
+  // because we have no upstream-published manifest to verify against — the
+  // only way to make integrity verification meaningful is to fetch the
+  // exact tag we have a pinned hash for. Bump the version + sums together
+  // (see BINARY_SHA256 doc comment for the refresh recipe).
+  const pinnedVersion = COMPONENT_VERSIONS['nvpn'];
+  if (!pinnedVersion) {
+    return fail('config', 'no pinned nvpn version in versions.ts');
+  }
+  const expectedSha = BINARY_SHA256.nvpn?.[platform.nvpnTarget];
+  if (!expectedSha) {
+    return fail(
+      'config',
+      `no checksum pinned for nvpn ${platform.nvpnTarget} — refusing unverified install`,
+    );
+  }
+
+  const tag = `v${pinnedVersion}`;
+  const url = `https://github.com/mmalmi/nostr-vpn/releases/download/${tag}/nvpn-${platform.nvpnTarget}.tar.gz`;
   const tmp = `/tmp/nvpn-install-${Date.now()}`;
   const tarPath = `${tmp}/nvpn.tar.gz`;
   fs.mkdirSync(tmp, { recursive: true });
-  append(`tmp dir: ${tmp}`);
+  append(`tmp dir: ${tmp} pinned=${pinnedVersion} sha256=${expectedSha.slice(0, 12)}…`);
 
   // Download — split from the extract step (older code piped curl | tar
   // which hid HTTP errors behind tar's "Unexpected EOF"). `-w` prints the
@@ -911,6 +954,27 @@ export async function installNostrVpn(
       `curl failed (exit ${exit}) for ${url}: ${stderr.trim().slice(0, 160) || 'no stderr'}`,
     );
   }
+
+  // Verify SHA256 of the tarball BEFORE extraction. Hard-fail on mismatch:
+  // an attacker-controlled tarball must never be unpacked, even into /tmp,
+  // because tar can write absolute / `..` paths and a malicious archive
+  // could land payloads outside the intended dir.
+  step('verifying sha256');
+  let verified = false;
+  try {
+    verified = verifyFileSha256(tarPath, expectedSha);
+  } catch (e: any) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return fail('checksum', `sha256 read failed: ${(e?.message ?? '').slice(0, 160)}`);
+  }
+  if (!verified) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return fail(
+      'checksum',
+      `nvpn tarball SHA256 mismatch (expected ${expectedSha.slice(0, 12)}…) — install aborted`,
+    );
+  }
+  append('sha256 verified');
 
   // Extract — tar's own errors surface clearly here, distinct from the
   // download step.
