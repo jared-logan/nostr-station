@@ -20,7 +20,7 @@ import { spawn, execSync } from 'child_process';
 import { nip19 } from 'nostr-tools';
 import { getPublicKey } from 'nostr-tools/pure';
 import { fileURLToPath } from 'url';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer } from 'ws';
 import { getKeychain } from './keychain.js';
 import {
   loadPty, createSession as createTerminal, attachClient as attachTerminal,
@@ -43,16 +43,15 @@ import {
 import { buildAiContext } from './ai-context.js';
 import { gatherStatus } from '../commands/Status.js';
 import {
-  readRelaySettings, defaultConfigPath, hexToNpub, npubToHex,
+  readRelaySettings, defaultConfigPath, hexToNpub,
   addToWhitelist, removeFromWhitelist, setAuthFlag,
 } from './relay-config.js';
 import { detectPlatform, detectInstalled, probeOllama, probeLmStudio } from './detect.js';
 import { bootstrapRelayServices } from './services.js';
 import { installNostrVpn } from './install.js';
 import {
-  readIdentity, addReadRelay, removeReadRelay, setNpub as setIdentityNpub,
-  setNgitRelay as setIdentityNgitRelay, setSetupComplete,
-  isNpubOrHex, isNsec, isValidRelayUrl, DEFAULT_READ_RELAYS, type Identity,
+  readIdentity, setSetupComplete,
+  isNsec, isValidRelayUrl,
 } from './identity.js';
 import {
   clearAllSessions, issueChallenge, consumeChallenge, createSession,
@@ -79,6 +78,7 @@ import {
   type CmdSpec,
 } from './routes/_shared.js';
 import { handleProjects } from './routes/projects.js';
+import { handleIdentity } from './routes/identity.js';
 
 // ── Static assets ─────────────────────────────────────────────────────────────
 //
@@ -826,122 +826,10 @@ async function setProviderConfig(body: any): Promise<{ ok: boolean; error?: stri
   return { ok: true };
 }
 
-// ── Identity profile lookup ───────────────────────────────────────────────────
-//
-// Runs `nak req -k 0 -a <hex> <relays…>` with a short cap; nak streams until
-// killed, so we collect events for a fixed window then pick the newest. The
-// result is memoized for 5 minutes to keep drawer-opens snappy.
-
-interface Profile {
-  npub: string;
-  hex:  string;
-  name?: string;
-  about?: string;
-  picture?: string;
-  nip05?: string;
-  nip05Verified?: boolean;
-  cachedAt: number;
-}
-
-const PROFILE_CACHE = new Map<string, Profile>();
-const PROFILE_TTL_MS = 5 * 60 * 1000;
-
-async function fetchNip05(name: string, domain: string, expectedHex: string): Promise<boolean> {
-  try {
-    const url = `https://${domain}/.well-known/nostr.json?name=${encodeURIComponent(name)}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) return false;
-    const data = await res.json() as { names?: Record<string, string> };
-    const got = data.names?.[name];
-    return typeof got === 'string' && got.toLowerCase() === expectedHex.toLowerCase();
-  } catch { return false; }
-}
-
-// Fetch a kind-0 event from one relay via raw WebSocket.
-// Resolves with the event (or null on timeout/error/EOSE-with-no-match).
-function fetchKind0FromRelay(relayUrl: string, hex: string, timeoutMs: number): Promise<any | null> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (ev: any | null) => {
-      if (settled) return;
-      settled = true;
-      try { ws.close(); } catch {}
-      clearTimeout(timer);
-      resolve(ev);
-    };
-    let ws: WebSocket;
-    try { ws = new WebSocket(relayUrl); }
-    catch { resolve(null); return; }
-
-    const timer = setTimeout(() => finish(null), timeoutMs);
-    const subId = 'ns-profile-' + Math.random().toString(36).slice(2, 8);
-
-    ws.addEventListener('open', () => {
-      try {
-        ws.send(JSON.stringify(['REQ', subId, { authors: [hex], kinds: [0], limit: 1 }]));
-      } catch { finish(null); }
-    });
-    ws.addEventListener('message', (m: any) => {
-      try {
-        const msg = JSON.parse(typeof m.data === 'string' ? m.data : m.data.toString());
-        if (Array.isArray(msg)) {
-          if (msg[0] === 'EVENT' && msg[1] === subId && msg[2]?.kind === 0) finish(msg[2]);
-          else if (msg[0] === 'EOSE' && msg[1] === subId) finish(null);
-        }
-      } catch {}
-    });
-    ws.addEventListener('error', () => finish(null));
-    ws.addEventListener('close', () => finish(null));
-  });
-}
-
-async function lookupProfile(npubOrHex: string, relays: string[]): Promise<Profile> {
-  const hex = npubToHex(npubOrHex);
-  if (!hex) throw new Error('could not resolve npub/hex');
-  const npub = hexToNpub(hex);
-  const cacheKey = hex;
-
-  const cached = PROFILE_CACHE.get(cacheKey);
-  if (cached && Date.now() - cached.cachedAt < PROFILE_TTL_MS) return cached;
-
-  const profile: Profile = { npub, hex, cachedAt: Date.now() };
-  if (relays.length === 0) { PROFILE_CACHE.set(cacheKey, profile); return profile; }
-
-  // Query all relays in parallel; take the newest kind-0 that answers.
-  // Each relay gets a 5s budget. Promise.all means we wait for the slowest
-  // relay (or its timeout), but since all run in parallel the total cap
-  // is still ~5s.
-  const results = await Promise.all(
-    relays.map(r => fetchKind0FromRelay(r, hex, 5000)),
-  );
-  const events = results.filter(Boolean);
-
-  const newest = events
-    .filter((e: any) => e && e.kind === 0 && typeof e.content === 'string')
-    .sort((a: any, b: any) => (b.created_at || 0) - (a.created_at || 0))[0];
-
-  if (newest) {
-    try {
-      const meta = JSON.parse(newest.content);
-      if (typeof meta.name    === 'string') profile.name    = meta.name;
-      if (typeof meta.about   === 'string') profile.about   = meta.about;
-      if (typeof meta.picture === 'string') profile.picture = meta.picture;
-      if (typeof meta.nip05   === 'string') profile.nip05   = meta.nip05;
-    } catch {}
-  }
-
-  if (profile.nip05) {
-    const at = profile.nip05.indexOf('@');
-    const name   = at >= 0 ? profile.nip05.slice(0, at) : '_';
-    const domain = at >= 0 ? profile.nip05.slice(at + 1) : profile.nip05;
-    profile.nip05Verified = await fetchNip05(name, domain, hex);
-  }
-
-  PROFILE_CACHE.set(cacheKey, profile);
-  return profile;
-}
-
-function bustProfileCache(): void { PROFILE_CACHE.clear(); }
+// Profile lookup helpers (Profile, PROFILE_CACHE, fetchNip05,
+// fetchKind0FromRelay, lookupProfile, bustProfileCache) moved alongside
+// the identity routes — see routes/identity.ts. Nothing outside
+// /api/identity/* consumed them, so they followed the routes out.
 
 // ── Exec streaming (whitelisted commands over SSE) ────────────────────────────
 //
@@ -1499,125 +1387,10 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
-      // ── Identity routes ─────────────────────────────────────────────────
-      if (url === '/api/identity/config' && method === 'GET') {
-        const ident = readIdentity();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          npub:       ident.npub,
-          readRelays: ident.readRelays,
-          ngitRelay:  ident.ngitRelay || '',
-          hasProfile: !!ident.npub,
-        }));
-        return;
-      }
-
-      if (url === '/api/identity/set' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        // Fields accepted by this route:
-        //   - npub          (bootstrap owner)
-        //   - ngitRelay     (station-level default for ngit)
-        //   - setupComplete (wizard progress marker — see localhostExempt)
-        // All optional; handler updates whichever is present.
-        const hasNpub     = typeof parsed.npub      === 'string';
-        const hasNgitRly  = typeof parsed.ngitRelay === 'string';
-        const hasSetup    = typeof parsed.setupComplete === 'boolean';
-        if (!hasNpub && !hasNgitRly && !hasSetup) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'nothing to update' }));
-          return;
-        }
-        let npubResult: { ok: boolean; error?: string; npub?: string } | null = null;
-        let ngitResult: { ok: boolean; error?: string; ngitRelay?: string } | null = null;
-        if (hasNpub) {
-          npubResult = setIdentityNpub(String(parsed.npub || '').trim());
-          if (npubResult.ok) bustProfileCache();
-        }
-        if (hasNgitRly) {
-          ngitResult = setIdentityNgitRelay(String(parsed.ngitRelay || '').trim());
-        }
-        if (hasSetup) {
-          setSetupComplete(parsed.setupComplete);
-        }
-        const ok = (!npubResult || npubResult.ok) && (!ngitResult || ngitResult.ok);
-        const body: any = { ok };
-        if (npubResult) { if (npubResult.npub) body.npub = npubResult.npub; if (npubResult.error) body.error = npubResult.error; }
-        if (ngitResult) { if (ngitResult.ngitRelay !== undefined) body.ngitRelay = ngitResult.ngitRelay; if (ngitResult.error) body.error = ngitResult.error; }
-        res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(body));
-        return;
-      }
-
-      if (url === '/api/identity/relays/add' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const r = addReadRelay(String(parsed.url || '').trim());
-        res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(r));
-        if (r.ok) bustProfileCache();
-        return;
-      }
-
-      if (url === '/api/identity/relays/remove' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const r = removeReadRelay(String(parsed.url || '').trim());
-        bustProfileCache();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(r));
-        return;
-      }
-
-      // Public read-only profile lookup for the setup wizard. Takes an
-      // npub in the query string and resolves it against the default
-      // discovery relays. Intentionally does NOT use stored identity
-      // state — the wizard runs before identity.json is written.
-      if (url.startsWith('/api/identity/profile/preview') && method === 'GET') {
-        const qpos = (req.url || '').indexOf('?');
-        const qs = qpos >= 0 ? new URLSearchParams((req.url || '').slice(qpos + 1)) : new URLSearchParams();
-        const raw = (qs.get('npub') || '').trim();
-        if (!raw || !isNpubOrHex(raw) || isNsec(raw)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'invalid npub' }));
-          return;
-        }
-        try {
-          const p = await lookupProfile(raw, DEFAULT_READ_RELAYS.slice());
-          // Scheme-gate the attacker-controlled `picture` URL so a hostile
-          // kind-0 can't land `javascript:` / `data:image/svg+xml` into an
-          // <img src>. Defense-in-depth alongside the CSP img-src allowlist.
-          const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture) };
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(sanitized));
-        } catch (e: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: String(e.message || e) }));
-        }
-        return;
-      }
-
-      if (url === '/api/identity/profile' && method === 'GET') {
-        const ident = readIdentity();
-        if (!ident.npub) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ empty: true }));
-          return;
-        }
-        try {
-          const p = await lookupProfile(ident.npub, ident.readRelays);
-          const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture) };
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(sanitized));
-        } catch (e: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: String(e.message || e) }));
-        }
-        return;
-      }
+      // ── Identity (extracted to routes/identity.ts) ─────────────────────
+      // Covers /api/identity/config, /api/identity/set, /api/identity/relays/{add,remove},
+      // /api/identity/profile/preview, /api/identity/profile, /api/identity/profile/sync.
+      if (await handleIdentity(req, res, url, method)) return;
 
       // Setup wizard completion — called once from the Done stage. Flips
       // setupComplete=true (ending the localhost exemption on this box
@@ -1736,25 +1509,6 @@ export async function startWebServer(port: number): Promise<void> {
           npub:      sess.npub,
           expiresAt: sess.expiresAt,
         }));
-        return;
-      }
-
-      if (url === '/api/identity/profile/sync' && method === 'POST') {
-        const ident = readIdentity();
-        bustProfileCache();
-        if (!ident.npub) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ empty: true }));
-          return;
-        }
-        try {
-          const p = await lookupProfile(ident.npub, ident.readRelays);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(p));
-        } catch (e: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: String(e.message || e) }));
-        }
         return;
       }
 
