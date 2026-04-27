@@ -62,9 +62,18 @@ ok "nostr-station installed"
 
 # Confirm the binary is reachable — if not, fall back to direct path
 if ! command -v nostr-station &>/dev/null; then
-  warn "nostr-station not found on PATH yet."
-  warn "Add this to your ~/.zshrc or ~/.bashrc and restart your shell:"
-  echo "  export PATH=\"${NPM_GLOBAL_BIN}:\$PATH\""
+  # Don't tell the user to `source ~/.bashrc` — nvm's hooks are written
+  # in a way that some users find brittle to re-source mid-session, and
+  # the simpler advice ("open a new terminal") works on every platform
+  # we ship to without extra moving parts. Add the explicit one-liner
+  # for users who don't want to spawn a new shell.
+  warn "nostr-station not found on PATH in this shell."
+  warn "Open a NEW terminal — your shell rc files will pick up the install automatically."
+  echo "  Or run this one-liner in the current shell:"
+  echo "    . ~/.nvm/nvm.sh && nostr-station onboard"
+  echo ""
+  echo "  If you'd rather edit your rc by hand, this PATH entry covers it:"
+  echo "    export PATH=\"${NPM_GLOBAL_BIN}:\$PATH\""
   STATION_CMD="${NPM_GLOBAL_BIN}/nostr-station"
 else
   STATION_CMD="nostr-station"
@@ -129,16 +138,53 @@ if [ -t 0 ]; then
   echo "    nostr-station onboard            # re-run this wizard"
   echo ""
 else
+  # Non-interactive branch (the curl | bash path) — make the success
+  # banner LOUD. nvm's installer alone produces ~50+ lines of bash-rc /
+  # rust-toolchain output before this point, so a quiet "✓ installed"
+  # at the end gets buried in scroll. Two pieces:
+  #   1. A clearly-rendered separator block + ASCII marker so the eye
+  #      catches the success even when reviewing scrollback.
+  #   2. A dropped file at ~/.nostr-station/install-complete.txt that
+  #      the user can `cat` afterwards — the same content as the
+  #      console banner, but durable.
+  COMPLETE_DIR="${HOME}/.nostr-station"
+  COMPLETE_FILE="${COMPLETE_DIR}/install-complete.txt"
+  mkdir -p "${COMPLETE_DIR}"
+  cat > "${COMPLETE_FILE}" <<EOF
+nostr-station — install complete
+
+The npm package is installed. To finish setup:
+
+  1. Open a NEW terminal (so PATH picks up the npm global bin).
+  2. Run one of:
+
+       nostr-station                    # web dashboard + first-run wizard
+       nostr-station onboard            # terminal wizard
+
+If 'command not found': nvm hasn't loaded yet in this shell. Either
+open a new terminal, or run the explicit one-liner:
+
+       . ~/.nvm/nvm.sh && nostr-station onboard
+
+If connecting via SSH:
+
+       ssh -t user@host
+       nostr-station onboard
+EOF
+
   echo ""
-  ok "nostr-station installed"
+  echo "════════════════════════════════════════════════════════════════"
+  echo "  ✓ nostr-station installed"
+  echo "════════════════════════════════════════════════════════════════"
   echo ""
-  echo "  No interactive terminal detected."
-  echo "  To finish setup, open a terminal and run one of:"
+  echo "  Open a NEW terminal and run:"
+  echo ""
   echo "    nostr-station                    # web dashboard + first-run wizard"
   echo "    nostr-station onboard            # terminal wizard"
   echo ""
-  echo "  Or if connecting via SSH:"
-  echo "    ssh -t user@host"
-  echo "    nostr-station onboard"
+  echo "  These steps were saved to:"
+  echo "    ${COMPLETE_FILE}"
+  echo ""
+  echo "  View again with:  cat ${COMPLETE_FILE}"
   echo ""
 fi
