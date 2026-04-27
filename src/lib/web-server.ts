@@ -16,7 +16,7 @@ import http from 'http';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { spawn, execSync, execFile, execFileSync } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { nip19 } from 'nostr-tools';
 import { getPublicKey } from 'nostr-tools/pure';
 import { fileURLToPath } from 'url';
@@ -64,14 +64,21 @@ import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
   signWithBunkerUrl, silentBunkerSign,
 } from './auth-bunker.js';
+// `getProject` + `resolveProjectContext` are still needed here for the
+// chat proxy's system-prompt resolution. Everything else moved to
+// `routes/projects.ts` along with the Projects + Chat-context routes.
 import {
-  readProjects, getProject, createProject, updateProject, deleteProject,
-  detectPath, projectGitStatus, projectGitLog, resolveProjectContext,
-  isStacksProject, validateProjectPath,
+  getProject, resolveProjectContext,
   type Project,
 } from './projects.js';
 import { writePidFile, removePidFile } from './pid-file.js';
-import { checkCollision, scaffoldProject } from './project-scaffold.js';
+import {
+  readBody, streamExec, streamExecError,
+  CLI_BIN, CLI_SPAWN,
+  getActiveChatProjectId,
+  type CmdSpec,
+} from './routes/_shared.js';
+import { handleProjects } from './routes/projects.js';
 
 // ── Static assets ─────────────────────────────────────────────────────────────
 //
@@ -276,21 +283,11 @@ export function contextExists(): boolean {
   return fs.existsSync(path.join(os.homedir(), 'projects', 'NOSTR_STATION.md'));
 }
 
-// Active chat project — set via POST /api/chat/context, read by proxyChat()
-// to pick the right system prompt. null means "use global NOSTR_STATION.md".
-// Module-scoped, resets on server restart (same lifecycle as sessions).
-let activeChatProjectId: string | null = null;
-
 // ── Chat proxy (streaming SSE) ────────────────────────────────────────────────
-
-async function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', c => { body += c; });
-    req.on('end',  () => resolve(body));
-    req.on('error', reject);
-  });
-}
+//
+// `readBody`, `streamExec`, `streamExecError`, `CmdSpec`, `CLI_BIN`,
+// `CLI_SPAWN`, and the active-chat-project-id state all moved to
+// `routes/_shared.ts` as part of the route-group split. Imported above.
 
 function completionsUrl(baseUrl: string): string {
   const base = baseUrl.replace(/\/$/, '');
@@ -472,8 +469,9 @@ async function proxyChat(
     return;
   }
 
-  const activeProject = activeChatProjectId ? getProject(activeChatProjectId) : null;
-  const system = activeChatProjectId
+  const activeProjectId = getActiveChatProjectId();
+  const activeProject = activeProjectId ? getProject(activeProjectId) : null;
+  const system = activeProjectId
     ? resolveProjectContext(activeProject).content
     : getContextContent(os.homedir());
   res.writeHead(200, {
@@ -955,28 +953,10 @@ function bustProfileCache(): void { PROFILE_CACHE.clear(); }
 //
 // The dashboard opens a modal that renders these lines into a terminal view.
 
-// Existing streaming-exec routes (publish, doctor, deploy…) pass CLI_BIN
-// to `node` and assume it exists as dist/cli.js. That breaks when the
-// dashboard is running in dev via `tsx src/cli.tsx chat` — cli.js never
-// gets built in that workflow. For the terminal panel we prefer a resolver
-// that picks whichever entrypoint actually exists and pairs it with the
-// matching runner (node + cli.js, or tsx + cli.tsx). CLI_BIN stays for the
-// legacy SSE call sites that already expect a Node+script pair; a dev who
-// exercises them is expected to have run `npm run build` at least once.
-const CLI_BIN = path.resolve(here, '..', 'cli.js');
-const CLI_TSX = path.resolve(here, '..', '..', 'src', 'cli.tsx');
-const TSX_BIN = path.resolve(here, '..', '..', 'node_modules', '.bin', 'tsx');
-// Detect dev layout by checking where this module itself lives. When the
-// web-server is being run from src/lib/ (tsx-hosted), prefer spawning our
-// CLI subcommands from src/cli.tsx too — otherwise edits under src/ won't
-// land until the user runs `npm run build`. In prod (dist/lib/), we always
-// prefer the compiled cli.js + node pair.
-const IS_DEV = here.includes(`${path.sep}src${path.sep}lib`);
-const CLI_SPAWN = (!IS_DEV && fs.existsSync(CLI_BIN))
-  ? { bin: process.execPath, prefix: [CLI_BIN] }
-  : { bin: TSX_BIN,          prefix: [CLI_TSX] };
-
-type CmdSpec = { bin: string; args: string[]; env?: Record<string, string> };
+// `streamExec`, `streamExecError`, `CmdSpec`, `CLI_BIN`, and `CLI_SPAWN`
+// moved to `routes/_shared.ts`. `cmdSpecFor` stays here because it's only
+// used by the slug-keyed `/api/exec/install/<slug>` SSE endpoint, which is
+// still resolved inline in this file.
 function cmdSpecFor(key: string, slug?: string): CmdSpec | null {
   // Whitelisted installs: these match src/lib/install.ts exports. We invoke
   // the CLI rather than the lib functions directly so the Ink install wizard
@@ -1005,68 +985,6 @@ function cmdSpecFor(key: string, slug?: string): CmdSpec | null {
     }
   }
   return null;
-}
-
-function streamExec(spec: CmdSpec, res: http.ServerResponse, req: http.IncomingMessage, cwd?: string, prelude?: object): void {
-  res.writeHead(200, {
-    'Content-Type':  'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection':    'keep-alive',
-  });
-  if (prelude) {
-    try { res.write(`data: ${JSON.stringify(prelude)}\n\n`); } catch {}
-  }
-  const child = spawn(spec.bin, spec.args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ...(spec.env || {}) },
-    cwd: cwd || undefined,
-  });
-
-  const emit = (payload: object) => {
-    try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {}
-  };
-  const pushStream = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
-    const lines = chunk.toString().split('\n');
-    for (const line of lines) {
-      if (line.length) emit({ line, stream });
-    }
-  };
-  child.stdout.on('data', pushStream('stdout'));
-  child.stderr.on('data', pushStream('stderr'));
-  child.on('close', (code) => {
-    emit({ done: true, code });
-    try { res.end(); } catch {}
-  });
-  child.on('error', (e) => {
-    emit({ line: String(e.message || e), stream: 'stderr' });
-    emit({ done: true, code: -1 });
-    try { res.end(); } catch {}
-  });
-
-  const cleanup = () => { try { child.kill(); } catch {} };
-  req.on('close', cleanup);
-  req.on('error', cleanup);
-}
-
-// Emits a single SSE stderr line + done frame so the exec modal renders a
-// readable error exactly like a real command failure would. Used for
-// preflight checks (e.g. missing git remote) where we want to skip the
-// spawn entirely but keep the UX consistent with streamed command failures.
-function streamExecError(res: http.ServerResponse, req: http.IncomingMessage, message: string): void {
-  res.writeHead(200, {
-    'Content-Type':  'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection':    'keep-alive',
-  });
-  const emit = (payload: object) => {
-    try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {}
-  };
-  emit({ line: message, stream: 'stderr' });
-  emit({ done: true, code: 1 });
-  try { res.end(); } catch {}
-  const noop = () => {};
-  req.on('close', noop);
-  req.on('error', noop);
 }
 
 // ── Relay database management ─────────────────────────────────────────────────
@@ -1572,407 +1490,8 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
-      // ── Projects ───────────────────────────────────────────────────────
-      if (url === '/api/projects' && method === 'GET') {
-        // Annotate each project with two derived flags:
-        //   - stacksProject — has stack.json (gates Dork/dev/deploy).
-        //   - pathMissing   — path was recorded but the dir no longer
-        //                     exists on disk (user deleted the folder
-        //                     outside nostr-station, or scaffold
-        //                     failed between mkdir and register). The
-        //                     UI uses this to paint the card red and
-        //                     guide the user toward Remove.
-        // Both are cheap fs checks — list size is single-digit on any
-        // install we've seen.
-        const annotated = readProjects().map(p => ({
-          ...p,
-          stacksProject: isStacksProject(p),
-          pathMissing:   !!p.path && !fs.existsSync(p.path),
-        }));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(annotated));
-        return;
-      }
-      if (url === '/api/projects' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const r = createProject(parsed);
-        if (!r.ok) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: r.error }));
-          return;
-        }
-        res.writeHead(201, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(r.project));
-        return;
-      }
-      if (url === '/api/projects/detect' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const p = String(parsed.path || '').trim();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(detectPath(p)));
-        return;
-      }
-
-      // New-project scaffold flow — two endpoints. /check is a cheap
-      // synchronous pre-flight the client uses to decide whether to open
-      // the collision modal ("directory exists — adopt it instead?") or
-      // proceed to the streaming scaffold. /new itself runs long (npm
-      // install inside mkstack) so it emits SSE in the same frame shape
-      // as /api/exec/install/* — openExecModal can render it directly.
-      // Sanitized read of Stacks's config — exposes which providers
-      // have a configured key (id only — never the key itself) so the
-      // Config panel's Stacks AI section can show "configured" status
-      // without the user needing to leave the dashboard. Stacks stores
-      // its config at ~/Library/Preferences/stacks/config.json on macOS;
-      // path differs on linux but stacks resolves it itself when the
-      // user runs stacks configure.
-      if (url === '/api/stacks/config' && method === 'GET') {
-        const candidates = [
-          path.join(os.homedir(), 'Library', 'Preferences', 'stacks', 'config.json'),
-          path.join(os.homedir(), '.config', 'stacks', 'config.json'),
-        ];
-        let cfg: any = null;
-        let foundAt: string | null = null;
-        for (const p of candidates) {
-          try {
-            const raw = fs.readFileSync(p, 'utf8');
-            cfg = JSON.parse(raw);
-            foundAt = p;
-            break;
-          } catch { /* try next */ }
-        }
-        const providers = cfg && cfg.providers && typeof cfg.providers === 'object'
-          ? Object.keys(cfg.providers)
-          : [];
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          configured: providers.length > 0,
-          providers,                  // ids only — no keys, no baseURLs
-          configPath: foundAt,
-          recentModels: Array.isArray(cfg?.recentModels) ? cfg.recentModels : [],
-        }));
-        return;
-      }
-
-      if (url === '/api/projects/new/check' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const report = checkCollision(String(parsed.name || ''));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(report));
-        return;
-      }
-      if (url === '/api/projects/new' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'bad json' }));
-          return;
-        }
-        const name = String(parsed.name || '');
-
-        // Two source types here: 'local-only' (plain git init) and
-        // 'git-url' (git clone + freshen). ngit clones go through the
-        // dedicated /api/ngit/clone path because they validate the
-        // nostr:// / naddr1 URL format and use the existing Scan flow.
-        // Default to local-only on unknown / missing source so we never
-        // accidentally shell out to something unexpected.
-        const src = parsed.source;
-        let source: import('./project-scaffold.js').ScaffoldSource = { type: 'local-only' };
-        if (src && typeof src === 'object') {
-          if (src.type === 'git-url' && typeof src.url === 'string') {
-            source = { type: 'git-url', url: src.url };
-          } else if (src.type === 'local-only') {
-            source = { type: 'local-only' };
-          }
-        }
-        // Identity: station-default unless the client explicitly opts
-        // the project into a project-specific npub + optional bunker.
-        // scaffoldProject + projects.validateInput own the validation
-        // (nsec rejection, bunker URL format); we just shape the object.
-        let identity: import('./project-scaffold.js').ScaffoldIdentity = {
-          useDefault: true, npub: null, bunkerUrl: null,
-        };
-        const rawIdent = parsed.identity;
-        if (rawIdent && typeof rawIdent === 'object' && rawIdent.useDefault === false) {
-          identity = {
-            useDefault: false,
-            npub:       typeof rawIdent.npub === 'string'      ? rawIdent.npub.trim()      : null,
-            bunkerUrl:  typeof rawIdent.bunkerUrl === 'string' ? rawIdent.bunkerUrl.trim() : null,
-          };
-        }
-        await scaffoldProject(name, source, res, identity);
-        return;
-      }
-
-      const projMatch = url.match(/^\/api\/projects\/([a-f0-9-]{10,})(?:\/(.*))?$/);
-      if (projMatch) {
-        const id = projMatch[1];
-        const tail = projMatch[2] || '';
-        const project = getProject(id);
-        if (!project) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'project not found' }));
-          return;
-        }
-
-        if (tail === '' && method === 'GET') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ...project, stacksProject: isStacksProject(project) }));
-          return;
-        }
-        if (tail === '' && method === 'PATCH') {
-          let parsed: any = {};
-          try { parsed = JSON.parse(await readBody(req)); }
-          catch { res.writeHead(400); res.end('bad json'); return; }
-          const r = updateProject(id, parsed);
-          if (!r.ok) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: r.error }));
-            return;
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(r.project));
-          return;
-        }
-        if (tail === '' && method === 'DELETE') {
-          const r = deleteProject(id);
-          res.writeHead(r.ok ? 200 : 404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: r.ok }));
-          return;
-        }
-
-        // Hard delete: rm -rf the project path, then unregister. POST
-        // (not DELETE) because the operation is irreversible and the
-        // UI path uses a type-to-confirm dialog. Safety guardrails are
-        // delegated to `validateProjectPath` (src/lib/projects.ts):
-        //   - path must be absolute
-        //   - path must be inside the user's home directory (after
-        //     symlink + `..` collapse)
-        //   - path must not BE the home directory itself
-        // Failures surface as 4xx with a message; the rm itself is
-        // best-effort — even if it partially fails, we unregister so
-        // the user isn't stuck with a broken card pointing at a
-        // now-partial path.
-        if (tail === 'purge' && method === 'POST') {
-          const target = project.path || '';
-          if (!target) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'project has no local path to delete' }));
-            return;
-          }
-          let normalizedTarget: string;
-          try {
-            normalizedTarget = validateProjectPath(target);
-          } catch (e) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-              error: `refusing to delete ${target}: ${(e as Error).message}`,
-            }));
-            return;
-          }
-          let rmError: string | null = null;
-          try {
-            fs.rmSync(normalizedTarget, { recursive: true, force: true });
-          } catch (e: any) {
-            rmError = e?.message || 'rm failed';
-          }
-          const r = deleteProject(id);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            ok:          r.ok,
-            unregistered: r.ok,
-            removedPath:  rmError ? null : normalizedTarget,
-            rmError,
-          }));
-          return;
-        }
-
-        if (tail === 'git/status' && method === 'GET') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(projectGitStatus(project.path || '')));
-          return;
-        }
-        if (tail === 'git/log' && method === 'GET') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(projectGitLog(project.path || '')));
-          return;
-        }
-        if (tail === 'git/pull' && method === 'POST') {
-          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
-          streamExec({ bin: 'git', args: ['pull', '--no-rebase', '--ff-only'] }, res, req, project.path);
-          return;
-        }
-        if (tail === 'git/push' && method === 'POST') {
-          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
-          // Route based on which capabilities are enabled.
-          // git + ngit → nostr-station publish --yes (handles both remotes)
-          // git only   → git push origin HEAD
-          // ngit only  → ngit push
-          let spec: CmdSpec;
-          if (project.capabilities.git && project.capabilities.ngit) {
-            spec = { bin: process.execPath, args: [CLI_BIN, 'publish', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
-          } else if (project.capabilities.git) {
-            // Preflight: if the repo has no `origin` remote, git push would
-            // fail with a cryptic "fatal: 'origin' does not appear…". Surface
-            // a readable error through the existing SSE modal instead.
-            try {
-              execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: project.path, stdio: 'pipe' });
-            } catch {
-              streamExecError(res, req, "No git remote named 'origin' — add one in project Settings.");
-              return;
-            }
-            spec = { bin: 'git', args: ['push', 'origin', 'HEAD'] };
-          } else if (project.capabilities.ngit) {
-            spec = { bin: 'ngit', args: ['push'] };
-          } else {
-            res.writeHead(400); res.end('no push-capable capability enabled'); return;
-          }
-          streamExec(spec, res, req, project.path);
-          return;
-        }
-
-        if (tail === 'stacks/deploy' && method === 'POST') {
-          if (!project.path) {
-            streamExecError(res, req, 'project has no local path');
-            return;
-          }
-          if (!isStacksProject(project)) {
-            streamExecError(res, req, 'not a Stacks project (no stack.json found)');
-            return;
-          }
-          // `npm run deploy` is mkstack's deploy script — bundles, uploads
-          // to Blossom, publishes Nostr metadata, returns a NostrDeploy
-          // URL. We stream the output as-is; URL parsing + persisting to
-          // project.nsite.url is deferred to a follow-up once we've seen
-          // the exact stdout format on a real deploy. For now, the user
-          // sees the live URL in the exec modal output.
-          streamExec(
-            { bin: 'npm', args: ['run', 'deploy'] },
-            res, req, project.path,
-            { line: `$ npm run deploy  (cwd: ${project.path})`, stream: 'stdout' },
-          );
-          return;
-        }
-
-        if (tail === 'ngit/status' && method === 'GET') {
-          // Mask bunker URL to domain-only for display.
-          const bunker = project.identity.bunkerUrl;
-          let bunkerDomain: string | null = null;
-          if (bunker) {
-            try { bunkerDomain = new URL(bunker.replace(/^bunker:/, 'https:')).host; }
-            catch { bunkerDomain = 'bunker'; }
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            remote: project.remotes.ngit,
-            bunkerDomain,
-            useDefault: project.identity.useDefault,
-          }));
-          return;
-        }
-        if (tail === 'ngit/push' && method === 'POST') {
-          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
-          streamExec({ bin: 'ngit', args: ['push'] }, res, req, project.path);
-          return;
-        }
-
-        if (tail === 'ngit/init' && method === 'POST') {
-          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
-          // Relay URL arrives in a JSON body and is validated strictly before
-          // being handed to ngit as a fixed argv element. The validator
-          // rejects whitespace and any non-ws(s):// scheme, so there's no
-          // path for a user string to reach the shell.
-          let parsed: any = {};
-          try { parsed = JSON.parse(await readBody(req)); }
-          catch { res.writeHead(400); res.end('bad json'); return; }
-          const raw = String(parsed.relay || '').trim();
-          if (!raw || !isValidRelayUrl(raw)) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'relay must be a ws:// or wss:// URL' }));
-            return;
-          }
-          streamExec(
-            { bin: 'ngit', args: ['init', '--relay', raw], env: { NO_COLOR: '1', TERM: 'dumb' } },
-            res, req, project.path,
-          );
-          return;
-        }
-
-        if (tail === 'exec' && method === 'POST') {
-          // Whitelisted read-only commands scoped to the project's cwd.
-          // Extend the switch below — NEVER interpolate body.cmd into argv.
-          let parsed: any = {};
-          try { parsed = JSON.parse(await readBody(req)); }
-          catch { res.writeHead(400); res.end('bad json'); return; }
-          const cmd = String(parsed.cmd || '');
-          if (!project.path) { res.writeHead(400); res.end('project has no local path'); return; }
-          let spec: CmdSpec | null = null;
-          if (cmd === 'git-status') spec = { bin: 'git', args: ['status'] };
-          if (!spec) { res.writeHead(400); res.end('unknown exec cmd'); return; }
-          streamExec(spec, res, req, project.path);
-          return;
-        }
-
-        if (tail === 'nsite/deploy' && method === 'POST') {
-          const cwd = project.path || process.cwd();
-          streamExec(
-            { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } },
-            res, req, cwd,
-          );
-          return;
-        }
-
-        res.writeHead(404); res.end('unknown project endpoint');
-        return;
-      }
-
-      // ── Chat project context ───────────────────────────────────────────
-      if (url === '/api/chat/context' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const projectId = parsed.projectId ? String(parsed.projectId) : null;
-        const project   = projectId ? getProject(projectId) : null;
-        if (projectId && !project) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'project not found' }));
-          return;
-        }
-        activeChatProjectId = projectId;
-        const { source } = resolveProjectContext(project);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          projectId,
-          projectName: project?.name || null,
-          source,
-        }));
-        return;
-      }
-      const chatCtxMatch = url.match(/^\/api\/chat\/context(?:\/([a-f0-9-]{10,}))?$/);
-      if (chatCtxMatch && method === 'GET') {
-        const pid = chatCtxMatch[1];
-        const project = pid ? getProject(pid) : null;
-        if (pid && !project) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'project not found' }));
-          return;
-        }
-        const { content, source } = resolveProjectContext(project);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          projectId: pid || null,
-          projectName: project?.name || null,
-          content, source,
-        }));
-        return;
-      }
+      // ── Projects + Chat project context (extracted to routes/projects.ts) ──
+      if (await handleProjects(req, res, url, method)) return;
 
       if (url === '/api/installed' && method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
