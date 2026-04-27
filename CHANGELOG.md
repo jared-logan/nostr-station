@@ -3,6 +3,11 @@
 All notable changes to nostr-station are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+- **Sync primitives — `src/lib/sync.ts`.** Three helpers that turn the Projects panel from a launcher into a dashboard. `getProjectGitState(project)` parses `git status --porcelain=v2 --branch` into an `{ ahead, behind, dirty, diverged, branch, label, backend }` shape. `syncProject(project)` dispatches per-backend: local-only no-ops, git does `fetch --all --prune` followed by a strict `merge --ff-only` (refusing dirty trees and diverged branches with actionable messages, never force-push or rebase), ngit does `ngit fetch` plus a kind-1617 proposals query against the project's relay hints + read relays — proposals come back as a first-class array on the result, not flattened into a generic message. `snapshotProject(project, message)` runs `git add -A` + `git commit -m <message>` via `execFile` (no shell template strings; arbitrary message content round-trips safely) with an ISO-timestamp fallback when the message is empty. 26 unit tests cover the porcelain parser (clean / ahead / behind / diverged / dirty-wins-priority / no-upstream / detached HEAD / local-only zero-out) and integration through real `git init` / `git push` / `git commit` flows including the ff-only fast-forward path, dirty-tree refusal, and snapshot's nothing-to-commit graceful path.
+
 ## [0.0.6] — 2026-04-27
 
 > **Security release.** Six findings closed: H1 (DNS rebinding) / H2 (CSRF during wizard) / H3 (relay-URL XSS) / M5 (dashboard security headers) / B1 (`nak` + `nvpn` SHA256 verification) / B2 (project-path traversal). All 0.0.5 users should upgrade — H1 and B2 in particular turn the local dashboard into an arbitrary-event-sign and arbitrary-file-read primitive against any remote site the user happens to visit. See the **Security** subsection below for full details.
