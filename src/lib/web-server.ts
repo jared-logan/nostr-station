@@ -70,6 +70,7 @@ import {
   isStacksProject, validateProjectPath,
   type Project,
 } from './projects.js';
+import { writePidFile, removePidFile } from './pid-file.js';
 import { checkCollision, scaffoldProject } from './project-scaffold.js';
 
 // ── Static assets ─────────────────────────────────────────────────────────────
@@ -3353,8 +3354,20 @@ export async function startWebServer(port: number): Promise<void> {
       });
     });
 
+    // PID file management (B3): write once we're bound, drop on graceful
+    // exit. The file lets `nostr-station uninstall` refuse to nuke services
+    // out from under a running dashboard — see src/lib/pid-file.ts for the
+    // stale-PID handling story.
+    let pidWritten = false;
+    const dropPid = () => {
+      if (!pidWritten) return;
+      pidWritten = false;
+      removePidFile();
+    };
+
     server.on('close', () => {
       destroyAllTerminals();
+      dropPid();
     });
 
     server.on('error', (e: NodeJS.ErrnoException) => {
@@ -3365,7 +3378,37 @@ export async function startWebServer(port: number): Promise<void> {
       }
     });
 
+    // Signal handlers — Ink's own SIGINT handler tears down the TUI but
+    // doesn't fire `server.close`, so we mirror cleanup here. Use `once`
+    // so a second Ctrl-C still terminates fast (default behavior); we
+    // re-raise the signal after our cleanup so node uses its default
+    // exit-on-signal semantics.
+    const onSignal = (sig: NodeJS.Signals) => {
+      dropPid();
+      // Best-effort graceful close; don't await.
+      try { server.close(); } catch {}
+      // Re-raise so the parent process / Ink propagates exit-on-signal
+      // semantics correctly. Without re-raising, a SIGTERM that arrived
+      // mid-run-up could be silently absorbed.
+      process.kill(process.pid, sig);
+    };
+    process.once('SIGINT',  onSignal);
+    process.once('SIGTERM', onSignal);
+    // `beforeExit` fires when the event loop drains naturally (rare for a
+    // server but covers oddball test paths). Not registered as `exit`
+    // because `exit` only allows synchronous work, and removePidFile is
+    // already sync — but `beforeExit` is friendlier to debugging stacks.
+    process.once('beforeExit', dropPid);
+
     server.listen(port, '127.0.0.1', () => {
+      try {
+        writePidFile();
+        pidWritten = true;
+      } catch (e) {
+        // PID file is advisory — failure to write must not block the
+        // dashboard from coming up. Surface to stderr for the post-mortem.
+        process.stderr.write(`[pid-file] write failed: ${(e as Error).message}\n`);
+      }
       // Kick off best-effort warm-ups now that the socket is bound. If any
       // of them hang (secret-tool unlock prompt, node-pty prebuilt probe,
       // ai-config migration) the dashboard is still up and serving.

@@ -14,7 +14,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { isNpubOrHex, isNsec, isValidRelayUrl } from './identity.js';
 
 export interface ProjectCapabilities {
@@ -508,10 +508,23 @@ export function projectGitStatus(projectPath: string): ProjectGitStatus {
 
 export function projectGitLog(projectPath: string, limit = 10): Array<{ hash: string; message: string; author: string; timestamp: number }> {
   if (!projectPath || !fs.existsSync(path.join(projectPath, '.git'))) return [];
-  // Single-quote the format so the shell doesn't interpret the `|` chars as
-  // pipes — without the quotes git log output would get piped into a series
-  // of nonexistent commands and we'd silently return an empty list.
-  const raw = runIn(projectPath, `git log -${limit} --pretty='%h|%s|%an|%ct'`);
+  // B4: argv-array invocation — never compose a git command with template
+  // strings, even when the only interpolation is a default-numeric limit.
+  // execFileSync skips the shell entirely so `|` chars in --pretty don't
+  // need single-quoting (no shell to misinterpret them as pipes), and any
+  // future caller that passes a string `limit` won't be able to inject.
+  // Defensive integer coercion + clamp keeps the argv canonical.
+  const n = Number.isFinite(limit) ? Math.max(1, Math.min(1000, Math.floor(Number(limit)))) : 10;
+  let raw: string;
+  try {
+    raw = execFileSync(
+      'git',
+      ['log', `-${n}`, '--pretty=%h|%s|%an|%ct'],
+      { cwd: projectPath, stdio: 'pipe' },
+    ).toString().trim();
+  } catch {
+    return [];
+  }
   if (!raw) return [];
   return raw.split('\n').filter(Boolean).map(line => {
     const [hash, message, author, ct] = line.split('|');

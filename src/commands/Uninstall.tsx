@@ -6,13 +6,32 @@ import { P } from '../onboard/components/palette.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
+import { probePidFile, removePidFile, pidFilePath } from '../lib/pid-file.js';
 
 interface UninstallProps { yes: boolean; }
 
-type Stage = 'confirm' | 'running' | 'done';
+// 'pid-blocked' is a hard stop before any teardown runs — see PID-file
+// section below. Once we're past it the wizard is the same shape as the
+// pre-B3 version, with one new optional 'remove configs?' confirm
+// inserted between the keychain step and the npm uninstall.
+type Stage = 'confirm' | 'pid-blocked' | 'running' | 'config-prompt' | 'done';
 
 const HOME = os.homedir();
 const IS_MAC = process.platform === 'darwin';
+
+// Configuration files that the optional "Remove configuration files?"
+// step nukes when the user opts in. Default is to LEAVE these — most
+// uninstalls are reinstalls, and rebuilding identity / projects / AI
+// config from scratch is annoying. Listed here (not inlined below) so
+// the confirm screen can show the user exactly what will go.
+const CONFIG_FILES = [
+  path.join(HOME, '.config', 'nostr-station', 'identity.json'),
+  path.join(HOME, '.config', 'nostr-station', 'projects.json'),
+  path.join(HOME, '.config', 'nostr-station', 'ai-config.json'),
+  path.join(HOME, '.claude_env'),
+  path.join(HOME, 'projects', 'NOSTR_STATION.md'),
+];
 
 // Everything nostr-station owns — nothing else
 const WHAT_GETS_REMOVED = [
@@ -32,6 +51,7 @@ const WHAT_STAYS = [
   'nak',
   'Rust/cargo',
   'Your relay data (SQLite)',
+  'nostr-station configs (identity, projects, ai-config) — opt-in to remove',
 ];
 
 function shell(cmd: string): boolean {
@@ -40,13 +60,18 @@ function shell(cmd: string): boolean {
 }
 
 export const Uninstall: React.FC<UninstallProps> = ({ yes }) => {
-  const [stage, setStage] = useState<Stage>(yes ? 'running' : 'confirm');
+  const [stage, setStage] = useState<Stage>('confirm');
   const [steps, setSteps] = useState<{ label: string; status: StepStatus }[]>([]);
+  const [livePid, setLivePid] = useState<number | null>(null);
 
   const up = (i: number, status: StepStatus) =>
     setSteps(prev => prev.map((s, idx) => idx === i ? { ...s, status } : s));
 
-  const run = async () => {
+  // Run steps 0–6 (the always-on teardown). Stops at the keychain step
+  // and hands off to the config-prompt stage where the user opts in or
+  // out of removing config files. Step 7 (npm uninstall) runs after the
+  // prompt resolves.
+  const runTeardown = async () => {
     const initial = [
       { label: 'Stop relay service',     status: 'pending' as StepStatus },
       { label: 'Stop watchdog service',  status: 'pending' as StepStatus },
@@ -55,7 +80,6 @@ export const Uninstall: React.FC<UninstallProps> = ({ yes }) => {
       { label: 'Remove log files',       status: 'pending' as StepStatus },
       { label: 'Remove watchdog script', status: 'pending' as StepStatus },
       { label: 'Clear stored secrets',   status: 'pending' as StepStatus },
-      { label: 'Uninstall npm package',  status: 'pending' as StepStatus },
     ];
     setSteps(initial);
     setStage('running');
@@ -113,20 +137,6 @@ export const Uninstall: React.FC<UninstallProps> = ({ yes }) => {
     // Stored secrets — wipe every slot keychain.ts wrote under
     // `service=nostr-station` (watchdog-nsec, demo-nsec, legacy
     // ai-api-key, and all ai:<provider-id> slots).
-    //
-    // Linux: `secret-tool clear` accepts an attribute filter and removes
-    // every matching item in one call.
-    //
-    // macOS: `security delete-generic-password` has no wildcard — it
-    // removes one match per invocation and exits non-zero when nothing is
-    // left. We loop until it fails, capped at 64 iterations as a safety
-    // net in case deletion ever appears to succeed without actually
-    // removing the item (would otherwise spin forever).
-    //
-    // Encrypted-file fallback (Linux without libsecret-tools or DBus):
-    // unconditionally rm the file — keychain.ts writes it as the single
-    // JSON store `~/.config/nostr-station/secrets`. Safe to run even when
-    // the real keyring was active; a missing file is a no-op.
     up(6, 'running');
     if (IS_MAC) {
       shell(
@@ -140,16 +150,73 @@ export const Uninstall: React.FC<UninstallProps> = ({ yes }) => {
     }
     up(6, 'done');
 
-    // npm package
-    up(7, 'running');
+    // Hand off to the config-prompt stage. With --yes we skip the prompt
+    // and treat it as "no" (preserve configs for reinstall, the documented
+    // default).
+    if (yes) {
+      finishUninstall(false);
+    } else {
+      setStage('config-prompt');
+    }
+  };
+
+  // Final stage: optional config wipe + npm uninstall. Pulled out so both
+  // the config-prompt branch (user-driven) and the --yes branch (auto)
+  // share one path.
+  const finishUninstall = async (removeConfigs: boolean) => {
+    const tail: { label: string; status: StepStatus }[] = [];
+    if (removeConfigs) {
+      tail.push({ label: 'Remove nostr-station configs', status: 'pending' as StepStatus });
+    }
+    tail.push({ label: 'Uninstall npm package', status: 'pending' as StepStatus });
+
+    setSteps(prev => [...prev, ...tail]);
+    setStage('running');
+
+    // Re-find the index of the first appended step so `up` lines up after
+    // the steady-state 7-row teardown list.
+    const TEARDOWN_LEN = 7;
+    let idx = TEARDOWN_LEN;
+
+    if (removeConfigs) {
+      up(idx, 'running');
+      for (const f of CONFIG_FILES) {
+        try { fs.rmSync(f, { force: true }); } catch { /* best-effort */ }
+      }
+      up(idx, 'done');
+      idx++;
+    }
+
+    up(idx, 'running');
     shell('npm uninstall -g nostr-station --quiet');
-    up(7, 'done');
+    up(idx, 'done');
 
     setStage('done');
   };
 
+  // PID-file gate — runs once on mount. Three outcomes:
+  //   1. No PID file (or stale): clear any stale file and continue to the
+  //      normal confirm flow (or auto-run if --yes).
+  //   2. Live PID: refuse with stage='pid-blocked'. The user has to stop
+  //      the dashboard themselves; we won't kill it for them because that
+  //      orphans terminal sessions, kills in-flight git pushes, etc.
+  //   3. EPERM / unknown: defensively treat as alive (same UI as case 2).
+  //      Better to surface "we can't tell, please stop it" than to nuke
+  //      services out from under another user's running dashboard.
   useEffect(() => {
-    if (yes) run();
+    const status = probePidFile();
+    if (status.state === 'alive' || status.state === 'unknown') {
+      setLivePid(status.pid);
+      setStage('pid-blocked');
+      return;
+    }
+    if (status.state === 'stale' || status.state === 'unreadable') {
+      // Drop the orphan file before we proceed. ESRCH means the dashboard
+      // crashed without firing its cleanup handlers; uninstall is exactly
+      // the right moment to garbage-collect.
+      removePidFile();
+    }
+    if (yes) runTeardown();
   }, []);
 
   return (
@@ -158,6 +225,20 @@ export const Uninstall: React.FC<UninstallProps> = ({ yes }) => {
         <Text color={P.error} bold>nostr-station uninstall</Text>
       </Box>
       <Text color={P.accentDim}>{'─────────────────────────────'}</Text>
+
+      {stage === 'pid-blocked' && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={P.error}>
+            ✗ The dashboard is still running (pid {livePid}).
+          </Text>
+          <Box marginTop={1} flexDirection="column">
+            <Text color={P.muted}>Stop it first, then re-run uninstall:</Text>
+            <Text>{'  '}1. In the dashboard's terminal: press Ctrl+C</Text>
+            <Text>{'  '}2. Or from any shell: kill {livePid}</Text>
+            <Text color={P.muted}>{'  (pid file: '}{pidFilePath()}{')'}</Text>
+          </Box>
+        </Box>
+      )}
 
       {stage === 'confirm' && (
         <Box flexDirection="column">
@@ -181,8 +262,33 @@ export const Uninstall: React.FC<UninstallProps> = ({ yes }) => {
             ]}
             onSelect={item => {
               if (item.value === 'cancel') process.exit(0);
-              else run();
+              else runTeardown();
             }}
+          />
+        </Box>
+      )}
+
+      {stage === 'config-prompt' && (
+        <Box flexDirection="column">
+          <Box marginBottom={1} flexDirection="column">
+            <Text color={P.warn} bold>Also remove configuration files?</Text>
+            {CONFIG_FILES.map((f, i) => (
+              <Text key={i} color={P.muted}>  • {f.replace(HOME, '~')}</Text>
+            ))}
+            <Box marginTop={1}>
+              <Text color={P.muted}>
+                Default: keep configs. Reinstalling later won't have to re-enter
+                identity, projects, or AI provider keys.
+              </Text>
+            </Box>
+          </Box>
+          <Select
+            label="Remove configs?"
+            options={[
+              { label: 'Keep configuration files (default)', value: 'no'  },
+              { label: 'Remove them too',                    value: 'yes' },
+            ]}
+            onSelect={item => finishUninstall(item.value === 'yes')}
           />
         </Box>
       )}

@@ -2,6 +2,7 @@ import { test, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { useTempHome, resetTempHome } from './_home.js';
 
 const HOME = useTempHome();
@@ -18,6 +19,7 @@ const {
   getProject,
   validateProjectPath,
   resolveSafeAbsolute,
+  projectGitLog,
   // @ts-expect-error — imported at runtime, not checked against .d.ts
 } = await import('../src/lib/projects.ts');
 
@@ -405,6 +407,69 @@ test('updateProject: rejects path patch that points outside HOME (B2)', () => {
   const updated = updateProject(created.project.id, { path: '/etc' });
   assert.equal(updated.ok, false);
   if (!updated.ok) assert.match(updated.error, /must be inside/i);
+});
+
+// ── B4: projectGitLog argv hygiene ────────────────────────────────────────
+//
+// Pre-B4 the git log call used a template-string into a shell. Now it goes
+// through execFileSync with an argv array. Confidence test: seed a tiny
+// repo, call projectGitLog, assert we get the commit metadata back.
+// Locks the contract that the new no-shell invocation still parses.
+
+function makeRepo(dir: string, commits: string[]): void {
+  fs.mkdirSync(dir, { recursive: true });
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 't@example.com',
+    GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 't@example.com',
+  };
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir, env });
+  // Seed one file so each subsequent commit has something to record.
+  fs.writeFileSync(path.join(dir, 'README'), 'x');
+  for (const msg of commits) {
+    fs.appendFileSync(path.join(dir, 'README'), msg);
+    execFileSync('git', ['add', '.'],                { cwd: dir, env });
+    execFileSync('git', ['commit', '-q', '-m', msg], { cwd: dir, env });
+  }
+}
+
+test('projectGitLog: returns parsed entries for a real repo', () => {
+  const repo = path.join(HOME, 'projects', 'gitlog-real');
+  makeRepo(repo, ['first', 'second']);
+  const log = projectGitLog(repo);
+  assert.equal(log.length, 2);
+  assert.equal(log[0].message, 'second');
+  assert.equal(log[1].message, 'first');
+  assert.match(log[0].hash, /^[0-9a-f]{7,}$/);
+  assert.equal(log[0].author, 'Test');
+  assert.ok(log[0].timestamp > 0);
+});
+
+test('projectGitLog: respects the limit parameter', () => {
+  const repo = path.join(HOME, 'projects', 'gitlog-limit');
+  makeRepo(repo, ['a', 'b', 'c', 'd']);
+  assert.equal(projectGitLog(repo, 2).length, 2);
+  assert.equal(projectGitLog(repo, 4).length, 4);
+});
+
+test('projectGitLog: returns [] when path has no .git', () => {
+  const not = path.join(HOME, 'projects', 'not-a-repo');
+  fs.mkdirSync(not, { recursive: true });
+  assert.deepEqual(projectGitLog(not), []);
+});
+
+test('projectGitLog: defensively coerces a non-numeric limit (no shell-injection surface)', () => {
+  // The pre-B4 implementation interpolated `${limit}` into a shell command,
+  // so a string limit like "5; rm -rf /" would have been disastrous. The
+  // execFile-based replacement coerces to a clamped integer; this test
+  // pins that behavior so a future caller passing user input through
+  // doesn't reintroduce the gap.
+  const repo = path.join(HOME, 'projects', 'gitlog-coerce');
+  makeRepo(repo, ['only']);
+  // @ts-expect-error — testing defensive coercion of bad input
+  const out = projectGitLog(repo, '2; echo pwn');
+  // Non-numeric → falls back to default 10. Tiny repo only has 1 commit.
+  assert.equal(out.length, 1);
 });
 
 test('updateProject: a non-path patch does not retroactively reject a row', () => {
