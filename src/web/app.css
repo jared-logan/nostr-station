@@ -3043,6 +3043,76 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .pc-state.pcs-ahead-behind{ background: var(--accent-soft);     color: var(--accent-bright); border: 1px solid var(--accent-dim); }
 .pc-state.pcs-diverged    { background: rgba(255, 80, 80, 0.10); color: var(--error);      border: 1px solid rgba(255, 80, 80, 0.32); }
 
+/* Sync-active state on the per-card sync icon — slow rotation while
+   the POST /api/projects/:id/sync request is in flight. The button
+   is also `disabled` for the duration so a double-click can't stack
+   two sync calls on the same project. */
+.pc-icon-btn.pc-sync-active svg { animation: pc-sync-spin 1.2s linear infinite; }
+@keyframes pc-sync-spin { to { transform: rotate(360deg); } }
+
+/* Per-card banner — populated by sync results, the snapshot dialog,
+   and snapshot success/error confirmations. Hidden when empty. Sits
+   below .pc-meta, inside the card. Click events inside are stopped
+   in JS so the card-level openDetail handler doesn't fire on every
+   button press / input keystroke. */
+.pc-banner[hidden] { display: none; }
+.pc-banner {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pc-banner.pcb-pending { background: rgba(180,180,200,0.06); color: var(--text-dim);    border: 1px solid rgba(180,180,200,0.18); }
+.pc-banner.pcb-ok      { background: rgba(80, 220, 120, 0.06); color: #6dd896;          border: 1px solid rgba(80, 220, 120, 0.22); }
+.pc-banner.pcb-err     { background: rgba(255, 80, 80, 0.08); color: var(--error);      border: 1px solid rgba(255, 80, 80, 0.28); }
+.pc-banner.pcb-dialog  { background: var(--bg-card); color: var(--text); border: 1px solid var(--border-strong); }
+
+.pc-banner .pcb-msg { flex: 1 1 auto; min-width: 0; word-wrap: break-word; }
+.pc-banner .pcb-prop-count {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  border: 1px solid var(--accent-dim);
+}
+.pc-banner .pcb-sha {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: rgba(180,180,200,0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* Snapshot dialog form — single line layout with input + Save +
+   Cancel. Wraps when the card is narrow (mobile / split-pane). */
+.pc-banner .pcb-snap-form {
+  display: flex; align-items: center; gap: 6px;
+  flex: 1 1 auto; flex-wrap: wrap;
+}
+.pc-banner .pcb-snap-input {
+  flex: 1 1 160px; min-width: 0;
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+.pc-banner .pcb-snap-input:focus { outline: 1px solid var(--accent-dim); border-color: var(--accent-dim); }
+.pc-banner .pcb-snap-save,
+.pc-banner .pcb-snap-cancel {
+  font-size: 11px; padding: 4px 10px;
+}
+
 /* Project detail view */
 
 #projects-title .detail-back {

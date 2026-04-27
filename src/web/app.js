@@ -2994,6 +2994,7 @@ const ProjectsPanel = (() => {
         <div class="pc-meta-row"><span class="k">identity</span><span class="v">${escapeHtml(projectIdentityLabel(p))}</span></div>
         <div class="pc-meta-row"><span class="k">last activity</span><span class="v pc-last-activity">${lastAct}</span></div>
       </div>
+      <div class="pc-banner" hidden></div>
     `;
 
     // Quick action icons
@@ -3019,6 +3020,29 @@ const ProjectsPanel = (() => {
         window.NSTerminal.open(terminalAi.key, { projectId: p.id });
       });
       actionsEl.appendChild(btn);
+    }
+
+    // Sync (Item 4) — git fetch + ff-only merge for git, ngit fetch +
+    // proposals query for ngit. Hidden on local-only cards (no remote
+    // story). Inline result lands in `.pc-banner` so the user sees the
+    // outcome without a modal hop.
+    if (p.path && (p.capabilities.git || p.capabilities.ngit)) {
+      const syncBtn = iconBtn('sync', 'Sync',
+        `<svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`);
+      syncBtn.classList.add('pc-sync-btn');
+      syncBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectSync(p, card, syncBtn); });
+      actionsEl.appendChild(syncBtn);
+    }
+
+    // Save snapshot (Item 4) — local commit primitive. Available on all
+    // backends with a local path (every project is a git repo locally,
+    // including ngit and nsite-only repos that opted into a path).
+    if (p.path) {
+      const snapBtn = iconBtn('snapshot', 'Save snapshot',
+        `<svg viewBox="0 0 24 24"><path d="M21 19V8l-3-4H6L3 8v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2z"/><circle cx="12" cy="14" r="3"/></svg>`);
+      snapBtn.classList.add('pc-snap-btn');
+      snapBtn.addEventListener('click', (e) => { e.stopPropagation(); openSnapshotDialog(p, card); });
+      actionsEl.appendChild(snapBtn);
     }
 
     if (p.capabilities.git || p.capabilities.ngit) {
@@ -3088,6 +3112,191 @@ const ProjectsPanel = (() => {
     btn.setAttribute('aria-label', label);
     btn.innerHTML = svg;
     return btn;
+  }
+
+  // ── Sync + snapshot (Item 4) ──────────────────────────────────────────
+  //
+  // The card banner is the inline output surface for both flows. It
+  // sits below `.pc-meta` and is hidden when empty. Click events
+  // inside the banner stop at the banner — the card has a click
+  // handler that opens the detail view, and we don't want every input
+  // keystroke or button press to navigate away.
+
+  function setCardBanner(card, html, opts = {}) {
+    const banner = card.querySelector('.pc-banner');
+    if (!banner) return null;
+    if (!html) {
+      banner.hidden = true;
+      banner.className = 'pc-banner';
+      banner.innerHTML = '';
+      return banner;
+    }
+    banner.hidden = false;
+    banner.className = `pc-banner${opts.kind ? ` pcb-${opts.kind}` : ''}`;
+    banner.innerHTML = html;
+    // One-shot listener: anything inside the banner shouldn't bubble
+    // up to the card-level click handler (openDetail). Reset on every
+    // call because innerHTML wipes child listeners.
+    banner.onclick = (e) => e.stopPropagation();
+    return banner;
+  }
+
+  function clearCardBannerLater(card, ms) {
+    setTimeout(() => {
+      const banner = card.querySelector('.pc-banner');
+      if (!banner) return;
+      // Only auto-clear if nothing else has overwritten the banner
+      // since we scheduled this call (e.g. user opened the snapshot
+      // dialog right after a sync ok message).
+      if (banner.dataset.scheduledClear === String(ms)) {
+        setCardBanner(card, '');
+      }
+    }, ms);
+    const banner = card.querySelector('.pc-banner');
+    if (banner) banner.dataset.scheduledClear = String(ms);
+  }
+
+  async function runProjectSync(p, card, syncBtn) {
+    if (syncBtn.disabled) return;  // dedup double-clicks
+    syncBtn.disabled = true;
+    syncBtn.classList.add('pc-sync-active');
+    const originalTitle = syncBtn.title;
+    syncBtn.title = 'Syncing…';
+    setCardBanner(card, `<span class="pcb-msg">Syncing…</span>`, { kind: 'pending' });
+    try {
+      const r = await api(`/api/projects/${p.id}/sync`, { method: 'POST' });
+      if (!r) {
+        setCardBanner(card, `<span class="pcb-msg">Sync failed</span>`, { kind: 'err' });
+        return;
+      }
+      if (r.ok === false) {
+        // Diverged or dirty — actionable inline message. Surface the
+        // ahead/behind counts when the backend gave them so the user
+        // knows the scale of the divergence at a glance.
+        const counts = (typeof r.ahead === 'number' && typeof r.behind === 'number')
+          ? ` (${r.ahead} ahead, ${r.behind} behind)`
+          : '';
+        setCardBanner(card,
+          `<span class="pcb-msg">${escapeHtml(r.message || 'sync failed')}${counts}</span>`,
+          { kind: 'err' },
+        );
+        return;
+      }
+      // ok branch.
+      // ngit case: surface the proposals count badge first-class —
+      // the brief is explicit that proposals must NOT be flattened
+      // into a generic message. No proposals view exists yet, so we
+      // render a non-linked count chip; clicking the card itself
+      // opens the detail view where a future proposals tab will
+      // surface the list.
+      let proposalsHtml = '';
+      if (Array.isArray(r.proposals) && r.proposals.length > 0) {
+        const n = r.proposals.length;
+        proposalsHtml = ` <span class="pcb-prop-count">${n} open proposal${n === 1 ? '' : 's'}</span>`;
+      }
+      setCardBanner(card,
+        `<span class="pcb-msg">${escapeHtml(r.message || 'synced')}</span>${proposalsHtml}`,
+        { kind: 'ok' },
+      );
+      // ok messages auto-clear so the card doesn't end up with a
+      // stale "fast-forwarded" line three days later. Errors stick
+      // until the next user action — they're actionable, not noise.
+      clearCardBannerLater(card, 5000);
+      // Refresh the badge so the user sees the new state — fast-
+      // forward erases the "behind" pill, ff fetch may flip "up to
+      // date" into "ahead" for ngit-only fetches that brought new
+      // remote commits without a local merge.
+      pollGitStateOne(p.id);
+    } catch (e) {
+      setCardBanner(card,
+        `<span class="pcb-msg">Sync failed: ${escapeHtml(String(e?.message || e || 'unknown'))}</span>`,
+        { kind: 'err' },
+      );
+    } finally {
+      syncBtn.disabled = false;
+      syncBtn.classList.remove('pc-sync-active');
+      syncBtn.title = originalTitle;
+    }
+  }
+
+  function openSnapshotDialog(p, card) {
+    // Render the dialog form into the banner. Single text input + Save
+    // + Cancel. Empty input is fine — the server falls back to an
+    // ISO timestamp message.
+    setCardBanner(card, `
+      <form class="pcb-snap-form" novalidate>
+        <input type="text" class="pcb-snap-input" placeholder="Describe this snapshot (optional)" maxlength="200" autocomplete="off">
+        <button type="submit" class="primary pcb-snap-save">Save</button>
+        <button type="button" class="pcb-snap-cancel">Cancel</button>
+      </form>
+    `, { kind: 'dialog' });
+
+    const form    = card.querySelector('.pcb-snap-form');
+    const input   = card.querySelector('.pcb-snap-input');
+    const saveBtn = card.querySelector('.pcb-snap-save');
+    const cancelBtn = card.querySelector('.pcb-snap-cancel');
+    if (!form || !input || !saveBtn || !cancelBtn) return;
+
+    // Auto-focus the input so the user can start typing immediately.
+    setTimeout(() => input.focus(), 0);
+
+    cancelBtn.addEventListener('click', (e) => {
+      e.stopPropagation(); e.preventDefault();
+      setCardBanner(card, '');
+    });
+
+    // Esc dismisses; Enter submits via the form's natural submit path.
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation(); e.preventDefault();
+        setCardBanner(card, '');
+      }
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (saveBtn.disabled) return;
+      saveBtn.disabled = true;
+      cancelBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      const message = input.value;
+      try {
+        const r = await api(`/api/projects/${p.id}/snapshot`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message }),
+        });
+        if (!r || r.ok === false) {
+          setCardBanner(card,
+            `<span class="pcb-msg">${escapeHtml(r?.error || 'snapshot failed')}</span>`,
+            { kind: 'err' },
+          );
+          return;
+        }
+        // Two ok shapes: real commit (sha set) and graceful no-op
+        // ('nothing to commit' surfaces in r.error per snapshot.ts
+        // contract). Render both as ok kinds so the dashboard never
+        // paints a red banner for the legitimate empty-tree case.
+        const tail = r.sha
+          ? ` <code class="pcb-sha">${escapeHtml(r.sha)}</code>`
+          : '';
+        const headline = r.error === 'nothing to commit'
+          ? 'Nothing to commit'
+          : 'Saved';
+        setCardBanner(card,
+          `<span class="pcb-msg">${headline}${tail}</span>`,
+          { kind: 'ok' },
+        );
+        clearCardBannerLater(card, 4000);
+        pollGitStateOne(p.id);
+      } catch (e2) {
+        setCardBanner(card,
+          `<span class="pcb-msg">Snapshot failed: ${escapeHtml(String(e2?.message || e2 || 'unknown'))}</span>`,
+          { kind: 'err' },
+        );
+      }
+    });
   }
 
   // ── Detail view ──────────────────────────────────────────────────────
