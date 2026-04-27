@@ -125,9 +125,42 @@ fi
 if [ -t 0 ]; then
   log "Launching onboard wizard..."
   echo ""
+  # Wrap with explicit exit-code capture (set +e) so we can run the
+  # apt-family broken-state diagnostic (A10) on failure. Without this,
+  # onboard's non-zero exit would tip set -euo pipefail's `-e` and
+  # tear down the script before any actionable hint reached the user.
+  set +e
   # Pass any pre-set env vars through — wizard reads process.env
   "${STATION_CMD}" onboard
+  ONBOARD_EXIT=$?
+  set -e
   echo ""
+
+  if [[ $ONBOARD_EXIT -ne 0 ]]; then
+    # A10 — apt-family broken-state hint.
+    #
+    # When onboard's installSystemDeps step runs `apt-get install`
+    # against a host with half-configured packages, apt exits 100 with
+    # a generic "could not configure pre-existing packages" line that
+    # doesn't tell the user *what* to do — and onboard then bubbles
+    # that up as a non-zero exit. dpkg --audit is the actionable
+    # diagnostic: read-only (no sudo), lists exactly which packages
+    # are in trouble. We only fire the hint when apt is the package
+    # manager AND dpkg actually reports broken state, so a generic
+    # onboard failure on Fedora / Arch / macOS still surfaces its
+    # own error untouched.
+    if command -v apt-get &>/dev/null && [[ -n "$(dpkg --audit 2>/dev/null)" ]]; then
+      warn "apt is in an error state — dpkg has broken or half-configured packages."
+      echo "  Clear it before retrying nostr-station:"
+      echo "    sudo dpkg --configure -a"
+      echo ""
+      echo "  Then re-run:"
+      echo "    nostr-station onboard"
+      echo ""
+    fi
+    exit $ONBOARD_EXIT
+  fi
+
   ok "Setup complete."
   echo ""
   echo "  Next time, just run:"
