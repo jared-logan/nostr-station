@@ -314,6 +314,14 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
     // (selects, spinners, multi-step wizards) renders as it does in a real
     // terminal. ns() picks node+cli.js or tsx+cli.tsx based on layout.
     case 'doctor':         return ns(['doctor'],             'doctor');
+    // A5: Status panel "Install" button. Same `doctor --fix` flow that
+    // /api/exec/install/<slug> drives via SSE, but rendered into a
+    // terminal tab so users see live cargo-compile output instead of a
+    // silent spinner for the 60–600s the build can take. Per-slug
+    // dispatch isn't needed — the underlying `doctor --fix` walks every
+    // missing component on its own; the slug-keyed SSE endpoint is kept
+    // as a fallback for environments without node-pty.
+    case 'doctor-fix':     return ns(['doctor', '--fix'],    'doctor --fix');
     case 'onboard':        return ns(['onboard'],            'onboard');
     case 'update':         return ns(['update'],             'update');
     case 'update-wizard':  return ns(['update', '--wizard'], 'update');

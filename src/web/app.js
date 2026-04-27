@@ -1212,6 +1212,27 @@ function buildStatusRow(s) {
     btn.textContent = 'Install';
     btn.addEventListener('click', (e) => {
       e.preventDefault();
+      // A5: prefer the terminal panel for installs.
+      //
+      // Cargo compiles take 60s–10min depending on the crate (nostr-rs-relay
+      // is the worst). The old SSE modal showed a single spinner with no
+      // visible output for the entire window — users either gave up,
+      // assumed it was hung, or resorted to running `doctor --fix` in a
+      // shell. Routing through the terminal panel surfaces live cargo
+      // stderr (compiling deps + linker) the same way `doctor` / `seed` /
+      // `publish` already do.
+      //
+      // Health refresh schedule is tuned for the long-tail compile (5min
+      // upper bound). The user can also click Refresh manually once the
+      // terminal output shows ✓.
+      if (window.NSTerminal?.isAvailable?.()) {
+        window.NSTerminal.open('doctor-fix');
+        [30_000, 120_000, 300_000].forEach(ms => setTimeout(refreshHealth, ms));
+        return;
+      }
+      // Fallback: SSE modal — same legacy path that's been there since
+      // 0.0.5. Kept intact so a node-pty-less install still has a way
+      // to drive doctor --fix from the dashboard.
       openExecModal({
         title: `Install ${s.label}`,
         subtitle: 'Running doctor --fix to repair missing tools',
