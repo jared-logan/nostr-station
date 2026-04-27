@@ -109,6 +109,48 @@ function gatherClaudePlugins(): ClaudePlugin[] {
   return rows;
 }
 
+// Pure state mapping for the nostr-vpn row (A4). Three sub-states stack
+// underneath the binary-present/absent split:
+//
+//   binary missing              → err  · "not installed"
+//   binary present, no service  → warn · actionable: rerun sudo service install
+//   binary present, service ok, no mesh
+//                               → warn · "not connected" (peer / firewall)
+//   binary present, mesh up     → ok   · tunnel IP
+//
+// Pre-A4, the cascade collapsed the first two warn shapes into one "not
+// connected" line, so a fresh-Linux user who skipped the sudo step at
+// onboard saw the same message as someone whose mesh peer was down — and
+// neither was actionable. The new middle state surfaces the exact command
+// the user needs to run to land the launchd / systemd unit.
+//
+// Pure + exported so tests can pin every branch without driving shellouts.
+export interface NvpnProbe {
+  binPresent:    boolean;
+  serviceLoaded: boolean;
+  meshIp:        string | null;
+}
+export function nvpnStateFor(p: NvpnProbe): {
+  value: string;
+  state: ServiceState;
+  ok:    boolean;
+} {
+  if (!p.binPresent) {
+    return { value: 'not installed', state: 'err', ok: false };
+  }
+  if (!p.serviceLoaded) {
+    return {
+      value: 'installed but service not running — run: sudo nvpn service install',
+      state: 'warn',
+      ok:    false,
+    };
+  }
+  if (p.meshIp) {
+    return { value: p.meshIp, state: 'ok', ok: true };
+  }
+  return { value: 'not connected', state: 'warn', ok: false };
+}
+
 // Every shellout here is on the hot path for /api/status. A single blocking
 // call (notably `nvpn status --json` when its daemon socket is wedged)
 // stalls the whole Node event loop and the dashboard sees a 10s+ hang.
@@ -150,6 +192,25 @@ export function gatherStatus(): ServiceStatus[] {
       return out ? JSON.parse(out)?.tunnel_ip ?? null : null;
     } catch { return null; }
   })();
+
+  // A4: distinct "binary present, sudo service install never ran" probe.
+  // Different from `meshIp` (mesh tunnel up) and from `nvpn status --json`
+  // (daemon socket — answers when the daemon is running, even without a
+  // supervised unit). We want the system-supervisor signal: did the
+  // launchd/systemd unit actually land? `launchctl list <label>` and
+  // `systemctl cat <unit>` both fail fast with non-zero on missing, so
+  // either gives us the binary check we need without sudo.
+  //
+  // nvpn is installed as a SYSTEM service (not --user) on both platforms —
+  // `sudo nvpn service install` writes /Library/LaunchDaemons/* on darwin
+  // and /etc/systemd/system/* on linux. The probe still works for the
+  // current user because `launchctl list` and `systemctl cat` both read
+  // public unit metadata.
+  const nvpnServiceLoaded = nvpnPath !== null && (
+    process.platform === 'darwin'
+      ? cmd('launchctl list com.nostr-vpn.nvpn', 1500) !== null
+      : cmd('systemctl cat nvpn',                1500) !== null
+  );
 
   const ngitBin   = hasBin('ngit');
   // Station-level "configured" signal is the default nostr relay the user
@@ -193,7 +254,6 @@ export function gatherStatus(): ServiceStatus[] {
   //   warn — installed but not running/configured
   //   err  — not installed
   const relayState:    ServiceState = relayUp ? 'ok' : relayBin ? 'warn' : 'err';
-  const vpnState:      ServiceState = meshIp  ? 'ok' : nvpnBin  ? 'warn' : 'err';
   const watchdogState: ServiceState = watchdogLoaded ? 'ok' : 'err';
   const ngitState:     ServiceState = ngitBin && ngitRelay ? 'ok' : ngitBin ? 'warn' : 'err';
   const relayBinState: ServiceState = relayBin ? 'ok' : 'err';
@@ -201,10 +261,17 @@ export function gatherStatus(): ServiceStatus[] {
   const nakState:      ServiceState = nakBin ? 'ok' : 'err';
   const stacksState:   ServiceState = stacksBin ? 'ok' : 'err';
 
+  // nvpn: see nvpnStateFor above for the four-branch decision table.
+  const nvpnRow = nvpnStateFor({
+    binPresent:    nvpnBin,
+    serviceLoaded: nvpnServiceLoaded,
+    meshIp,
+  });
+
   return [
     // Services — daemons or scheduled jobs with a runtime state.
     { id: 'relay',     label: 'Relay',       value: relayUp ? 'ws://localhost:8080 ✓' : relayBin ? 'installed (down)' : 'not installed', ok: relayUp,      state: relayState,    kind: 'service' },
-    { id: 'vpn',       label: 'nostr-vpn',   value: meshIp  ?? (nvpnBin  ? 'not connected' : 'not installed'),                            ok: !!meshIp,     state: vpnState,      kind: 'service' },
+    { id: 'vpn',       label: 'nostr-vpn',   value: nvpnRow.value,                                                                       ok: nvpnRow.ok,   state: nvpnRow.state, kind: 'service' },
     { id: 'watchdog',  label: 'watchdog',    value: watchdogLoaded ? 'scheduled · fires every 5m' : 'not installed',                     ok: watchdogLoaded, state: watchdogState, kind: 'service' },
     // Binaries — CLI tools; installed or not. `ngit` is the lone binary with
     // a warn state (installed but no default relay set — configure in Config).
