@@ -25,6 +25,9 @@
  *   POST   /api/projects/:id/ngit/init         — SSE
  *   POST   /api/projects/:id/exec              — SSE
  *   POST   /api/projects/:id/nsite/deploy      — SSE
+ *   GET    /api/projects/:id/git-state         — sync.getProjectGitState
+ *   POST   /api/projects/:id/sync              — sync.syncProject
+ *   POST   /api/projects/:id/snapshot          — sync.snapshotProject
  *   POST   /api/chat/context                   — set active project
  *   GET    /api/chat/context[/:id]             — read active context
  *
@@ -43,6 +46,9 @@ import {
 } from '../projects.js';
 import { checkCollision, scaffoldProject } from '../project-scaffold.js';
 import { isValidRelayUrl } from '../identity.js';
+import {
+  getProjectGitState, syncProject, snapshotProject,
+} from '../sync.js';
 import {
   readBody, streamExec, streamExecError, setActiveChatProjectId,
   CLI_BIN, type CmdSpec,
@@ -408,6 +414,84 @@ export async function handleProjects(
         { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } },
         res, req, cwd,
       );
+      return true;
+    }
+
+    // ── Sync surface (Item 2) ────────────────────────────────────────
+    //
+    // Three endpoints back the dashboard's git-state badge + Sync /
+    // Save-snapshot buttons. All three share the same precondition:
+    //   - project must have a local path (else 400 — the sync helpers
+    //     already handle missing paths gracefully but the API contract
+    //     should refuse early so the dashboard renders an actionable
+    //     error rather than a silent ok).
+    //   - validateProjectPath must accept the path (defense-in-depth
+    //     against a project row whose stored path was recorded before
+    //     B2 landed; we never want git/ngit invoked outside HOME).
+    //
+    // The 404 for unknown :id is handled by the project lookup at the
+    // top of the projMatch block — control never reaches here without
+    // a real Project in scope.
+    if (tail === 'git-state' && method === 'GET') {
+      if (!project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'project has no local path' }));
+        return true;
+      }
+      try { validateProjectPath(project.path); }
+      catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+        return true;
+      }
+      const state = await getProjectGitState(project);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(state));
+      return true;
+    }
+
+    if (tail === 'sync' && method === 'POST') {
+      if (!project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'project has no local path' }));
+        return true;
+      }
+      try { validateProjectPath(project.path); }
+      catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+        return true;
+      }
+      const result = await syncProject(project);
+      // syncProject's own SyncResult shape carries both ok/error
+      // semantics AND the per-backend payload (proposals[] for ngit,
+      // ahead/behind for git). 200 even on ok:false — the body is
+      // the actionable signal, not the HTTP status, mirroring the
+      // existing /api/projects PATCH error contract.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+      return true;
+    }
+
+    if (tail === 'snapshot' && method === 'POST') {
+      if (!project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'project has no local path' }));
+        return true;
+      }
+      try { validateProjectPath(project.path); }
+      catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+        return true;
+      }
+      let parsed: any = {};
+      try { parsed = JSON.parse(await readBody(req)); }
+      catch { res.writeHead(400); res.end('bad json'); return true; }
+      const message = typeof parsed.message === 'string' ? parsed.message : '';
+      const result = await snapshotProject(project, message);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
       return true;
     }
 
