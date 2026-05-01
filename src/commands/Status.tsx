@@ -166,10 +166,79 @@ function cmd(c: string, timeoutMs = 2000): string | null {
   } catch { return null; }
 }
 
+// Container-mode probes the host OS doesn't apply to. The relay lives in a
+// sibling container reachable via Docker DNS (RELAY_HOST), the watchdog is
+// a long-lived process writing a heartbeat file (no systemd/launchd), and
+// nostr-vpn isn't supportable inside an unprivileged container at all.
+//
+// Pure + exported so tests can drive the row shape without spawning anything.
+export interface ContainerStatusInputs {
+  relayUp:        boolean;
+  heartbeatPath:  string;
+  heartbeatMtime: number | null;  // ms epoch, null if missing
+  now:            number;          // ms epoch — injected for testability
+  relayHost:      string;
+  relayPort:      number;
+}
+const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;
+
+export function gatherStatusContainer(p: ContainerStatusInputs): ServiceStatus[] {
+  const relayUrl = `ws://${p.relayHost}:${p.relayPort}`;
+  const relayState: ServiceState = p.relayUp ? 'ok' : 'warn';
+  const relayValue = p.relayUp
+    ? `${relayUrl} ✓`
+    : `managed by docker compose — bring up via \`docker compose up relay\``;
+
+  let watchdogState: ServiceState;
+  let watchdogValue: string;
+  if (p.heartbeatMtime === null) {
+    watchdogState = 'err';
+    watchdogValue = `no heartbeat at ${p.heartbeatPath} — is the watchdog container up?`;
+  } else {
+    const ageMs = Math.max(0, p.now - p.heartbeatMtime);
+    const ageMin = Math.floor(ageMs / 60000);
+    if (ageMs <= HEARTBEAT_FRESH_MS) {
+      watchdogState = 'ok';
+      watchdogValue = `heartbeat ${ageMin === 0 ? 'just now' : `${ageMin}m ago`}`;
+    } else {
+      watchdogState = 'warn';
+      watchdogValue = `heartbeat stale (${ageMin}m ago)`;
+    }
+  }
+
+  return [
+    { id: 'relay',     label: 'Relay',       value: relayValue,                            ok: p.relayUp,           state: relayState,    kind: 'service' },
+    { id: 'vpn',       label: 'nostr-vpn',   value: 'not applicable in container mode',   ok: false,               state: 'warn',        kind: 'service' },
+    { id: 'watchdog',  label: 'watchdog',    value: watchdogValue,                         ok: watchdogState === 'ok', state: watchdogState, kind: 'service' },
+    { id: 'ngit',      label: 'ngit',        value: 'managed outside container',           ok: false,               state: 'warn',        kind: 'binary' },
+    { id: 'claude',    label: 'claude-code', value: 'managed outside container',           ok: false,               state: 'warn',        kind: 'binary', plugins: gatherClaudePlugins() },
+    { id: 'nak',       label: 'nak',         value: 'managed outside container',           ok: false,               state: 'warn',        kind: 'binary' },
+    { id: 'relay-bin', label: 'relay bin',   value: 'lives in relay container',            ok: p.relayUp,           state: relayState,    kind: 'binary' },
+    { id: 'stacks',    label: 'Stacks',      value: 'managed outside container',           ok: false,               state: 'warn',        kind: 'binary' },
+  ];
+}
+
 // Exported so cli.tsx can call it directly for --json mode, bypassing Ink.
 // Ink would otherwise write UI frames to stdout alongside the JSON payload,
 // corrupting any programmatic consumer piping stdout into a parser.
 export function gatherStatus(): ServiceStatus[] {
+  // Container mode: skip host-OS probes entirely (systemctl/launchctl can't
+  // tell us anything useful here) and report on the docker-compose-managed
+  // services via env-driven probes.
+  if (process.env.STATION_MODE === 'container') {
+    const relayHost = process.env.RELAY_HOST || 'localhost';
+    const relayPort = Number(process.env.RELAY_PORT || '8080');
+    const relayUp   = cmd(`nc -z -w 1 ${relayHost} ${relayPort}`, 1500) !== null;
+    const heartbeatPath = process.env.WATCHDOG_HEARTBEAT
+      || '/var/run/nostr-station/watchdog.heartbeat';
+    let heartbeatMtime: number | null = null;
+    try { heartbeatMtime = fs.statSync(heartbeatPath).mtimeMs; } catch {}
+    return gatherStatusContainer({
+      relayUp, heartbeatPath, heartbeatMtime,
+      now: Date.now(), relayHost, relayPort,
+    });
+  }
+
   // `-w 1` is a second belt-and-suspenders timeout — both BSD and GNU nc
   // respect it. Protects against nc variants that ignore our execSync
   // timeout (rare, but cheap insurance).

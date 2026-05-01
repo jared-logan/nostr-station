@@ -102,17 +102,48 @@ class LinuxKeyring implements KeychainBackend {
 // ── Linux headless fallback — AES-256-GCM encrypted file ──────────────────────
 // Machine-derived key: not as strong as a proper keychain, but far better
 // than plaintext. User is told which backend is active during onboard.
+//
+// Container mode (STATION_MODE=container) overrides the storage path via
+// KEYCHAIN_DIR and persists a 32-byte KEK alongside the secrets file. Without
+// a persisted KEK, /etc/machine-id can regenerate on image rebuild and
+// invalidate every stored secret — fine for `docker compose down -v` (a
+// deliberate fresh start) but a footgun for `docker compose down && up`.
+// The KEK lives in the named volume, so it persists with the secrets it
+// protects.
 
 class EncryptedFileBackend implements KeychainBackend {
-  private readonly filePath = path.join(
-    os.homedir(), '.config', 'nostr-station', 'secrets'
-  );
+  private readonly storageDir: string;
+  private readonly filePath:   string;
+  private readonly kekPath:    string;
+  private readonly persistKek: boolean;
+
+  constructor(storageDir?: string, persistKek = false) {
+    this.storageDir = storageDir
+      ?? path.join(os.homedir(), '.config', 'nostr-station');
+    this.filePath = path.join(this.storageDir, 'secrets');
+    this.kekPath  = path.join(this.storageDir, '.kek');
+    this.persistKek = persistKek;
+  }
 
   backendName() {
-    return 'encrypted file (~/.config/nostr-station/secrets)';
+    return `encrypted file (${this.filePath})`;
   }
 
   private deriveKey(): Buffer {
+    if (this.persistKek) {
+      // Container mode: read a persisted 32-byte KEK from the storage dir,
+      // generating it on first call. The KEK shares the lifetime of the
+      // named volume that holds the secrets — survives image rebuilds,
+      // dies with `docker compose down -v`.
+      try {
+        const kek = fs.readFileSync(this.kekPath);
+        if (kek.length === 32) return kek;
+      } catch {}
+      const fresh = crypto.randomBytes(32);
+      fs.mkdirSync(this.storageDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(this.kekPath, fresh, { mode: 0o600 });
+      return fresh;
+    }
     let machineId = '';
     try { machineId = fs.readFileSync('/etc/machine-id', 'utf8').trim(); } catch {}
     return crypto.scryptSync(
@@ -128,7 +159,7 @@ class EncryptedFileBackend implements KeychainBackend {
   }
 
   private writeStore(store: Record<string, { iv: string; tag: string; data: string }>) {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
     fs.writeFileSync(this.filePath, JSON.stringify(store, null, 2), { mode: 0o600 });
   }
 
@@ -185,6 +216,18 @@ let _instance: KeychainBackend | null = null;
 
 export function getKeychain(): KeychainBackend {
   if (_instance) return _instance;
+  // Container mode: pin the encrypted-file backend with a path that points
+  // at the keychain named volume (KEYCHAIN_DIR). Don't auto-detect — even
+  // if a future image variant happens to ship secret-tool, we want the
+  // backend to be the deterministic compose-managed one, not whatever
+  // happens to be on PATH.
+  if (process.env.STATION_MODE === 'container') {
+    _instance = new EncryptedFileBackend(
+      process.env.KEYCHAIN_DIR ?? '/var/lib/nostr-station/keys',
+      /* persistKek */ true,
+    );
+    return _instance;
+  }
   if (process.platform === 'darwin') {
     _instance = new MacOSKeychain();
   } else if (isGnomeKeyringAvailable()) {
@@ -193,6 +236,11 @@ export function getKeychain(): KeychainBackend {
     _instance = new EncryptedFileBackend();
   }
   return _instance;
+}
+
+// Tests reset the cached instance between cases that toggle env vars.
+export function _resetKeychainCache(): void {
+  _instance = null;
 }
 
 export function getKeychainBackendName(): string {

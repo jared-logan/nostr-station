@@ -310,6 +310,27 @@ switch (command) {
     render(React.createElement(Uninstall, { yes: flag('--yes') }));
     break;
 
+  case 'watchdog': {
+    // Container-mode watchdog. Defaults match the env vars gatherStatus()
+    // reads, so a default invocation in compose lines up with the dashboard
+    // probe with no extra flags.
+    const loop          = flag('--loop');
+    const intervalSec   = arg('--interval')       ? parseInt(arg('--interval')!,       10) : 60;
+    const heartbeatPath = arg('--heartbeat-file') ?? process.env.WATCHDOG_HEARTBEAT
+                          ?? '/var/run/nostr-station/watchdog.heartbeat';
+    const relayHost     = arg('--relay-host')     ?? process.env.RELAY_HOST ?? 'localhost';
+    const relayPort     = arg('--relay-port')     ? parseInt(arg('--relay-port')!,     10)
+                          : Number(process.env.RELAY_PORT ?? '8080');
+
+    void import('./commands/Watchdog.js').then(({ runWatchdogCli }) =>
+      runWatchdogCli({ loop, intervalSec, heartbeatPath, relayHost, relayPort })
+    ).catch((e: Error) => {
+      process.stderr.write(`watchdog: ${e.message}\n`);
+      process.exit(1);
+    });
+    break;
+  }
+
   case 'version':
   case '--version':
   case '-v':
