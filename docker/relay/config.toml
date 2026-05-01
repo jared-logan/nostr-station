@@ -1,0 +1,55 @@
+# nostr-rs-relay configuration — container default.
+#
+# Mirrors the shape of RELAY_CONFIG in src/lib/services.ts. The wizard's
+# host-OS path personalizes [info].pubkey / [info].contact at first run;
+# in container mode that personalization is deferred to a follow-up PR
+# that writes into the relay-data volume. Defaults below are safe to ship
+# unedited — the relay accepts publishes regardless of contact metadata.
+
+[info]
+relay_url = "ws://localhost:8080"
+name = "nostr-station"
+description = "Personal Nostr dev relay"
+# pubkey/contact intentionally blank — informational only, can be edited
+# in /var/lib/nostr-rs-relay/config.toml at runtime if you want them set.
+pubkey = ""
+contact = ""
+
+[diagnostics]
+tracing = false
+
+[database]
+data_directory = "/var/lib/nostr-rs-relay"
+engine = "sqlite"
+
+[network]
+# Bind 0.0.0.0 INSIDE the container — the trust boundary is Docker's
+# bridge network + the host port binding (which compose deliberately does
+# NOT publish for the relay). The relay is reachable only from sibling
+# containers on nostr-net.
+port = 8080
+address = "0.0.0.0"
+connection_wait_timeout = 60
+ping_interval_seconds = 300
+
+[limits]
+messages_per_sec = 2
+max_event_bytes = 131072
+max_ws_message_bytes = 131072
+max_ws_frame_bytes = 131072
+broadcast_buffer = 16384
+event_persist_buffer = 4096
+max_limit = 1000
+max_subid_length = 100
+max_event_tags = 2000
+max_content_length = 102400
+reject_future_seconds = 900
+limit_scrapers = true
+
+[authorization]
+nip42_auth = true
+nip42_dms = true
+pubkey_whitelist = []
+
+[verified_users]
+verify_users = "disabled"

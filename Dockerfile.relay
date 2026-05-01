@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1.6
+#
+# nostr-rs-relay — packaged for the docker-compose station stack.
+#
+# Two-stage build keeps the runtime image small: the build stage carries
+# the rust toolchain (~1.5GB), the runtime image is just slim Debian +
+# the resulting static-ish binary + a default config.
+#
+# Pin the version explicitly. Reproducible builds matter more than
+# auto-latest here — bumping is a deliberate edit, not a silent rebuild.
+
+# ── Build stage ─────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl git build-essential pkg-config libssl-dev \
+    cmake protobuf-compiler libsqlite3-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Pinned to match COMPONENT_VERSIONS['nostr-rs-relay'] in src/lib/versions.ts —
+# the host-OS install path (install.ts:installCargoBin) uses the same value.
+# Bump both in lockstep when a new version has been validated end-to-end.
+#
+# Intentionally NOT --locked: nostr-rs-relay 0.8.12 ships a Cargo.lock that
+# pins `time 0.3.25`, which fails to compile on modern rustc with
+# `error[E0282]: type annotations needed for Box<_>`. Dropping --locked lets
+# cargo pick a semver-compatible newer patch that includes the fix. Same
+# reasoning as install.ts:311-317.
+ARG NOSTR_RS_RELAY_VERSION=0.8.12
+RUN cargo install nostr-rs-relay --version ${NOSTR_RS_RELAY_VERSION}
+
+# ── Runtime stage ───────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libsqlite3-0 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /root/.cargo/bin/nostr-rs-relay /usr/local/bin/nostr-rs-relay
+
+# Default config baked into the image. Override by mounting a custom
+# config.toml at /etc/nostr-rs-relay/config.toml via the relay-data volume,
+# or set NOSTR_RS_RELAY_CONFIG_OVERRIDE in compose to point CMD elsewhere.
+COPY docker/relay/config.toml /etc/nostr-rs-relay/config.toml
+
+# Persist the SQLite event store across container restarts. Compose mounts
+# the relay-data named volume here; declaring VOLUME makes `docker run`
+# (without compose) auto-anonymize, which keeps "I tried it standalone"
+# attempts from accumulating data in image layers.
+VOLUME ["/var/lib/nostr-rs-relay"]
+EXPOSE 8080
+
+CMD ["nostr-rs-relay", "--config", "/etc/nostr-rs-relay/config.toml"]

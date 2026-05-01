@@ -1,0 +1,80 @@
+# nostr-station — end-user docker-compose stack.
+#
+# Quick start:
+#   git clone <this-repo> && cd nostr-station
+#   docker compose up
+#
+# This brings up three containers on a private bridge network:
+#   - relay     nostr-rs-relay 0.8.12, internal-Docker-only (no host port)
+#   - station   the dashboard, bound to 127.0.0.1:3000 on the host
+#   - watchdog  long-running heartbeat + relay-health probe
+#
+# Trust model: the station's host port is bound to 127.0.0.1:3000:3000,
+# so only the host machine itself can reach the dashboard. Inside the
+# container the auth-localhost-exemption trusts any source IP because
+# the trust gate has already been enforced at the host port binding.
+# See src/lib/auth.ts for the STATION_MODE=container branch.
+#
+# Persistence: four named volumes survive `docker compose down` (config,
+# keys, relay db, watchdog heartbeat). Use `docker compose down -v` for
+# a clean reset back to first-run state.
+
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.relay
+    volumes:
+      - "relay-data:/var/lib/nostr-rs-relay"
+    networks: [ nostr-net ]
+    restart: unless-stopped
+    # No `ports:` — relay is internal-Docker-only.
+
+  station:
+    build:
+      context: .
+      dockerfile: Dockerfile.station
+    command: ["node", "dist/cli.js"]
+    environment:
+      STATION_MODE: container
+      DEV_HOST: 0.0.0.0
+      RELAY_HOST: relay
+      RELAY_PORT: "8080"
+      WATCHDOG_HEARTBEAT: /var/run/nostr-station/watchdog.heartbeat
+      KEYCHAIN_DIR: /var/lib/nostr-station/keys
+    volumes:
+      - "station-config:/root/.nostr-station"
+      - "keys:/var/lib/nostr-station/keys"
+      - "watchdog-heartbeat:/var/run/nostr-station"
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [ nostr-net ]
+    depends_on: [ relay ]
+    restart: unless-stopped
+
+  watchdog:
+    build:
+      context: .
+      dockerfile: Dockerfile.station
+    command: ["node", "dist/cli.js", "watchdog", "--loop", "--interval", "60"]
+    environment:
+      STATION_MODE: container
+      RELAY_HOST: relay
+      RELAY_PORT: "8080"
+      WATCHDOG_HEARTBEAT: /var/run/nostr-station/watchdog.heartbeat
+      KEYCHAIN_DIR: /var/lib/nostr-station/keys
+    volumes:
+      - "keys:/var/lib/nostr-station/keys"
+      - "watchdog-heartbeat:/var/run/nostr-station"
+    networks: [ nostr-net ]
+    depends_on: [ relay ]
+    restart: unless-stopped
+
+volumes:
+  relay-data:
+  station-config:
+  keys:
+  watchdog-heartbeat:
+
+networks:
+  nostr-net:

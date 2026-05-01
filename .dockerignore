@@ -1,0 +1,43 @@
+# Build artifacts and deps — regenerated inside the image. Including the
+# host's node_modules pollutes the context with the wrong arch's natives
+# (better-sqlite3, node-pty), and a stale local dist/ would clobber the
+# build stage's fresh tsc output.
+node_modules
+dist
+
+# Source control — large, never used at runtime, never copied.
+.git
+.gitignore
+.gitattributes
+
+# Tests + their fixtures aren't part of the runtime image. Building inside
+# the container is the validated path; this dockerignore is just for the
+# image we ship.
+tests
+
+# Editor / OS noise
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Local env files — never bake secrets into images. Compose passes config
+# via the `environment:` block.
+.env
+.env.*
+*.local
+
+# Claude Code session state — private to the developer's workspace.
+.claude
+CLAUDE.md
+NOSTR_STATION.md
+
+# Logs and coverage
+*.log
+coverage
+.nyc_output
+
+# Docker itself — no need to copy compose/dockerfiles INTO the image.
+docker-compose*.yml
+Dockerfile*
+.dockerignore
