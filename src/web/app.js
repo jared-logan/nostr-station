@@ -5755,7 +5755,7 @@ AuthScreen = (() => {
       // Either a session was restored (server has our token) or localhost
       // exemption is in effect. Tear down the auth screen and hand off.
       hide();
-      bootDashboard(status.localhostExempt);
+      bootDashboard(status.localhostExempt, status.containerMode);
       return;
     }
 
@@ -6479,17 +6479,58 @@ const SetupWizard = (() => {
 
     const paint = async () => {
       let relay = null;
+      let errTitle = null;
+      let errMsg   = null;
+      let containerMode = false;
       try {
-        const status = await fetch('/api/status').then(r => r.ok ? r.json() : []);
-        relay = Array.isArray(status) ? status.find(s => s.id === 'relay') : null;
+        const auth = await fetch('/api/auth/status').then(r => r.ok ? r.json() : {});
+        containerMode = !!auth.containerMode;
       } catch {}
+      try {
+        const res = await fetch('/api/status');
+        if (res.status === 401) {
+          errTitle = 'Sign in required';
+          errMsg   = 'Finish the identity step first — the dashboard needs auth before it can report status.';
+        } else if (!res.ok) {
+          errTitle = 'Status unavailable';
+          errMsg   = `Local API returned ${res.status}. Try refreshing.`;
+        } else {
+          const status = await res.json();
+          relay = Array.isArray(status) ? status.find(s => s.id === 'relay') : null;
+          if (!relay) {
+            errTitle = 'Status unavailable';
+            errMsg   = 'Status response missing relay info. Try refreshing.';
+          }
+        }
+      } catch {
+        errTitle = 'Status unavailable';
+        errMsg   = "Couldn't reach the local API. Is the server still running?";
+      }
 
-      if (!relay) {
+      if (errTitle) {
         bodyEl.innerHTML = `<div class="setup-relay-row err">
           <span class="dot err"></span>
           <div>
-            <div class="title">Status unavailable</div>
-            <div class="muted">Couldn't reach the local API. Is the server still running?</div>
+            <div class="title">${escapeHtml(errTitle)}</div>
+            <div class="muted">${escapeHtml(errMsg)}</div>
+          </div>
+        </div>`;
+        nextBtn.disabled = false;
+        return;
+      }
+
+      // Container mode: the relay isn't a host service the wizard can install —
+      // it's a sibling container managed by docker compose. The wizard step
+      // becomes informational; Continue is always enabled.
+      if (containerMode) {
+        const ok = relay.state === 'ok';
+        bodyEl.innerHTML = `<div class="setup-relay-row ${ok ? 'ok' : 'warn'}">
+          <span class="dot ${ok ? 'ok' : 'warn'}"></span>
+          <div>
+            <div class="title">${ok ? 'Relay running' : 'Relay managed by docker compose'}</div>
+            <div class="muted">${ok
+              ? escapeHtml(relay.value || '')
+              : 'Bring the <code>relay</code> service up via <code>docker compose up relay</code> when ready. This step is informational.'}</div>
           </div>
         </div>`;
         nextBtn.disabled = false;
@@ -7113,7 +7154,7 @@ const Panels = {
 // exemption is active). Idempotent: re-invoking just re-kicks the panel
 // loaders, which each already de-dupe their fetches.
 let __bootStarted = false;
-function bootDashboard(localhostExempt) {
+function bootDashboard(localhostExempt, containerMode) {
   if (!__bootStarted) {
     __bootStarted = true;
     refreshHeader();
@@ -7157,20 +7198,22 @@ function bootDashboard(localhostExempt) {
       }
     });
   }
-  toggleLocalhostBanner(localhostExempt);
+  toggleLocalhostBanner(localhostExempt, containerMode);
 }
 
 // Toast helper exposed so terminal.js (loaded before app.js) can surface
 // errors through the same UI as the rest of the dashboard.
 window.toast = toast;
 
-function toggleLocalhostBanner(on) {
+function toggleLocalhostBanner(on, containerMode) {
   let el = document.getElementById('auth-localhost-banner');
   if (on && !el) {
     el = document.createElement('div');
     el.id = 'auth-localhost-banner';
     el.className = 'auth-localhost-banner';
-    el.textContent = 'Auth disabled for localhost — enable in Config';
+    el.textContent = containerMode
+      ? 'Auth disabled — running in Docker (host port 127.0.0.1:3000)'
+      : 'Auth disabled for localhost — enable in Config';
     document.body.appendChild(el);
   } else if (!on && el) {
     el.remove();
@@ -7193,7 +7236,7 @@ function toggleLocalhostBanner(on) {
     return;
   }
   if (status.authenticated) {
-    bootDashboard(status.localhostExempt);
+    bootDashboard(status.localhostExempt, status.containerMode);
   } else {
     AuthScreen.show();
   }

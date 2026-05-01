@@ -191,7 +191,23 @@ export function verifyNip98(input: VerifyInput): VerifyResult {
 
 // ── Localhost exemption ─────────────────────────────────────────────────────
 
+// Container deployment: when the dashboard runs inside a Docker container with
+// the host port published as 127.0.0.1:<port>:<port>, every request that
+// reaches the listener has already passed the host kernel's loopback gate.
+// Inside the container the source address is the bridge gateway, not 127.0.0.1
+// — but the trust boundary is the host port binding, not the container's view
+// of the socket. Treat any source IP as localhost-equivalent here.
+//
+// This is opt-in via STATION_MODE=container. The compose stack is responsible
+// for keeping the host port loopback-only; binding 0.0.0.0:<port> on the host
+// would silently widen the trust boundary, which is why this is an env var,
+// not auto-detected.
+export function isContainerMode(): boolean {
+  return process.env.STATION_MODE === 'container';
+}
+
 export function isLocalhost(req: http.IncomingMessage): boolean {
+  if (isContainerMode()) return true;
   const ra = req.socket.remoteAddress || '';
   return ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
 }
@@ -219,6 +235,7 @@ export interface AuthStatus {
   authenticated:   boolean;
   requireAuth:     boolean;
   localhostExempt: boolean;
+  containerMode:   boolean;
   session?: {
     createdAt: number;
     expiresAt: number;
@@ -237,6 +254,7 @@ export function authStatus(req: http.IncomingMessage): AuthStatus {
     npub:            ident.npub || null,
     requireAuth,
     localhostExempt: exempt,
+    containerMode:   isContainerMode(),
     authenticated:   !!session || exempt,
     session: session
       ? { createdAt: session.createdAt, expiresAt: session.expiresAt, npub: session.npub }

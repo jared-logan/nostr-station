@@ -1497,7 +1497,7 @@ export async function startWebServer(port: number): Promise<void> {
     // already sync — but `beforeExit` is friendlier to debugging stacks.
     process.once('beforeExit', dropPid);
 
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, process.env.DEV_HOST || '127.0.0.1', () => {
       try {
         writePidFile();
         pidWritten = true;
