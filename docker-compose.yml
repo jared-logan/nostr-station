@@ -15,9 +15,15 @@
 # the trust gate has already been enforced at the host port binding.
 # See src/lib/auth.ts for the STATION_MODE=container branch.
 #
-# Persistence: four named volumes survive `docker compose down` (config,
-# keys, relay db, watchdog heartbeat). Use `docker compose down -v` for
-# a clean reset back to first-run state.
+# Persistence: five named volumes survive `docker compose down` (config,
+# keys, relay db, watchdog heartbeat, projects). Use `docker compose down -v`
+# for a clean reset back to first-run state.
+#
+# Projects volume: the dashboard scaffolds new projects into /root/projects
+# inside the station container; that path is the named `projects` volume,
+# so the working trees survive container rebuilds. STATION_PROJECTS_ROOT
+# tells validateProjectPath (src/lib/projects.ts) to gate paths against
+# this root instead of HOME.
 
 services:
   relay:
@@ -42,10 +48,12 @@ services:
       RELAY_PORT: "8080"
       WATCHDOG_HEARTBEAT: /var/run/nostr-station/watchdog.heartbeat
       KEYCHAIN_DIR: /var/lib/nostr-station/keys
+      STATION_PROJECTS_ROOT: /root/projects
     volumes:
       - "station-config:/root/.nostr-station"
       - "keys:/var/lib/nostr-station/keys"
       - "watchdog-heartbeat:/var/run/nostr-station"
+      - "projects:/root/projects"
     ports:
       - "127.0.0.1:3000:3000"
     networks: [ nostr-net ]
@@ -75,6 +83,7 @@ volumes:
   station-config:
   keys:
   watchdog-heartbeat:
+  projects:           # working trees scaffolded by the dashboard
 
 networks:
   nostr-net:

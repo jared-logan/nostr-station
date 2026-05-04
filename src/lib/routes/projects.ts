@@ -241,9 +241,9 @@ export async function handleProjects(
     // UI path uses a type-to-confirm dialog. Safety guardrails are
     // delegated to `validateProjectPath` (src/lib/projects.ts):
     //   - path must be absolute
-    //   - path must be inside the user's home directory (after
-    //     symlink + `..` collapse)
-    //   - path must not BE the home directory itself
+    //   - path must be inside the projects root (HOME by default, or
+    //     STATION_PROJECTS_ROOT when set) after symlink + `..` collapse
+    //   - path must not BE the projects root itself
     // Failures surface as 4xx with a message; the rm itself is
     // best-effort — even if it partially fails, we unregister so
     // the user isn't stuck with a broken card pointing at a

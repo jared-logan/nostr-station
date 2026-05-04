@@ -101,11 +101,28 @@ export function resolveSafeAbsolute(p: string): string {
 }
 
 /**
+ * Resolves the directory project paths must live under. By default this is
+ * the user's home directory (host-install shape). When `STATION_PROJECTS_ROOT`
+ * is set, that path is used instead — the container deployment mounts a named
+ * `projects` volume at `/root/projects` and sets this env var so the dashboard
+ * scaffolds projects into the volume rather than the container's ephemeral
+ * overlayfs. Resolved through realpath so symlinks (common on macOS, e.g.
+ * `/var/folders/.../tmp` → `/private/var/folders/...`) compare correctly.
+ */
+function projectsRoot(): string {
+  const envRoot = process.env.STATION_PROJECTS_ROOT;
+  const base = envRoot && envRoot.trim() ? envRoot.trim() : os.homedir();
+  try { return fs.realpathSync(base); }
+  catch { return path.resolve(base); }
+}
+
+/**
  * Throws on invalid input, returns the resolved absolute path on valid.
  * Invariants on the returned path:
  *   - absolute
- *   - inside the user's home directory (after symlink + `..` collapse)
- *   - never equal to home itself
+ *   - inside the projects root (HOME, or STATION_PROJECTS_ROOT when set)
+ *     after symlink + `..` collapse
+ *   - never equal to the projects root itself
  *
  * Trims surrounding whitespace before validation so a stray newline doesn't
  * tip an otherwise-valid path into the rejection branch.
@@ -122,16 +139,14 @@ export function validateProjectPath(p: string): string {
     throw new Error(`project path must be absolute, got "${trimmed}"`);
   }
   const resolved = resolveSafeAbsolute(trimmed);
-  let realHome: string;
-  try { realHome = fs.realpathSync(os.homedir()); }
-  catch { realHome = path.resolve(os.homedir()); }
+  const root = projectsRoot();
 
-  const rel = path.relative(realHome, resolved);
+  const rel = path.relative(root, resolved);
   if (rel === '' || rel === '.') {
-    throw new Error('project path cannot be the home directory itself');
+    throw new Error('project path cannot be the projects root itself');
   }
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`project path must be inside ${realHome}, got "${trimmed}"`);
+    throw new Error(`project path must be inside ${root}, got "${trimmed}"`);
   }
   return resolved;
 }

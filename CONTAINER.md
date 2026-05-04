@@ -18,7 +18,7 @@ walks the setup wizard; subsequent runs land on the dashboard.
 To stop and reset to first-run state:
 
 ```bash
-docker compose down -v   # -v wipes named volumes (config, keys, relay db)
+docker compose down -v   # -v wipes named volumes (config, keys, relay db, projects)
 ```
 
 ## Architecture
@@ -116,10 +116,11 @@ defaults; override in compose's `environment:` block as needed.
 | `RELAY_PORT` | `8080` | Port for the relay reachability probe. |
 | `WATCHDOG_HEARTBEAT` | `/var/run/nostr-station/watchdog.heartbeat` | Path the watchdog writes and the dashboard reads to determine watchdog liveness. Both services must have it mounted at the same path. |
 | `KEYCHAIN_DIR` | `/var/lib/nostr-station/keys` | Where the file-based keychain stores its encrypted secrets and persisted KEK. Mount as a named volume so secrets survive image rebuilds. |
+| `STATION_PROJECTS_ROOT` | (unset → HOME) | The directory project paths must live under. In container mode, set to `/root/projects` and back it with the `projects` named volume so working trees survive container rebuilds. `validateProjectPath` (`src/lib/projects.ts`) gates incoming paths against this root. |
 
 ## Volumes
 
-Four named volumes are created on first `docker compose up`. They survive
+Five named volumes are created on first `docker compose up`. They survive
 `docker compose down`. Wipe them all with `docker compose down -v`.
 
 | Volume | Mounted at | Service(s) | Contents |
@@ -128,6 +129,7 @@ Four named volumes are created on first `docker compose up`. They survive
 | `station-config` | `/root/.nostr-station` | station | identity.json, ai-config.json |
 | `keys` | `/var/lib/nostr-station/keys` | station, watchdog | Encrypted-file keychain (watchdog nsec, AI keys) + persisted KEK |
 | `watchdog-heartbeat` | `/var/run/nostr-station` | station, watchdog | Heartbeat file (mtime is the liveness signal) |
+| `projects` | `/root/projects` | station | Working trees scaffolded by the dashboard. Pinned by `STATION_PROJECTS_ROOT`. |
 
 The `keys` and `watchdog-heartbeat` volumes are intentionally shared
 between the station and watchdog services — they need the same view of

@@ -311,7 +311,7 @@ test('validateProjectPath: rejects paths outside HOME (e.g. /etc)', () => {
 });
 
 test('validateProjectPath: rejects HOME itself', () => {
-  assert.throws(() => validateProjectPath(HOME), /home directory itself/i);
+  assert.throws(() => validateProjectPath(HOME), /projects root itself/i);
 });
 
 test('validateProjectPath: rejects relative paths', () => {
@@ -367,6 +367,88 @@ test('validateProjectPath: trims surrounding whitespace before validating', () =
   // into an invalid one.
   const out = validateProjectPath(`  ${real}\n`);
   assert.equal(typeof out, 'string');
+});
+
+// ── STATION_PROJECTS_ROOT — container deployment override ─────────────────
+//
+// In container mode the dashboard scaffolds projects into a named volume
+// mounted at `/root/projects`, not into HOME. STATION_PROJECTS_ROOT lets
+// the container point validateProjectPath at that volume instead. These
+// tests pin the contract: env var present → containment uses the env var
+// root; env var absent → existing HOME containment unchanged.
+
+test('validateProjectPath: STATION_PROJECTS_ROOT overrides HOME for containment', () => {
+  const root = path.join(HOME, 'station-projects');
+  fs.mkdirSync(root, { recursive: true });
+  process.env.STATION_PROJECTS_ROOT = root;
+  try {
+    const inside = path.join(root, 'demo');
+    const out = validateProjectPath(inside);
+    assert.equal(typeof out, 'string');
+    assert.equal(path.isAbsolute(out), true);
+  } finally {
+    delete process.env.STATION_PROJECTS_ROOT;
+  }
+});
+
+test('validateProjectPath: STATION_PROJECTS_ROOT rejects paths outside the root (even if inside HOME)', () => {
+  const root = path.join(HOME, 'station-projects');
+  fs.mkdirSync(root, { recursive: true });
+  process.env.STATION_PROJECTS_ROOT = root;
+  try {
+    // Path is inside HOME but outside the configured projects root.
+    // Without the env var this would succeed; with it, it must fail.
+    const sibling = path.join(HOME, 'other', 'demo');
+    assert.throws(() => validateProjectPath(sibling), /must be inside/i);
+  } finally {
+    delete process.env.STATION_PROJECTS_ROOT;
+  }
+});
+
+test('validateProjectPath: STATION_PROJECTS_ROOT rejects the root itself', () => {
+  const root = path.join(HOME, 'station-projects');
+  fs.mkdirSync(root, { recursive: true });
+  process.env.STATION_PROJECTS_ROOT = root;
+  try {
+    assert.throws(() => validateProjectPath(root), /projects root itself/i);
+  } finally {
+    delete process.env.STATION_PROJECTS_ROOT;
+  }
+});
+
+test('validateProjectPath: STATION_PROJECTS_ROOT resolves symlinks in the root path', () => {
+  // macOS surfaces /var/folders/... as a symlink to /private/var/folders/...
+  // The container case is the inverse — a /root/projects bind that may or
+  // may not be symlinked — but the underlying invariant is the same:
+  // realpath both sides before comparing. Build the same shape with a
+  // synthetic symlink to pin the contract.
+  const real = path.join(HOME, 'real-root');
+  const link = path.join(HOME, 'link-root');
+  fs.mkdirSync(real, { recursive: true });
+  fs.symlinkSync(real, link);
+  process.env.STATION_PROJECTS_ROOT = link;
+  try {
+    // A path expressed via the realpath of the root must still be accepted.
+    const inside = path.join(real, 'demo');
+    const out = validateProjectPath(inside);
+    assert.equal(typeof out, 'string');
+  } finally {
+    delete process.env.STATION_PROJECTS_ROOT;
+  }
+});
+
+test('validateProjectPath: STATION_PROJECTS_ROOT empty string falls back to HOME', () => {
+  // An empty / whitespace-only env var must not silently widen the gate
+  // to "everything is allowed". Treat blank as unset.
+  process.env.STATION_PROJECTS_ROOT = '   ';
+  try {
+    assert.throws(() => validateProjectPath('/etc'), /must be inside/i);
+    const inside = path.join(HOME, 'projects', 'fallback');
+    const out = validateProjectPath(inside);
+    assert.equal(typeof out, 'string');
+  } finally {
+    delete process.env.STATION_PROJECTS_ROOT;
+  }
 });
 
 test('createProject: rejects path outside HOME (B2)', () => {
