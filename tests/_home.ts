@@ -17,11 +17,24 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+// Seed a minimal global git config so tests that shell out to
+// `git commit` (e.g. snapshotProject in sync.test.ts) have an
+// identity to attach. Without this, CI runners — which have no
+// global git identity — fail the commit because HOME is redirected
+// to the tmpdir and the runner's global config is invisible.
+function seedGitConfig(dir: string): void {
+  fs.writeFileSync(
+    path.join(dir, '.gitconfig'),
+    '[user]\n\tname = nostr-station tests\n\temail = tests@nostr-station.local\n',
+  );
+}
+
 export function useTempHome(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nostr-station-test-'));
   process.env.HOME = dir;
   // Some libs (and os.homedir() on Windows) read USERPROFILE instead.
   process.env.USERPROFILE = dir;
+  seedGitConfig(dir);
   return dir;
 }
 
@@ -32,4 +45,6 @@ export function resetTempHome(dir: string): void {
   for (const entry of fs.readdirSync(dir)) {
     fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
   }
+  // Re-seed after wipe — the .gitconfig from useTempHome was just deleted.
+  seedGitConfig(dir);
 }
