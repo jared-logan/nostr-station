@@ -22,6 +22,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Configure git identity (required by sync.test.ts)
+        # tests/sync.test.ts exercises snapshotProject(), which shells
+        # out to `git commit`. The CI runner has no global git identity,
+        # so the commit fails with "Author identity unknown" and the
+        # snapshotProject tests assert ok=false. Set a synthetic identity
+        # globally so tests can commit. End-users always have their own
+        # identity configured, so this is a CI-environment gap, not a
+        # production-code issue.
+        run: |
+          git config --global user.email "ci@nostr-station.local"
+          git config --global user.name  "nostr-station CI"
+
       - name: Unit tests (projects + ai-config)
         run: npm test
 
