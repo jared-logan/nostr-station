@@ -79,6 +79,36 @@ else
   STATION_CMD="nostr-station"
 fi
 
+# ── 5b. Lay down compose assets at ~/.nostr-station/compose/ ──────────────────
+#
+# The launcher (Phase 3+) shells `docker compose -f <here>/docker-compose.yml`
+# against this stable path so end users never type docker compose themselves.
+# We copy from the npm package's installed location rather than fetching from
+# GitHub so the user's installed version always matches the assets they got.
+#
+# Idempotent: re-running install.sh overwrites the assets in place. Users who
+# customized them locally lose those customizations on re-install — acceptable
+# for now since the assets are infrastructure, not configuration.
+COMPOSE_DIR="${HOME}/.nostr-station/compose"
+NPM_PKG_DIR="$(npm root -g)/${NPM_PKG}"
+
+if [[ -d "$NPM_PKG_DIR" ]]; then
+  log "Laying down compose assets at ${COMPOSE_DIR}..."
+  mkdir -p "$COMPOSE_DIR"
+  for asset in docker-compose.yml Dockerfile.relay Dockerfile.station .dockerignore; do
+    if [[ -f "${NPM_PKG_DIR}/${asset}" ]]; then
+      cp "${NPM_PKG_DIR}/${asset}" "${COMPOSE_DIR}/${asset}"
+    fi
+  done
+  if [[ -d "${NPM_PKG_DIR}/docker" ]]; then
+    cp -R "${NPM_PKG_DIR}/docker" "${COMPOSE_DIR}/"
+  fi
+  ok "Compose assets at ${COMPOSE_DIR}"
+else
+  warn "npm package dir not found at ${NPM_PKG_DIR} — skipping compose-asset layout."
+  warn "Re-run install.sh after the npm install completes if you intend to use the container stack."
+fi
+
 # ── 6. SSH + tmux safety check ────────────────────────────────────────────────
 if [[ -n "${SSH_CLIENT:-}" ]] || [[ -n "${SSH_TTY:-}" ]]; then
   if [[ -z "${TMUX:-}" ]]; then
