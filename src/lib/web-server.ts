@@ -54,6 +54,8 @@ import {
 import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
   signWithBunkerUrl, silentBunkerSign,
+  startSetupAmber, getSetupAmberSession, consumeSetupAmberSession,
+  signEventWithSavedBunker,
 } from './auth-bunker.js';
 // `getProject` + `resolveProjectContext` are still needed here for the
 // chat proxy's system-prompt resolution. Everything else moved to
@@ -922,6 +924,126 @@ function shouldStartInprocRelay(): boolean {
   return true;                                    // default for the host-Node deployment
 }
 
+// Live verification (Phase 4 of the user-journey spec). Asks the saved
+// bunker client (Amber on the user's phone) to sign a kind-1 test event,
+// publishes it to the running in-process relay over ws://, and reads it
+// back via a REQ subscription. Each step is named so the client can
+// render a checklist; failures stop at the first broken step.
+//
+// Why ws:// instead of calling the relay's store directly: the test is
+// trying to prove "your apps will be able to talk to this relay." Going
+// through the WebSocket layer exercises the same path the user's apps
+// will use (NIP-01 over WS), which is what we want to verify.
+
+interface VerifyStep { name: string; ok: boolean; detail?: string }
+interface VerifyResult {
+  ok:      boolean;
+  steps:   VerifyStep[];
+  eventId?: string;
+  npub?:    string;
+  error?:   string;
+}
+
+async function runSetupVerify(): Promise<VerifyResult> {
+  const steps: VerifyStep[] = [];
+  const ident = readIdentity();
+  // Step 1 — sign via Amber. Generic event template; signEventWithSavedBunker
+  // returns a fully-signed event whose pubkey is the user's main pubkey.
+  const template = {
+    kind:       1,
+    created_at: Math.floor(Date.now() / 1000),
+    tags:       [['client', 'nostr-station-setup-verify']],
+    content:    'nostr-station: setup verification — you can ignore this event.',
+  };
+  let signed: any;
+  try {
+    const r = await signEventWithSavedBunker(template, 60_000);
+    if (!r.ok || !r.signedEvent) {
+      steps.push({ name: 'sign-via-amber', ok: false, detail: r.error || 'signing failed' });
+      return { ok: false, steps, error: 'Amber did not sign the test event' };
+    }
+    signed = r.signedEvent;
+    steps.push({ name: 'sign-via-amber', ok: true, detail: `signed by ${signed.pubkey.slice(0, 8)}…` });
+  } catch (e: any) {
+    steps.push({ name: 'sign-via-amber', ok: false, detail: String(e?.message ?? e) });
+    return { ok: false, steps, error: 'sign step failed' };
+  }
+
+  // Resolve relay URL — same env vars maybeStartInprocRelay sets.
+  const relayHost = process.env.RELAY_HOST || '127.0.0.1';
+  const relayPort = process.env.RELAY_PORT || '7777';
+  const relayUrl  = `ws://${relayHost}:${relayPort}`;
+
+  // Steps 2 + 3 — publish + read back, both over a single WS connection.
+  // Lazy-import ws so we don't pay the cost on cold-path requests.
+  const { WebSocket } = await import('ws');
+  const ws = new WebSocket(relayUrl);
+
+  // Generic JSON-frame waiter so each step can wait for the message it
+  // cares about without racing on the buffer's order.
+  const waiters: Array<{ pred: (m: any[]) => boolean; resolve: (m: any[]) => void; reject: (e: Error) => void; timer?: NodeJS.Timeout }> = [];
+  const buffer: any[][] = [];
+  ws.on('message', d => {
+    try {
+      const msg = JSON.parse(d.toString());
+      if (!Array.isArray(msg)) return;
+      const idx = waiters.findIndex(w => w.pred(msg));
+      if (idx >= 0) {
+        const [w] = waiters.splice(idx, 1);
+        if (w.timer) clearTimeout(w.timer);
+        w.resolve(msg);
+      } else {
+        buffer.push(msg);
+      }
+    } catch { /* not JSON / not array — ignore */ }
+  });
+  const next = (pred: (m: any[]) => boolean, ms = 5_000): Promise<any[]> => {
+    const idx = buffer.findIndex(pred);
+    if (idx >= 0) return Promise.resolve(buffer.splice(idx, 1)[0]);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const i = waiters.findIndex(w => w.pred === pred);
+        if (i >= 0) waiters.splice(i, 1);
+        reject(new Error(`timeout after ${ms}ms`));
+      }, ms);
+      waiters.push({ pred, resolve, reject, timer });
+    });
+  };
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open',  () => resolve());
+      ws.once('error', reject);
+    });
+
+    // Step 2 — publish.
+    ws.send(JSON.stringify(['EVENT', signed]));
+    const ok = await next(m => m[0] === 'OK' && m[1] === signed.id, 10_000);
+    if (ok[2] !== true) {
+      steps.push({ name: 'publish-to-relay', ok: false, detail: ok[3] || 'relay rejected event' });
+      ws.close();
+      return { ok: false, steps, error: 'relay rejected the test event' };
+    }
+    steps.push({ name: 'publish-to-relay', ok: true, detail: `accepted by ${relayUrl}` });
+
+    // Step 3 — read back via REQ. The store is local and the round-trip
+    // takes single-digit ms, so a 5s timeout is generous slack.
+    const subId = 'setup-verify';
+    ws.send(JSON.stringify(['REQ', subId, { ids: [signed.id] }]));
+    await next(m => m[0] === 'EVENT' && m[1] === subId && m[2]?.id === signed.id, 5_000);
+    await next(m => m[0] === 'EOSE'  && m[1] === subId, 5_000);
+    ws.send(JSON.stringify(['CLOSE', subId]));
+    steps.push({ name: 'read-back-from-relay', ok: true, detail: 'event found in store' });
+  } catch (e: any) {
+    steps.push({ name: 'read-back-from-relay', ok: false, detail: String(e?.message ?? e) });
+    try { ws.close(); } catch {}
+    return { ok: false, steps, error: 'relay round-trip failed' };
+  }
+  try { ws.close(); } catch {}
+
+  return { ok: true, steps, eventId: signed.id, npub: ident.npub };
+}
+
 async function maybeStartInprocRelay(): Promise<void> {
   if (!shouldStartInprocRelay()) return;
   if (inprocRelay) return;
@@ -1438,6 +1560,98 @@ export async function startWebServer(port: number): Promise<void> {
       // no public-API carveout needed. Assumes the relay BINARY is already
       // installed; the wizard leaves compile/download to `nostr-station
       // onboard` because that step can run 10+ minutes and needs a TTY.
+      // ── Amber QR pairing (first-run /setup) ──────────────────────────
+      //
+      // The hero step of the user-journey spec: a single full-screen QR
+      // representing a NIP-46 nostrconnect:// URI. The user scans in
+      // Amber, taps approve once, and the bunker handshake captures
+      // their npub + saves a bunker client for future signing — all
+      // without ever asking them to paste an npub.
+      //
+      // Two endpoints:
+      //   POST /api/setup/amber/start
+      //     Generates the URI + QR SVG, returns the session id for
+      //     polling. Background task races the bunker connect against
+      //     CONNECT_TIMEOUT_MS.
+      //   GET  /api/setup/amber/session/:eph
+      //     Polls session state. On status='ok' returns the captured
+      //     npub; identity.json is already written by the time the
+      //     wizard sees this response.
+      if (url === '/api/setup/amber/start' && method === 'POST') {
+        // Once setup is complete, this endpoint stops responding —
+        // it's only meaningful during the first-run window. Subsequent
+        // pairings (e.g. user wants to switch Amber accounts) go
+        // through /api/auth/bunker-connect instead.
+        const ident = readIdentity();
+        if (ident.setupComplete === true) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'setup already complete' }));
+          return;
+        }
+        const start = await startSetupAmber(expectedDashboardUrl(req, port));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...start }));
+        return;
+      }
+
+      const setupAmberPollMatch = url.match(/^\/api\/setup\/amber\/session\/([0-9a-f]{64})$/);
+      if (setupAmberPollMatch && method === 'GET') {
+        const eph = setupAmberPollMatch[1];
+        const s   = getSetupAmberSession(eph);
+        if (!s) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'error', error: 'unknown session' }));
+          return;
+        }
+        if (s.status === 'waiting') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'waiting', expiresAt: s.expiresAt }));
+          return;
+        }
+        // Terminal state — consume the session entry. The wizard
+        // displays the result and moves to the next stage.
+        consumeSetupAmberSession(eph);
+        if (s.status !== 'ok') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: s.status, error: s.error }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', npub: s.userNpub }));
+        return;
+      }
+
+      // ── Live verification (Phase 4 of the user journey) ──────────────
+      //
+      // Generates a kind-1 test event, asks Amber to sign it (second
+      // and last phone tap during onboarding), publishes to the
+      // in-process relay over the public ws:// URL, reads it back via
+      // a REQ subscription, and returns a step-by-step result. This
+      // is the trust-earning moment — the user sees the full pipeline
+      // work end-to-end before being asked to do anything real.
+      if (url === '/api/setup/verify' && method === 'POST') {
+        const ident = readIdentity();
+        if (!ident.npub) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'identity not paired — finish Amber pairing first' }));
+          return;
+        }
+        if (ident.setupComplete === true) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'setup already complete' }));
+          return;
+        }
+        try {
+          const result = await runSetupVerify();
+          res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message ?? e) }));
+        }
+        return;
+      }
+
       if (url === '/api/setup/relay/install' && method === 'POST') {
         // Container mode: the relay is already running as a sibling
         // container, brought up by docker compose at install time. The

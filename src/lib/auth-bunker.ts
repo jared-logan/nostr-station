@@ -18,9 +18,12 @@
 import nodeCrypto from 'node:crypto';
 import { BunkerSigner, parseBunkerInput, createNostrConnectURI } from 'nostr-tools/nip46';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
+import { nip19 } from 'nostr-tools';
 // @ts-expect-error — qrcode ships no types, CJS default export carries toString
 import QRCode from 'qrcode';
-import { readIdentity } from './identity.js';
+import {
+  readIdentity, writeIdentity, DEFAULT_READ_RELAYS,
+} from './identity.js';
 import {
   readSavedBunkerClient, writeSavedBunkerClient, clearSavedBunkerClient,
   type SavedBunkerClient,
@@ -353,6 +356,221 @@ export async function silentBunkerSign(
     // instead of retrying a broken path.
     clearSavedBunkerClient();
     return { ok: false, tried: true, error: e?.message || 'silent bunker flow failed' };
+  } finally {
+    try { await signer.close(); } catch {}
+  }
+}
+
+// ── Setup wizard pairing (first-run /setup) ─────────────────────────────────
+//
+// startSetupAmber() is the initial-pairing analogue of startNostrConnect():
+// same nostrconnect:// QR flow, but on success we capture the user's pubkey
+// from the bunker handshake, write it as the station owner npub, and save
+// the bunker client for future silent re-auth + signing. NO event is signed
+// during the handshake — pairing alone is a one-tap operation; signing is
+// deferred to /api/setup/verify (the live verification stage). This keeps
+// the "two phone taps total" guarantee from the user-journey spec.
+
+export interface SetupAmberStart {
+  ephemeralPubkey: string;
+  nostrconnectUri: string;
+  qrSvg:           string;
+  relays:          string[];
+  expiresAt:       number;
+}
+
+export interface SetupAmberSession extends BunkerSession {
+  // Captured after a successful connect — the user's main npub, written
+  // straight into identity.json so the wizard never has to ask for it.
+  userNpub?: string;
+}
+
+const setupSessions = new Map<string, SetupAmberSession>();
+
+function pruneSetupSessions(): void {
+  const now = Date.now();
+  for (const [k, v] of setupSessions) if (v.expiresAt < now) setupSessions.delete(k);
+}
+
+export function getSetupAmberSession(eph: string): SetupAmberSession | null {
+  pruneSetupSessions();
+  return setupSessions.get(eph) ?? null;
+}
+
+export function consumeSetupAmberSession(eph: string): SetupAmberSession | null {
+  const s = setupSessions.get(eph) ?? null;
+  if (s) setupSessions.delete(eph);
+  return s;
+}
+
+// Setup pairing uses a fixed list of well-known public bunker relays. The
+// user has no identity yet, so we can't pull their preferred read-relays
+// from identity.json the way startNostrConnect() does. These are the
+// relays Amber + the major Nostr clients use for NIP-46 routing.
+const SETUP_AMBER_RELAYS = [
+  'wss://relay.nsec.app',
+  'wss://relay.damus.io',
+  'wss://nos.lol',
+];
+
+export async function startSetupAmber(dashboardUrl: string): Promise<SetupAmberStart> {
+  const secretKey       = generateSecretKey();
+  const ephemeralPubkey = getPublicKey(secretKey);
+  const connectSecret   = nodeCrypto.randomBytes(16).toString('hex');
+
+  const nostrconnectUri = createNostrConnectURI({
+    clientPubkey: ephemeralPubkey,
+    relays:       SETUP_AMBER_RELAYS,
+    secret:       connectSecret,
+    // Permissions requested at pairing — covers the verify stage's kind-1
+    // test event plus the kinds the user is most likely to publish in
+    // their first session. Adding more permissions post-pairing is cheap;
+    // requesting too many up-front trains users to "approve all" which
+    // defeats the per-event prompt model.
+    perms: ['sign_event:1', 'sign_event:0', 'sign_event:6', 'get_public_key'],
+    name:  'nostr-station',
+    url:   dashboardUrl,
+  });
+
+  const qrSvg = await renderQrSvg(nostrconnectUri);
+
+  const now = Date.now();
+  const session: SetupAmberSession = {
+    ephemeralPubkey,
+    nostrconnectUri,
+    relays:    SETUP_AMBER_RELAYS,
+    createdAt: now,
+    expiresAt: now + CONNECT_TIMEOUT_MS,
+    status:    'waiting',
+  };
+  setupSessions.set(ephemeralPubkey, session);
+
+  // Run the connect flow in the background. On success: persist npub +
+  // bunker client. On failure: status is updated so the polling endpoint
+  // can surface the error.
+  runSetupAmberFlow(session, secretKey).catch(err => {
+    session.status = 'error';
+    session.error  = err?.message || String(err);
+  });
+
+  return {
+    ephemeralPubkey,
+    nostrconnectUri,
+    qrSvg,
+    relays:    SETUP_AMBER_RELAYS,
+    expiresAt: session.expiresAt,
+  };
+}
+
+async function runSetupAmberFlow(
+  session:   SetupAmberSession,
+  secretKey: Uint8Array,
+): Promise<void> {
+  let signer: any;
+  try {
+    signer = await BunkerSigner.fromURI(
+      secretKey, session.nostrconnectUri, {}, CONNECT_TIMEOUT_MS,
+    );
+  } catch (e: any) {
+    if (session.status === 'waiting') {
+      session.status = 'timeout';
+      session.error  = e?.message || 'bunker connect failed';
+    }
+    return;
+  }
+
+  try {
+    // Ask the bunker for the user's pubkey via NIP-46's get_public_key.
+    // BunkerSigner exposes this as `getPublicKey()`. The returned hex is
+    // the user's main pubkey (what the user signs with), not the bunker's
+    // app-pubkey on `bp`. Some bunkers return the same value for both;
+    // for Amber-style "delegated app pubkey" setups they differ, and
+    // this method gives us the right one.
+    let userPubkeyHex: string;
+    if (typeof signer.getPublicKey === 'function') {
+      userPubkeyHex = await signer.getPublicKey();
+    } else {
+      // Fallback for older nostr-tools — bp.pubkey is Amber's pubkey,
+      // which for Amber's main flow is the user's pubkey.
+      userPubkeyHex = String(signer?.bp?.pubkey ?? '');
+    }
+    if (!/^[0-9a-f]{64}$/.test(userPubkeyHex)) {
+      throw new Error(`invalid pubkey from bunker: ${userPubkeyHex}`);
+    }
+
+    const npub = nip19.npubEncode(userPubkeyHex);
+
+    // Write identity.json. Read first to preserve any pre-existing
+    // requireAuth / readRelays values; we only set the npub + ensure
+    // setupComplete stays false until /api/setup/complete runs.
+    const prev = readIdentity();
+    writeIdentity({
+      ...prev,
+      npub,
+      readRelays: prev.readRelays?.length ? prev.readRelays : DEFAULT_READ_RELAYS.slice(),
+      setupComplete: false,
+    });
+
+    // Save the bunker client so future signing requests (verify stage,
+    // ngit pushes, nsite publishes) silently reuse this pairing.
+    persistBunkerClient(secretKey, signer?.bp);
+
+    session.userNpub = npub;
+    session.status   = 'ok';
+  } catch (e: any) {
+    session.status = 'error';
+    session.error  = e?.message || 'bunker handshake failed';
+  } finally {
+    try { await signer.close(); } catch {}
+  }
+}
+
+// ── Generic event signing via saved bunker ──────────────────────────────────
+//
+// signEventWithSavedBunker() is the building block /api/setup/verify uses
+// to ask Amber to sign the test kind-1 event. It's also the path future
+// publish/deploy flows will call when they need a signed event without a
+// fresh QR. Returns { ok: false, tried: false } when no saved client
+// exists — the caller can decide whether to surface a "pair Amber first"
+// error or fall through to a different sign source.
+
+export interface SignWithBunkerResult {
+  ok:           boolean;
+  tried:        boolean;
+  signedEvent?: any;
+  error?:       string;
+}
+
+export async function signEventWithSavedBunker(
+  template:  { kind: number; created_at: number; tags: string[][]; content: string },
+  timeoutMs: number = BUNKER_TIMEOUT_MS,
+): Promise<SignWithBunkerResult> {
+  const ident = readIdentity();
+  if (!ident.npub) return { ok: false, tried: false, error: 'no station npub configured' };
+
+  const saved = readSavedBunkerClient(ident.npub);
+  if (!saved) return { ok: false, tried: false, error: 'no saved bunker client' };
+
+  const secretKey = hexToBytes(saved.clientSecretHex);
+  let signer: any;
+  try {
+    signer = BunkerSigner.fromBunker(secretKey, saved.bunker, {});
+  } catch (e: any) {
+    return { ok: false, tried: true, error: e?.message || 'bunker init failed' };
+  }
+
+  const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label} timed out`)), ms)),
+    ]);
+
+  try {
+    await withTimeout(signer.connect(), timeoutMs, 'connect');
+    const signed = await withTimeout(signer.signEvent(template), timeoutMs, 'sign_event');
+    return { ok: true, tried: true, signedEvent: signed };
+  } catch (e: any) {
+    return { ok: false, tried: true, error: e?.message || 'bunker sign failed' };
   } finally {
     try { await signer.close(); } catch {}
   }
