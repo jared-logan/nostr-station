@@ -38,6 +38,20 @@ const toast = (() => {
   };
 })();
 
+// Toast helper for relay-config / whitelist saves. In container mode the
+// station has no docker socket so it can't restart the sibling relay
+// container — the API returns a `restartHint` (a copy-pasteable host
+// command) and we surface that as a 'warn' toast instead of the cheerful
+// "Relay restarted". On host the field is absent and we keep the original
+// success message.
+function relayApplyToast(title, response, hostFallbackBody = 'Relay restarted') {
+  if (response && response.restartHint) {
+    toast(title, `Saved · run on host: ${response.restartHint}`, 'warn');
+  } else {
+    toast(title, hostFallbackBody, 'ok');
+  }
+}
+
 // Session token lives in localStorage so it survives tab close and browser
 // re-launch — the 8h server-side TTL (with 30m sliding window) is the
 // authoritative expiry, and forcing a bunker re-auth on every refresh was
@@ -1970,7 +1984,7 @@ const RelayPanel = (() => {
       });
       if (!r.ok) throw new Error(r.error || 'add failed');
       if (r.already) toast('Already whitelisted', npub, 'warn');
-      else           toast('Added to whitelist', 'Relay restarted', 'ok');
+      else           relayApplyToast('Added to whitelist', r);
       input.value = '';
       refreshWhitelist();
     } catch (e) {
@@ -1992,7 +2006,7 @@ const RelayPanel = (() => {
         body: JSON.stringify({ npub }),
       });
       if (!r.ok) throw new Error(r.error || 'remove failed');
-      toast('Removed', 'Relay restarted', 'ok');
+      relayApplyToast('Removed', r);
       refreshWhitelist();
     } catch (e) {
       toast('Whitelist remove failed', e.message, 'err');
@@ -5675,7 +5689,10 @@ const ConfigPanel = (() => {
         body: JSON.stringify(body),
       });
       if (!r.ok) throw new Error((r.errors || []).join('; ') || 'save failed');
-      toast(`${key === 'auth' ? 'NIP-42' : 'DM'} auth ${value ? 'enabled' : 'disabled'}`, 'Relay restarted', 'ok');
+      relayApplyToast(
+        `${key === 'auth' ? 'NIP-42' : 'DM'} auth ${value ? 'enabled' : 'disabled'}`,
+        r,
+      );
     } catch (e) { toast('Save failed', e.message, 'err'); load(); }
   }
 
@@ -6135,7 +6152,14 @@ AuthScreen = (() => {
 
 const SetupWizard = (() => {
   const root = $('setup-root');
-  const STAGES = ['welcome', 'identity', 'relay', 'ai', 'ngit', 'vpn', 'done'];
+  // STAGES is mutable so show() can drop the relay + vpn stages in
+  // container mode — both are inapplicable there: the relay is already
+  // running as a sibling container and nostr-vpn isn't supportable
+  // inside an unprivileged container. Decided at show() time after we
+  // fetch /api/auth/status (which carries the containerMode flag).
+  const STAGES_HOST      = ['welcome', 'identity', 'relay', 'ai', 'ngit', 'vpn', 'done'];
+  const STAGES_CONTAINER = ['welcome', 'identity', 'ai', 'ngit', 'done'];
+  let STAGES = STAGES_HOST;
   let stageIdx = 0;
   const state = { npub: '', profile: null };
 
@@ -6169,7 +6193,12 @@ const SetupWizard = (() => {
         location.href = '/';
         return;
       }
-    } catch { /* fall through — render wizard anyway */ }
+      // Container-mode wizard skips the relay-install + nvpn-install
+      // stages — both call APIs that 410 in container mode (the relay
+      // is already running, nvpn isn't supportable). Walking users
+      // through them would be a dead end.
+      STAGES = st.containerMode ? STAGES_CONTAINER : STAGES_HOST;
+    } catch { /* fall through — render wizard anyway with default STAGES */ }
 
     stageIdx = 0;
     root.hidden = false;
@@ -7157,6 +7186,25 @@ let __bootStarted = false;
 function bootDashboard(localhostExempt, containerMode) {
   if (!__bootStarted) {
     __bootStarted = true;
+    // Container mode: nostr-vpn isn't supportable inside an unprivileged
+    // container (matches the Status panel's "not applicable in container
+    // mode" row). Hide the Logs panel's vpn tab so users don't click into
+    // a forever-empty stream. Default tab stays 'relay' (set in the
+    // LogsPanel IIFE) so this is a one-line DOM tweak — no state plumbing.
+    //
+    // Same reasoning applies to the Relay panel's start/stop/restart
+    // buttons — the relay's lifecycle is owned by docker compose on the
+    // host, not the dashboard. The /api/relay/* endpoints already return
+    // 501 with a `hostCmd` field in container mode (see web-server.ts);
+    // hiding the buttons keeps the UI honest.
+    if (containerMode) {
+      const vpnTab = document.querySelector('#logs-tabs [data-log="vpn"]');
+      if (vpnTab) vpnTab.hidden = true;
+      for (const id of ['relay-start', 'relay-stop', 'relay-restart']) {
+        const btn = document.getElementById(id);
+        if (btn) btn.hidden = true;
+      }
+    }
     refreshHeader();
     refreshHealth();
     activatePanel(currentPanel());
