@@ -905,6 +905,27 @@ function exportRelayEvents(): Promise<{ ok: boolean; file?: string; error?: stri
 
 // ── Server ────────────────────────────────────────────────────────────────────
 
+// In-process Nostr relay handle. Started by maybeStartInprocRelay() when
+// STATION_INPROC_RELAY=1 is set in the environment, kept here so the
+// dashboard's shutdown path can stop it cleanly. We type it loosely
+// (any) to avoid pulling the whole relay module into web-server's import
+// graph at type-resolution time when the flag is off.
+let inprocRelay: { stop: () => Promise<void> } | null = null;
+
+async function maybeStartInprocRelay(): Promise<void> {
+  if (process.env.STATION_INPROC_RELAY !== '1') return;
+  if (inprocRelay) return;
+  // Lazy import — nothing in the rest of web-server.ts references the
+  // relay module, so we keep it out of the load graph entirely when the
+  // flag is off (the legacy Docker relay path is unaffected).
+  const { Relay } = await import('../relay/index.js');
+  const port = Number(process.env.STATION_INPROC_RELAY_PORT || '7777');
+  const r = new Relay({ port, host: '127.0.0.1' });
+  await r.start();
+  inprocRelay = r;
+  process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);
+}
+
 export async function startWebServer(port: number): Promise<void> {
   // Sessions are in-memory only and never survive a server restart — the
   // user re-authenticates after a nostr-station chat restart. Explicit here
@@ -1644,6 +1665,11 @@ export async function startWebServer(port: number): Promise<void> {
 
     server.on('close', () => {
       destroyAllTerminals();
+      // Stop the in-process relay alongside the dashboard. Errors are
+      // swallowed because a half-stopped relay during shutdown is no
+      // worse than a dropped log line.
+      void inprocRelay?.stop().catch(() => {});
+      inprocRelay = null;
       dropPid();
     });
 
@@ -1690,6 +1716,13 @@ export async function startWebServer(port: number): Promise<void> {
       // of them hang (secret-tool unlock prompt, node-pty prebuilt probe,
       // ai-config migration) the dashboard is still up and serving.
       warmUp();
+      // In-process relay (gated on STATION_INPROC_RELAY=1). Started after
+      // the dashboard binds so a relay-port collision doesn't prevent
+      // the dashboard from coming up — the relay will surface its own
+      // EADDRINUSE in stderr if 7777 is taken.
+      void maybeStartInprocRelay().catch(e => {
+        process.stderr.write(`[relay] failed to start: ${(e as Error).message}\n`);
+      });
       resolve();
     });
   });
