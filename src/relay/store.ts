@@ -249,6 +249,29 @@ export class EventStore {
     return (this.stCount.get() as { n: number }).n;
   }
 
+  // Stream every event in created_at ASC order. Yields one at a time via
+  // better-sqlite3's iterator so a relay with hundreds of thousands of
+  // events doesn't have to fit in memory during /api/relay/database/export.
+  *iterAll(): Generator<NostrEvent> {
+    const stmt = this.db.prepare(
+      'SELECT id, pubkey, created_at, kind, content, sig, tags_json FROM events ORDER BY created_at ASC',
+    );
+    for (const r of stmt.iterate() as IterableIterator<{
+      id: string; pubkey: string; created_at: number;
+      kind: number; content: string; sig: string; tags_json: string;
+    }>) {
+      yield {
+        id:         r.id,
+        pubkey:     r.pubkey,
+        created_at: r.created_at,
+        kind:       r.kind,
+        content:    r.content,
+        sig:        r.sig,
+        tags:       JSON.parse(r.tags_json) as string[][],
+      };
+    }
+  }
+
   // Empty the relay. The tags table cascades, then VACUUM reclaims pages
   // so the on-disk file shrinks alongside the row count (otherwise sqlite
   // keeps the file at high-water mark and the Relay panel's "wipe" button

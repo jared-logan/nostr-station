@@ -890,6 +890,44 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
+      // ── Relay sqlite DB export ────────────────────────────────────────
+      // Dumps every event in the store as one JSON object per line into
+      // ~/nostr-exports/relay-events-<stamp>.jsonl. Drives Relay panel's
+      // export button (app.js:2069). Streams via EventStore.iterAll() so
+      // a large store doesn't blow up memory; sync write loop is fine
+      // here because better-sqlite3 is sync anyway and the route blocks
+      // until done. Pre-deletion this shelled to `nak req`; the new path
+      // hits the store directly and removes the nak-on-PATH dependency.
+      if (url === '/api/relay/database/export' && method === 'POST') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        try {
+          const exportDir = path.join(os.homedir(), 'nostr-exports');
+          fs.mkdirSync(exportDir, { recursive: true });
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const filePath = path.join(exportDir, `relay-events-${stamp}.jsonl`);
+          const fd = fs.openSync(filePath, 'w');
+          let count = 0;
+          try {
+            for (const ev of inprocRelay.store.iterAll()) {
+              fs.writeSync(fd, JSON.stringify(ev) + '\n');
+              count++;
+            }
+          } finally {
+            fs.closeSync(fd);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, file: filePath, count }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+        }
+        return;
+      }
+
       // ── Relay sqlite DB wipe ──────────────────────────────────────────
       // Empties the relay's event store. Triggered by Relay panel's
       // danger-zone wipe button (app.js:2038). No service restart needed:
