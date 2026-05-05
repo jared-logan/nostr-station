@@ -32,6 +32,7 @@ import {
 // surface goes away when the Chat pane fully switches to /api/ai/chat.
 import { migrateIfNeeded } from './ai-config.js';
 import { gatherStatus } from '../commands/Status.js';
+import { DEFAULT_DB_PATH } from '../relay/store.js';
 import { hexToNpub } from './identity.js';
 // relay-config / services / install were the host-install era's
 // LaunchAgent/systemd/cargo plumbing; all gone now that the relay
@@ -857,6 +858,27 @@ export async function startWebServer(port: number): Promise<void> {
       //   knownRoles — owner npub from identity.json, plus best-effort
       //     watchdog/seed npubs derived from keychain nsec slots so the
       //     whitelist editor can label entries by role.
+      // ── Relay sqlite DB stats ─────────────────────────────────────────
+      // Used by the Relay panel's database section (app.js:1908). Sums the
+      // sqlite main file plus its WAL/SHM sidecars so a relay under active
+      // write load reports honestly. `exists:false` lets the UI show
+      // "empty" instead of "0 B" when nothing's been stored yet.
+      if (url === '/api/relay/database/stats' && method === 'GET') {
+        const dbPath = DEFAULT_DB_PATH;
+        let sizeBytes = 0;
+        let exists = false;
+        for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+          try {
+            const st = fs.statSync(p);
+            sizeBytes += st.size;
+            if (p === dbPath) exists = true;
+          } catch { /* missing sidecar — fine */ }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sizeBytes, exists, path: dbPath }));
+        return;
+      }
+
       if (url === '/api/relay-config' && method === 'GET') {
         const ident = readIdentity();
         const host = process.env.RELAY_HOST || '127.0.0.1';

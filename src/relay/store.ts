@@ -22,7 +22,7 @@ export interface StoreOptions {
   maxEvents?: number;
 }
 
-const DEFAULT_DB_PATH = path.join(os.homedir(), '.nostr-station', 'data', 'relay.db');
+export const DEFAULT_DB_PATH = path.join(os.homedir(), '.nostr-station', 'data', 'relay.db');
 const DEFAULT_MAX_EVENTS = 100_000;
 
 // Replaceable event ranges per NIP-01. Inserting a newer event of the
