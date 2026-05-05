@@ -1040,6 +1040,15 @@ export async function startWebServer(port: number): Promise<void> {
       // the path from location and renders the wizard/panel accordingly.
       // Listed explicitly (not a catch-all) so typos still 404.
       if (method === 'GET' && url === '/setup') {
+        // Already paired — bounce to the dashboard. Without this guard a
+        // refresh on /setup keeps the wizard SPA mounted, which both
+        // confuses the user and offers no working path forward (the
+        // /api/setup/* endpoints all 409 once setupComplete flips true).
+        if (readIdentity().setupComplete === true) {
+          res.writeHead(302, { Location: '/' });
+          res.end();
+          return;
+        }
         const indexPath = path.join(WEB_DIR, 'index.html');
         if (fs.existsSync(indexPath)) {
           res.writeHead(200, {
