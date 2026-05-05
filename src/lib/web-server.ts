@@ -321,6 +321,25 @@ async function proxyChat(
   res.end();
 }
 
+// ── Relay-adjacent helpers ────────────────────────────────────────────────────
+
+// Derive the npub for a keychain-stored nsec, best-effort. Used by
+// /api/relay-config to label whitelist entries by role (the station
+// owner's own npub comes straight from identity.json; watchdog and seed
+// are recoverable only by reading + decoding the keychain entry). Returns
+// null on any failure — the consumer treats null as "role not configured
+// on this station", not "keychain backend broken".
+async function deriveKeychainNpub(slot: 'watchdog-nsec' | 'seed-nsec'): Promise<string | null> {
+  try {
+    const nsec = await getKeychain().retrieve(slot);
+    if (!nsec) return null;
+    const decoded = nip19.decode(nsec);
+    if (decoded.type !== 'nsec') return null;
+    const pubHex = getPublicKey(decoded.data as Uint8Array);
+    return nip19.npubEncode(pubHex);
+  } catch { return null; }
+}
+
 // ── Relay liveness probe ──────────────────────────────────────────────────────
 
 function isRelayUp(): boolean {
@@ -823,6 +842,44 @@ export async function startWebServer(port: number): Promise<void> {
       if (url === '/api/status' && method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(gatherStatus()));
+        return;
+      }
+
+      // ── Relay config (read-only stub) ─────────────────────────────────
+      // The Config panel does a Promise.all over seven endpoints at boot
+      // (app.js:4910). One 404 collapses the entire panel to "failed to
+      // load", so this stub exists to unblock Config UI rendering even
+      // before the real settings store / NIP-42 / whitelist enforcement
+      // land. Fields:
+      //   name/url/dataDir/configPath — describe the in-process relay
+      //   auth/dmAuth — placeholder false; real toggles wire up in 1.7
+      //   whitelist — empty array; populated by 1.6 once the store exists
+      //   knownRoles — owner npub from identity.json, plus best-effort
+      //     watchdog/seed npubs derived from keychain nsec slots so the
+      //     whitelist editor can label entries by role.
+      if (url === '/api/relay-config' && method === 'GET') {
+        const ident = readIdentity();
+        const host = process.env.RELAY_HOST || '127.0.0.1';
+        const port = process.env.RELAY_PORT || '7777';
+        const [watchdogNpub, seedNpub] = await Promise.all([
+          deriveKeychainNpub('watchdog-nsec'),
+          deriveKeychainNpub('seed-nsec'),
+        ]);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          name:       'nostr-station',
+          url:        `ws://${host}:${port}`,
+          auth:       false,
+          dmAuth:     false,
+          whitelist:  [],
+          dataDir:    path.join(os.homedir(), '.nostr-station', 'data'),
+          configPath: 'in-process — no config file',
+          knownRoles: {
+            station:  ident.npub || null,
+            watchdog: watchdogNpub,
+            seed:     seedNpub,
+          },
+        }));
         return;
       }
 
