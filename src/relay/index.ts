@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { verifyEvent } from 'nostr-tools/pure';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { EventStore } from './store.js';
 import { WhitelistStore } from './whitelist-store.js';
 import { eventMatchesAny } from './filter.js';
@@ -20,14 +21,24 @@ import type { NostrEvent, NostrFilter } from './types.js';
 //     ["NOTICE", <message>]
 //     ["CLOSED", <subId>, <message>]
 //
-// Auth (NIP-42) is intentionally NOT implemented in this first cut — the
-// relay only listens on loopback by default, so the threat model is "any
-// process on this machine" which already has stronger access. We can add
-// NIP-42 later as a hardening pass once the dashboard is using the relay.
+// NIP-42 authentication is implemented at the wire-protocol level: every
+// new connection receives ["AUTH", <challenge>] immediately and a client
+// can respond with ["AUTH", <kind-22242 event>] to bind a pubkey to the
+// connection. The actual write-access policy ("only the station owner
+// and whitelisted pubkeys may publish") lives in handleEvent and is
+// enforced via the event's own signed pubkey, not the AUTHed pubkey
+// (signature verification already proves authorship — AUTH is
+// informational here, useful for clients that expect the dance and for
+// the spec-mandated `auth-required:` rejection prefix).
 
 interface Subscription {
   ws:      WebSocket;
   filters: NostrFilter[];
+}
+
+interface ConnAuth {
+  challenge:     string;          // hex string, sent on connect
+  authedPubkey?: string;          // hex; set after a valid kind-22242 reply
 }
 
 export interface RelayOptions {
@@ -123,13 +134,18 @@ export class Relay {
         name:        'nostr-station',
         description: 'Local development relay',
         software:    'nostr-station',
-        supported_nips: [1, 11],
+        supported_nips: [1, 11, 42],
         limitation: {
           max_subscriptions: 100,
           max_filters:       10,
           max_limit:         5000,
           payment_required:  false,
+          // Reads are open. Writes are pubkey-gated (owner + whitelist).
+          // auth_required:false reflects "you can connect and subscribe
+          // without AUTH"; the per-EVENT response carries `auth-required:`
+          // for clients that try to publish without permission.
           auth_required:     false,
+          restricted_writes: true,
         },
       }));
       return;
@@ -139,6 +155,14 @@ export class Relay {
 
   private handleConnection(ws: WebSocket): void {
     const connSubs = new Set<string>();
+
+    // Per NIP-42: send AUTH challenge immediately on connect. 32 bytes hex
+    // is more than enough entropy and matches the entropy we use elsewhere
+    // for session tokens. Challenge is per-connection, so a replay against
+    // a different connection is rejected by mismatched challenge tag.
+    const auth: ConnAuth = { challenge: crypto.randomBytes(32).toString('hex') };
+    (ws as any).__nsAuth = auth;
+    sendJson(ws, ['AUTH', auth.challenge]);
 
     ws.on('message', (data) => {
       let msg: unknown;
@@ -153,6 +177,7 @@ export class Relay {
       if (type === 'EVENT') return this.handleEvent(ws, rest[0]);
       if (type === 'REQ')   return this.handleReq(ws, rest, connSubs);
       if (type === 'CLOSE') return this.handleClose(ws, rest[0], connSubs);
+      if (type === 'AUTH')  return this.handleAuth(ws, rest[0]);
       notice(ws, `unknown message type: ${type}`);
     });
 
@@ -161,6 +186,52 @@ export class Relay {
       connSubs.clear();
     });
     ws.on('error', () => { /* swallow — close handler does cleanup */ });
+  }
+
+  // NIP-42 client AUTH response. The event must:
+  //   - be kind 22242
+  //   - carry a `challenge` tag matching the one we sent on connect
+  //   - carry a `relay` tag matching this relay's URL
+  //   - be signed correctly (verifyEvent)
+  //   - be timestamped within ±10 minutes (clock-skew tolerance, matches
+  //     NIP-98's 60s window scaled up to allow for slow Amber round-trips)
+  // On success the connection's authedPubkey is set; the actual write
+  // policy (in handleEvent) reads event.pubkey from each EVENT instead,
+  // so AUTH state is informational here.
+  private handleAuth(ws: WebSocket, raw: unknown): void {
+    if (!isEvent(raw)) return notice(ws, 'AUTH: not an event object');
+    const auth = (ws as any).__nsAuth as ConnAuth | undefined;
+    if (!auth) return notice(ws, 'AUTH: connection has no challenge');
+
+    if (raw.kind !== 22242) return ok(ws, raw.id, false, 'auth-failed: kind must be 22242');
+
+    let valid = false;
+    try { valid = verifyEvent(raw as any); } catch { valid = false; }
+    if (!valid) return ok(ws, raw.id, false, 'auth-failed: bad signature');
+
+    const challengeTag = raw.tags.find(t => t[0] === 'challenge')?.[1];
+    if (challengeTag !== auth.challenge) {
+      return ok(ws, raw.id, false, 'auth-failed: challenge mismatch');
+    }
+    const relayTag = raw.tags.find(t => t[0] === 'relay')?.[1];
+    const expectedRelay = this.getRelayUrl();
+    if (!relayTag || !sameRelayUrl(relayTag, expectedRelay)) {
+      return ok(ws, raw.id, false, `auth-failed: relay tag must be ${expectedRelay}`);
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(now - raw.created_at) > 600) {
+      return ok(ws, raw.id, false, 'auth-failed: created_at outside ±10min');
+    }
+
+    auth.authedPubkey = raw.pubkey;
+    ok(ws, raw.id, true, '');
+  }
+
+  // Public — used by handleAuth's relay-tag check and exposed so the HTTP
+  // layer can use the same canonical form when constructing /api/relay-config
+  // responses.
+  getRelayUrl(): string {
+    return `ws://${this.host}:${this.port}`;
   }
 
   private handleEvent(ws: WebSocket, raw: unknown): void {
@@ -253,4 +324,14 @@ function notice(ws: WebSocket, text: string): void {
 
 function ok(ws: WebSocket, eventId: string, accepted: boolean, message: string): void {
   sendJson(ws, ['OK', eventId, accepted, message]);
+}
+
+// Compare two relay URLs for equality with mild normalization. NIP-42's
+// `relay` tag is supposed to match the relay URL exactly, but in practice
+// clients normalize trailing slashes / case the host differently. We allow
+// trailing-slash and case-insensitive scheme/host so a well-meaning Amber
+// client doesn't bounce off our spec-strictness.
+function sameRelayUrl(a: string, b: string): boolean {
+  const norm = (s: string) => s.replace(/\/+$/, '').toLowerCase();
+  return norm(a) === norm(b);
 }
