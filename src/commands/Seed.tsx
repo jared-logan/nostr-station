@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { execa } from 'execa';
-import { execSync } from 'child_process';
-import net from 'net';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { P } from '../cli-ui/palette.js';
 import { Select } from '../cli-ui/Select.js';
@@ -15,7 +13,12 @@ interface SeedProps {
   full: boolean;
 }
 
-const RELAY_URL = 'ws://localhost:8080';
+// In-process relay defaults; honors the env vars web-server.ts publishes
+// when the dashboard is already running so a `seed --full` against a
+// non-default port still hits the right relay.
+const RELAY_HOST = process.env.RELAY_HOST || '127.0.0.1';
+const RELAY_PORT = process.env.RELAY_PORT || '7777';
+const RELAY_URL  = `ws://${RELAY_HOST}:${RELAY_PORT}`;
 
 const NOTE_CONTENT = [
   'Testing the local relay — hello nostr!',
@@ -115,40 +118,6 @@ async function ensureSeedIdentity(): Promise<{ nsec: string; npub: string; fresh
   const npub = nip19.npubEncode(getPublicKey(sk));
   await kc.store('seed-nsec', nsec);
   return { nsec, npub, freshlyGenerated: true };
-}
-
-// ── Relay lifecycle helpers ────────────────────────────────────────────────
-
-function serviceCmd(action: 'start' | 'stop'): string {
-  const isMac = process.platform === 'darwin';
-  const label = 'com.nostr-station.relay';
-  if (isMac) return `launchctl ${action} ${label}`;
-  return `systemctl --user ${action} nostr-relay.service`;
-}
-
-async function waitForRelayListening(port = 8080, timeoutMs = 10_000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const up = await new Promise<boolean>(resolve => {
-      const sock = net.createConnection({ host: '127.0.0.1', port }, () => {
-        sock.end();
-        resolve(true);
-      });
-      sock.on('error', () => resolve(false));
-      sock.setTimeout(500, () => { sock.destroy(); resolve(false); });
-    });
-    if (up) return true;
-    await new Promise(r => setTimeout(r, 250));
-  }
-  return false;
-}
-
-async function restartRelay(): Promise<boolean> {
-  try { execSync(serviceCmd('stop'), { stdio: 'pipe', timeout: 5000 }); } catch { /* idempotent */ }
-  await new Promise(r => setTimeout(r, 500));
-  try { execSync(serviceCmd('start'), { stdio: 'pipe', timeout: 5000 }); }
-  catch { return false; }
-  return waitForRelayListening();
 }
 
 export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {

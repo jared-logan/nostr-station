@@ -5,9 +5,6 @@
  *   GET  /api/config         — AI provider + model + context presence
  *   POST /api/chat           — SSE streaming chat (proxies to provider)
  *   GET  /api/status         — gatherStatus() results (shared w/ `status --json`)
- *   GET  /api/relay-config   — relay name/url/auth/dm-auth/whitelist (npubs)
- *   POST /api/relay/:action  — start | stop | restart (launchctl/systemctl)
- *   GET  /api/logs/:service  — SSE live tail of relay or watchdog log
  *
  * Bound to 127.0.0.1 only. No auth — local user is the trust boundary.
  */
@@ -47,7 +44,6 @@ import {
   clearAllSessions, issueChallenge, consumeChallenge, createSession,
   deleteSession, extractBearer, verifyNip98, authStatus,
   isPublicApi, requireSession, expectedDashboardUrl,
-  isContainerMode,
 } from './auth.js';
 import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
@@ -325,22 +321,11 @@ async function proxyChat(
   res.end();
 }
 
-// ── Relay service controls ────────────────────────────────────────────────────
-
-function serviceCmd(action: 'start' | 'stop'): string {
-  const label = 'com.nostr-station.relay';
-  return process.platform === 'darwin'
-    ? `launchctl ${action} ${label}`
-    : `systemctl --user ${action} nostr-relay.service`;
-}
+// ── Relay liveness probe ──────────────────────────────────────────────────────
 
 function isRelayUp(): boolean {
-  // Env-driven so container mode (compose sets RELAY_HOST=relay, RELAY_PORT=8080)
-  // and host mode (env unset → defaults to localhost:8080) share one probe.
-  // Without this, the dashboard's relay state indicator was permanently red
-  // inside the station container — it was probing the wrong host.
-  const host = process.env.RELAY_HOST || 'localhost';
-  const port = Number(process.env.RELAY_PORT || '8080');
+  const host = process.env.RELAY_HOST || '127.0.0.1';
+  const port = Number(process.env.RELAY_PORT || '7777');
   try {
     execSync(`nc -z -w 1 ${host} ${port}`, {
       stdio: 'pipe', timeout: 1500, killSignal: 'SIGKILL',
@@ -354,19 +339,14 @@ function isRelayUp(): boolean {
 // ── Server ────────────────────────────────────────────────────────────────────
 
 // In-process Nostr relay handle. Started by maybeStartInprocRelay() unless
-// (a) we're running inside the station container (STATION_MODE=container)
-// — there a sibling docker-compose relay container is the right thing — or
-// (b) the user explicitly opts out with STATION_INPROC_RELAY=0 (used by
-// the host-install legacy path while it's still around). Kept here so the
-// dashboard's shutdown path can stop it cleanly. We type it loosely (any)
-// to avoid pulling the whole relay module into web-server's import graph
-// at type-resolution time when the relay isn't started.
+// the user explicitly opts out with STATION_INPROC_RELAY=0. Kept here so
+// the dashboard's shutdown path can stop it cleanly. Loosely typed (any) to
+// avoid pulling the whole relay module into web-server's import graph at
+// type-resolution time when the relay isn't started.
 let inprocRelay: { stop: () => Promise<void> } | null = null;
 
 function shouldStartInprocRelay(): boolean {
-  if (isContainerMode()) return false;            // sibling Docker relay handles it
-  if (process.env.STATION_INPROC_RELAY === '0') return false; // explicit opt-out
-  return true;                                    // default for the host-Node deployment
+  return process.env.STATION_INPROC_RELAY !== '0';
 }
 
 // Live verification (Phase 4 of the user-journey spec). Asks the saved
@@ -494,18 +474,15 @@ async function maybeStartInprocRelay(): Promise<void> {
   if (inprocRelay) return;
   // Lazy import — nothing in the rest of web-server.ts references the
   // relay module, so we keep it out of the load graph entirely when the
-  // relay isn't started (legacy Docker path is unaffected).
+  // relay isn't started.
   const { Relay } = await import('../relay/index.js');
   const port = Number(process.env.STATION_INPROC_RELAY_PORT || '7777');
   const r = new Relay({ port, host: '127.0.0.1' });
   await r.start();
   inprocRelay = r;
-  // Override the relay-probe env vars so the dashboard's status panel
-  // (gatherStatus + isRelayUp) finds the in-process relay instead of
-  // looking for a host-OS launchd unit on :8080. We mutate process.env
-  // intentionally — the new defaults must propagate to both the existing
-  // env-var readers in this file and any descendant tooling (e.g. nak
-  // commands that get spawned for log streams).
+  // Publish the relay address via env so gatherStatus + isRelayUp probe
+  // the right port, and any descendant tooling (e.g. nak commands) sees
+  // the same source of truth.
   process.env.RELAY_HOST = '127.0.0.1';
   process.env.RELAY_PORT = String(port);
   process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);

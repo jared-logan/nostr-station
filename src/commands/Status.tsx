@@ -295,11 +295,11 @@ export function gatherStatus(): ServiceStatus[] {
   // timeout (rare, but cheap insurance).
   //
   // RELAY_HOST/PORT are set by the in-process relay at boot (see
-  // web-server.ts maybeStartInprocRelay) so this probe finds it on :7777
-  // by default; falls back to the legacy :8080 if neither var is set
-  // (host-install path with the docker-compose stack down).
-  const probeHost = process.env.RELAY_HOST || 'localhost';
-  const probePort = Number(process.env.RELAY_PORT || '8080');
+  // web-server.ts maybeStartInprocRelay). When this CLI runs before the
+  // dashboard has booted (e.g. `nostr-station status` from a fresh shell)
+  // the env is unset; default to the relay's own defaults.
+  const probeHost = process.env.RELAY_HOST || '127.0.0.1';
+  const probePort = Number(process.env.RELAY_PORT || '7777');
   const relayUp   = cmd(`nc -z -w 1 ${probeHost} ${probePort}`, 1500) !== null;
   // Binary presence goes through findBin (absolute-path walk) so a fresh
   // Linux install where ~/.cargo/bin isn't on the Node PATH still shows
