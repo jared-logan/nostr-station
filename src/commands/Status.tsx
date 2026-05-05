@@ -293,7 +293,14 @@ export function gatherStatus(): ServiceStatus[] {
   // `-w 1` is a second belt-and-suspenders timeout — both BSD and GNU nc
   // respect it. Protects against nc variants that ignore our execSync
   // timeout (rare, but cheap insurance).
-  const relayUp   = cmd('nc -z -w 1 localhost 8080', 1500) !== null;
+  //
+  // RELAY_HOST/PORT are set by the in-process relay at boot (see
+  // web-server.ts maybeStartInprocRelay) so this probe finds it on :7777
+  // by default; falls back to the legacy :8080 if neither var is set
+  // (host-install path with the docker-compose stack down).
+  const probeHost = process.env.RELAY_HOST || 'localhost';
+  const probePort = Number(process.env.RELAY_PORT || '8080');
+  const relayUp   = cmd(`nc -z -w 1 ${probeHost} ${probePort}`, 1500) !== null;
   // Binary presence goes through findBin (absolute-path walk) so a fresh
   // Linux install where ~/.cargo/bin isn't on the Node PATH still shows
   // ✓ for installed tools. Version probes spawn the resolved absolute
@@ -390,7 +397,7 @@ export function gatherStatus(): ServiceStatus[] {
 
   return [
     // Services — daemons or scheduled jobs with a runtime state.
-    { id: 'relay',     label: 'Relay',       value: relayUp ? 'ws://localhost:8080 ✓' : relayBin ? 'installed (down)' : 'not installed', ok: relayUp,      state: relayState,    kind: 'service' },
+    { id: 'relay',     label: 'Relay',       value: relayUp ? `ws://${probeHost}:${probePort} ✓` : relayBin ? 'installed (down)' : 'not installed', ok: relayUp,      state: relayState,    kind: 'service' },
     { id: 'vpn',       label: 'nostr-vpn',   value: nvpnRow.value,                                                                       ok: nvpnRow.ok,   state: nvpnRow.state, kind: 'service' },
     { id: 'watchdog',  label: 'watchdog',    value: watchdogLoaded ? 'scheduled · fires every 5m' : 'not installed',                     ok: watchdogLoaded, state: watchdogState, kind: 'service' },
     // Binaries — CLI tools; installed or not. `ngit` is the lone binary with

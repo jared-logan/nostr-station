@@ -882,7 +882,8 @@ function exportRelayEvents(): Promise<{ ok: boolean; file?: string; error?: stri
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const file  = path.join(dir, `relay-events-${stamp}.jsonl`);
     const out   = fs.createWriteStream(file);
-    const child = spawn('nak', ['req', '--stream', 'ws://localhost:8080'], {
+    const relayUrl = `ws://${process.env.RELAY_HOST || 'localhost'}:${process.env.RELAY_PORT || '8080'}`;
+    const child = spawn('nak', ['req', '--stream', relayUrl], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let closed = false;
@@ -905,24 +906,41 @@ function exportRelayEvents(): Promise<{ ok: boolean; file?: string; error?: stri
 
 // ── Server ────────────────────────────────────────────────────────────────────
 
-// In-process Nostr relay handle. Started by maybeStartInprocRelay() when
-// STATION_INPROC_RELAY=1 is set in the environment, kept here so the
-// dashboard's shutdown path can stop it cleanly. We type it loosely
-// (any) to avoid pulling the whole relay module into web-server's import
-// graph at type-resolution time when the flag is off.
+// In-process Nostr relay handle. Started by maybeStartInprocRelay() unless
+// (a) we're running inside the station container (STATION_MODE=container)
+// — there a sibling docker-compose relay container is the right thing — or
+// (b) the user explicitly opts out with STATION_INPROC_RELAY=0 (used by
+// the host-install legacy path while it's still around). Kept here so the
+// dashboard's shutdown path can stop it cleanly. We type it loosely (any)
+// to avoid pulling the whole relay module into web-server's import graph
+// at type-resolution time when the relay isn't started.
 let inprocRelay: { stop: () => Promise<void> } | null = null;
 
+function shouldStartInprocRelay(): boolean {
+  if (isContainerMode()) return false;            // sibling Docker relay handles it
+  if (process.env.STATION_INPROC_RELAY === '0') return false; // explicit opt-out
+  return true;                                    // default for the host-Node deployment
+}
+
 async function maybeStartInprocRelay(): Promise<void> {
-  if (process.env.STATION_INPROC_RELAY !== '1') return;
+  if (!shouldStartInprocRelay()) return;
   if (inprocRelay) return;
   // Lazy import — nothing in the rest of web-server.ts references the
   // relay module, so we keep it out of the load graph entirely when the
-  // flag is off (the legacy Docker relay path is unaffected).
+  // relay isn't started (legacy Docker path is unaffected).
   const { Relay } = await import('../relay/index.js');
   const port = Number(process.env.STATION_INPROC_RELAY_PORT || '7777');
   const r = new Relay({ port, host: '127.0.0.1' });
   await r.start();
   inprocRelay = r;
+  // Override the relay-probe env vars so the dashboard's status panel
+  // (gatherStatus + isRelayUp) finds the in-process relay instead of
+  // looking for a host-OS launchd unit on :8080. We mutate process.env
+  // intentionally — the new defaults must propagate to both the existing
+  // env-var readers in this file and any descendant tooling (e.g. nak
+  // commands that get spawned for log streams).
+  process.env.RELAY_HOST = '127.0.0.1';
+  process.env.RELAY_PORT = String(port);
   process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);
 }
 

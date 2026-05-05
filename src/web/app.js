@@ -6152,13 +6152,18 @@ AuthScreen = (() => {
 
 const SetupWizard = (() => {
   const root = $('setup-root');
-  // STAGES is mutable so show() can drop the relay + vpn stages in
-  // container mode — both are inapplicable there: the relay is already
-  // running as a sibling container and nostr-vpn isn't supportable
-  // inside an unprivileged container. Decided at show() time after we
-  // fetch /api/auth/status (which carries the containerMode flag).
+  // STAGES is mutable so show() can drop the relay + vpn stages when:
+  //   - container mode: sibling Docker relay is already up; nvpn needs
+  //     kernel-module access we don't grant in the container
+  //   - in-process relay: the relay starts inside the dashboard process
+  //     before the wizard renders, so the install stage is a no-op
+  // Decided at show() time after we fetch /api/auth/status (which now
+  // carries both `containerMode` and `inprocRelay` flags).
   const STAGES_HOST      = ['welcome', 'identity', 'relay', 'ai', 'ngit', 'vpn', 'done'];
   const STAGES_CONTAINER = ['welcome', 'identity', 'ai', 'ngit', 'done'];
+  // Pure-Node host deployment: relay already up, nvpn skipped (same
+  // reasoning as container — no Wireguard kernel module here either).
+  const STAGES_INPROC    = ['welcome', 'identity', 'ai', 'ngit', 'done'];
   let STAGES = STAGES_HOST;
   let stageIdx = 0;
   const state = { npub: '', profile: null };
@@ -6193,11 +6198,15 @@ const SetupWizard = (() => {
         location.href = '/';
         return;
       }
-      // Container-mode wizard skips the relay-install + nvpn-install
-      // stages — both call APIs that 410 in container mode (the relay
-      // is already running, nvpn isn't supportable). Walking users
-      // through them would be a dead end.
-      STAGES = st.containerMode ? STAGES_CONTAINER : STAGES_HOST;
+      // Pick the stage list based on deployment mode:
+      //   - container: sibling Docker relay is up, nvpn unsupportable
+      //   - in-process relay: the dashboard's own Node process is the relay
+      //   - host-install (legacy): full HOST stage list, install relay + nvpn
+      // The relay-install / nvpn-install APIs return 410 in the first two
+      // modes; walking users through those stages would be a dead end.
+      STAGES = st.containerMode ? STAGES_CONTAINER
+             : st.inprocRelay   ? STAGES_INPROC
+             : STAGES_HOST;
     } catch { /* fall through — render wizard anyway with default STAGES */ }
 
     stageIdx = 0;
