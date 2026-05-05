@@ -19,6 +19,39 @@ case "$(uname -s)" in
   *)      echo "Unsupported OS: $(uname -s)"; exit 1 ;;
 esac
 
+# ── 1b. Detect Docker ─────────────────────────────────────────────────────────
+#
+# nostr-station runs as a docker-compose stack. Without docker the
+# launcher (`nostr-station start`) can't bring anything up. Don't fail
+# the install — Node + the launcher binary are still useful, and the
+# user may install Docker afterwards. Just print actionable next-steps
+# so the missing dep is obvious before they hit it from the launcher.
+DOCKER_OK=true
+if ! command -v docker &>/dev/null; then
+  DOCKER_OK=false
+  warn "docker not found on PATH."
+  if [[ "$OS" == "macos" ]]; then
+    echo "  Install OrbStack (recommended for Apple Silicon — fast, low-memory):"
+    echo "    https://orbstack.dev/download"
+    echo "  Or Docker Desktop:"
+    echo "    https://www.docker.com/products/docker-desktop"
+  else
+    echo "  Install via your package manager:"
+    echo "    sudo apt install -y docker.io docker-compose-plugin   # Debian/Ubuntu"
+    echo "    sudo dnf install -y docker docker-compose-plugin      # Fedora"
+    echo "  Or follow the official install guide:"
+    echo "    https://docs.docker.com/engine/install/"
+  fi
+  echo ""
+elif ! docker info &>/dev/null; then
+  DOCKER_OK=false
+  warn "docker is installed but the daemon is not responding."
+  echo "  Start Docker Desktop / OrbStack, then run \`nostr-station\` again."
+  echo ""
+else
+  ok "docker $(docker --version | sed 's/^Docker //; s/,.*//')"
+fi
+
 # ── 2. Source nvm if already installed (handles existing installs) ─────────────
 export NVM_DIR="${HOME}/.nvm"
 # shellcheck disable=SC1091
@@ -60,23 +93,16 @@ log "Installing nostr-station..."
 npm install -g "${NPM_PKG}@latest" --quiet
 ok "nostr-station installed"
 
-# Confirm the binary is reachable — if not, fall back to direct path
+# Confirm the binary is reachable — if not, surface the fix without
+# making the user re-source their shell rc.
 if ! command -v nostr-station &>/dev/null; then
-  # Don't tell the user to `source ~/.bashrc` — nvm's hooks are written
-  # in a way that some users find brittle to re-source mid-session, and
-  # the simpler advice ("open a new terminal") works on every platform
-  # we ship to without extra moving parts. Add the explicit one-liner
-  # for users who don't want to spawn a new shell.
   warn "nostr-station not found on PATH in this shell."
   warn "Open a NEW terminal — your shell rc files will pick up the install automatically."
   echo "  Or run this one-liner in the current shell:"
-  echo "    . ~/.nvm/nvm.sh && nostr-station onboard"
+  echo "    . ~/.nvm/nvm.sh && nostr-station"
   echo ""
   echo "  If you'd rather edit your rc by hand, this PATH entry covers it:"
   echo "    export PATH=\"${NPM_GLOBAL_BIN}:\$PATH\""
-  STATION_CMD="${NPM_GLOBAL_BIN}/nostr-station"
-else
-  STATION_CMD="nostr-station"
 fi
 
 # ── 5b. Lay down compose assets at ~/.nostr-station/compose/ ──────────────────
@@ -109,145 +135,49 @@ else
   warn "Re-run install.sh after the npm install completes if you intend to use the container stack."
 fi
 
-# ── 6. SSH + tmux safety check ────────────────────────────────────────────────
-if [[ -n "${SSH_CLIENT:-}" ]] || [[ -n "${SSH_TTY:-}" ]]; then
-  if [[ -z "${TMUX:-}" ]]; then
-    echo ""
-    warn "Running over SSH. If your connection drops, the install will stop."
-    echo "     For long Rust compiles we recommend running inside tmux:"
-    echo ""
-    if command -v tmux &>/dev/null; then
-      echo "       tmux"
-      echo "       nostr-station onboard"
-      echo ""
-      echo "       # If disconnected, reconnect and run:"
-      echo "       tmux attach"
-    else
-      echo "       # Install tmux first:"
-      if [[ "$OS" == "macos" ]]; then
-        echo "       brew install tmux"
-      else
-        echo "       sudo apt install tmux   (or brew install tmux)"
-      fi
-      echo ""
-      echo "       tmux"
-      echo "       nostr-station onboard"
-      echo ""
-      echo "       # If disconnected, reconnect and run:"
-      echo "       tmux attach"
-    fi
-    echo ""
-    read -r -p "  Press Enter to continue anyway, or Ctrl+C to exit and use tmux. "
-  fi
-fi
-
-# ── 7. Hand off to onboard wizard ─────────────────────────────────────────────
+# ── 6. Final message ──────────────────────────────────────────────────────────
 #
-# The TUI wizard still owns heavy installs (Rust toolchain, nostr-rs-relay,
-# systemd/launchd units). Once it completes successfully it marks
-# identity.setupComplete = true, so subsequent `nostr-station` invocations
-# skip the wizard and go straight to the dashboard.
-#
-# Power users who prefer the terminal can keep running `nostr-station
-# onboard` directly. Everyone else just runs `nostr-station` — it opens
-# the dashboard, or the web setup wizard at /setup if first-run state is
-# still missing.
-if [ -t 0 ]; then
-  log "Launching onboard wizard..."
-  echo ""
-  # Wrap with explicit exit-code capture (set +e) so we can run the
-  # apt-family broken-state diagnostic (A10) on failure. Without this,
-  # onboard's non-zero exit would tip set -euo pipefail's `-e` and
-  # tear down the script before any actionable hint reached the user.
-  set +e
-  # Pass any pre-set env vars through — wizard reads process.env
-  "${STATION_CMD}" onboard
-  ONBOARD_EXIT=$?
-  set -e
-  echo ""
+# The install path is intentionally fast: no Rust compile, no apt
+# install, no host relay binary. The heavy work (image pulls/builds)
+# happens lazily on first `nostr-station start`. The final banner is
+# just "you're done; here's how to launch", with the only branch being
+# whether docker is reachable.
 
-  if [[ $ONBOARD_EXIT -ne 0 ]]; then
-    # A10 — apt-family broken-state hint.
-    #
-    # When onboard's installSystemDeps step runs `apt-get install`
-    # against a host with half-configured packages, apt exits 100 with
-    # a generic "could not configure pre-existing packages" line that
-    # doesn't tell the user *what* to do — and onboard then bubbles
-    # that up as a non-zero exit. dpkg --audit is the actionable
-    # diagnostic: read-only (no sudo), lists exactly which packages
-    # are in trouble. We only fire the hint when apt is the package
-    # manager AND dpkg actually reports broken state, so a generic
-    # onboard failure on Fedora / Arch / macOS still surfaces its
-    # own error untouched.
-    if command -v apt-get &>/dev/null && [[ -n "$(dpkg --audit 2>/dev/null)" ]]; then
-      warn "apt is in an error state — dpkg has broken or half-configured packages."
-      echo "  Clear it before retrying nostr-station:"
-      echo "    sudo dpkg --configure -a"
-      echo ""
-      echo "  Then re-run:"
-      echo "    nostr-station onboard"
-      echo ""
-    fi
-    exit $ONBOARD_EXIT
-  fi
-
-  ok "Setup complete."
-  echo ""
-  echo "  Next time, just run:"
-  echo "    nostr-station                    # opens the dashboard in your browser"
-  echo ""
-  echo "  Or for the terminal UI:"
-  echo "    nostr-station tui                # live events, logs, status"
-  echo "    nostr-station onboard            # re-run this wizard"
-  echo ""
-else
-  # Non-interactive branch (the curl | bash path) — make the success
-  # banner LOUD. nvm's installer alone produces ~50+ lines of bash-rc /
-  # rust-toolchain output before this point, so a quiet "✓ installed"
-  # at the end gets buried in scroll. Two pieces:
-  #   1. A clearly-rendered separator block + ASCII marker so the eye
-  #      catches the success even when reviewing scrollback.
-  #   2. A dropped file at ~/.nostr-station/install-complete.txt that
-  #      the user can `cat` afterwards — the same content as the
-  #      console banner, but durable.
-  COMPLETE_DIR="${HOME}/.nostr-station"
-  COMPLETE_FILE="${COMPLETE_DIR}/install-complete.txt"
-  mkdir -p "${COMPLETE_DIR}"
-  cat > "${COMPLETE_FILE}" <<EOF
+COMPLETE_DIR="${HOME}/.nostr-station"
+COMPLETE_FILE="${COMPLETE_DIR}/install-complete.txt"
+mkdir -p "${COMPLETE_DIR}"
+cat > "${COMPLETE_FILE}" <<EOF
 nostr-station — install complete
 
-The npm package is installed. To finish setup:
+The launcher binary and compose assets are in place at:
+  ${COMPOSE_DIR:-${HOME}/.nostr-station/compose}
 
-  1. Open a NEW terminal (so PATH picks up the npm global bin).
-  2. Run one of:
+To start the stack:
 
-       nostr-station                    # web dashboard + first-run wizard
-       nostr-station onboard            # terminal wizard
+  nostr-station                    # brings up docker compose + opens the dashboard
 
-If 'command not found': nvm hasn't loaded yet in this shell. Either
-open a new terminal, or run the explicit one-liner:
+Other launcher commands:
+  nostr-station start              # same as bare invocation
+  nostr-station stop               # bring stack down (volumes preserved)
+  nostr-station ps                 # show container status
+  nostr-station --help             # full reference
 
-       . ~/.nvm/nvm.sh && nostr-station onboard
-
-If connecting via SSH:
-
-       ssh -t user@host
-       nostr-station onboard
+If you don't have Docker yet, install it first:
+  macOS: https://orbstack.dev/download  or  https://www.docker.com/products/docker-desktop
+  Linux: sudo apt install -y docker.io docker-compose-plugin
 EOF
 
-  echo ""
-  echo "════════════════════════════════════════════════════════════════"
-  echo "  ✓ nostr-station installed"
-  echo "════════════════════════════════════════════════════════════════"
-  echo ""
-  echo "  Open a NEW terminal and run:"
-  echo ""
-  echo "    nostr-station                    # web dashboard + first-run wizard"
-  echo "    nostr-station onboard            # terminal wizard"
-  echo ""
-  echo "  These steps were saved to:"
-  echo "    ${COMPLETE_FILE}"
-  echo ""
-  echo "  View again with:  cat ${COMPLETE_FILE}"
-  echo ""
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo "  ✓ nostr-station installed"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+if [[ "$DOCKER_OK" == "true" ]]; then
+  echo "  Run \`nostr-station\` to bring up the dashboard."
+else
+  echo "  Install Docker (instructions above), then run:"
+  echo "    nostr-station"
 fi
+echo ""
+echo "  Notes saved to ${COMPLETE_FILE}"
+echo ""
