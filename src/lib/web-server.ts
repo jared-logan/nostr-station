@@ -33,6 +33,7 @@ import {
 import { migrateIfNeeded } from './ai-config.js';
 import { gatherStatus } from '../commands/Status.js';
 import { DEFAULT_DB_PATH } from '../relay/store.js';
+import type { Relay } from '../relay/index.js';
 import { hexToNpub } from './identity.js';
 // relay-config / services / install were the host-install era's
 // LaunchAgent/systemd/cargo plumbing; all gone now that the relay
@@ -360,10 +361,11 @@ function isRelayUp(): boolean {
 
 // In-process Nostr relay handle. Started by maybeStartInprocRelay() unless
 // the user explicitly opts out with STATION_INPROC_RELAY=0. Kept here so
-// the dashboard's shutdown path can stop it cleanly. Loosely typed (any) to
-// avoid pulling the whole relay module into web-server's import graph at
-// type-resolution time when the relay isn't started.
-let inprocRelay: { stop: () => Promise<void> } | null = null;
+// the dashboard's shutdown path can stop it cleanly + the Relay panel's
+// control endpoints can mutate its state. `import type` keeps the relay
+// module out of runtime load until maybeStartInprocRelay's dynamic import
+// actually fires (preserving the STATION_INPROC_RELAY=0 fast path).
+let inprocRelay: Relay | null = null;
 
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
@@ -884,6 +886,30 @@ export async function startWebServer(port: number): Promise<void> {
         } catch (e: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, action, error: String(e?.message || e) }));
+        }
+        return;
+      }
+
+      // ── Relay sqlite DB wipe ──────────────────────────────────────────
+      // Empties the relay's event store. Triggered by Relay panel's
+      // danger-zone wipe button (app.js:2038). No service restart needed:
+      // EventStore lives inside the dashboard process, the relay just
+      // keeps serving once the table is empty. VACUUM (in EventStore.wipe)
+      // shrinks the on-disk file so /api/relay/database/stats reports the
+      // expected zero immediately.
+      if (url === '/api/relay/database/wipe' && method === 'POST') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        try {
+          inprocRelay.store.wipe();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
         }
         return;
       }

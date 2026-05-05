@@ -249,6 +249,16 @@ export class EventStore {
     return (this.stCount.get() as { n: number }).n;
   }
 
+  // Empty the relay. The tags table cascades, then VACUUM reclaims pages
+  // so the on-disk file shrinks alongside the row count (otherwise sqlite
+  // keeps the file at high-water mark and the Relay panel's "wipe" button
+  // looks like it did nothing). No service restart needed — the EventStore
+  // sits inside the dashboard process, callers just keep using it.
+  wipe(): void {
+    this.db.exec('DELETE FROM events');
+    this.db.exec('VACUUM');
+  }
+
   close(): void {
     this.db.close();
   }
