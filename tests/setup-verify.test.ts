@@ -97,3 +97,12 @@ test('consumeSetupAmberSession: removes the entry after read', async () => {
   const second = auth.consumeSetupAmberSession(start.ephemeralPubkey);
   assert.equal(second, null, 'second consume returns null');
 });
+
+test.after(() => {
+  // startSetupAmber() kicks off a fire-and-forget BunkerSigner connect
+  // against public Nostr relays, with a 2-minute timeout. On a runner
+  // with internet (GitHub Actions) those WebSockets stay open and hold
+  // the event loop until the timeout fires, turning this 6-test file
+  // into a 6+ minute hang. Aborting the signals closes them at once.
+  auth.cancelAllSetupAmberFlows();
+});

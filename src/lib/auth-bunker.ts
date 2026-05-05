@@ -466,16 +466,26 @@ async function runSetupAmberFlow(
   session:   SetupAmberSession,
   secretKey: Uint8Array,
 ): Promise<void> {
+  // AbortController so callers (notably tests) can cancel an in-flight
+  // BunkerSigner connect without waiting the full CONNECT_TIMEOUT_MS.
+  // Without this, the fire-and-forget background flow holds open
+  // WebSockets to public relays for up to 2 minutes per call, which on
+  // CI runners with internet access turns setup-verify.test.ts into a
+  // 6+ minute hang waiting for the event loop to drain.
+  const abort = new AbortController();
+  activeSetupAmberAborts.add(abort);
+
   let signer: any;
   try {
     signer = await BunkerSigner.fromURI(
-      secretKey, session.nostrconnectUri, {}, CONNECT_TIMEOUT_MS,
+      secretKey, session.nostrconnectUri, {}, abort.signal,
     );
   } catch (e: any) {
     if (session.status === 'waiting') {
-      session.status = 'timeout';
+      session.status = abort.signal.aborted ? 'error' : 'timeout';
       session.error  = e?.message || 'bunker connect failed';
     }
+    activeSetupAmberAborts.delete(abort);
     return;
   }
 
@@ -522,7 +532,21 @@ async function runSetupAmberFlow(
     session.error  = e?.message || 'bunker handshake failed';
   } finally {
     try { await signer.close(); } catch {}
+    activeSetupAmberAborts.delete(abort);
   }
+}
+
+// Module-level registry of in-flight BunkerSigner connects started by
+// startSetupAmber(). Used by cancelAllSetupAmberFlows() for graceful test
+// teardown — tests that hit startSetupAmber() will leave WS connections
+// open to public relays for up to CONNECT_TIMEOUT_MS otherwise.
+const activeSetupAmberAborts = new Set<AbortController>();
+
+export function cancelAllSetupAmberFlows(): void {
+  for (const a of activeSetupAmberAborts) {
+    try { a.abort(); } catch {}
+  }
+  activeSetupAmberAborts.clear();
 }
 
 // ── Generic event signing via saved bunker ──────────────────────────────────
