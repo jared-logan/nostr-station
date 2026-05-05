@@ -40,7 +40,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.station
-    command: ["node", "dist/cli.js"]
+    command: ["node", "dist/cli.js", "serve"]
     environment:
       STATION_MODE: container
       DEV_HOST: 0.0.0.0

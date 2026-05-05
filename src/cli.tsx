@@ -163,11 +163,83 @@ switch (command) {
     }));
     break;
 
-  case '__welcome__':
-    // No-args entry — boots the dashboard and deep-links the browser
-    // to the setup wizard at /setup. If the station is already set up
-    // the wizard short-circuits to the dashboard (handled in 6.2+).
+  case 'serve':
+    // Explicit "run the dashboard process" verb. Used inside the
+    // container by compose's `command:` and by `npm run dev` in
+    // dev checkouts. Same shape as the old bare-invocation behavior:
+    // boot the web server and deep-link to /setup if first-run.
     render(React.createElement(Chat, { port: 3000, path: '/setup' }));
+    break;
+
+  case '__welcome__': {
+    // No-args entry. Two roles for the same binary:
+    //   - inside the container (STATION_MODE=container): act as `serve`
+    //     so `node dist/cli.js` (no args) still boots the dashboard.
+    //     Compose normally invokes `serve` explicitly, but bare invocation
+    //     for ad-hoc `docker exec` should still work.
+    //   - on the host: act as the launcher — ensure docker compose is up,
+    //     wait for the dashboard, open the browser. End users never type
+    //     docker themselves; this is the entire UX.
+    if (process.env.STATION_MODE === 'container') {
+      render(React.createElement(Chat, { port: 3000, path: '/setup' }));
+      break;
+    }
+    void (async () => {
+      const launcher = await import('./lib/launcher.js');
+      process.stderr.write('Bringing up nostr-station…\n');
+      const up = launcher.runComposeCmd('up', ['-d']);
+      if (!up.ok) {
+        process.stderr.write(`\n${up.detail}\n`);
+        process.exit(up.exitCode ?? 1);
+      }
+      process.stderr.write('Waiting for the dashboard to come online… ');
+      const live = await launcher.waitForDashboard(3000);
+      if (!live) {
+        process.stderr.write('\nTimed out waiting for http://127.0.0.1:3000/api/status.\n');
+        process.stderr.write('Try `nostr-station logs` to see what the station is doing.\n');
+        process.exit(1);
+      }
+      process.stderr.write('ready.\n');
+      launcher.tryOpenBrowser('http://127.0.0.1:3000/');
+      process.stderr.write('Dashboard at http://127.0.0.1:3000/  (Ctrl+C does nothing — the stack runs in the background. Use `nostr-station stop` to bring it down.)\n');
+    })();
+    break;
+  }
+
+  case 'start':
+  case 'up':
+    // Same behavior as bare invocation: bring up the compose stack and
+    // open the browser. Explicit verb for users who prefer typing it.
+    void (async () => {
+      const launcher = await import('./lib/launcher.js');
+      process.stderr.write('Bringing up nostr-station…\n');
+      const up = launcher.runComposeCmd('up', ['-d']);
+      if (!up.ok) {
+        process.stderr.write(`\n${up.detail}\n`);
+        process.exit(up.exitCode ?? 1);
+      }
+      process.stderr.write('Waiting for the dashboard… ');
+      const live = await launcher.waitForDashboard(3000);
+      process.stderr.write(live ? 'ready.\n' : 'timed out (continuing anyway).\n');
+      launcher.tryOpenBrowser('http://127.0.0.1:3000/');
+    })();
+    break;
+
+  case 'stop':
+  case 'down':
+    void (async () => {
+      const launcher = await import('./lib/launcher.js');
+      const r = launcher.runComposeCmd('down');
+      process.exit(r.ok ? 0 : (r.exitCode ?? 1));
+    })();
+    break;
+
+  case 'ps':
+    void (async () => {
+      const launcher = await import('./lib/launcher.js');
+      const r = launcher.runComposeCmd('ps');
+      process.exit(r.ok ? 0 : (r.exitCode ?? 1));
+    })();
     break;
 
   case 'logs':
@@ -412,26 +484,33 @@ function printHelp() {
   nostr-station — Nostr-native dev environment
 
   USAGE
-    nostr-station                    Open the web dashboard (or setup wizard on first run)
+    nostr-station                    Bring up the docker-compose stack and open the dashboard
     nostr-station <command> [options]
 
-  COMMANDS
-    onboard              Terminal setup wizard — installs relay, wires up AI + Amber signing
-                         (web alternative: nostr-station → /setup)
-    doctor               Check system health; --fix auto-repairs common problems
+  LAUNCHER (Docker-managed stack)
+    start, up            Bring up the stack and open the browser
+    stop, down           Bring the stack down (volumes preserved)
+    ps                   Show container status (docker compose ps)
+    serve                Run the dashboard process directly (used inside the container)
+
+  CONFIG / STATE
     status               Show relay, mesh, and service state
+    chat                 Web dashboard at localhost:3000 — chat, relay, logs, status, config
+    keychain             Store, rotate, and inspect credentials in the OS keychain
+    ai                   Manage AI providers — add, remove, list, set defaults
+    seed                 Publish test events to your relay  (great for smoke-testing)
+    publish              Publish current repo to GitHub + Nostr (ngit) simultaneously
+    nsite                Publish a static site to Nostr via nsyte
+    editor               Re-link NOSTR_STATION.md for a different AI coding tool
+    completion           Install or print shell tab-completion  (zsh / bash)
+
+  HOST-INSTALL (legacy — being phased out for the container stack)
+    onboard              Terminal setup wizard — installs relay, wires up AI + Amber signing
+    doctor               Check system health; --fix auto-repairs common problems
     update               Fetch and apply the latest versions of all components
     update --wizard      Interactive update with version preview and diff
     relay                Start, stop, restart, configure, and tail logs for the local relay
     tui                  Live dashboard — events, connection map, and logs
-    seed                 Publish test events to your relay  (great for smoke-testing)
-    publish              Publish current repo to GitHub + Nostr (ngit) simultaneously
-    keychain             Store, rotate, and inspect credentials in the OS keychain
-    ai                   Manage AI providers — add, remove, list, set defaults
-    chat                 Web dashboard at localhost:3000 — chat, relay, logs, status, config
-    nsite                Publish a static site to Nostr via nsyte
-    editor               Re-link NOSTR_STATION.md for a different AI coding tool
-    completion           Install or print shell tab-completion  (zsh / bash)
     uninstall            Remove all nostr-station components cleanly
 
   RELAY SUBCOMMANDS
