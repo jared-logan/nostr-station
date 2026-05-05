@@ -34,7 +34,7 @@ import { migrateIfNeeded } from './ai-config.js';
 import { gatherStatus } from '../commands/Status.js';
 import { DEFAULT_DB_PATH } from '../relay/store.js';
 import type { Relay } from '../relay/index.js';
-import { hexToNpub } from './identity.js';
+import { hexToNpub, npubToHex } from './identity.js';
 // relay-config / services / install were the host-install era's
 // LaunchAgent/systemd/cargo plumbing; all gone now that the relay
 // runs in-process. Remaining route handlers below were trimmed
@@ -860,6 +860,72 @@ export async function startWebServer(port: number): Promise<void> {
       //   knownRoles — owner npub from identity.json, plus best-effort
       //     watchdog/seed npubs derived from keychain nsec slots so the
       //     whitelist editor can label entries by role.
+      // ── Relay whitelist add/remove ────────────────────────────────────
+      // Mutates the in-process relay's whitelist, persisted next to
+      // relay.db. The Relay panel posts npub strings (app.js:1980, 2003);
+      // we decode to hex for storage so the relay's handleEvent gating
+      // path (1.6c) compares apples to apples — sigs verify against hex
+      // pubkeys, not bech32. `already`/`absent` short-circuit responses
+      // mirror the original endpoint shape so the panel's toast copy
+      // ("npub already on whitelist") still works.
+      if (url === '/api/relay/whitelist/add' && method === 'POST') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        let body: { npub?: string };
+        try { body = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+          return;
+        }
+        const input = String(body?.npub || '').trim();
+        let hex: string;
+        try {
+          hex = input.startsWith('npub') ? npubToHex(input) : input;
+          if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('not a valid pubkey');
+        } catch (e: any) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || 'invalid pubkey') }));
+          return;
+        }
+        const added = inprocRelay.whitelist.add(hex);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, hex, already: !added }));
+        return;
+      }
+
+      if (url === '/api/relay/whitelist/remove' && method === 'POST') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        let body: { npub?: string };
+        try { body = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+          return;
+        }
+        const input = String(body?.npub || '').trim();
+        let hex: string;
+        try {
+          hex = input.startsWith('npub') ? npubToHex(input) : input;
+          if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('not a valid pubkey');
+        } catch (e: any) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || 'invalid pubkey') }));
+          return;
+        }
+        const removed = inprocRelay.whitelist.remove(hex);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, hex, absent: !removed }));
+        return;
+      }
+
       // ── Relay lifecycle ───────────────────────────────────────────────
       // start/stop/restart the in-process relay from the Relay panel
       // (app.js:1925). Pre-architectural-simplification this drove
@@ -981,13 +1047,19 @@ export async function startWebServer(port: number): Promise<void> {
           deriveKeychainNpub('watchdog-nsec'),
           deriveKeychainNpub('seed-nsec'),
         ]);
+        // Whitelist is presented as npubs because that's what the Relay
+        // panel renders. Storage is hex (matches sig verification); we
+        // bech32-encode on the way out only.
+        const whitelist = inprocRelay
+          ? inprocRelay.whitelist.list().map(hex => hexToNpub(hex))
+          : [];
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           name:       'nostr-station',
           url:        `ws://${host}:${port}`,
           auth:       false,
           dmAuth:     false,
-          whitelist:  [],
+          whitelist,
           dataDir:    path.join(os.homedir(), '.nostr-station', 'data'),
           configPath: 'in-process — no config file',
           knownRoles: {

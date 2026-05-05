@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { verifyEvent } from 'nostr-tools/pure';
 import http from 'node:http';
 import { EventStore } from './store.js';
+import { WhitelistStore } from './whitelist-store.js';
 import { eventMatchesAny } from './filter.js';
 import type { NostrEvent, NostrFilter } from './types.js';
 
@@ -34,6 +35,10 @@ export interface RelayOptions {
   host?:       string;       // defaults to 127.0.0.1
   dbPath?:     string;       // forwarded to EventStore
   maxEvents?:  number;       // forwarded to EventStore
+  // Override the whitelist store path. Used by tests to keep state out
+  // of the user's real ~/.nostr-station; production code uses the
+  // default (next to relay.db).
+  whitelistPath?: string;
   // Externally-provided HTTP server. When supplied, the relay attaches
   // its WebSocket upgrade handler to it and does NOT listen() on its own
   // port. Used for the in-process mode where dashboard and relay share
@@ -46,7 +51,8 @@ const DEFAULT_PORT = 7777;
 const DEFAULT_HOST = '127.0.0.1';
 
 export class Relay {
-  readonly store: EventStore;
+  readonly store:     EventStore;
+  readonly whitelist: WhitelistStore;
   private wss?:   WebSocketServer;
   private http?:  http.Server;
   // subId is per-connection; we key the Map by ws + ':' + subId so we can
@@ -56,9 +62,10 @@ export class Relay {
   private host: string;
 
   constructor(opts: RelayOptions = {}) {
-    this.port = opts.port ?? DEFAULT_PORT;
-    this.host = opts.host ?? DEFAULT_HOST;
-    this.store = new EventStore({ dbPath: opts.dbPath, maxEvents: opts.maxEvents });
+    this.port      = opts.port ?? DEFAULT_PORT;
+    this.host      = opts.host ?? DEFAULT_HOST;
+    this.store     = new EventStore({ dbPath: opts.dbPath, maxEvents: opts.maxEvents });
+    this.whitelist = new WhitelistStore(opts.whitelistPath);
   }
 
   async start(): Promise<{ port: number; host: string }> {
