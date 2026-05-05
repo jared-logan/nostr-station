@@ -97,12 +97,64 @@ test('vpn row: collapses to "not applicable in container mode"', () => {
   assert.match(v.value, /not applicable/);
 });
 
-test('binary rows: marked managed-outside-container', () => {
+test('binary rows: warn when binaries map missing or all null (image-build gap)', () => {
+  // Default `baseInputs` has no `binaries` field — represents the
+  // pre-Phase-2.5 case where nothing is baked into the image. Dashboard
+  // must surface this as actionable warn, not pretend it's fine.
   const rows = gatherStatusContainer({ ...baseInputs });
   for (const id of ['ngit', 'claude', 'nak', 'stacks']) {
     const row = findRow(rows, id);
-    assert.equal(row.state, 'warn', `${id} should be warn`);
-    assert.match(row.value, /managed outside container/, `${id} value mismatch`);
+    assert.equal(row.state, 'warn', `${id} should be warn when binary missing`);
+    assert.match(row.value, /not installed in image/, `${id} value should mention image`);
+    assert.equal(row.ok, false, `${id} ok must be false when missing`);
+  }
+});
+
+test('binary rows: ok with version when --version output is present', () => {
+  // Mirrors the runtime case after Phase 2.5: gatherStatus() shells the
+  // four `<tool> --version` probes and feeds results in. The row's value
+  // is the first line of the version output (claude-code prints multi-line
+  // banners that we don't want cluttering the panel).
+  const rows = gatherStatusContainer({
+    ...baseInputs,
+    binaries: {
+      ngit:   'ngit 2.2.3',
+      claude: '1.0.42 (Claude Code)\nadditional banner line',
+      nak:    'v0.19.7',
+      stacks: 'stacks 2.4.0',
+    },
+  });
+
+  const ngit = findRow(rows, 'ngit');
+  assert.equal(ngit.state, 'ok');
+  assert.equal(ngit.ok,    true);
+  assert.equal(ngit.value, 'ngit 2.2.3');
+
+  const claude = findRow(rows, 'claude');
+  assert.equal(claude.state, 'ok');
+  assert.equal(claude.value, '1.0.42 (Claude Code)');  // first line only
+
+  const nak = findRow(rows, 'nak');
+  assert.equal(nak.state, 'ok');
+  assert.equal(nak.value, 'v0.19.7');
+
+  const stacks = findRow(rows, 'stacks');
+  assert.equal(stacks.state, 'ok');
+  assert.equal(stacks.value, 'stacks 2.4.0');
+});
+
+test('binary rows: empty/whitespace --version output treated as missing', () => {
+  // Pin the contract: a tool that exits 0 but writes nothing useful is
+  // still "missing" from the user's perspective — we'd rather flag than
+  // show a blank green row.
+  const rows = gatherStatusContainer({
+    ...baseInputs,
+    binaries: { ngit: '', claude: '   \n  ', nak: null, stacks: null },
+  });
+  for (const id of ['ngit', 'claude', 'nak', 'stacks']) {
+    const row = findRow(rows, id);
+    assert.equal(row.state, 'warn', `${id} should be warn for empty/null output`);
+    assert.equal(row.ok,    false);
   }
 });
 

@@ -9,6 +9,48 @@
 # scripts/copy-web.mjs). Tests, .git, node_modules from the host, and
 # editor metadata are excluded by .dockerignore — the build context
 # stays small.
+#
+# The runtime image bakes the four user-facing dev tools (ngit, nak,
+# claude-code, stacks) so end users get a working toolchain without
+# separate host installs. Versions for ngit and nak track
+# src/lib/versions.ts; claude-code and stacks track upstream latest,
+# matching the existing host-install path (install.ts:865/875).
+
+# ── ngit build stage ────────────────────────────────────────────────────────
+# ngit ships only as a Rust crate (no upstream prebuilt binaries we trust),
+# so we cargo-install it. Cold builds take ~5 min; the cache mounts drop
+# this to <1 min on rebuilds. No --locked — see install.ts:311 for why
+# (older crates pin rustc-incompatible patch versions like time 0.3.25).
+FROM rust:1-bookworm AS ngit-build
+ARG NGIT_VERSION=2.2.3
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo install ngit --version ${NGIT_VERSION}
+
+# ── nak fetch stage (prebuilt Go binary, SHA256-verified) ──────────────────
+# Mirror of installNak() in src/lib/install.ts — same release URL, same
+# checksums from src/lib/versions.ts BINARY_SHA256.nak. Hard-fail on
+# checksum mismatch; never silently fall back to an unverified copy.
+# TARGETARCH is provided by buildx (amd64 | arm64).
+FROM debian:bookworm-slim AS nak-fetch
+ARG NAK_VERSION=0.19.7
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+RUN set -e; \
+    case "${TARGETARCH}" in \
+      amd64) NAK_SHA256=d98c575e2a070d8aad8630b173a22a425484fe1a1c7b94bf71a46b0e7c2cf591 ;; \
+      arm64) NAK_SHA256=6882b4ebd0adb2e606680a96db0723239475cf6e570e6f3ff3264059b9fc9f03 ;; \
+      *) echo "unsupported arch for nak: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/fiatjaf/nak/releases/download/v${NAK_VERSION}/nak-v${NAK_VERSION}-linux-${TARGETARCH}" \
+      -o /tmp/nak; \
+    echo "${NAK_SHA256}  /tmp/nak" | sha256sum -c -; \
+    chmod 0755 /tmp/nak
 
 # ── Build stage: full deps + tsc ────────────────────────────────────────────
 FROM node:22-bookworm-slim AS build
@@ -40,11 +82,13 @@ RUN npm prune --omit=dev
 # ── Runtime stage ───────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim
 
-# netcat-openbsd is what gatherStatus()'s container branch shells to for
-# the relay reachability probe (`nc -z $RELAY_HOST 8080`). ca-certificates
-# is for HTTPS to AI providers and fallback relays.
+# netcat-openbsd: the relay reachability probe (`nc -z $RELAY_HOST 8080`)
+#   in gatherStatus()'s container branch shells to it.
+# ca-certificates: HTTPS to AI providers, fallback relays, npm registry.
+# git: ngit's `init/clone/log/push` wrappers all shell to git underneath;
+#   without it the dev surface is broken.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates netcat-openbsd \
+    ca-certificates netcat-openbsd git \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -52,11 +96,21 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist         ./dist
 COPY --from=build /app/package.json ./
 
+# Bake the four user-facing dev tools into the runtime image. End users
+# see them as "ok / version X" rows in the dashboard Status panel, and
+# the dashboard's terminal panels can invoke them directly without a
+# separate host install. See gatherStatusContainer in src/commands/Status.tsx.
+COPY --from=ngit-build /usr/local/cargo/bin/ngit /usr/local/bin/ngit
+COPY --from=nak-fetch  /tmp/nak                  /usr/local/bin/nak
+RUN npm install -g --no-audit --no-fund \
+      @anthropic-ai/claude-code \
+      @getstacks/stacks
+
 # Volumes the compose stack mounts. Declaring them here makes ad-hoc
 # `docker run` (without compose) safer too — Docker auto-anonymizes
 # anything bind-less, so trial runs don't accumulate state in image
 # layers.
-VOLUME ["/root/.nostr-station", "/var/lib/nostr-station/keys", "/var/run/nostr-station"]
+VOLUME ["/root/.nostr-station", "/var/lib/nostr-station/keys", "/var/run/nostr-station", "/root/projects"]
 EXPOSE 3000
 
 CMD ["node", "dist/cli.js"]

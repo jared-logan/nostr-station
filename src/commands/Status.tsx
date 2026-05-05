@@ -179,8 +179,47 @@ export interface ContainerStatusInputs {
   now:            number;          // ms epoch — injected for testability
   relayHost:      string;
   relayPort:      number;
+  // Per-tool `--version` output (or null when the binary isn't on PATH /
+  // the probe failed). Injected so tests can pin both the present and
+  // absent cases without spawning real binaries. Populated in gatherStatus()
+  // by shelling `<tool> --version` against the runtime image's PATH.
+  binaries?: {
+    ngit:   string | null;
+    claude: string | null;
+    nak:    string | null;
+    stacks: string | null;
+  };
 }
 const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;
+
+// Compress a multi-line `--version` blob into a single readable line for
+// the status row. Most tools print "<name> <semver> [extra]" on the first
+// line; the rest is build-info noise users don't need in the panel.
+function firstLine(s: string): string {
+  return s.split('\n')[0]?.trim() ?? '';
+}
+
+function binaryRow(
+  id: 'ngit' | 'claude' | 'nak' | 'stacks',
+  label: string,
+  versionOutput: string | null,
+  extras: Partial<ServiceStatus> = {},
+): ServiceStatus {
+  if (versionOutput && versionOutput.trim()) {
+    return {
+      id, label, kind: 'binary',
+      value: firstLine(versionOutput),
+      ok: true, state: 'ok',
+      ...extras,
+    };
+  }
+  return {
+    id, label, kind: 'binary',
+    value: 'not installed in image — rebuild Dockerfile.station',
+    ok: false, state: 'warn',
+    ...extras,
+  };
+}
 
 export function gatherStatusContainer(p: ContainerStatusInputs): ServiceStatus[] {
   const relayUrl = `ws://${p.relayHost}:${p.relayPort}`;
@@ -206,15 +245,17 @@ export function gatherStatusContainer(p: ContainerStatusInputs): ServiceStatus[]
     }
   }
 
+  const bins = p.binaries ?? { ngit: null, claude: null, nak: null, stacks: null };
+
   return [
     { id: 'relay',     label: 'Relay',       value: relayValue,                            ok: p.relayUp,           state: relayState,    kind: 'service' },
     { id: 'vpn',       label: 'nostr-vpn',   value: 'not applicable in container mode',   ok: false,               state: 'warn',        kind: 'service' },
     { id: 'watchdog',  label: 'watchdog',    value: watchdogValue,                         ok: watchdogState === 'ok', state: watchdogState, kind: 'service' },
-    { id: 'ngit',      label: 'ngit',        value: 'managed outside container',           ok: false,               state: 'warn',        kind: 'binary' },
-    { id: 'claude',    label: 'claude-code', value: 'managed outside container',           ok: false,               state: 'warn',        kind: 'binary', plugins: gatherClaudePlugins() },
-    { id: 'nak',       label: 'nak',         value: 'managed outside container',           ok: false,               state: 'warn',        kind: 'binary' },
+    binaryRow('ngit',   'ngit',        bins.ngit),
+    binaryRow('claude', 'claude-code', bins.claude, { plugins: gatherClaudePlugins() }),
+    binaryRow('nak',    'nak',         bins.nak),
     { id: 'relay-bin', label: 'relay bin',   value: 'lives in relay container',            ok: p.relayUp,           state: relayState,    kind: 'binary' },
-    { id: 'stacks',    label: 'Stacks',      value: 'managed outside container',           ok: false,               state: 'warn',        kind: 'binary' },
+    binaryRow('stacks', 'Stacks',      bins.stacks),
   ];
 }
 
@@ -233,9 +274,19 @@ export function gatherStatus(): ServiceStatus[] {
       || '/var/run/nostr-station/watchdog.heartbeat';
     let heartbeatMtime: number | null = null;
     try { heartbeatMtime = fs.statSync(heartbeatPath).mtimeMs; } catch {}
+    // Probe each baked-in dev tool. Dockerfile.station puts them at
+    // /usr/local/bin (cargo binary, sha256-verified prebuilt, npm globals);
+    // null here means the build skipped a stage or someone bind-mounted
+    // over the install — actionable signal for the dashboard, not silence.
+    const binaries = {
+      ngit:   cmd('ngit --version',   1500),
+      claude: cmd('claude --version', 1500),
+      nak:    cmd('nak --version',    1500),
+      stacks: cmd('stacks --version', 1500),
+    };
     return gatherStatusContainer({
       relayUp, heartbeatPath, heartbeatMtime,
-      now: Date.now(), relayHost, relayPort,
+      now: Date.now(), relayHost, relayPort, binaries,
     });
   }
 
