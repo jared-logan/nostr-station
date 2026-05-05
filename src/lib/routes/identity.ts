@@ -23,9 +23,8 @@ import {
   readIdentity, addReadRelay, removeReadRelay,
   setNpub as setIdentityNpub, setNgitRelay as setIdentityNgitRelay,
   setSetupComplete, isNpubOrHex, isNsec,
-  DEFAULT_READ_RELAYS,
+  DEFAULT_READ_RELAYS, hexToNpub, npubToHex,
 } from '../identity.js';
-import { hexToNpub, npubToHex } from '../relay-config.js';
 import { safeHttpUrl } from '../url-safety.js';
 import { readBody } from './_shared.js';
 

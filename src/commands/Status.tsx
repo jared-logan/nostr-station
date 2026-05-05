@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import { P } from '../onboard/components/palette.js';
+import { P } from '../cli-ui/palette.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';

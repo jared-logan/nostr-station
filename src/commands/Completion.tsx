@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import { Select } from '../onboard/components/Select.js';
-import { P } from '../onboard/components/palette.js';
+import { Select } from '../cli-ui/Select.js';
+import { P } from '../cli-ui/palette.js';
 import { generateCompletion, installCompletion } from '../lib/completion.js';
 
 interface CompletionProps {

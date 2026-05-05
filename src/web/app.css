@@ -1,5 +1,5 @@
 /* nostr-station dashboard — dark terminal aesthetic, nostr-purple accent.
-   Matches the ostrich-palette tokens from src/onboard/components/palette.ts
+   Matches the ostrich-palette tokens from src/cli-ui/palette.ts
    so the CLI and web UI read as the same product. */
 
 :root {

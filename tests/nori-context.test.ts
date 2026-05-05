@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 // Pure helper — no HOME isolation needed.
 // @ts-expect-error — runtime import of .ts; tsx handles resolution
-const services = await import('../src/lib/services.ts');
-const { extractUserRegion, USER_REGION_BEGIN, USER_REGION_END } = services;
+const editor = await import('../src/lib/editor.ts');
+const { extractUserRegion, USER_REGION_BEGIN, USER_REGION_END } = editor;
 
 // ── happy path ───────────────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { spawn } from 'child_process';
-import { P } from '../onboard/components/palette.js';
+import { P } from '../cli-ui/palette.js';
 import { startWebServer, contextExists } from '../lib/web-server.js';
 
 interface ChatProps {
