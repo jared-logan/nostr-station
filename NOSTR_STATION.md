@@ -1,17 +1,24 @@
 # nostr-station — Contributor Context
 
-This file is for contributors using Claude Code (or any AI coding tool) to work on **nostr-station itself**. It describes the project so an AI agent can contribute effectively without needing the full conversation history.
+Context file for contributors using Claude Code (or any AI coding tool) to
+work on **nostr-station itself**. Describes the project so an AI agent
+can contribute effectively without needing the full conversation history.
 
-> This is the repo-root contributor file. It is separate from the `NOSTR_STATION.md` generated on the *user's* machine during install (which lives in `~/projects/`).
+> This is the repo-root contributor file. It is separate from the
+> `NOSTR_STATION.md` written to the *user's* projects directory at first
+> run (which lives at `~/nostr-station/projects/NOSTR_STATION.md`).
 
 ## What nostr-station is
 
-A single npm package (`nostr-station`) that sets up a complete Nostr dev environment in one invocation: local private relay, mesh VPN (nostr-vpn), Nostr-native git (ngit + Amber signing), any combination of AI coding tools (terminal-native + API), and optional extras (nsyte, Stacks/MKStack, Blossom).
+A single npm package that runs a complete Nostr dev environment in **one
+Node process**: an in-process Nostr relay (NIP-01 over WebSocket, NIP-11
+over HTTP, `better-sqlite3`-backed event store) and an HTTP dashboard
+with chat, projects, terminal, and a first-run setup wizard.
 
-Two equivalent entry paths, both reaching the same configured end-state:
-
-- **Web setup wizard** — `nostr-station` with no arguments boots the dashboard server and deep-links the browser to `/setup`. The default path; expected to be most users' first experience.
-- **Ink TUI wizard** — `nostr-station onboard` runs a five-phase terminal wizard (Detect → Config → Install → Services → Verify). Equivalent end-state; preferred for SSH, CI, headless, or copy-pastable logs.
+One curl command installs Node + the npm package + auto-launches.
+Browser opens at `http://localhost:3000/setup`. First run pairs Amber
+via NIP-46 nostrconnect (one QR), runs a live signing-pipeline
+verification (sign + publish + read-back), then drops to the dashboard.
 
 **npm:** `npm install -g nostr-station`
 **GitHub:** github.com/jared-logan/nostr-station
@@ -22,143 +29,230 @@ Two equivalent entry paths, both reaching the same configured end-state:
 |-------|-----------|
 | Language | TypeScript strict mode, ES2022, ESM-only |
 | Runtime | Node.js ≥ 22 |
-| Terminal UI | React + [Ink](https://github.com/vadimdemedes/ink) for the onboard wizard, tui, and CLI commands |
-| Web UI | Plain HTML + vanilla JS (no framework), xterm.js for the terminal panel, served by `src/lib/web-server.ts` |
-| PTY | [node-pty](https://github.com/microsoft/node-pty) as an `optionalDependency`, with our own `node-pty-prebuilts` release pipeline (linux-x64, darwin-arm64) since upstream ships no prebuilts |
-| Shell calls | `execa` + `execFileSync` with fixed argv arrays only — no `/bin/sh -c` string concatenation anywhere |
-| Nostr | `nostr-tools` for key ops + NIP-19 + NIP-46 + NIP-98; `nak` CLI for event publish/query where it shortens code |
-| Package | npm, published as `nostr-station` |
-| Bootstrap | `install.sh` bash script — installs Node via nvm, then `npm install -g nostr-station` |
+| Relay | Pure-JS, in-process. `ws` + `better-sqlite3` (npm prebuilds) |
+| Terminal UI | React + [Ink](https://github.com/vadimdemedes/ink) for CLI commands (Add, Editor, Keychain, etc.) |
+| Web UI | Plain HTML + vanilla JS (no framework), xterm.js for terminal panel, served by `src/lib/web-server.ts` |
+| PTY | [node-pty](https://github.com/microsoft/node-pty) as `optionalDependency` |
+| Shell calls | `execa` + `execFile` with fixed argv only — no `/bin/sh -c` string concat |
+| Nostr | `nostr-tools` for keys + NIP-19 + NIP-46 + signature verification |
+| Bootstrap | `install.sh` — installs Node via nvm, then `npm install -g nostr-station`, then `exec nostr-station` |
+
+No Docker, no Rust toolchain, no Apple Developer cert, no LaunchAgent /
+systemd. Optional tools (ngit, nak, stacks, nsyte) are user-installed
+post-onboard via `nostr-station add <tool>`.
 
 ## File structure
 
 ```
 src/
-  cli.tsx                     Entry point — parses argv, dispatches to command components.
-                              Bare invocation (process.argv.length === 2) routes to the
-                              web __welcome__ path (Chat component with path: '/setup').
-  commands/                   One React/Ink component per top-level command.
-    Ai.tsx                    `ai list|add|remove|default <terminal|chat>` subcommands
-    Chat.tsx                  Boots web-server.ts; serves dashboard + /setup wizard
+  cli.tsx                     Entry — parses argv, dispatches to command
+                              components. Bare invocation renders <Chat>
+                              (boots web-server.ts + opens browser at /setup).
+  cli-ui/                     Reusable Ink components (palette, Select,
+                              Prompt, Step) — used by every CLI command.
+  commands/                   One Ink component per top-level command.
+    Add.tsx                   `nostr-station add <tool>` + `list`
+    Ai.tsx                    `ai list|add|remove|default <terminal|chat>`
+    Chat.tsx                  Boots web-server.ts; serves dashboard + /setup
     Completion.tsx            zsh/bash tab-completion install
-    Doctor.tsx                Health checks + --fix auto-repair; --plain for SSE/CI
-    Editor.tsx                Relink NOSTR_STATION.md symlink to different AI tool
+    Editor.tsx                Relink NOSTR_STATION.md symlink to AI tool
     Keychain.tsx              list / get / set / delete / rotate / migrate
-    Logs.tsx                  Log tailing (relay / watchdog / vpn / all)
     Nsite.tsx                 init / publish / deploy / status / open
     Publish.tsx               Fan out to git push + ngit push
-    Relay.tsx                 start / stop / restart / status
-    RelayConfig.tsx           relay config + relay whitelist subcommands
     Seed.tsx                  Seed relay with stable-identity dummy events
-    Status.tsx                System status summary; gatherStatus() + formatStatusJson
-    Tui.tsx                   Ink live dashboard (events, logs, mesh)
-    Uninstall.tsx             Clean removal; clears all keychain slots
-    Update.tsx                Non-interactive update
-    UpdateWizard.tsx          Interactive update with version preview
+    Status.tsx                System status + gatherStatus + formatStatusJson
+  relay/                      In-process Nostr relay (~550 LoC).
+    types.ts                  NostrEvent + NostrFilter
+    filter.ts                 NIP-01 filter matcher (live fan-out)
+    store.ts                  better-sqlite3 event store; replaceable +
+                              parameterized-replaceable handling, indexed
+                              tag table, maxEvents eviction
+    index.ts                  WebSocket server (EVENT/REQ/CLOSE/EOSE/OK/
+                              NOTICE/CLOSED) + NIP-11 metadata over HTTP
   lib/
-    ai-providers.ts           Static provider registry (14 providers, terminal-native + api)
-    ai-config.ts              ~/.nostr-station/ai-config.json reader/writer + legacy migration
-    ai-context.ts             Builds NOSTR_STATION.md as system prompt for the Chat pane
-    auth.ts                   Session tokens, localhost opt-out, requireAuth parsing
-    auth-bunker.ts            NIP-46 sign-in flow + silentBunkerSign() re-auth
-    bunker-storage.ts         Persisted bunker client at ~/.nostr-station/bunker-client.json
+    ai-providers.ts           Static provider registry (~14 providers)
+    ai-config.ts              ~/.nostr-station/ai-config.json + legacy migration
+    ai-context.ts             Build NOSTR_STATION.md as system prompt for
+                              Chat pane; per-project overlay support
+    auth.ts                   Session tokens, localhost opt-out, requireAuth
+    auth-bunker.ts            NIP-46 sign-in: post-setup auth (existing) +
+                              setup pairing (startSetupAmber) +
+                              signEventWithSavedBunker generic helper
+    bunker-storage.ts         Persisted bunker client at ~/.nostr-station/
+                              bunker-client.json (mode 0600)
     completion.ts             zsh + bash tab-completion script generators
-    detect.ts                 Platform / OS / arch / pkg-mgr / installed-tool detection
+    detect.ts                 Platform / OS / arch / hasBin / findBin
+    editor.ts                 EDITOR_FILENAMES + symlinkEditorFile +
+                              extractUserRegion (USER_REGION markers)
     git.ts                    Git helpers — remote resolve, argv-clean clone
-    identity.ts               ~/.config/nostr-station/identity.json read/write + seed
-    install.ts                installCargoBin, installClaudeCode, installStacks, installNvpn
-    keychain.ts               OS keychain abstraction (macOS Security / GNOME secret-tool /
-                              AES-256-GCM file); 5 s timeout wrapper on all backend ops
+    identity.ts               ~/.config/nostr-station/identity.json read/write;
+                              hexToNpub / npubToHex helpers
+    keychain.ts               OS keychain abstraction (macOS Security /
+                              GNOME secret-tool / AES-256-GCM file)
+    pid-file.ts               ~/.config/nostr-station/chat.pid lifecycle
     project-scaffold.ts       New Local Project + MKStack scaffold pipeline
-    projects.ts               Registered-project CRUD + capability detection; /api/projects
-    relay-config.ts           TOML read/write for nostr-rs-relay config; whitelist helpers;
-                              argv-safe npubToHex via nip19.decode (no nak dep)
-    services.ts               Config file templates, service-unit writers, NOSTR_STATION.md builder
-    terminal.ts               node-pty session registry, PTY spawn helpers, capability probe
+    projects.ts               Project CRUD + capability detection
+    sync.ts                   Project git-state, sync, snapshot helpers
+    terminal.ts               node-pty session registry, PTY spawn helpers
+    tools.ts                  Optional-tool registry for `nostr-station add`
     tty.ts                    requireInteractive gate for TTY-only commands
-    verify.ts                 Onboard Phase 5 checks + doctor probes
-    version.ts                Re-exports package.json version — single source of truth
-    versions.ts               Pinned upstream versions for Rust components
-    web-server.ts             HTTP + WS server; /setup wizard; /api/* endpoints; SSE streaming
-  onboard/
-    index.tsx                 Wizard orchestrator — Detect → Config → Install → Services → Verify
-    components/               Banner, LaunchPicker, palette, Prompt, Select, Step, Summary
-    phases/
-      Detect.tsx              Phase 1 — OS/arch/pkg-mgr/installed-tool detection
-      Config.tsx              Phase 2 — collects user config interactively
-      Install.tsx             Phase 3 — compiles + installs all components
-      Services.tsx            Phase 4 — writes configs, registers services, seeds keychain
-      Verify.tsx              Phase 5 — checks everything is running
+    url-safety.ts             safeHttpUrl — strict scheme + host validation
+    version.ts                Re-exports package.json version
+    web-server.ts             HTTP server + WS relay-startup hook;
+                              /setup wizard endpoints; /api/* router;
+                              SSE streaming; mounts in-process relay
+                              alongside the dashboard.
+    routes/
+      _shared.ts              readBody + streamExec helpers
+      ai.ts                   /api/ai/* (providers, config, chat, models)
+      identity.ts             /api/identity/* (config, set, relays, profile)
+      ngit.ts                 /api/ngit/* (discover, clone, account)
+      projects.ts             /api/projects/* (CRUD, git-state, sync, snapshot)
+      terminal.ts             /api/terminal/* + WS upgrade
   web/
-    index.html                Dashboard shell — panels, sidebar, identity drawer
-    app.js                    All panel logic (vanilla JS, no framework)
+    index.html                Dashboard shell — panels, sidebar, identity
+    app.js                    All panel logic (vanilla JS, ~7k LoC)
     app.css                   Dashboard styling
     terminal.js               xterm.js + WS client for the terminal panel
     nori.svg                  Logo
+tests/                        node:test via tsx (~2k LoC, ~160 tests)
 ```
 
 ## Key design decisions
 
-**nsec never on this machine.** All signing via Amber NIP-46 (`ngit push`, `nsite publish`). The watchdog keypair and the stable seed keypair are the only nsecs stored locally, and both live in the OS keychain — never written to disk in plaintext.
+**One Node process, no Docker.** The relay (`src/relay/`) runs inside
+the dashboard's process via `maybeStartInprocRelay()` in
+`web-server.ts`. Lifecycle is one PID file at
+`~/.config/nostr-station/chat.pid`. `nostr-station stop` reads the PID
+and SIGTERMs — the same handler runs on Ctrl+C. Distribution is the npm
+package; install is `curl … | bash → npm install -g → exec`.
 
-**Private relay by default.** NIP-42 auth enabled; whitelist-only; not listed on relay directories.
+**nsec never on this machine.** All user-owned signing routes through
+Amber via NIP-46. The setup wizard captures the user's npub via
+`signer.getPublicKey()` during the connect handshake (no event signed
+during pairing — single phone tap), then the verify stage signs a
+kind-1 test event (second tap), publishes, reads back. Future
+publish/deploy flows use `signEventWithSavedBunker(template)` from
+`auth-bunker.ts` — same primitive.
 
-**AI provider agnostic — multi-provider registry.** Two surfaces:
+**Optional tools are post-onboard.** Wizard never asks about ngit /
+nak / nsyte / stacks. Users install via `nostr-station add <tool>`.
+Registry at `src/lib/tools.ts` is data: `id`, `binary`, `detect` argv,
+`prereqs`, `installSteps[{ kind, display, argv }]`. Adding a new tool
+is a one-record diff. Step kinds: `cargo-install`, `npm-global`,
+`shell-script`, `manual` (no automated path — surfaces install URL).
 
-- **Terminal-native** (Claude Code, OpenCode) — spawned as PTY tabs via `terminal.ts`; each tool owns its own auth.
-- **API** (Anthropic, OpenAI, OpenRouter, OpenCode Zen, Groq, Mistral, Gemini, Routstr, PayPerQ, Ollama, LM Studio, Maple) — proxied via `/api/ai/chat` with keys in per-provider keychain slots `ai:<provider-id>`.
+**AI provider agnostic.** Two surfaces:
+- **Terminal-native** (Claude Code, OpenCode) — spawned as PTY tabs;
+  each owns its own auth.
+- **API** (Anthropic, OpenAI, OpenRouter, OpenCode Zen, Groq, Mistral,
+  Gemini, Routstr, PayPerQ, Ollama, LM Studio, Maple) — proxied via
+  `/api/ai/chat` with keys in per-provider keychain slots
+  `ai:<provider-id>`.
 
-Separate defaults for `terminal` (the "Open in AI" project-card button) and `chat` (the Chat pane) — a user can pair e.g. Claude Code for coding with Ollama for chat. `ai-providers.ts` is the static registry; `ai-config.ts` reads `~/.nostr-station/ai-config.json` for which providers the user has configured and any overrides. **Do not add providers ad-hoc in consuming code** — register in `ai-providers.ts` and consumers pick them up for free.
+Separate defaults for `terminal` and `chat`. Register new providers in
+`ai-providers.ts` only — consumers (Config panel, Chat pane, `ai` CLI,
+`/api/ai/providers`) enumerate the registry at runtime.
 
-**Stacks/MKStack is integrated.** The Projects panel scaffolds new Nostr React apps via `stacks mkstack <slug>` (see `project-scaffold.ts`), surfaces Open-in-Dork / Run-dev-server / Deploy buttons on stacks projects, and the Config panel exposes a "Stacks AI (Dork)" section that reads (sanitized — provider ids only, never keys) from `~/Library/Preferences/stacks/config.json`. `ensureStacksRelays()` widens Stacks's relay list on install and on every mkstack scaffold. (Historical note: earlier versions of this file said "do not add Dork references" — that constraint no longer applies.)
+**Owner authentication for the dashboard.** NIP-98 challenge/response;
+every `/api/*` endpoint requires a session token issued only to the
+npub in `identity.json`. 8 h session tokens in `localStorage` so they
+survive browser restart. `silentBunkerSign()` re-auths via the persisted
+bunker client so users don't rescan a QR on every refresh. Localhost
+opt-out: `"requireAuth": false` in `identity.json` exempts `127.0.0.1`
+/ `::1` with a persistent banner.
 
-**Owner authentication for the dashboard.** NIP-98 challenge/response: every `/api/*` endpoint requires a session token issued only to the npub in `identity.json`. Server signs a 32-byte challenge (60 s TTL, single-use), verifies the kind-27235 response, issues an 8 h session token returned via `Authorization: Bearer <token>`. Tokens live in `localStorage` so sessions survive browser restart. `silentBunkerSign()` re-auths via a persisted bunker client at `~/.nostr-station/bunker-client.json` (mode 0600) so users don't face a QR rescan on every refresh. Localhost opt-out: `"requireAuth": false` in `identity.json` skips auth for `127.0.0.1` / `::1` with a persistent dashboard banner.
+**Terminal panel as the exec surface.** Long-running actions render in
+live terminal tabs via `terminal.ts` + `/api/terminal/*`, not modal
+dialogs. Copy-pastable, inspectable.
 
-**Terminal panel as the exec surface.** Long-running dashboard actions (doctor, update, relay seed, relay logs, Open-in-Claude-Code, publish, ngit push, nsite deploy) render in live terminal tabs via `terminal.ts` + `/api/terminal/*` endpoints, not modal dialogs. Copy-pastable, inspectable, paste-a-trace-into-issue friendly.
+**execa / execFile for all shell calls.** Fixed argv arrays only. No
+string concatenation into `/bin/sh -c`. The `tools.ts` install runner
+is the canonical pattern: `spawn(argv[0], argv.slice(1), { stdio:
+['ignore', 'pipe', 'pipe'] })`, stream lines to the caller.
 
-**execa / execFileSync for all shell calls.** No string concatenation passed to `/bin/sh -c`. Every credential-touching or user-input path uses fixed argv arrays. The `npub`/`hex` helpers in `web-server.ts` specifically invoke `nak` via `execFileSync` with regex-validated inputs — not a live vuln either way, but the standard for the codebase.
-
-**Nak on PATH is not assumed.** Where a hot path needs to decode npubs or hex (watchdog script, onboard Services phase, relay-config whitelist), the code prefers `nostr-tools` `nip19.decode` directly rather than shelling out to `nak`. `nak` is a convenience wrapper when it shortens code, never a hard dependency in critical paths — users frequently land in fresh shells where `~/.cargo/bin` isn't on PATH.
+**Pure-JS over native binaries.** The relay is `better-sqlite3` (which
+ships its own npm prebuilds — that's our only native dep, and npm
+handles platform matching). No Rust, no Go, no signing pipeline.
 
 ## How to run locally
 
 ```bash
 npm install
-npm run build
+npm run dev                          # tsx watch — bare invocation,
+                                     #   dashboard at :3000, relay at :7777
 
-# Terminal wizard (Ink TUI)
-node dist/cli.js onboard
-node dist/cli.js onboard --demo          # throwaway keypair, no prompts (CI/screenshots)
-
-# Web wizard / dashboard (default on bare invocation)
-node dist/cli.js                          # → http://localhost:3000/setup or /
-node dist/cli.js chat                     # same, explicit
-
-# Individual commands
-node dist/cli.js doctor
-node dist/cli.js seed --full
-node dist/cli.js ai list
-node dist/cli.js status --json
+# Or after `npm run build`:
+node dist/cli.js                     # bare invocation
+node dist/cli.js status              # individual commands
+node dist/cli.js add                 # list optional tools
+node dist/cli.js stop                # SIGTERM via PID file
 ```
 
-Or without building (tsx watch):
+Web assets (`src/web/*`) are copied to `dist/web/` by
+`scripts/copy-web.mjs` during build; `tsx` in dev serves them directly
+from `src/web/`.
+
+## Tests
 
 ```bash
-npm run dev -- onboard
-npm run dev                               # bare → web wizard/dashboard
+npm test             # node:test via tsx, ~3s, ~160 tests
+npx tsc --noEmit     # type-check
 ```
 
-Web assets (`src/web/*`) are copied into `dist/web/` by `scripts/copy-web.mjs` during build; `tsx` in dev serves them directly from `src/web/`.
+Test files live in `tests/`. Each test file that touches HOME-rooted
+state (config, keychain, identity, relay db) imports `_home.ts`'s
+`useTempHome()` BEFORE its module-under-test imports — that pins HOME
+to a tmpdir before any module-load constants are computed.
+
+## Clean-install testing
+
+Any change touching `install.sh` or first-run flow should be tested in
+a fresh VM, not on a developer machine. Multipass or OrbStack VMs both
+work and reset in ~30 seconds:
+
+```bash
+multipass launch --name ns-test
+multipass shell ns-test
+# inside VM: curl -fsSL https://.../install.sh | bash
+multipass delete ns-test --purge
+
+# or:
+orb create ubuntu ns-test
+orb shell ns-test
+orb delete ns-test
+```
 
 ## Current version
 
-v0.0.6-0 (pre-release tag; 0.0.6 is in progress — see `[Unreleased]` at the top of `CHANGELOG.md`). The version string is sourced from `package.json` via `src/lib/version.ts`; `cli --version` and the onboard Banner both derive from there so they never drift.
+v0.0.6-0 (pre-release tag; 0.0.6 is in progress). Version string is
+sourced from `package.json` via `src/lib/version.ts`; `cli --version`
+derives from there.
 
 ## What must never be broken in contributions
 
-1. **nsec never stored in plaintext on disk.** Watchdog nsec, seed nsec, and any future locally-stored nsec go through `src/lib/keychain.ts`. Amber signing for anything user-owned.
-2. **All shell calls use argv arrays** (`execa` / `execFileSync`). No string concatenation into `/bin/sh -c`. Credential-touching paths especially.
-3. **AI providers register in `ai-providers.ts`, nowhere else.** Consumers (Config panel, Chat pane, `ai` CLI, `/api/ai/providers`) enumerate the registry at runtime.
-4. **Dashboard auth stays on by default.** The `requireAuth: false` opt-out is explicit + localhost-scoped + banner-visible for a reason. Don't add silent bypasses.
-5. **Keychain abstraction covers all three backends** (macOS Security, GNOME secret-tool, AES-256-GCM file). All backend ops are wrapped in a 5 s timeout — fresh Linux installs with a locked GNOME keyring hang indefinitely without it.
-6. **Every `execa('nak', …)` passes `stdin: 'ignore'`.** nak blocks forever on EOF without it. (See `project_nak_stdin_hang` memory.)
+1. **nsec never stored in plaintext on disk.** All user-owned signing
+   routes through Amber via NIP-46. Local nsecs (watchdog, seed) live
+   in the OS keychain via `src/lib/keychain.ts`.
+2. **All shell calls use argv arrays** (`execa` / `execFile`). No string
+   concatenation into `/bin/sh -c`. The `tools.ts` install runner is
+   the reference pattern.
+3. **AI providers register in `ai-providers.ts`, nowhere else.**
+   Consumers enumerate the registry at runtime.
+4. **Dashboard auth stays on by default.** `requireAuth: false` is
+   explicit, localhost-scoped, banner-visible. Don't add silent
+   bypasses.
+5. **Keychain abstraction covers all three backends** (macOS Security,
+   GNOME secret-tool, AES-256-GCM file). All backend ops wrapped in a
+   5 s timeout — fresh Linux with a locked GNOME keyring hangs
+   indefinitely without it.
+6. **The relay stays minimal.** `src/relay/` implements NIP-01 + NIP-11
+   for a single-user local dev relay. Don't add NIP-42 / NIP-50 /
+   metrics / clustering / multi-tenant features without an explicit
+   discussion — production-grade relays are not what this is for.
+7. **Optional tools stay in `nostr-station add`.** Wizard never asks
+   about ngit / nak / nsyte / stacks. Auto-installing them on a fresh
+   machine is exactly what the simplification deleted.
+8. **`install.sh` stays one curl command.** No `sudo`, no `apt-get`,
+   no Docker, no Rust prereq checks. Inner loop: install Node via nvm
+   if missing → npm install -g → exec.
