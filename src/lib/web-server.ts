@@ -49,6 +49,7 @@ import {
   clearAllSessions, issueChallenge, consumeChallenge, createSession,
   deleteSession, extractBearer, verifyNip98, authStatus,
   isPublicApi, requireSession, expectedDashboardUrl,
+  isContainerMode,
 } from './auth.js';
 import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
@@ -334,7 +335,18 @@ function serviceCmd(action: 'start' | 'stop'): string {
 }
 
 function isRelayUp(): boolean {
-  try { execSync('nc -z localhost 8080', { stdio: 'pipe' }); return true; }
+  // Env-driven so container mode (compose sets RELAY_HOST=relay, RELAY_PORT=8080)
+  // and host mode (env unset → defaults to localhost:8080) share one probe.
+  // Without this, the dashboard's relay state indicator was permanently red
+  // inside the station container — it was probing the wrong host.
+  const host = process.env.RELAY_HOST || 'localhost';
+  const port = Number(process.env.RELAY_PORT || '8080');
+  try {
+    execSync(`nc -z -w 1 ${host} ${port}`, {
+      stdio: 'pipe', timeout: 1500, killSignal: 'SIGKILL',
+    });
+    return true;
+  }
   catch { return false; }
 }
 
@@ -342,6 +354,24 @@ async function relayAction(
   action: 'start' | 'stop' | 'restart',
   res: http.ServerResponse,
 ): Promise<void> {
+  // Container mode: the relay is a sibling container managed by docker
+  // compose. The station container has no docker socket (and shouldn't —
+  // see invariant 9), so we can't drive lifecycle from here. Surface a
+  // clear "run on host" message instead of leaking the launchctl/systemctl
+  // command-not-found error the existing code path produced.
+  if (isContainerMode()) {
+    const hostCmd = action === 'start' ? 'nostr-station start'
+      : action === 'stop'              ? 'nostr-station stop'
+      : 'docker compose -f ~/.nostr-station/compose/docker-compose.yml restart relay';
+    res.writeHead(501, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: false,
+      error: `Relay lifecycle is managed by docker compose. Run \`${hostCmd}\` on the host.`,
+      hostCmd,
+      containerMode: true,
+    }));
+    return;
+  }
   res.writeHead(200, { 'Content-Type': 'application/json' });
   try {
     if (action === 'restart') {
@@ -495,7 +525,104 @@ function probeNvpn(): { installed: boolean; running: boolean; logPath: string } 
   }
 }
 
+// Pure container-mode mapper — exported for tests. Mirrors the shape used
+// by the host-mode branch below so callers (streamLogs SSE) consume one
+// type. Keeping I/O outside this function lets tests pin every branch
+// without spawning launchctl/systemctl/nc.
+const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;
+
+export interface ContainerHealthInputs {
+  service:        LogService;
+  relayUp:        boolean;
+  heartbeatMtime: number | null;
+  now:            number;
+  logPath:        string;
+  logExists:      boolean;
+  logMtimeMs:     number | null;
+}
+
+export function serviceHealthForContainer(p: ContainerHealthInputs): ServiceHealth {
+  let installed: boolean;
+  let running:   boolean;
+
+  switch (p.service) {
+    case 'relay':
+      // The relay container is part of the compose stack — "installed" is
+      // unconditionally true. "Running" tracks whether the port answers,
+      // matching what Status.tsx and verify.ts already do for the same row.
+      installed = true;
+      running   = p.relayUp;
+      break;
+    case 'watchdog':
+      // Watchdog is a long-running container in compose mode (no
+      // launchd/systemd timer). Heartbeat freshness is the only signal —
+      // same threshold the Status panel uses, kept identical so the two
+      // surfaces never disagree.
+      installed = true;
+      running   = p.heartbeatMtime !== null
+        && (p.now - p.heartbeatMtime) <= HEARTBEAT_FRESH_MS;
+      break;
+    case 'vpn':
+    default:
+      // nostr-vpn isn't supportable inside an unprivileged container —
+      // this matches the Status panel's "not applicable in container mode"
+      // row. PR B will hide the vpn tab entirely from the Logs panel.
+      installed = false;
+      running   = false;
+      break;
+  }
+
+  const threshold = STALE_MS[p.service];
+  const stale = threshold !== undefined
+    && running && p.logExists && p.logMtimeMs !== null
+    && (p.now - p.logMtimeMs) > threshold;
+
+  return {
+    service:    p.service,
+    installed, running,
+    logPath:    p.logPath,
+    logExists:  p.logExists,
+    logMtimeMs: p.logMtimeMs,
+    stale,
+  };
+}
+
 function probeServiceHealth(service: LogService): ServiceHealth {
+  if (isContainerMode()) {
+    // Container-mode log paths default to a shared volume location; PR B
+    // wires the actual writers (relay's TOML log_path, watchdog stdout
+    // tee) to write there. For now the file may not exist — streamLogs
+    // already handles `logExists: false` cleanly with a banner and a
+    // heartbeat-only SSE stream.
+    const logDir = process.env.STATION_LOG_DIR || '/var/log/nostr-station';
+    const logPath = service === 'relay'    ? path.join(logDir, 'relay.log')
+                  : service === 'watchdog' ? path.join(logDir, 'watchdog.log')
+                  :                          path.join(logDir, 'nvpn.log');
+
+    let logMtimeMs: number | null = null;
+    let logExists = false;
+    try {
+      const st = fs.statSync(logPath);
+      logExists = true;
+      logMtimeMs = st.mtimeMs;
+    } catch { /* file missing — handled below */ }
+
+    let heartbeatMtime: number | null = null;
+    if (service === 'watchdog') {
+      const hbPath = process.env.WATCHDOG_HEARTBEAT
+        || '/var/run/nostr-station/watchdog.heartbeat';
+      try { heartbeatMtime = fs.statSync(hbPath).mtimeMs; } catch {}
+    }
+
+    return serviceHealthForContainer({
+      service,
+      relayUp: service === 'relay' ? isRelayUp() : false,
+      heartbeatMtime,
+      now: Date.now(),
+      logPath, logExists, logMtimeMs,
+    });
+  }
+
   let logPath = {
     relay:    path.join(os.homedir(), 'logs', 'nostr-rs-relay.log'),
     watchdog: path.join(os.homedir(), 'logs', 'watchdog.log'),
@@ -1128,16 +1255,24 @@ export async function startWebServer(port: number): Promise<void> {
         const errors: string[] = [];
         if (typeof parsed.auth === 'boolean')   if (!setAuthFlag('nip42_auth', parsed.auth)) errors.push('could not write nip42_auth');
         if (typeof parsed.dmAuth === 'boolean') if (!setAuthFlag('nip42_dms',  parsed.dmAuth)) errors.push('could not write nip42_dms');
+        // Apply changes with a restart on host. In container mode the
+        // station has no docker socket so we can't restart the sibling
+        // relay container — surface a `restartHint` instead and let the
+        // dashboard show "changes saved · restart relay on host to apply".
+        let restartHint: string | undefined;
         if (errors.length === 0) {
-          // Apply changes with a restart — same pattern as CLI.
-          try {
-            execSync(serviceCmd('stop'), { stdio: 'pipe' });
-            await wait(400);
-            execSync(serviceCmd('start'), { stdio: 'pipe' });
-          } catch {}
+          if (isContainerMode()) {
+            restartHint = 'docker compose -f ~/.nostr-station/compose/docker-compose.yml restart relay';
+          } else {
+            try {
+              execSync(serviceCmd('stop'), { stdio: 'pipe' });
+              await wait(400);
+              execSync(serviceCmd('start'), { stdio: 'pipe' });
+            } catch {}
+          }
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: errors.length === 0, errors }));
+        res.end(JSON.stringify({ ok: errors.length === 0, errors, restartHint }));
         return;
       }
 
@@ -1171,9 +1306,18 @@ export async function startWebServer(port: number): Promise<void> {
         }
         const r = addToWhitelist(npub);
         // Apply via restart so the new whitelist entry takes effect.
-        if (r.ok && !r.already) { try { execSync(serviceCmd('stop'), { stdio: 'pipe' }); await wait(400); execSync(serviceCmd('start'), { stdio: 'pipe' }); } catch {} }
+        // Container mode: skip — station has no docker socket. Caller
+        // gets `restartHint` and shows "run on host to apply".
+        let restartHint: string | undefined;
+        if (r.ok && !r.already) {
+          if (isContainerMode()) {
+            restartHint = 'docker compose -f ~/.nostr-station/compose/docker-compose.yml restart relay';
+          } else {
+            try { execSync(serviceCmd('stop'), { stdio: 'pipe' }); await wait(400); execSync(serviceCmd('start'), { stdio: 'pipe' }); } catch {}
+          }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(r));
+        res.end(JSON.stringify({ ...r, restartHint }));
         return;
       }
 
@@ -1188,9 +1332,16 @@ export async function startWebServer(port: number): Promise<void> {
           return;
         }
         const r = removeFromWhitelist(npub);
-        if (r.ok) { try { execSync(serviceCmd('stop'), { stdio: 'pipe' }); await wait(400); execSync(serviceCmd('start'), { stdio: 'pipe' }); } catch {} }
+        let restartHint: string | undefined;
+        if (r.ok) {
+          if (isContainerMode()) {
+            restartHint = 'docker compose -f ~/.nostr-station/compose/docker-compose.yml restart relay';
+          } else {
+            try { execSync(serviceCmd('stop'), { stdio: 'pipe' }); await wait(400); execSync(serviceCmd('start'), { stdio: 'pipe' }); } catch {}
+          }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(r));
+        res.end(JSON.stringify({ ...r, restartHint }));
         return;
       }
 
@@ -1249,6 +1400,22 @@ export async function startWebServer(port: number): Promise<void> {
       // installed; the wizard leaves compile/download to `nostr-station
       // onboard` because that step can run 10+ minutes and needs a TTY.
       if (url === '/api/setup/relay/install' && method === 'POST') {
+        // Container mode: the relay is already running as a sibling
+        // container, brought up by docker compose at install time. The
+        // host-OS bootstrap path (writes launchd/systemd units, runs
+        // enable --now) doesn't apply here. The wizard's STAGES list
+        // already skips this stage in container mode (see app.js
+        // STAGES_CONTAINER); this 410 is defense-in-depth for any
+        // direct-curl callers.
+        if (isContainerMode()) {
+          res.writeHead(410, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'Relay install does not apply in container mode — the relay container is brought up by docker compose at install time.',
+            containerMode: true,
+          }));
+          return;
+        }
         const ident = readIdentity();
         if (!ident.npub) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1299,6 +1466,19 @@ export async function startWebServer(port: number): Promise<void> {
       // surfaces in the final "done" event with the nvpn-install.log path so
       // the user can rerun `sudo <cargoBin>/nvpn service install` manually.
       if (url === '/api/setup/nvpn/install' && method === 'POST') {
+        // Container mode: nostr-vpn isn't supportable inside an
+        // unprivileged container — needs WireGuard kernel module + raw
+        // socket access we don't grant. Wizard skips this stage; 410 is
+        // defense-in-depth for any direct caller.
+        if (isContainerMode()) {
+          res.writeHead(410, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'nostr-vpn is not supportable in container mode (WireGuard requires kernel-module access).',
+            containerMode: true,
+          }));
+          return;
+        }
         res.writeHead(200, {
           'Content-Type':      'application/x-ndjson',
           'Cache-Control':     'no-cache',
