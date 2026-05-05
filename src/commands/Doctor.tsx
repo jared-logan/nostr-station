@@ -165,6 +165,29 @@ export const Doctor: React.FC<DoctorProps> = ({ fix, deep }) => {
 };
 
 function getFix(label: string): string | undefined {
+  // Container mode: every actionable fix has to run on the host (docker
+  // compose isn't reachable from inside the unprivileged station container).
+  // We still emit the strings so the dashboard's Quick-Fixes section tells
+  // users exactly what to type — auto-`--fix` will fail to exec these, but
+  // displaying them is the high-value path.
+  if (process.env.STATION_MODE === 'container') {
+    if (label.startsWith('Relay (')) return 'nostr-station start  # on host';
+    if (label === 'Watchdog heartbeat') return 'nostr-station start  # on host';
+    if (label === 'Relay NIP-11 response') {
+      return 'docker compose -f ~/.nostr-station/compose/docker-compose.yml restart relay  # on host';
+    }
+    // Binaries are baked into the station image — the fix is a rebuild.
+    if (
+      label === 'ngit binary' ||
+      label === 'claude-code binary' ||
+      label === 'nak binary' ||
+      label === 'stacks binary'
+    ) {
+      return 'docker compose -f ~/.nostr-station/compose/docker-compose.yml build station  # on host';
+    }
+    return undefined;
+  }
+
   // For `nostr-vpn daemon` we surface the start command rather than
   // `sudo nvpn service install`: on a fresh box the wizard already ran
   // service install, so the unit is on disk — the common cause of a failing

@@ -1,4 +1,5 @@
 import { execSync } from 'child_process';
+import fs from 'fs';
 import { hasBin } from './detect.js';
 
 export interface CheckResult {
@@ -7,9 +8,17 @@ export interface CheckResult {
   detail?: string;
 }
 
-function cmd(c: string): boolean {
-  try { execSync(c, { stdio: 'pipe', timeout: 2000, killSignal: 'SIGKILL' }); return true; }
+function cmd(c: string, timeoutMs = 2000): boolean {
+  try { execSync(c, { stdio: 'pipe', timeout: timeoutMs, killSignal: 'SIGKILL' }); return true; }
   catch { return false; }
+}
+
+function cmdOut(c: string, timeoutMs = 2000): string | null {
+  try {
+    return execSync(c, {
+      stdio: 'pipe', timeout: timeoutMs, killSignal: 'SIGKILL',
+    }).toString().trim();
+  } catch { return null; }
 }
 
 // Is the nvpn daemon running? Distinct from "is the mesh tunnel connected"
@@ -35,7 +44,80 @@ function isNvpnDaemonActive(): boolean {
   }
 }
 
+// Inputs for the pure container-mode check function. Tests inject these
+// directly so we don't spawn anything; gathering happens in the I/O wrapper
+// (runChecks below). Mirrors the shape of ContainerStatusInputs in Status.tsx
+// so the two surfaces stay aligned.
+export interface ContainerCheckInputs {
+  relayUp:        boolean;
+  nip11Ok:        boolean;
+  heartbeatMtime: number | null;  // ms epoch, null if file missing
+  now:            number;          // ms epoch, injected for testability
+  relayHost:      string;
+  relayPort:      number;
+  binaries: {
+    ngit:   string | null;
+    claude: string | null;
+    nak:    string | null;
+    stacks: string | null;
+  };
+}
+
+const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;
+
+// Pure function — no I/O, fully testable. The host-mode runChecks() does
+// its own probes inline (mirrors what was there before container-mode was
+// introduced); container mode goes through this so we can pin every branch
+// in tests without spawning anything.
+export function runChecksContainer(p: ContainerCheckInputs): CheckResult[] {
+  const watchdogOk = p.heartbeatMtime !== null
+    && (p.now - p.heartbeatMtime) <= HEARTBEAT_FRESH_MS;
+
+  const present = (s: string | null) => !!s && s.trim().length > 0;
+
+  return [
+    { label: `Relay (${p.relayHost}:${p.relayPort})`, ok: p.relayUp },
+    { label: 'Watchdog heartbeat',                    ok: watchdogOk },
+    { label: 'ngit binary',                           ok: present(p.binaries.ngit) },
+    { label: 'claude-code binary',                    ok: present(p.binaries.claude) },
+    { label: 'nak binary',                            ok: present(p.binaries.nak) },
+    { label: 'stacks binary',                         ok: present(p.binaries.stacks) },
+    { label: 'Relay NIP-11 response',                 ok: p.nip11Ok },
+  ];
+}
+
 export function runChecks(): CheckResult[] {
+  // Container mode: the relay binary lives in a sibling container and nvpn
+  // isn't supportable inside an unprivileged container, so the host-OS
+  // probes below would produce false failures. Mirror what gatherStatus()
+  // does in Status.tsx — env-driven probes against the compose-managed
+  // services and `<tool> --version` for the dev tools baked into the image.
+  if (process.env.STATION_MODE === 'container') {
+    const relayHost = process.env.RELAY_HOST || 'localhost';
+    const relayPort = Number(process.env.RELAY_PORT || '8080');
+    const heartbeatPath = process.env.WATCHDOG_HEARTBEAT
+      || '/var/run/nostr-station/watchdog.heartbeat';
+    let heartbeatMtime: number | null = null;
+    try { heartbeatMtime = fs.statSync(heartbeatPath).mtimeMs; } catch {}
+
+    return runChecksContainer({
+      relayUp: cmd(`nc -z -w 1 ${relayHost} ${relayPort}`, 1500),
+      nip11Ok: cmd(
+        `curl -sf -H 'Accept: application/nostr+json' http://${relayHost}:${relayPort} | grep -q supported_nips`,
+        2000,
+      ),
+      heartbeatMtime,
+      now: Date.now(),
+      relayHost, relayPort,
+      binaries: {
+        ngit:   cmdOut('ngit --version',   1500),
+        claude: cmdOut('claude --version', 1500),
+        nak:    cmdOut('nak --version',    1500),
+        stacks: cmdOut('stacks --version', 1500),
+      },
+    });
+  }
+
   // Binary presence goes through hasBin (absolute-path walk) rather than
   // `command -v`, which relies on the Node process's PATH. On fresh Linux
   // installs, ~/.cargo/bin isn't on that PATH yet — `command -v ngit`
