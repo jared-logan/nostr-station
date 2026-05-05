@@ -183,6 +183,12 @@ export function gatherStatusContainer(p: ContainerStatusInputs): ServiceStatus[]
 
   return [
     { id: 'relay',     label: 'Relay',       value: relayValue,                            ok: p.relayUp,           state: relayState,    kind: 'service' },
+    // vpn / watchdog: long-term first-class services. Install + management
+    // backends are mid-migration after the architectural-simplification merge,
+    // so the rows surface as 'pending' rather than err — the user sees that
+    // they're tracked and on the roadmap, not broken.
+    { id: 'vpn',       label: 'nostr-vpn',   value: 'installer wiring pending',            ok: false,               state: 'warn',        kind: 'service' },
+    { id: 'watchdog',  label: 'watchdog',    value: 'installer wiring pending',            ok: false,               state: 'warn',        kind: 'service' },
     binaryRow('ngit',   'ngit',        bins.ngit),
     binaryRow('claude', 'claude-code', bins.claude, { plugins: gatherClaudePlugins() }),
     binaryRow('nak',    'nak',         bins.nak),
@@ -268,6 +274,12 @@ export function gatherStatus(): ServiceStatus[] {
   return [
     // Services — daemons or scheduled jobs with a runtime state.
     { id: 'relay',     label: 'Relay',       value: relayUp ? `ws://${probeHost}:${probePort} ✓` : 'not running',                       ok: relayUp,      state: relayState,    kind: 'service' },
+    // vpn / watchdog: long-term first-class services. Install + management
+    // backends are mid-migration after the architectural-simplification merge,
+    // so the rows surface as 'pending' rather than err — the user sees that
+    // they're tracked and on the roadmap, not broken.
+    { id: 'vpn',       label: 'nostr-vpn',   value: 'installer wiring pending',                                                          ok: false,        state: 'warn',        kind: 'service' },
+    { id: 'watchdog',  label: 'watchdog',    value: 'installer wiring pending',                                                          ok: false,        state: 'warn',        kind: 'service' },
     // Binaries — CLI tools; installed or not. `ngit` is the lone binary with
     // a warn state (installed but no default relay set — configure in Config).
     { id: 'ngit',      label: 'ngit',        value: ngitBin && ngitRelay ? `relay: ${ngitRelay.replace(/^wss?:\/\//, '')}` : ngitBin ? 'not configured' : 'not installed', ok: ngitBin && !!ngitRelay, state: ngitState,    kind: 'binary' },
