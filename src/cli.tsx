@@ -50,7 +50,7 @@ function deprecate(cmd: string, alt: string): void {
 switch (command) {
 
   case 'onboard':
-    deprecate('onboard', 'Run `nostr-station` to bring up the container stack — first-run setup runs in the browser at /setup.');
+    deprecate('onboard', 'Run `nostr-station` — first-run setup is now the browser wizard at /setup.');
     // --demo is the explicit non-interactive path — takes no prompts and
     // produces deterministic output for screenshots / CI. Gating it behind
     // the TTY check broke e2e-linux (stdin is /dev/null in GH Actions).
@@ -129,7 +129,7 @@ switch (command) {
     break;
 
   case 'doctor':
-    deprecate('doctor', 'Use `nostr-station ps` to check container health.');
+    deprecate('doctor', 'Use `nostr-station status` to check service state.');
     // --plain bypasses Ink entirely — emits one-line-per-check text so
     // non-TTY consumers (web dashboard SSE modal, CI jobs) get readable
     // output instead of Ink's screen-redraw frames.
@@ -158,7 +158,7 @@ switch (command) {
     break;
 
   case 'update':
-    deprecate('update', 'For the container stack: `nostr-station stop && docker compose -f ~/.nostr-station/compose/docker-compose.yml pull && nostr-station start`.');
+    deprecate('update', 'Run `npm install -g nostr-station@latest` to update.');
     if (flag('--wizard')) {
       requireInteractive('update --wizard', 'Use `nostr-station update --yes` for non-interactive updates.');
       render(React.createElement(UpdateWizard, null));
@@ -184,76 +184,64 @@ switch (command) {
     render(React.createElement(Chat, { port: 3000, path: '/setup' }));
     break;
 
-  case '__welcome__': {
-    // No-args entry. Two roles for the same binary:
-    //   - inside the container (STATION_MODE=container): act as `serve`
-    //     so `node dist/cli.js` (no args) still boots the dashboard.
-    //     Compose normally invokes `serve` explicitly, but bare invocation
-    //     for ad-hoc `docker exec` should still work.
-    //   - on the host: act as the launcher — ensure docker compose is up,
-    //     wait for the dashboard, open the browser. End users never type
-    //     docker themselves; this is the entire UX.
-    if (process.env.STATION_MODE === 'container') {
-      render(React.createElement(Chat, { port: 3000, path: '/setup' }));
-      break;
-    }
+  case '__welcome__':
+  case 'start':
+  case 'up': {
+    // Bare invocation + the explicit `start`/`up` verbs all do the same
+    // thing in the host-Node deployment: boot the dashboard process
+    // (which now includes the in-process Nostr relay — see
+    // src/relay/) and open the browser at /setup. Foreground; Ctrl+C
+    // brings the whole stack down cleanly.
+    //
+    // Container mode (STATION_MODE=container): same Chat component, but
+    // the relay is the sibling docker-compose container. The Chat's
+    // startWebServer call short-circuits the in-process relay via
+    // shouldStartInprocRelay() so we don't double-bind the port.
+    //
+    // The legacy `docker compose up -d` launcher path was removed in
+    // favor of the in-process relay. If you want to run the docker
+    // stack for development, use `docker compose up` directly from a
+    // checkout — that's a developer concern, not a user-facing path.
+    render(React.createElement(Chat, { port: 3000, path: '/setup' }));
+    break;
+  }
+
+  case 'stop':
+  case 'down': {
+    // Read the dashboard PID file written by startWebServer and SIGTERM
+    // the recorded process. SIGTERM hits the same `onSignal` handler in
+    // web-server.ts that runs on Ctrl+C, so the in-process relay is
+    // closed and the PID file is unlinked as part of normal shutdown.
     void (async () => {
-      const launcher = await import('./lib/launcher.js');
-      process.stderr.write('Bringing up nostr-station…\n');
-      const up = launcher.runComposeCmd('up', ['-d']);
-      if (!up.ok) {
-        process.stderr.write(`\n${up.detail}\n`);
-        process.exit(up.exitCode ?? 1);
+      const { probePidFile } = await import('./lib/pid-file.js');
+      const status = probePidFile();
+      if (status.state === 'absent' || status.state === 'stale') {
+        process.stderr.write('nostr-station is not running.\n');
+        process.exit(0);
       }
-      process.stderr.write('Waiting for the dashboard to come online… ');
-      const live = await launcher.waitForDashboard(3000);
-      if (!live) {
-        process.stderr.write('\nTimed out waiting for http://127.0.0.1:3000/api/status.\n');
-        process.stderr.write('Try `nostr-station logs` to see what the station is doing.\n');
+      if (status.state === 'unreadable' || status.state === 'unknown') {
+        process.stderr.write(`couldn't read pid file: ${status.state === 'unreadable' ? status.error : status.error ?? 'permission denied'}\n`);
         process.exit(1);
       }
-      process.stderr.write('ready.\n');
-      launcher.tryOpenBrowser('http://127.0.0.1:3000/');
-      process.stderr.write('Dashboard at http://127.0.0.1:3000/  (Ctrl+C does nothing — the stack runs in the background. Use `nostr-station stop` to bring it down.)\n');
+      try {
+        process.kill(status.pid, 'SIGTERM');
+        process.stderr.write(`stopped (pid ${status.pid}).\n`);
+        process.exit(0);
+      } catch (e: any) {
+        process.stderr.write(`stop failed: ${e?.message ?? e}\n`);
+        process.exit(1);
+      }
     })();
     break;
   }
 
-  case 'start':
-  case 'up':
-    // Same behavior as bare invocation: bring up the compose stack and
-    // open the browser. Explicit verb for users who prefer typing it.
-    void (async () => {
-      const launcher = await import('./lib/launcher.js');
-      process.stderr.write('Bringing up nostr-station…\n');
-      const up = launcher.runComposeCmd('up', ['-d']);
-      if (!up.ok) {
-        process.stderr.write(`\n${up.detail}\n`);
-        process.exit(up.exitCode ?? 1);
-      }
-      process.stderr.write('Waiting for the dashboard… ');
-      const live = await launcher.waitForDashboard(3000);
-      process.stderr.write(live ? 'ready.\n' : 'timed out (continuing anyway).\n');
-      launcher.tryOpenBrowser('http://127.0.0.1:3000/');
-    })();
-    break;
-
-  case 'stop':
-  case 'down':
-    void (async () => {
-      const launcher = await import('./lib/launcher.js');
-      const r = launcher.runComposeCmd('down');
-      process.exit(r.ok ? 0 : (r.exitCode ?? 1));
-    })();
-    break;
-
-  case 'ps':
-    void (async () => {
-      const launcher = await import('./lib/launcher.js');
-      const r = launcher.runComposeCmd('ps');
-      process.exit(r.ok ? 0 : (r.exitCode ?? 1));
-    })();
-    break;
+  case 'ps': {
+    // Used to be `docker compose ps`. With the in-process model there
+    // are no containers to list — point users at `status` (the proper
+    // service-state command) instead of pretending compose is involved.
+    process.stderr.write('`ps` is no longer used — run `nostr-station status` to see service state.\n');
+    process.exit(0);
+  }
 
   case 'logs':
     // Deprecated alias for `relay logs` — kept one release cycle.
@@ -300,7 +288,7 @@ switch (command) {
       // group it here because in the container world the user wants the
       // dashboard view (`nostr-station ps` or http://127.0.0.1:3000).
       if (relayAction === 'start' || relayAction === 'stop' || relayAction === 'restart') {
-        deprecate(`relay ${relayAction}`, 'Use `nostr-station start/stop` — the relay runs as a container.');
+        deprecate(`relay ${relayAction}`, 'Use `nostr-station start/stop` — the relay runs in-process with the dashboard.');
       }
       render(React.createElement(Relay, {
         action: relayAction as 'start' | 'stop' | 'restart' | 'status',
@@ -397,7 +385,7 @@ switch (command) {
   }
 
   case 'uninstall':
-    deprecate('uninstall', 'To wipe the container stack: `cd ~/.nostr-station/compose && docker compose down -v`.');
+    deprecate('uninstall', 'Run `npm uninstall -g nostr-station` and `rm -rf ~/.nostr-station ~/.config/nostr-station` to wipe the install.');
     // --yes skips the confirmation Select; otherwise the picker needs a TTY.
     if (!flag('--yes')) {
       requireInteractive('uninstall', 'Pass --yes to skip the confirmation.');
@@ -507,14 +495,13 @@ function printHelp() {
   nostr-station — Nostr-native dev environment
 
   USAGE
-    nostr-station                    Bring up the docker-compose stack and open the dashboard
+    nostr-station                    Boot the dashboard + relay and open the browser
     nostr-station <command> [options]
 
-  LAUNCHER (Docker-managed stack)
-    start, up            Bring up the stack and open the browser
-    stop, down           Bring the stack down (volumes preserved)
-    ps                   Show container status (docker compose ps)
-    serve                Run the dashboard process directly (used inside the container)
+  LAUNCHER
+    start, up            Same as bare invocation — boot the dashboard + relay
+    stop, down           Stop the running dashboard (sends SIGTERM via PID file)
+    serve                Run the dashboard process in foreground (alias for bare)
 
   CONFIG / STATE
     status               Show relay, mesh, and service state

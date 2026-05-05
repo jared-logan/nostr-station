@@ -9,12 +9,7 @@
   "files": [
     "dist",
     "install.sh",
-    "README.md",
-    "docker-compose.yml",
-    "Dockerfile.relay",
-    "Dockerfile.station",
-    "docker/",
-    ".dockerignore"
+    "README.md"
   ],
   "scripts": {
     "build": "tsc && node scripts/copy-web.mjs",
