@@ -37,9 +37,20 @@ const [,, command = bareInvocation ? '__welcome__' : 'help', ...args] = process.
 const flag = (f: string) => args.includes(f);
 const arg  = (f: string) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
 
+// One-line stderr warning for commands that target the legacy host-install
+// path. The commands still work — this is a nudge, not a block — but the
+// supported deployment is `nostr-station` (Docker launcher) and these
+// surfaces will be deleted in a future cleanup pass once the container
+// deployment has been battle-tested. Pointing at the alternative every
+// time the command is invoked keeps the migration friction visible.
+function deprecate(cmd: string, alt: string): void {
+  process.stderr.write(`[1;33m⚠[0m \`nostr-station ${cmd}\` targets the legacy host-install path. ${alt}\n`);
+}
+
 switch (command) {
 
   case 'onboard':
+    deprecate('onboard', 'Run `nostr-station` to bring up the container stack — first-run setup runs in the browser at /setup.');
     // --demo is the explicit non-interactive path — takes no prompts and
     // produces deterministic output for screenshots / CI. Gating it behind
     // the TTY check broke e2e-linux (stdin is /dev/null in GH Actions).
@@ -118,6 +129,7 @@ switch (command) {
     break;
 
   case 'doctor':
+    deprecate('doctor', 'Use `nostr-station ps` to check container health.');
     // --plain bypasses Ink entirely — emits one-line-per-check text so
     // non-TTY consumers (web dashboard SSE modal, CI jobs) get readable
     // output instead of Ink's screen-redraw frames.
@@ -146,6 +158,7 @@ switch (command) {
     break;
 
   case 'update':
+    deprecate('update', 'For the container stack: `nostr-station stop && docker compose -f ~/.nostr-station/compose/docker-compose.yml pull && nostr-station start`.');
     if (flag('--wizard')) {
       requireInteractive('update --wizard', 'Use `nostr-station update --yes` for non-interactive updates.');
       render(React.createElement(UpdateWizard, null));
@@ -281,6 +294,14 @@ switch (command) {
       }
       render(React.createElement(RelayWhitelist, { add: addNpub, remove: removeNpub }));
     } else {
+      // start/stop/restart target the host-installed relay binary +
+      // launchd/systemd unit, both of which the container deployment
+      // replaces. `status` is mostly harmless — it just probes — but we
+      // group it here because in the container world the user wants the
+      // dashboard view (`nostr-station ps` or http://127.0.0.1:3000).
+      if (relayAction === 'start' || relayAction === 'stop' || relayAction === 'restart') {
+        deprecate(`relay ${relayAction}`, 'Use `nostr-station start/stop` — the relay runs as a container.');
+      }
       render(React.createElement(Relay, {
         action: relayAction as 'start' | 'stop' | 'restart' | 'status',
       }));
@@ -289,6 +310,7 @@ switch (command) {
   }
 
   case 'tui':
+    deprecate('tui', 'The dashboard at http://127.0.0.1:3000 is the supported UI — open it with `nostr-station`.');
     requireInteractive('tui', 'Use `nostr-station status` for a non-interactive snapshot.');
     render(React.createElement(Tui, null));
     break;
@@ -375,6 +397,7 @@ switch (command) {
   }
 
   case 'uninstall':
+    deprecate('uninstall', 'To wipe the container stack: `cd ~/.nostr-station/compose && docker compose down -v`.');
     // --yes skips the confirmation Select; otherwise the picker needs a TTY.
     if (!flag('--yes')) {
       requireInteractive('uninstall', 'Pass --yes to skip the confirmation.');
