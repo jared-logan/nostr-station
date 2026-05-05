@@ -448,10 +448,21 @@ export async function startSetupAmber(dashboardUrl: string): Promise<SetupAmberS
   // Run the connect flow in the background. On success: persist npub +
   // bunker client. On failure: status is updated so the polling endpoint
   // can surface the error.
-  runSetupAmberFlow(session, secretKey).catch(err => {
-    session.status = 'error';
-    session.error  = err?.message || String(err);
-  });
+  //
+  // STATION_SKIP_BG_AMBER_FLOW=1 skips this kickoff entirely. Set in
+  // tests/setup-verify.test.ts so node:test isn't held by orphaned
+  // WebSocket connections to public relays — BunkerSigner.fromURI opens
+  // sockets in a SimplePool we don't have a reference to, and even
+  // aborting the signal (NIP-46 4th-arg AbortSignal) only closes the
+  // subscription, not the underlying TCP. The connections then leak
+  // until Node's keep-alive timer expires (~30s each × 3 relays × 3
+  // tests = the 6-minute CI hang).
+  if (process.env.STATION_SKIP_BG_AMBER_FLOW !== '1') {
+    runSetupAmberFlow(session, secretKey).catch(err => {
+      session.status = 'error';
+      session.error  = err?.message || String(err);
+    });
+  }
 
   return {
     ephemeralPubkey,

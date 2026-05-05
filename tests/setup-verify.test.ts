@@ -6,6 +6,15 @@ import path from 'node:path';
 import { useTempHome, resetTempHome } from './_home.js';
 const HOME = useTempHome();
 
+// Skip the fire-and-forget BunkerSigner.fromURI background flow that
+// startSetupAmber() normally kicks off. Three of the tests below call
+// startSetupAmber to assert on its return shape; without this bypass each
+// call opens WebSockets to wss://relay.nsec.app / wss://relay.damus.io /
+// wss://nos.lol via a SimplePool we have no handle on, and node:test
+// won't exit until those sockets time out (~30s × 3 relays × 3 calls →
+// 6+ minute hang on CI runners with internet egress).
+process.env.STATION_SKIP_BG_AMBER_FLOW = '1';
+
 // auth-bunker pulls in identity + bunker-storage which both resolve
 // ~/.config/nostr-station and ~/.nostr-station at module load. HOME is
 // already pinned by the time this dynamic import runs.
@@ -98,11 +107,3 @@ test('consumeSetupAmberSession: removes the entry after read', async () => {
   assert.equal(second, null, 'second consume returns null');
 });
 
-test.after(() => {
-  // startSetupAmber() kicks off a fire-and-forget BunkerSigner connect
-  // against public Nostr relays, with a 2-minute timeout. On a runner
-  // with internet (GitHub Actions) those WebSockets stay open and hold
-  // the event loop until the timeout fires, turning this 6-test file
-  // into a 6+ minute hang. Aborting the signals closes them at once.
-  auth.cancelAllSetupAmberFlows();
-});
