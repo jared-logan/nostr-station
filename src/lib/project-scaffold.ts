@@ -2,10 +2,10 @@
  * Project scaffolding for the dashboard's "New Project" flow.
  *
  * Two source types supported:
- *   - local-only — creates a fresh ~/projects/<slug> with `git init -b main`,
- *     a minimal README and .gitignore, and an initial commit. Zero external
- *     deps. This is the blank-canvas path; the user plugs in whatever AI /
- *     editor / build system they want afterward.
+ *   - local-only — creates a fresh ~/nostr-station/projects/<slug> with
+ *     `git init -b main`, a minimal README and .gitignore, and an initial
+ *     commit. Zero external deps. This is the blank-canvas path; the user
+ *     plugs in whatever AI / editor / build system they want afterward.
  *   - git-url — shells to `git clone <url> <target>` for any standard git
  *     URL (github, gitlab, codeberg, self-hosted). After clone, git history
  *     is reset to a single root commit owned by the user so the project
@@ -17,8 +17,8 @@
  * ngit init publishes a repo announcement to nostr relays and belongs in
  * the user-initiated Publish flow, not automatically on creation.
  *
- * Both scaffold paths land at ~/projects/<slug> and register into
- * projects.json via createProject() so the Projects panel shows them.
+ * Both scaffold paths land at ~/nostr-station/projects/<slug> and register
+ * into projects.json via createProject() so the Projects panel shows them.
  */
 
 import fs from 'fs';
@@ -58,8 +58,10 @@ export function slugifyName(raw: string): string {
     .slice(0, 40);
 }
 
+// Branded parent directory: everything nostr-station owns lives under
+// ~/nostr-station, so `rm -rf ~/nostr-station` is a clean uninstall.
 export function projectsDir(): string {
-  return path.join(os.homedir(), 'projects');
+  return path.join(os.homedir(), 'nostr-station', 'projects');
 }
 
 export function previewPath(slug: string): string {

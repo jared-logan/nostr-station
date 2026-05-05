@@ -213,15 +213,16 @@ function normalizeCwd(raw: string | undefined): string | undefined {
   return raw;
 }
 
-// Where the bare-shell terminal tab should start. ~/projects is what onboard
-// creates + what NOSTR_STATION.md's CLAUDE.md symlink lives under, so `claude`
-// auto-loads station context and `ngit clone` lands alongside other projects.
-// Falls back to ~ when the projects dir doesn't exist (partial install,
-// user wiped it, pre-onboard state) so the shell still opens somewhere
-// sensible instead of node-pty's default (the web-server process cwd).
+// Where the bare-shell terminal tab should start. ~/nostr-station/projects
+// is the branded workspace the dashboard scaffolds projects into + where
+// NOSTR_STATION.md's CLAUDE.md symlink lives, so `claude` auto-loads station
+// context and `ngit clone` lands alongside other projects. Falls back to ~
+// when the projects dir doesn't exist yet (first run, user wiped it) so the
+// shell still opens somewhere sensible instead of node-pty's default (the
+// web-server process cwd).
 function defaultShellCwd(): string | undefined {
   const home = os.homedir();
-  const projects = path.join(home, 'projects');
+  const projects = path.join(home, 'nostr-station', 'projects');
   try {
     if (fs.statSync(projects).isDirectory()) return projects;
   } catch { /* fall through */ }
@@ -254,15 +255,15 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
       // Login shell so interactive tooling that relies on ~/.zshrc / ~/.bashrc
       // (cargo, deno, pyenv shims) behaves as the user expects. When no
       // explicit cwd was requested (the sidebar Terminal button + drawer
-      // expand both open with empty opts), anchor to ~/projects so `claude`
-      // loads NOSTR_STATION.md context and `ngit clone` lands in the right
-      // place — see defaultShellCwd() for the ~ fallback.
+      // expand both open with empty opts), anchor to ~/nostr-station/projects
+      // so `claude` loads NOSTR_STATION.md context and `ngit clone` lands in
+      // the right place — see defaultShellCwd() for the ~ fallback.
       const shellCwd = cwd ?? defaultShellCwd();
       // Label with the cwd basename so multiple shell tabs are
       // distinguishable — "shell · projects" vs "shell · my-app" vs the
       // shell name alone when we don't know where it's running (rare:
-      // defaultShellCwd returned undefined because both ~/projects and ~
-      // are missing or unstattable).
+      // defaultShellCwd returned undefined because both the projects dir
+      // and ~ are missing or unstattable).
       const shellName = path.basename(shell);
       const label = shellCwd ? `${shellName} · ${path.basename(shellCwd)}` : shellName;
       return { cmd: shell, args: ['-l'], cwd: shellCwd, label };

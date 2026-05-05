@@ -71,7 +71,7 @@ export const Editor: React.FC<EditorProps> = () => {
           </Text>
           <Box marginTop={1}>
             <Text color={P.muted}>
-              {`~/projects/${result.linked} now points to your context file.`}
+              {`~/nostr-station/projects/${result.linked} now points to your context file.`}
             </Text>
           </Box>
         </Box>

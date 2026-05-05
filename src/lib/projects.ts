@@ -572,7 +572,7 @@ export interface ContextResult {
 }
 
 const GLOBAL_CONTEXT_PATHS = [
-  path.join(os.homedir(), 'projects', 'NOSTR_STATION.md'),
+  path.join(os.homedir(), 'nostr-station', 'projects', 'NOSTR_STATION.md'),
 ];
 
 export function resolveProjectContext(project: Project | null): ContextResult {

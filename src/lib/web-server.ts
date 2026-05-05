@@ -267,13 +267,13 @@ async function loadProviderConfig(): Promise<{ cfg: ProviderConfig | null; meta:
 }
 
 function getContextContent(homeDir: string): string {
-  const contextPath = path.join(homeDir, 'projects', 'NOSTR_STATION.md');
+  const contextPath = path.join(homeDir, 'nostr-station', 'projects', 'NOSTR_STATION.md');
   try { return fs.readFileSync(contextPath, 'utf8'); }
   catch { return 'You are a helpful assistant for Nostr protocol development.'; }
 }
 
 export function contextExists(): boolean {
-  return fs.existsSync(path.join(os.homedir(), 'projects', 'NOSTR_STATION.md'));
+  return fs.existsSync(path.join(os.homedir(), 'nostr-station', 'projects', 'NOSTR_STATION.md'));
 }
 
 // ── Chat proxy (streaming SSE) ────────────────────────────────────────────────

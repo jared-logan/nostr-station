@@ -7,7 +7,7 @@
  * Surface (verbatim from the pre-refactor inline blocks):
  *   GET    /api/ngit/discover            — list owner's kind-30617 repo announcements
  *   GET    /api/nsite/discover           — list owner's kind-35128 site manifests
- *   POST   /api/ngit/clone               — SSE: git clone <naddr|nostr://> ~/projects/<name>
+ *   POST   /api/ngit/clone               — SSE: git clone <naddr|nostr://> ~/nostr-station/projects/<name>
  *   GET    /api/ngit/account             — signer login state (masked bunker URI)
  *   POST   /api/ngit/account/login       — SSE: ngit account login -i
  *   POST   /api/ngit/account/logout      — SSE: ngit account logout
@@ -477,9 +477,9 @@ export async function handleNgit(
     // Server owns the full path construction — never accept a user-
     // supplied path, never use a "~"-prefixed string. HOME is read
     // from the environment (falling back to os.homedir()) and the
-    // clone target is ~/projects/<repoName>, always absolute.
+    // clone target is ~/nostr-station/projects/<repoName>, always absolute.
     const home = process.env.HOME || os.homedir();
-    const projectsDir = path.join(home, 'projects');
+    const projectsDir = path.join(home, 'nostr-station', 'projects');
     const target      = path.join(projectsDir, rawRepoName);
     try { fs.mkdirSync(projectsDir, { recursive: true, mode: 0o755 }); } catch {}
     if (fs.existsSync(target)) {
