@@ -77,6 +77,22 @@ export function isNpubOrHex(s: string): boolean {
   return /^npub1[a-z0-9]{58,}$/.test(s) || /^[0-9a-f]{64}$/.test(s);
 }
 
+// ── npub <-> hex pubkey converters ────────────────────────────────────────
+// Bech32 encode/decode round-trip. Lifted from the deleted relay-config
+// module since the dashboard's identity routes still need them.
+
+import { nip19 } from 'nostr-tools';
+
+export function hexToNpub(hex: string): string {
+  return nip19.npubEncode(hex);
+}
+
+export function npubToHex(npub: string): string {
+  const decoded = nip19.decode(npub);
+  if (decoded.type !== 'npub') throw new Error(`expected npub, got ${decoded.type}`);
+  return decoded.data;
+}
+
 export function isNsec(s: string): boolean {
   // Reject both bech32 nsec and plain 64-hex-labeled-as-nsec variants.
   return s.startsWith('nsec');

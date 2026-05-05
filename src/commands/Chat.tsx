@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { spawn } from 'child_process';
-import { P } from '../onboard/components/palette.js';
+import { P } from '../cli-ui/palette.js';
 import { startWebServer, contextExists } from '../lib/web-server.js';
 
 interface ChatProps {
@@ -99,7 +99,7 @@ export const Chat: React.FC<ChatProps> = ({ port = 3000, path = '' }) => {
           <Box marginTop={1} flexDirection="column">
             {!contextExists() && (
               <Box marginBottom={1}>
-                <Text color={P.warn}>⚠  NOSTR_STATION.md not found at ~/projects — run onboard first for full chat context.</Text>
+                <Text color={P.warn}>⚠  NOSTR_STATION.md not found at ~/nostr-station/projects — run setup first for full chat context.</Text>
               </Box>
             )}
             <Text color={P.muted}>Panels: status · chat · relay · logs · config</Text>

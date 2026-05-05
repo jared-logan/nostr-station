@@ -9,12 +9,7 @@
   "files": [
     "dist",
     "install.sh",
-    "README.md",
-    "docker-compose.yml",
-    "Dockerfile.relay",
-    "Dockerfile.station",
-    "docker/",
-    ".dockerignore"
+    "README.md"
   ],
   "scripts": {
     "build": "tsc && node scripts/copy-web.mjs",
@@ -27,6 +22,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
+    "better-sqlite3": "^11.3.0",
     "execa": "^9.0.0",
     "ink": "^5.0.0",
     "ink-select-input": "^6.0.0",
@@ -41,6 +37,7 @@
     "node-pty": "^1.1.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.1",
     "@types/ws": "^8.5.10",

@@ -5,9 +5,6 @@
  *   GET  /api/config         — AI provider + model + context presence
  *   POST /api/chat           — SSE streaming chat (proxies to provider)
  *   GET  /api/status         — gatherStatus() results (shared w/ `status --json`)
- *   GET  /api/relay-config   — relay name/url/auth/dm-auth/whitelist (npubs)
- *   POST /api/relay/:action  — start | stop | restart (launchctl/systemctl)
- *   GET  /api/logs/:service  — SSE live tail of relay or watchdog log
  *
  * Bound to 127.0.0.1 only. No auth — local user is the trust boundary.
  */
@@ -35,13 +32,11 @@ import {
 // surface goes away when the Chat pane fully switches to /api/ai/chat.
 import { migrateIfNeeded } from './ai-config.js';
 import { gatherStatus } from '../commands/Status.js';
-import {
-  readRelaySettings, defaultConfigPath, hexToNpub,
-  addToWhitelist, removeFromWhitelist, setAuthFlag,
-} from './relay-config.js';
-import { detectPlatform, detectInstalled } from './detect.js';
-import { bootstrapRelayServices } from './services.js';
-import { installNostrVpn } from './install.js';
+import { hexToNpub } from './identity.js';
+// relay-config / services / install were the host-install era's
+// LaunchAgent/systemd/cargo plumbing; all gone now that the relay
+// runs in-process. Remaining route handlers below were trimmed
+// alongside the imports.
 import {
   readIdentity, setSetupComplete, isNsec,
 } from './identity.js';
@@ -49,11 +44,12 @@ import {
   clearAllSessions, issueChallenge, consumeChallenge, createSession,
   deleteSession, extractBearer, verifyNip98, authStatus,
   isPublicApi, requireSession, expectedDashboardUrl,
-  isContainerMode,
 } from './auth.js';
 import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
   signWithBunkerUrl, silentBunkerSign,
+  startSetupAmber, getSetupAmberSession, consumeSetupAmberSession,
+  signEventWithSavedBunker,
 } from './auth-bunker.js';
 // `getProject` + `resolveProjectContext` are still needed here for the
 // chat proxy's system-prompt resolution. Everything else moved to
@@ -271,13 +267,13 @@ async function loadProviderConfig(): Promise<{ cfg: ProviderConfig | null; meta:
 }
 
 function getContextContent(homeDir: string): string {
-  const contextPath = path.join(homeDir, 'projects', 'NOSTR_STATION.md');
+  const contextPath = path.join(homeDir, 'nostr-station', 'projects', 'NOSTR_STATION.md');
   try { return fs.readFileSync(contextPath, 'utf8'); }
   catch { return 'You are a helpful assistant for Nostr protocol development.'; }
 }
 
 export function contextExists(): boolean {
-  return fs.existsSync(path.join(os.homedir(), 'projects', 'NOSTR_STATION.md'));
+  return fs.existsSync(path.join(os.homedir(), 'nostr-station', 'projects', 'NOSTR_STATION.md'));
 }
 
 // ── Chat proxy (streaming SSE) ────────────────────────────────────────────────
@@ -325,22 +321,11 @@ async function proxyChat(
   res.end();
 }
 
-// ── Relay service controls ────────────────────────────────────────────────────
-
-function serviceCmd(action: 'start' | 'stop'): string {
-  const label = 'com.nostr-station.relay';
-  return process.platform === 'darwin'
-    ? `launchctl ${action} ${label}`
-    : `systemctl --user ${action} nostr-relay.service`;
-}
+// ── Relay liveness probe ──────────────────────────────────────────────────────
 
 function isRelayUp(): boolean {
-  // Env-driven so container mode (compose sets RELAY_HOST=relay, RELAY_PORT=8080)
-  // and host mode (env unset → defaults to localhost:8080) share one probe.
-  // Without this, the dashboard's relay state indicator was permanently red
-  // inside the station container — it was probing the wrong host.
-  const host = process.env.RELAY_HOST || 'localhost';
-  const port = Number(process.env.RELAY_PORT || '8080');
+  const host = process.env.RELAY_HOST || '127.0.0.1';
+  const port = Number(process.env.RELAY_PORT || '7777');
   try {
     execSync(`nc -z -w 1 ${host} ${port}`, {
       stdio: 'pipe', timeout: 1500, killSignal: 'SIGKILL',
@@ -350,560 +335,158 @@ function isRelayUp(): boolean {
   catch { return false; }
 }
 
-async function relayAction(
-  action: 'start' | 'stop' | 'restart',
-  res: http.ServerResponse,
-): Promise<void> {
-  // Container mode: the relay is a sibling container managed by docker
-  // compose. The station container has no docker socket (and shouldn't —
-  // see invariant 9), so we can't drive lifecycle from here. Surface a
-  // clear "run on host" message instead of leaking the launchctl/systemctl
-  // command-not-found error the existing code path produced.
-  if (isContainerMode()) {
-    const hostCmd = action === 'start' ? 'nostr-station start'
-      : action === 'stop'              ? 'nostr-station stop'
-      : 'docker compose -f ~/.nostr-station/compose/docker-compose.yml restart relay';
-    res.writeHead(501, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      ok: false,
-      error: `Relay lifecycle is managed by docker compose. Run \`${hostCmd}\` on the host.`,
-      hostCmd,
-      containerMode: true,
-    }));
-    return;
-  }
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  try {
-    if (action === 'restart') {
-      try { execSync(serviceCmd('stop'), { stdio: 'pipe' }); } catch {}
-      await wait(500);
-      execSync(serviceCmd('start'), { stdio: 'pipe' });
-      await wait(1500);
-    } else {
-      execSync(serviceCmd(action), { stdio: 'pipe' });
-      if (action === 'start') await wait(1500);
-    }
-    const up = isRelayUp();
-    const expected = action !== 'stop';
-    const ok = up === expected;
-    res.end(JSON.stringify({ ok, up, action }));
-  } catch (e: any) {
-    const raw = String(e.message ?? e);
-    const looksMissing = /not found|no such|could not find|input\/output error/i.test(raw);
-    const hint = looksMissing ? 'relay service not installed — run: nostr-station onboard' : raw.slice(0, 160);
-    res.end(JSON.stringify({ ok: false, error: hint }));
-  }
-}
-
-function wait(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-// ── Relay config (read-only) ──────────────────────────────────────────────────
-
-async function serveRelayConfig(res: http.ServerResponse): Promise<void> {
-  const s = readRelaySettings();
-  if (!s) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      name: '', url: '', auth: false, dmAuth: false,
-      whitelist: [], knownRoles: {}, dataDir: '', configPath: defaultConfigPath(),
-      error: `config not found at ${defaultConfigPath()} — run nostr-station onboard`,
-    }));
-    return;
-  }
-  // Prefer npub in the UI — hex is noise to humans. hexToNpub shells to `nak`
-  // once per entry; whitelists are typically 1-10 entries so this is cheap.
-  const whitelist = s.whitelist.map(h => hexToNpub(h));
-
-  // Role labels for the UI — lets the whitelist render "You · station",
-  // "Watchdog", "Seed" badges next to the nostr-station-managed entries
-  // without the user having to memorize truncated npub prefixes. Any of
-  // these may be undefined on a partial install (e.g. seed has never been
-  // run yet, so seed-nsec isn't in keychain); the client just renders no
-  // badge for missing roles.
-  const ident = readIdentity();
-  const [watchdogNpub, seedNpub] = await Promise.all([
-    deriveKeychainNpub('watchdog-nsec'),
-    deriveKeychainNpub('seed-nsec'),
-  ]);
-  const knownRoles: { station?: string; watchdog?: string; seed?: string } = {};
-  if (ident.npub) knownRoles.station = ident.npub;
-  if (watchdogNpub) knownRoles.watchdog = watchdogNpub;
-  if (seedNpub)     knownRoles.seed = seedNpub;
-
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ...s, whitelist, knownRoles }));
-}
-
-// ── Logs (SSE live tail) ──────────────────────────────────────────────────────
-
-type LogService = 'relay' | 'watchdog' | 'vpn';
-
-interface ServiceHealth {
-  service:    LogService;
-  installed:  boolean;         // unit file / binary present
-  running:    boolean;         // daemon actively loaded / running
-  logPath:    string;
-  logExists:  boolean;
-  logMtimeMs: number | null;   // last write timestamp
-  stale:      boolean;         // running but log hasn't been written recently
-  watchdogNpub?: string;       // watchdog service only — so the user knows
-                               // which identity to follow for relay-down DMs
-}
-
-// Per-service staleness threshold, in ms. Only set for services with a known
-// write cadence; `undefined` means we never call the log stale based on mtime.
-//
-// - watchdog: fires every 5 min (launchd StartInterval=300) and always appends
-//   a line, so >10 min of silence while the job is loaded is a real wedge.
-// - relay / vpn: long-running daemons that are legitimately silent when idle
-//   (a fresh relay with no connected clients writes nothing for hours). PID
-//   presence via launchctl is the correct health signal for these; mtime-based
-//   staleness on the log file fires as a false positive on quiet boxes.
-const STALE_MS: Partial<Record<LogService, number>> = {
-  watchdog: 600_000,
-};
-
-function cmdOk(c: string): boolean {
-  try { execSync(c, { stdio: 'pipe', timeout: 1500, killSignal: 'SIGKILL' }); return true; }
-  catch { return false; }
-}
-
-// launchctl list <label> exits 0 when the job is loaded; its output's PID
-// field is an integer while the job is executing and absent otherwise.
-//
-// For continuous daemons (relay, vpn) "running" = live PID. For interval
-// jobs (watchdog, StartInterval=300) there's no PID 99% of the time — it
-// fires, exits, and waits. Loaded-and-scheduled IS the running state for
-// those; gating on PID produced a permanent false-negative banner.
-function launchctlState(
-  label: string,
-  mode: 'continuous' | 'interval',
-): { installed: boolean; running: boolean } {
-  try {
-    const out = execSync(`launchctl list ${label}`, { stdio: 'pipe', timeout: 1500 }).toString();
-    if (mode === 'interval') {
-      // Just being loaded is enough — the next scheduled fire will run it.
-      return { installed: true, running: true };
-    }
-    const pidLine = out.split('\n').find(l => l.includes('"PID"'));
-    const running = !!(pidLine && /"PID"\s*=\s*\d+/.test(pidLine));
-    return { installed: true, running };
-  } catch {
-    return { installed: false, running: false };
-  }
-}
-
-// nvpn owns its own daemon lifecycle — it's launched via `nvpn start --daemon`
-// (or `nvpn service install` on systems that want a platform-managed service),
-// homebrew's post-install, or a user's own supervisor. That means launchd /
-// systemd labels are unreliable predictors of install state: a perfectly fine
-// homebrew install has no launchd agent, but the daemon is running and we
-// should tail it. `nvpn status --json` is the authoritative signal — it
-// reports `daemon.running` and the actual `log_file` path nvpn writes to,
-// which is nvpn's Application Support dir, NOT our ~/logs convention.
-function probeNvpn(): { installed: boolean; running: boolean; logPath: string } {
-  const defaultLogPath = path.join(os.homedir(), 'logs', 'nvpn.log');
-  const hasBinary = cmdOk('command -v nvpn');
-  if (!hasBinary) return { installed: false, running: false, logPath: defaultLogPath };
-
-  try {
-    const out = execSync('nvpn status --json', { stdio: 'pipe', timeout: 2000 }).toString();
-    const data: any = JSON.parse(out);
-    const logFile = data?.daemon?.log_file;
-    return {
-      installed: true,
-      running:   Boolean(data?.daemon?.running),
-      logPath:   (typeof logFile === 'string' && logFile) ? logFile : defaultLogPath,
-    };
-  } catch {
-    // Binary exists but status failed — daemon probably not running (nvpn
-    // errors out when it can't reach its socket). Report installed + not
-    // running; banner will tell the user how to start it.
-    return { installed: true, running: false, logPath: defaultLogPath };
-  }
-}
-
-// Pure container-mode mapper — exported for tests. Mirrors the shape used
-// by the host-mode branch below so callers (streamLogs SSE) consume one
-// type. Keeping I/O outside this function lets tests pin every branch
-// without spawning launchctl/systemctl/nc.
-const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;
-
-export interface ContainerHealthInputs {
-  service:        LogService;
-  relayUp:        boolean;
-  heartbeatMtime: number | null;
-  now:            number;
-  logPath:        string;
-  logExists:      boolean;
-  logMtimeMs:     number | null;
-}
-
-export function serviceHealthForContainer(p: ContainerHealthInputs): ServiceHealth {
-  let installed: boolean;
-  let running:   boolean;
-
-  switch (p.service) {
-    case 'relay':
-      // The relay container is part of the compose stack — "installed" is
-      // unconditionally true. "Running" tracks whether the port answers,
-      // matching what Status.tsx and verify.ts already do for the same row.
-      installed = true;
-      running   = p.relayUp;
-      break;
-    case 'watchdog':
-      // Watchdog is a long-running container in compose mode (no
-      // launchd/systemd timer). Heartbeat freshness is the only signal —
-      // same threshold the Status panel uses, kept identical so the two
-      // surfaces never disagree.
-      installed = true;
-      running   = p.heartbeatMtime !== null
-        && (p.now - p.heartbeatMtime) <= HEARTBEAT_FRESH_MS;
-      break;
-    case 'vpn':
-    default:
-      // nostr-vpn isn't supportable inside an unprivileged container —
-      // this matches the Status panel's "not applicable in container mode"
-      // row. PR B will hide the vpn tab entirely from the Logs panel.
-      installed = false;
-      running   = false;
-      break;
-  }
-
-  const threshold = STALE_MS[p.service];
-  const stale = threshold !== undefined
-    && running && p.logExists && p.logMtimeMs !== null
-    && (p.now - p.logMtimeMs) > threshold;
-
-  return {
-    service:    p.service,
-    installed, running,
-    logPath:    p.logPath,
-    logExists:  p.logExists,
-    logMtimeMs: p.logMtimeMs,
-    stale,
-  };
-}
-
-function probeServiceHealth(service: LogService): ServiceHealth {
-  if (isContainerMode()) {
-    // Container-mode log paths default to a shared volume location; PR B
-    // wires the actual writers (relay's TOML log_path, watchdog stdout
-    // tee) to write there. For now the file may not exist — streamLogs
-    // already handles `logExists: false` cleanly with a banner and a
-    // heartbeat-only SSE stream.
-    const logDir = process.env.STATION_LOG_DIR || '/var/log/nostr-station';
-    const logPath = service === 'relay'    ? path.join(logDir, 'relay.log')
-                  : service === 'watchdog' ? path.join(logDir, 'watchdog.log')
-                  :                          path.join(logDir, 'nvpn.log');
-
-    let logMtimeMs: number | null = null;
-    let logExists = false;
-    try {
-      const st = fs.statSync(logPath);
-      logExists = true;
-      logMtimeMs = st.mtimeMs;
-    } catch { /* file missing — handled below */ }
-
-    let heartbeatMtime: number | null = null;
-    if (service === 'watchdog') {
-      const hbPath = process.env.WATCHDOG_HEARTBEAT
-        || '/var/run/nostr-station/watchdog.heartbeat';
-      try { heartbeatMtime = fs.statSync(hbPath).mtimeMs; } catch {}
-    }
-
-    return serviceHealthForContainer({
-      service,
-      relayUp: service === 'relay' ? isRelayUp() : false,
-      heartbeatMtime,
-      now: Date.now(),
-      logPath, logExists, logMtimeMs,
-    });
-  }
-
-  let logPath = {
-    relay:    path.join(os.homedir(), 'logs', 'nostr-rs-relay.log'),
-    watchdog: path.join(os.homedir(), 'logs', 'watchdog.log'),
-    vpn:      path.join(os.homedir(), 'logs', 'nvpn.log'),
-  }[service];
-
-  let installed = false;
-  let running   = false;
-
-  if (service === 'vpn') {
-    const s = probeNvpn();
-    installed = s.installed;
-    running   = s.running;
-    logPath   = s.logPath;  // nvpn's own log location, from its status JSON
-  } else if (process.platform === 'darwin') {
-    const label = service === 'relay' ? 'com.nostr-station.relay' : 'com.nostr-station.watchdog';
-    const mode  = service === 'watchdog' ? 'interval' : 'continuous';
-    ({ installed, running } = launchctlState(label, mode));
-  } else if (process.platform === 'linux') {
-    const unit = service === 'relay' ? 'nostr-relay.service' : 'nostr-watchdog.timer';
-    installed = cmdOk(`systemctl --user cat ${unit}`) || cmdOk(`systemctl cat ${unit}`);
-    running   = cmdOk(`systemctl --user is-active --quiet ${unit}`)
-             || cmdOk(`systemctl is-active --quiet ${unit}`);
-  }
-
-  let logMtimeMs: number | null = null;
-  let logExists = false;
-  try {
-    const st = fs.statSync(logPath);
-    logExists = true;
-    logMtimeMs = st.mtimeMs;
-  } catch { /* missing file — logExists stays false */ }
-
-  const threshold = STALE_MS[service];
-  const stale = threshold !== undefined
-    && running && logExists && logMtimeMs !== null
-    && (Date.now() - logMtimeMs) > threshold;
-
-  return { service, installed, running, logPath, logExists, logMtimeMs, stale };
-}
-
-async function deriveKeychainNpub(
-  slot: 'watchdog-nsec' | 'seed-nsec',
-): Promise<string | undefined> {
-  try {
-    const nsec = await getKeychain().retrieve(slot);
-    if (!nsec || !nsec.startsWith('nsec')) return undefined;
-    const d = nip19.decode(nsec);
-    if (d.type !== 'nsec') return undefined;
-    const pk = getPublicKey(d.data as Uint8Array);
-    return nip19.npubEncode(pk);
-  } catch { return undefined; }
-}
-
-const deriveWatchdogNpub = () => deriveKeychainNpub('watchdog-nsec');
-
-async function streamLogs(
-  service: LogService,
-  res: http.ServerResponse,
-  req: http.IncomingMessage,
-): Promise<void> {
-  res.writeHead(200, {
-    'Content-Type':  'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection':    'keep-alive',
-  });
-
-  const health = probeServiceHealth(service);
-  if (service === 'watchdog') {
-    health.watchdogNpub = await deriveWatchdogNpub();
-  }
-  res.write(`data: ${JSON.stringify({ status: health })}\n\n`);
-
-  if (!health.logExists) {
-    // Keep the connection alive so the client can keep rendering its banner;
-    // closing here made the EventSource fire onerror and log "[stream closed]",
-    // which buried the status guidance under a false failure message.
-    const hb = setInterval(() => {
-      try { res.write(': heartbeat\n\n'); } catch { clearInterval(hb); }
-    }, 15_000);
-    const done = () => { clearInterval(hb); try { res.end(); } catch {} };
-    req.on('close', done);
-    req.on('error', done);
-    return;
-  }
-
-  const tail = spawn('tail', ['-f', '-n', '200', health.logPath], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-  const sendLines = (chunk: Buffer) => {
-    const lines = chunk.toString().split('\n').filter(Boolean);
-    if (lines.length) res.write(`data: ${JSON.stringify({ lines })}\n\n`);
-  };
-  tail.stdout.on('data',  sendLines);
-  tail.stderr.on('data',  c => res.write(`data: ${JSON.stringify({ error: c.toString() })}\n\n`));
-  tail.on('close', () => { try { res.end(); } catch {} });
-
-  const cleanup = () => { try { tail.kill(); } catch {} };
-  req.on('close', cleanup);
-  req.on('error', cleanup);
-}
-
-// ── Provider config writer ────────────────────────────────────────────────────
-//
-// When the dashboard switches AI provider, we rewrite ~/.claude_env (baseUrl
-// + model) and, if an api key is supplied, update the single 'ai-api-key'
-// keychain slot. The CLI keychain lib only has one slot — provider switching
-// *overwrites* the key on purpose. A client that switches away from a hosted
-// provider without providing a new key will hit the "not configured" state
-// until a key is stored via `nostr-station keychain set ai-api-key`.
-
-const PROVIDERS: Record<string, { baseUrl: string; defaultModel: string; bareKey?: string }> = {
-  anthropic:    { baseUrl: '',                                defaultModel: 'claude-opus-4-6' },
-  openrouter:   { baseUrl: 'https://openrouter.ai/api/v1',    defaultModel: 'anthropic/claude-sonnet-4' },
-  'opencode-zen': { baseUrl: 'https://opencode.ai/zen/v1',     defaultModel: 'claude-opus-4-6' },
-  routstr:      { baseUrl: 'https://api.routstr.com/v1',      defaultModel: 'claude-sonnet-4' },
-  ppq:          { baseUrl: 'https://api.ppq.ai/v1',           defaultModel: 'claude-sonnet-4' },
-  ollama:       { baseUrl: 'http://localhost:11434/v1',       defaultModel: 'llama3.2', bareKey: 'ollama' },
-  lmstudio:     { baseUrl: 'http://localhost:1234/v1',        defaultModel: 'default',  bareKey: 'lm-studio' },
-  maple:        { baseUrl: 'http://localhost:8081/v1',        defaultModel: 'claude-sonnet-4', bareKey: 'maple-desktop-auto' },
-  custom:       { baseUrl: '',                                defaultModel: 'default' },
-};
-
-async function setProviderConfig(body: any): Promise<{ ok: boolean; error?: string }> {
-  const provider = String(body.provider || '');
-  const model    = String(body.model || '');
-  const apiKey   = typeof body.apiKey === 'string' ? body.apiKey : undefined;
-  const baseUrlOverride = typeof body.baseUrl === 'string' ? body.baseUrl : undefined;
-
-  const spec = PROVIDERS[provider];
-  if (!spec) return { ok: false, error: `unknown provider: ${provider}` };
-  const baseUrl = spec.baseUrl || baseUrlOverride || '';
-
-  // Rewrite ~/.claude_env — preserve unrelated lines if present.
-  const envPath = path.join(os.homedir(), '.claude_env');
-  let existing = '';
-  try { existing = fs.readFileSync(envPath, 'utf8'); } catch {}
-
-  const resolvedModel = model || spec.defaultModel;
-  const lines = existing.split('\n').filter(l =>
-    !l.startsWith('export ANTHROPIC_BASE_URL=') &&
-    !l.startsWith('export CLAUDE_MODEL=') &&
-    l.trim() !== '',
-  );
-  if (baseUrl) lines.push(`export ANTHROPIC_BASE_URL="${baseUrl}"`);
-  lines.push(`export CLAUDE_MODEL="${resolvedModel}"`);
-
-  try {
-    fs.writeFileSync(envPath, lines.join('\n') + '\n', { mode: 0o600 });
-  } catch (e: any) {
-    return { ok: false, error: `failed to write ~/.claude_env: ${e.message}` };
-  }
-
-  // Update keychain: either a user-supplied key, or a bare sentinel for
-  // local-auth providers (ollama/lm-studio/maple) so chat works out of the box.
-  if (apiKey && apiKey.length > 0) {
-    try { await getKeychain().store('ai-api-key', apiKey); }
-    catch (e: any) { return { ok: false, error: `keychain write failed: ${e.message}` }; }
-  } else if (spec.bareKey) {
-    try { await getKeychain().store('ai-api-key', spec.bareKey); } catch {}
-  }
-
-  return { ok: true };
-}
-
-// Profile lookup helpers (Profile, PROFILE_CACHE, fetchNip05,
-// fetchKind0FromRelay, lookupProfile, bustProfileCache) moved alongside
-// the identity routes — see routes/identity.ts. Nothing outside
-// /api/identity/* consumed them, so they followed the routes out.
-
-// ── Exec streaming (whitelisted commands over SSE) ────────────────────────────
-//
-// Commands are keyed by a short string; we never interpolate user input into
-// the argv. Each command spawns via execFile-equivalent (spawn with a fixed
-// argv array) and streams stdout+stderr as JSON-per-SSE-frame:
-//   data: {"line":"<text>","stream":"stdout"|"stderr"}
-//   data: {"done":true,"code":<int>}
-//
-// The dashboard opens a modal that renders these lines into a terminal view.
-
-// `streamExec`, `streamExecError`, `CmdSpec`, `CLI_BIN`, and `CLI_SPAWN`
-// moved to `routes/_shared.ts`. `cmdSpecFor` stays here because it's only
-// used by the slug-keyed `/api/exec/install/<slug>` SSE endpoint, which is
-// still resolved inline in this file.
-function cmdSpecFor(key: string, slug?: string): CmdSpec | null {
-  // Whitelisted installs: these match src/lib/install.ts exports. We invoke
-  // the CLI rather than the lib functions directly so the Ink install wizard
-  // writes legible text lines (the wizard itself respects NO_COLOR + --plain
-  // where applicable — see Doctor.tsx for the pattern).
-  const INSTALL_TARGETS: Record<string, string[]> = {
-    'nak':       ['doctor', '--fix'],   // Doctor --fix reinstalls missing bins
-    'relay':     ['doctor', '--fix'],
-    'claude':    ['doctor', '--fix'],
-    'nsyte':     ['doctor', '--fix'],
-    'stacks':    ['doctor', '--fix'],
-    'gh':        ['doctor', '--fix'],
-    'ngit':      ['doctor', '--fix'],
-    'nvpn':      ['doctor', '--fix'],
-  };
-
-  switch (key) {
-    case 'doctor': return { bin: process.execPath, args: [CLI_BIN, 'doctor', '--plain'], env: { NO_COLOR: '1', TERM: 'dumb' } };
-    case 'publish': return { bin: process.execPath, args: [CLI_BIN, 'publish', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
-    case 'deploy': return { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
-    case 'git-pull': return { bin: 'git', args: ['pull', '--no-rebase', '--ff-only'] };
-    case 'install': {
-      const t = INSTALL_TARGETS[slug || ''];
-      if (!t) return null;
-      return { bin: process.execPath, args: [CLI_BIN, ...t], env: { NO_COLOR: '1', TERM: 'dumb' } };
-    }
-  }
-  return null;
-}
-
-// ── Relay database management ─────────────────────────────────────────────────
-
-function relayDbPaths(): string[] {
-  const s = readRelaySettings();
-  if (!s || !s.dataDir) return [];
-  return [
-    path.join(s.dataDir, 'nostr.db'),
-    path.join(s.dataDir, 'nostr.db-wal'),
-    path.join(s.dataDir, 'nostr.db-shm'),
-  ];
-}
-
-function relayDbStats(): { sizeBytes: number; exists: boolean; path: string | null } {
-  const paths = relayDbPaths();
-  const main  = paths[0];
-  if (!main || !fs.existsSync(main)) return { sizeBytes: 0, exists: false, path: null };
-  let size = 0;
-  for (const p of paths) {
-    try { size += fs.statSync(p).size; } catch {}
-  }
-  return { sizeBytes: size, exists: true, path: main };
-}
-
-async function wipeRelayDatabase(): Promise<{ ok: boolean; error?: string }> {
-  try { execSync(serviceCmd('stop'), { stdio: 'pipe' }); } catch {}
-  await wait(600);
-  const paths = relayDbPaths();
-  for (const p of paths) {
-    try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e: any) {
-      return { ok: false, error: `could not remove ${p}: ${e.message}` };
-    }
-  }
-  try { execSync(serviceCmd('start'), { stdio: 'pipe' }); } catch (e: any) {
-    return { ok: false, error: `restart failed: ${e.message}` };
-  }
-  await wait(1500);
-  return { ok: true };
-}
-
-function exportRelayEvents(): Promise<{ ok: boolean; file?: string; error?: string }> {
-  return new Promise((resolve) => {
-    const dir = path.join(os.homedir(), 'nostr-exports');
-    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const file  = path.join(dir, `relay-events-${stamp}.jsonl`);
-    const out   = fs.createWriteStream(file);
-    const child = spawn('nak', ['req', '--stream', 'ws://localhost:8080'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let closed = false;
-    const finish = (ok: boolean, err?: string) => {
-      if (closed) return;
-      closed = true;
-      try { child.kill(); } catch {}
-      try { out.end(); } catch {}
-      resolve({ ok, file: ok ? file : undefined, error: err });
-    };
-    child.stdout.on('data', chunk => out.write(chunk));
-    child.on('error', e => finish(false, String(e.message)));
-    // nak --stream doesn't exit on its own; cap the export at 3 seconds —
-    // local relays either have all events by then or we're exporting a
-    // live feed which the user would cancel manually. A smarter cap
-    // (EOSE detection) can come later.
-    setTimeout(() => finish(true), 3000);
-  });
-}
 
 // ── Server ────────────────────────────────────────────────────────────────────
+
+// In-process Nostr relay handle. Started by maybeStartInprocRelay() unless
+// the user explicitly opts out with STATION_INPROC_RELAY=0. Kept here so
+// the dashboard's shutdown path can stop it cleanly. Loosely typed (any) to
+// avoid pulling the whole relay module into web-server's import graph at
+// type-resolution time when the relay isn't started.
+let inprocRelay: { stop: () => Promise<void> } | null = null;
+
+function shouldStartInprocRelay(): boolean {
+  return process.env.STATION_INPROC_RELAY !== '0';
+}
+
+// Live verification (Phase 4 of the user-journey spec). Asks the saved
+// bunker client (Amber on the user's phone) to sign a kind-1 test event,
+// publishes it to the running in-process relay over ws://, and reads it
+// back via a REQ subscription. Each step is named so the client can
+// render a checklist; failures stop at the first broken step.
+//
+// Why ws:// instead of calling the relay's store directly: the test is
+// trying to prove "your apps will be able to talk to this relay." Going
+// through the WebSocket layer exercises the same path the user's apps
+// will use (NIP-01 over WS), which is what we want to verify.
+
+interface VerifyStep { name: string; ok: boolean; detail?: string }
+interface VerifyResult {
+  ok:      boolean;
+  steps:   VerifyStep[];
+  eventId?: string;
+  npub?:    string;
+  error?:   string;
+}
+
+async function runSetupVerify(): Promise<VerifyResult> {
+  const steps: VerifyStep[] = [];
+  const ident = readIdentity();
+  // Step 1 — sign via Amber. Generic event template; signEventWithSavedBunker
+  // returns a fully-signed event whose pubkey is the user's main pubkey.
+  const template = {
+    kind:       1,
+    created_at: Math.floor(Date.now() / 1000),
+    tags:       [['client', 'nostr-station-setup-verify']],
+    content:    'nostr-station: setup verification — you can ignore this event.',
+  };
+  let signed: any;
+  try {
+    const r = await signEventWithSavedBunker(template, 60_000);
+    if (!r.ok || !r.signedEvent) {
+      steps.push({ name: 'sign-via-amber', ok: false, detail: r.error || 'signing failed' });
+      return { ok: false, steps, error: 'Amber did not sign the test event' };
+    }
+    signed = r.signedEvent;
+    steps.push({ name: 'sign-via-amber', ok: true, detail: `signed by ${signed.pubkey.slice(0, 8)}…` });
+  } catch (e: any) {
+    steps.push({ name: 'sign-via-amber', ok: false, detail: String(e?.message ?? e) });
+    return { ok: false, steps, error: 'sign step failed' };
+  }
+
+  // Resolve relay URL — same env vars maybeStartInprocRelay sets.
+  const relayHost = process.env.RELAY_HOST || '127.0.0.1';
+  const relayPort = process.env.RELAY_PORT || '7777';
+  const relayUrl  = `ws://${relayHost}:${relayPort}`;
+
+  // Steps 2 + 3 — publish + read back, both over a single WS connection.
+  // Lazy-import ws so we don't pay the cost on cold-path requests.
+  const { WebSocket } = await import('ws');
+  const ws = new WebSocket(relayUrl);
+
+  // Generic JSON-frame waiter so each step can wait for the message it
+  // cares about without racing on the buffer's order.
+  const waiters: Array<{ pred: (m: any[]) => boolean; resolve: (m: any[]) => void; reject: (e: Error) => void; timer?: NodeJS.Timeout }> = [];
+  const buffer: any[][] = [];
+  ws.on('message', d => {
+    try {
+      const msg = JSON.parse(d.toString());
+      if (!Array.isArray(msg)) return;
+      const idx = waiters.findIndex(w => w.pred(msg));
+      if (idx >= 0) {
+        const [w] = waiters.splice(idx, 1);
+        if (w.timer) clearTimeout(w.timer);
+        w.resolve(msg);
+      } else {
+        buffer.push(msg);
+      }
+    } catch { /* not JSON / not array — ignore */ }
+  });
+  const next = (pred: (m: any[]) => boolean, ms = 5_000): Promise<any[]> => {
+    const idx = buffer.findIndex(pred);
+    if (idx >= 0) return Promise.resolve(buffer.splice(idx, 1)[0]);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const i = waiters.findIndex(w => w.pred === pred);
+        if (i >= 0) waiters.splice(i, 1);
+        reject(new Error(`timeout after ${ms}ms`));
+      }, ms);
+      waiters.push({ pred, resolve, reject, timer });
+    });
+  };
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open',  () => resolve());
+      ws.once('error', reject);
+    });
+
+    // Step 2 — publish.
+    ws.send(JSON.stringify(['EVENT', signed]));
+    const ok = await next(m => m[0] === 'OK' && m[1] === signed.id, 10_000);
+    if (ok[2] !== true) {
+      steps.push({ name: 'publish-to-relay', ok: false, detail: ok[3] || 'relay rejected event' });
+      ws.close();
+      return { ok: false, steps, error: 'relay rejected the test event' };
+    }
+    steps.push({ name: 'publish-to-relay', ok: true, detail: `accepted by ${relayUrl}` });
+
+    // Step 3 — read back via REQ. The store is local and the round-trip
+    // takes single-digit ms, so a 5s timeout is generous slack.
+    const subId = 'setup-verify';
+    ws.send(JSON.stringify(['REQ', subId, { ids: [signed.id] }]));
+    await next(m => m[0] === 'EVENT' && m[1] === subId && m[2]?.id === signed.id, 5_000);
+    await next(m => m[0] === 'EOSE'  && m[1] === subId, 5_000);
+    ws.send(JSON.stringify(['CLOSE', subId]));
+    steps.push({ name: 'read-back-from-relay', ok: true, detail: 'event found in store' });
+  } catch (e: any) {
+    steps.push({ name: 'read-back-from-relay', ok: false, detail: String(e?.message ?? e) });
+    try { ws.close(); } catch {}
+    return { ok: false, steps, error: 'relay round-trip failed' };
+  }
+  try { ws.close(); } catch {}
+
+  return { ok: true, steps, eventId: signed.id, npub: ident.npub };
+}
+
+async function maybeStartInprocRelay(): Promise<void> {
+  if (!shouldStartInprocRelay()) return;
+  if (inprocRelay) return;
+  // Lazy import — nothing in the rest of web-server.ts references the
+  // relay module, so we keep it out of the load graph entirely when the
+  // relay isn't started.
+  const { Relay } = await import('../relay/index.js');
+  const port = Number(process.env.STATION_INPROC_RELAY_PORT || '7777');
+  const r = new Relay({ port, host: '127.0.0.1' });
+  await r.start();
+  inprocRelay = r;
+  // Publish the relay address via env so gatherStatus + isRelayUp probe
+  // the right port, and any descendant tooling (e.g. nak commands) sees
+  // the same source of truth.
+  process.env.RELAY_HOST = '127.0.0.1';
+  process.env.RELAY_PORT = String(port);
+  process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);
+}
 
 export async function startWebServer(port: number): Promise<void> {
   // Sessions are in-memory only and never survive a server restart — the
@@ -1243,134 +826,9 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
-      if (url === '/api/relay-config' && method === 'GET') {
-        await serveRelayConfig(res);
-        return;
-      }
-
-      if (url === '/api/relay-config' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const errors: string[] = [];
-        if (typeof parsed.auth === 'boolean')   if (!setAuthFlag('nip42_auth', parsed.auth)) errors.push('could not write nip42_auth');
-        if (typeof parsed.dmAuth === 'boolean') if (!setAuthFlag('nip42_dms',  parsed.dmAuth)) errors.push('could not write nip42_dms');
-        // Apply changes with a restart on host. In container mode the
-        // station has no docker socket so we can't restart the sibling
-        // relay container — surface a `restartHint` instead and let the
-        // dashboard show "changes saved · restart relay on host to apply".
-        let restartHint: string | undefined;
-        if (errors.length === 0) {
-          if (isContainerMode()) {
-            restartHint = 'docker compose -f ~/.nostr-station/compose/docker-compose.yml restart relay';
-          } else {
-            try {
-              execSync(serviceCmd('stop'), { stdio: 'pipe' });
-              await wait(400);
-              execSync(serviceCmd('start'), { stdio: 'pipe' });
-            } catch {}
-          }
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: errors.length === 0, errors, restartHint }));
-        return;
-      }
-
-      if (url === '/api/config/set' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const result = await setProviderConfig(parsed);
-        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(result));
-        return;
-      }
-
-      const relayMatch = url.match(/^\/api\/relay\/(start|stop|restart)$/);
-      if (relayMatch && method === 'POST') {
-        await relayAction(relayMatch[1] as 'start' | 'stop' | 'restart', res);
-        return;
-      }
-
-      if (url === '/api/relay/whitelist/add' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const npub = String(parsed.npub || '').trim();
-        // Guard: only accept npub or 64-hex. addToWhitelist accepts both, but
-        // validating here gives a cleaner error to the caller.
-        if (!/^npub1[a-z0-9]{58,}$/.test(npub) && !/^[0-9a-f]{64}$/.test(npub)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'invalid npub or hex key' }));
-          return;
-        }
-        const r = addToWhitelist(npub);
-        // Apply via restart so the new whitelist entry takes effect.
-        // Container mode: skip — station has no docker socket. Caller
-        // gets `restartHint` and shows "run on host to apply".
-        let restartHint: string | undefined;
-        if (r.ok && !r.already) {
-          if (isContainerMode()) {
-            restartHint = 'docker compose -f ~/.nostr-station/compose/docker-compose.yml restart relay';
-          } else {
-            try { execSync(serviceCmd('stop'), { stdio: 'pipe' }); await wait(400); execSync(serviceCmd('start'), { stdio: 'pipe' }); } catch {}
-          }
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ...r, restartHint }));
-        return;
-      }
-
-      if (url === '/api/relay/whitelist/remove' && method === 'POST') {
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req)); }
-        catch { res.writeHead(400); res.end('bad json'); return; }
-        const npub = String(parsed.npub || '').trim();
-        if (!npub) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'missing npub' }));
-          return;
-        }
-        const r = removeFromWhitelist(npub);
-        let restartHint: string | undefined;
-        if (r.ok) {
-          if (isContainerMode()) {
-            restartHint = 'docker compose -f ~/.nostr-station/compose/docker-compose.yml restart relay';
-          } else {
-            try { execSync(serviceCmd('stop'), { stdio: 'pipe' }); await wait(400); execSync(serviceCmd('start'), { stdio: 'pipe' }); } catch {}
-          }
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ...r, restartHint }));
-        return;
-      }
-
-      if (url === '/api/relay/database/stats' && method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(relayDbStats()));
-        return;
-      }
-      if (url === '/api/relay/database/wipe' && method === 'POST') {
-        const r = await wipeRelayDatabase();
-        res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(r));
-        return;
-      }
-      if (url === '/api/relay/database/export' && method === 'POST') {
-        const r = await exportRelayEvents();
-        res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(r));
-        return;
-      }
 
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
       if (await handleProjects(req, res, url, method)) return;
-
-      if (url === '/api/installed' && method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(detectInstalled()));
-        return;
-      }
 
       // ── Identity (extracted to routes/identity.ts) ─────────────────────
       // Covers /api/identity/config, /api/identity/set, /api/identity/relays/{add,remove},
@@ -1399,105 +857,95 @@ export async function startWebServer(port: number): Promise<void> {
       // no public-API carveout needed. Assumes the relay BINARY is already
       // installed; the wizard leaves compile/download to `nostr-station
       // onboard` because that step can run 10+ minutes and needs a TTY.
-      if (url === '/api/setup/relay/install' && method === 'POST') {
-        // Container mode: the relay is already running as a sibling
-        // container, brought up by docker compose at install time. The
-        // host-OS bootstrap path (writes launchd/systemd units, runs
-        // enable --now) doesn't apply here. The wizard's STAGES list
-        // already skips this stage in container mode (see app.js
-        // STAGES_CONTAINER); this 410 is defense-in-depth for any
-        // direct-curl callers.
-        if (isContainerMode()) {
-          res.writeHead(410, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            ok: false,
-            error: 'Relay install does not apply in container mode — the relay container is brought up by docker compose at install time.',
-            containerMode: true,
-          }));
-          return;
-        }
+      // ── Amber QR pairing (first-run /setup) ──────────────────────────
+      //
+      // The hero step of the user-journey spec: a single full-screen QR
+      // representing a NIP-46 nostrconnect:// URI. The user scans in
+      // Amber, taps approve once, and the bunker handshake captures
+      // their npub + saves a bunker client for future signing — all
+      // without ever asking them to paste an npub.
+      //
+      // Two endpoints:
+      //   POST /api/setup/amber/start
+      //     Generates the URI + QR SVG, returns the session id for
+      //     polling. Background task races the bunker connect against
+      //     CONNECT_TIMEOUT_MS.
+      //   GET  /api/setup/amber/session/:eph
+      //     Polls session state. On status='ok' returns the captured
+      //     npub; identity.json is already written by the time the
+      //     wizard sees this response.
+      if (url === '/api/setup/amber/start' && method === 'POST') {
+        // Once setup is complete, this endpoint stops responding —
+        // it's only meaningful during the first-run window. Subsequent
+        // pairings (e.g. user wants to switch Amber accounts) go
+        // through /api/auth/bunker-connect instead.
         const ident = readIdentity();
-        if (!ident.npub) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'identity.npub is not set — finish the Identity stage first' }));
+        if (ident.setupComplete === true) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'setup already complete' }));
           return;
         }
-        // Optional body — caller can override relay name + fallback relays
-        // + extra whitelisted npubs. Empty body is fine; the bootstrap
-        // applies the same defaults as the TUI Config phase.
-        let parsed: any = {};
-        try { parsed = JSON.parse(await readBody(req) || '{}'); }
-        catch { /* empty / malformed body — fall through with defaults */ }
-        try {
-          const platform = detectPlatform();
-          const result = await bootstrapRelayServices(platform, {
-            npub:           ident.npub,
-            relayName:      typeof parsed.relayName      === 'string' ? parsed.relayName      : undefined,
-            fallbackRelays: typeof parsed.fallbackRelays === 'string' ? parsed.fallbackRelays : undefined,
-            whitelistExtra: typeof parsed.whitelistExtra === 'string' ? parsed.whitelistExtra : undefined,
-          });
-          // Probe the running relay so the client can short-circuit its own
-          // status poll. `isRelayUp()` hits localhost:8080; safe to call even
-          // when enable --now failed — just returns false.
-          const up = isRelayUp();
-          res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ...result, up }));
-        } catch (e: any) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: String(e.message ?? e) }));
-        }
+        const start = await startSetupAmber(expectedDashboardUrl(req, port));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...start }));
         return;
       }
 
-      // nvpn install — mirrors the TUI Services-phase nvpn step but
-      // streams the per-step progress back to the browser as
-      // newline-delimited JSON so the wizard can render each step live
-      // (download → extract → locate → copy → verify → init → service).
-      // Long-running (~30–60s with compile, more on slow links), so a
-      // synchronous response would look like a freeze.
-      //
-      // Protocol:
-      //   {"type":"progress","step":"<message>"}   — one per onProgress call
-      //   {"type":"done","ok":bool,"detail":str}   — final event, then stream closes
-      //
-      // Gated by the same localhost-exempt wizard window as the rest of
-      // /api/setup/*, no separate public-API entry needed. `sudo -n` inside
-      // installNostrVpn will fail when the cred cache is cold; the error
-      // surfaces in the final "done" event with the nvpn-install.log path so
-      // the user can rerun `sudo <cargoBin>/nvpn service install` manually.
-      if (url === '/api/setup/nvpn/install' && method === 'POST') {
-        // Container mode: nostr-vpn isn't supportable inside an
-        // unprivileged container — needs WireGuard kernel module + raw
-        // socket access we don't grant. Wizard skips this stage; 410 is
-        // defense-in-depth for any direct caller.
-        if (isContainerMode()) {
-          res.writeHead(410, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            ok: false,
-            error: 'nostr-vpn is not supportable in container mode (WireGuard requires kernel-module access).',
-            containerMode: true,
-          }));
+      const setupAmberPollMatch = url.match(/^\/api\/setup\/amber\/session\/([0-9a-f]{64})$/);
+      if (setupAmberPollMatch && method === 'GET') {
+        const eph = setupAmberPollMatch[1];
+        const s   = getSetupAmberSession(eph);
+        if (!s) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'error', error: 'unknown session' }));
           return;
         }
-        res.writeHead(200, {
-          'Content-Type':      'application/x-ndjson',
-          'Cache-Control':     'no-cache',
-          'Connection':        'keep-alive',
-          'X-Accel-Buffering': 'no',
-        });
-        try {
-          const platform = detectPlatform();
-          const result = await installNostrVpn(platform, (step) => {
-            // node's http response.write() is synchronous from our side but
-            // the socket may apply backpressure — ignore it, we're emitting
-            // <1 event per step so throttling isn't a concern.
-            res.write(JSON.stringify({ type: 'progress', step }) + '\n');
-          });
-          res.write(JSON.stringify({ type: 'done', ok: result.ok, detail: result.detail ?? '' }) + '\n');
-        } catch (e: any) {
-          res.write(JSON.stringify({ type: 'done', ok: false, detail: String(e.message ?? e) }) + '\n');
+        if (s.status === 'waiting') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'waiting', expiresAt: s.expiresAt }));
+          return;
         }
-        res.end();
+        // Terminal state — consume the session entry. The wizard
+        // displays the result and moves to the next stage.
+        consumeSetupAmberSession(eph);
+        if (s.status !== 'ok') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: s.status, error: s.error }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', npub: s.userNpub }));
+        return;
+      }
+
+      // ── Live verification (Phase 4 of the user journey) ──────────────
+      //
+      // Generates a kind-1 test event, asks Amber to sign it (second
+      // and last phone tap during onboarding), publishes to the
+      // in-process relay over the public ws:// URL, reads it back via
+      // a REQ subscription, and returns a step-by-step result. This
+      // is the trust-earning moment — the user sees the full pipeline
+      // work end-to-end before being asked to do anything real.
+      if (url === '/api/setup/verify' && method === 'POST') {
+        const ident = readIdentity();
+        if (!ident.npub) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'identity not paired — finish Amber pairing first' }));
+          return;
+        }
+        if (ident.setupComplete === true) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'setup already complete' }));
+          return;
+        }
+        try {
+          const result = await runSetupVerify();
+          res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message ?? e) }));
+        }
         return;
       }
 
@@ -1576,22 +1024,6 @@ export async function startWebServer(port: number): Promise<void> {
       // /api/ai/providers/:id/models, and /api/ai/chat.
       if (await handleAi(req, res, url, method)) return;
 
-      const execMatch = url.match(/^\/api\/exec\/([a-z-]+)(?:\/([a-z0-9-]+))?$/);
-      if (execMatch && method === 'POST') {
-        const spec = cmdSpecFor(execMatch[1], execMatch[2]);
-        if (!spec) { res.writeHead(404); res.end('unknown exec target'); return; }
-        streamExec(spec, res, req);
-        return;
-      }
-
-      const logsMatch = url.match(/^\/api\/logs\/(relay|watchdog|vpn)$/);
-      if (logsMatch && method === 'GET') {
-        streamLogs(logsMatch[1] as 'relay' | 'watchdog' | 'vpn', res, req)
-          .catch(e => { try { res.end(); } catch {} ; process.stderr.write(`streamLogs error: ${e}\n`); });
-        return;
-      }
-
-
       // ── Terminal HTTP surface (extracted to routes/terminal.ts) ───────
       // Covers /api/terminal/capability, /api/terminal, /api/terminal/create,
       // and DELETE /api/terminal/:id. The matching WebSocket upgrade is
@@ -1644,6 +1076,11 @@ export async function startWebServer(port: number): Promise<void> {
 
     server.on('close', () => {
       destroyAllTerminals();
+      // Stop the in-process relay alongside the dashboard. Errors are
+      // swallowed because a half-stopped relay during shutdown is no
+      // worse than a dropped log line.
+      void inprocRelay?.stop().catch(() => {});
+      inprocRelay = null;
       dropPid();
     });
 
@@ -1690,6 +1127,13 @@ export async function startWebServer(port: number): Promise<void> {
       // of them hang (secret-tool unlock prompt, node-pty prebuilt probe,
       // ai-config migration) the dashboard is still up and serving.
       warmUp();
+      // In-process relay (gated on STATION_INPROC_RELAY=1). Started after
+      // the dashboard binds so a relay-port collision doesn't prevent
+      // the dashboard from coming up — the relay will surface its own
+      // EADDRINUSE in stderr if 7777 is taken.
+      void maybeStartInprocRelay().catch(e => {
+        process.stderr.write(`[relay] failed to start: ${(e as Error).message}\n`);
+      });
       resolve();
     });
   });

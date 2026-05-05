@@ -6152,13 +6152,22 @@ AuthScreen = (() => {
 
 const SetupWizard = (() => {
   const root = $('setup-root');
-  // STAGES is mutable so show() can drop the relay + vpn stages in
-  // container mode — both are inapplicable there: the relay is already
-  // running as a sibling container and nostr-vpn isn't supportable
-  // inside an unprivileged container. Decided at show() time after we
-  // fetch /api/auth/status (which carries the containerMode flag).
+  // STAGES is mutable so show() can drop the relay + vpn stages when:
+  //   - container mode: sibling Docker relay is already up; nvpn needs
+  //     kernel-module access we don't grant in the container
+  //   - in-process relay: the relay starts inside the dashboard process
+  //     before the wizard renders, so the install stage is a no-op
+  // Decided at show() time after we fetch /api/auth/status (which now
+  // carries both `containerMode` and `inprocRelay` flags).
   const STAGES_HOST      = ['welcome', 'identity', 'relay', 'ai', 'ngit', 'vpn', 'done'];
   const STAGES_CONTAINER = ['welcome', 'identity', 'ai', 'ngit', 'done'];
+  // Pure-Node host deployment: relay already up, nvpn skipped (same
+  // reasoning as container — no Wireguard kernel module here either).
+  // First-run pairing is the Amber QR (no paste fallback) followed by a
+  // live signing-pipeline verification — together those replace the
+  // legacy "paste an npub" identity stage with the spec's "scan, tap,
+  // proven" flow.
+  const STAGES_INPROC    = ['welcome', 'amber', 'verify', 'ai', 'ngit', 'done'];
   let STAGES = STAGES_HOST;
   let stageIdx = 0;
   const state = { npub: '', profile: null };
@@ -6193,11 +6202,15 @@ const SetupWizard = (() => {
         location.href = '/';
         return;
       }
-      // Container-mode wizard skips the relay-install + nvpn-install
-      // stages — both call APIs that 410 in container mode (the relay
-      // is already running, nvpn isn't supportable). Walking users
-      // through them would be a dead end.
-      STAGES = st.containerMode ? STAGES_CONTAINER : STAGES_HOST;
+      // Pick the stage list based on deployment mode:
+      //   - container: sibling Docker relay is up, nvpn unsupportable
+      //   - in-process relay: the dashboard's own Node process is the relay
+      //   - host-install (legacy): full HOST stage list, install relay + nvpn
+      // The relay-install / nvpn-install APIs return 410 in the first two
+      // modes; walking users through those stages would be a dead end.
+      STAGES = st.containerMode ? STAGES_CONTAINER
+             : st.inprocRelay   ? STAGES_INPROC
+             : STAGES_HOST;
     } catch { /* fall through — render wizard anyway with default STAGES */ }
 
     stageIdx = 0;
@@ -6243,6 +6256,8 @@ const SetupWizard = (() => {
   function render() {
     const stage = STAGES[stageIdx];
     if      (stage === 'welcome')  renderWelcome();
+    else if (stage === 'amber')    renderAmber();
+    else if (stage === 'verify')   renderVerify();
     else if (stage === 'identity') renderIdentity();
     else if (stage === 'relay')    renderRelay();
     else if (stage === 'ai')       renderAi();
@@ -6250,6 +6265,161 @@ const SetupWizard = (() => {
     else if (stage === 'vpn')      renderVpn();
     else if (stage === 'done')     renderDone();
     else                           renderStub(stage);
+  }
+
+  // ── Amber QR pairing ─────────────────────────────────────────────────
+  // The hero step. One full-size QR code, one instruction. The user scans
+  // in Amber, taps approve once, and the wizard captures their npub via
+  // the NIP-46 nostr-connect handshake. No paste field, no fallback —
+  // this is THE sign-in for the in-process deployment.
+  let amberPollTimer = null;
+  function renderAmber() {
+    if (amberPollTimer) { clearTimeout(amberPollTimer); amberPollTimer = null; }
+    root.innerHTML = shell(
+      'Pair Amber',
+      'Open Amber on your phone, scan this QR, tap approve.',
+      `
+        <div class="setup-amber-stage">
+          <div id="setup-amber-qr" class="setup-amber-qr">
+            <div class="muted">Generating QR…</div>
+          </div>
+          <div id="setup-amber-status" class="setup-amber-status muted">
+            Waiting for Amber…
+          </div>
+          <div class="setup-amber-help muted">
+            No Amber yet?
+            <a href="https://github.com/greenart7c3/Amber" target="_blank" rel="noreferrer">Install Amber</a>
+            on your Android phone, create or import a key, then come back.
+          </div>
+        </div>
+      `,
+    );
+    // Kick off the start request. On success, render the QR and begin
+    // polling. Errors surface inline.
+    fetch('/api/setup/amber/start', { method: 'POST' })
+      .then(r => r.json())
+      .then(j => {
+        if (!j.ok) throw new Error(j.error || 'start failed');
+        const qrBox = document.getElementById('setup-amber-qr');
+        if (qrBox) qrBox.innerHTML = j.qrSvg;
+        startAmberPolling(j.ephemeralPubkey);
+      })
+      .catch(err => {
+        const status = document.getElementById('setup-amber-status');
+        if (status) {
+          status.innerHTML = `<span class="err">Couldn't start pairing: ${escapeHtml(err.message)}</span>`;
+        }
+      });
+  }
+
+  function startAmberPolling(eph) {
+    let stopped = false;
+    const status = () => document.getElementById('setup-amber-status');
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const res = await fetch(`/api/setup/amber/session/${eph}`);
+        const j   = await res.json();
+        if (j.status === 'waiting') {
+          amberPollTimer = setTimeout(poll, 1500);
+          return;
+        }
+        stopped = true;
+        if (j.status === 'ok' && j.npub) {
+          state.npub = j.npub;
+          if (status()) {
+            status().innerHTML = `<span class="ok">✓ Paired as ${escapeHtml(truncNpub(j.npub))}</span>`;
+          }
+          // Brief pause so the user registers the success state before
+          // the wizard advances. Matches the "✓ pair → next" rhythm of
+          // the spec.
+          setTimeout(() => next(), 900);
+        } else if (j.status === 'timeout') {
+          if (status()) {
+            status().innerHTML = `<span class="err">Pairing timed out — </span><a href="#" id="amber-retry">try again</a>`;
+            const retry = document.getElementById('amber-retry');
+            if (retry) retry.addEventListener('click', e => { e.preventDefault(); render(); });
+          }
+        } else {
+          if (status()) {
+            status().innerHTML = `<span class="err">Pairing failed: ${escapeHtml(j.error || 'unknown error')}</span> · <a href="#" id="amber-retry">retry</a>`;
+            const retry = document.getElementById('amber-retry');
+            if (retry) retry.addEventListener('click', e => { e.preventDefault(); render(); });
+          }
+        }
+      } catch (e) {
+        // Network blip — retry once before giving up.
+        amberPollTimer = setTimeout(poll, 2000);
+      }
+    };
+    poll();
+  }
+
+  // ── Live verification ────────────────────────────────────────────────
+  // The trust-earning moment per the user-journey spec. Generates a
+  // kind-1 test event, signs via Amber (second phone tap, last in
+  // onboarding), publishes to the local relay, reads it back. User sees
+  // a live checklist; on success the wizard advances.
+  function renderVerify() {
+    root.innerHTML = shell(
+      'Verify the pipeline',
+      'One tap on your phone confirms Amber, the relay, and signing all work end-to-end.',
+      `
+        <div class="setup-verify-stage">
+          <div id="setup-verify-steps" class="setup-verify-steps">
+            <div class="setup-verify-step pending"><span class="bullet">•</span> Sign a test event via Amber</div>
+            <div class="setup-verify-step pending"><span class="bullet">•</span> Publish to ws://localhost:7777</div>
+            <div class="setup-verify-step pending"><span class="bullet">•</span> Read it back from the relay</div>
+          </div>
+          <div id="setup-verify-status" class="setup-verify-status muted">
+            Approve the signing prompt on your phone…
+          </div>
+          <div class="setup-actions">
+            <button class="setup-back" id="verify-back">← Back</button>
+            <button class="primary setup-next" id="verify-next" disabled>Continue →</button>
+          </div>
+        </div>
+      `,
+    );
+    document.getElementById('verify-back').addEventListener('click', back);
+    document.getElementById('verify-next').addEventListener('click', next);
+
+    fetch('/api/setup/verify', { method: 'POST' })
+      .then(async r => {
+        const j = await r.json();
+        return { ok: r.ok, body: j };
+      })
+      .then(({ ok, body }) => {
+        const stepEls = document.querySelectorAll('#setup-verify-steps .setup-verify-step');
+        const stepNames = ['sign-via-amber', 'publish-to-relay', 'read-back-from-relay'];
+        const status = document.getElementById('setup-verify-status');
+        for (let i = 0; i < stepNames.length; i++) {
+          const result = (body.steps || []).find(s => s.name === stepNames[i]);
+          if (!result) continue;
+          stepEls[i].classList.remove('pending');
+          stepEls[i].classList.add(result.ok ? 'ok' : 'err');
+          stepEls[i].querySelector('.bullet').textContent = result.ok ? '✓' : '✗';
+          if (result.detail) {
+            const detail = document.createElement('span');
+            detail.className = 'muted';
+            detail.style.marginLeft = '0.5em';
+            detail.textContent = result.detail;
+            stepEls[i].appendChild(detail);
+          }
+        }
+        if (ok && body.ok) {
+          status.innerHTML = '<span class="ok">Signing works. Relay is live. You\'re ready.</span>';
+          document.getElementById('verify-next').disabled = false;
+        } else {
+          status.innerHTML = `<span class="err">${escapeHtml(body.error || 'verification failed')}</span> · <a href="#" id="verify-retry">retry</a>`;
+          const retry = document.getElementById('verify-retry');
+          if (retry) retry.addEventListener('click', e => { e.preventDefault(); render(); });
+        }
+      })
+      .catch(err => {
+        const status = document.getElementById('setup-verify-status');
+        if (status) status.innerHTML = `<span class="err">Couldn't run verification: ${escapeHtml(err.message)}</span>`;
+      });
   }
 
   // ── Welcome ──────────────────────────────────────────────────────────

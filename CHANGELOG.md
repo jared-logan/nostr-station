@@ -5,6 +5,92 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Architectural simplification (six-step rewrite)
+
+> **Major.** nostr-station is now a single Node process with an in-process
+> Nostr relay. No Docker, no Rust toolchain, no LaunchAgent / systemd, no
+> mesh VPN, no Ink TUI wizard. Install is one curl command and ~10 seconds.
+> All host-install and Docker-stack code paths were deleted. ~10,400 lines
+> of legacy infra removed; codebase shrunk by roughly half.
+
+The user-journey spec — pair Amber with one QR, verify the signing
+pipeline live, then dashboard — is now the only first-run flow. The
+six commits, in order:
+
+- **`feat(relay)`: in-process Nostr relay behind `STATION_INPROC_RELAY=1`.**
+  New `src/relay/` module — NIP-01 protocol over WebSocket, NIP-11 over
+  HTTP, `better-sqlite3` event store with replaceable / parameterized-
+  replaceable handling, indexed tag table, max-events eviction. Lazy-imported
+  by the dashboard so the legacy Docker path is unaffected when the flag
+  is off. 23 new tests covering filter logic, store, and protocol.
+- **`feat(relay)`: make in-process relay the default.** Boots automatically
+  unless `STATION_MODE=container` (sibling Docker relay) or
+  `STATION_INPROC_RELAY=0` (explicit opt-out). `RELAY_HOST` / `RELAY_PORT`
+  env vars are auto-populated so `nostr-station status` and the dashboard's
+  service panel find the new relay on `:7777`. `auth.inprocRelay` flag added
+  to `/api/auth/status` so the wizard knows to skip the legacy relay-install
+  stage.
+- **`feat(install)`: strip Docker out of `install.sh`.** New 70-line
+  installer: detect macOS / Linux, install Node 22+ via nvm if missing,
+  `npm install -g nostr-station`, `exec nostr-station`. No Docker check,
+  no compose-asset copy, no `sudo`, no `apt-get`, no `brew`, no `cargo`.
+  CLI verbs collapsed: bare invocation + `start` + `up` all render the
+  Chat component (which boots the dashboard + in-process relay);
+  `stop` / `down` SIGTERM via PID file; `ps` removed (use `status`).
+- **`feat(setup)`: Amber QR pairing + live verification stage.** First-run
+  `/setup` wizard now uses `STAGES_INPROC = [welcome, amber, verify, ai,
+  ngit, done]`. The amber stage shows ONE full-screen QR — the
+  nostr-connect URI — and polls for the bunker handshake. On connect:
+  captures user pubkey via `signer.getPublicKey()`, encodes to npub,
+  writes `identity.json`, persists the bunker client for silent
+  re-auth. The verify stage runs an end-to-end pipeline test: sign a
+  kind-1 event via Amber (second tap), publish over WS to the
+  in-process relay, REQ-replay to read it back, return a step-by-step
+  result. New endpoints: `POST /api/setup/amber/start`,
+  `GET /api/setup/amber/session/:eph`, `POST /api/setup/verify`. New
+  generic helper `signEventWithSavedBunker(template)` in
+  `auth-bunker.ts` is the building block for ngit / nsite signing too.
+- **`refactor`: delete the host-install / Docker-stack legacy infra.**
+  Removed: `Dockerfile.relay`, `Dockerfile.station`, `docker-compose.yml`,
+  `docker/`, `.dockerignore`, `CONTAINER.md`, `src/onboard/` (legacy Ink TUI
+  wizard, ~1,300 LoC), nine legacy CLI commands (Doctor / Tui / Uninstall /
+  Update / UpdateWizard / Watchdog / Logs / Relay / RelayConfig), eight
+  legacy lib modules (`install.ts`, `services.ts`, `verify.ts`,
+  `relay-config.ts`, `launcher.ts`, `watchdog.ts`, `checksum.ts`,
+  `install-log.ts`), and ~1,500 LoC of container-mode + host-install tests.
+  `src/lib/web-server.ts` lost ~660 lines: `relayAction`,
+  `serveRelayConfig`, `streamLogs`, `exportRelayEvents`, the
+  ServiceHealth / log-tail apparatus, and ten dead route handlers
+  (`/api/relay-config`, `/api/relay/{start,stop,restart}`,
+  `/api/relay/whitelist/{add,remove}`, `/api/relay/database/{stats,wipe,export}`,
+  `/api/setup/relay/install`, `/api/setup/nvpn/install`, `/api/exec/:cmd`,
+  `/api/installed`, `/api/logs/:service`). Reusable Ink components
+  (`palette.ts`, `Select.tsx`, `Prompt.tsx`, `Step.tsx`) moved from
+  `src/onboard/components/` to `src/cli-ui/`. Editor helpers
+  (`EDITOR_FILENAMES`, `symlinkEditorFile`, `extractUserRegion`) extracted
+  from the deleted `services.ts` to a new minimal `src/lib/editor.ts`.
+  `hexToNpub` / `npubToHex` moved to `identity.ts` from the deleted
+  `relay-config.ts`. **67 files changed, 112 insertions, 10,527 deletions.**
+- **`feat(add)`: `nostr-station add <tool>` — opt-in installer.** Restores
+  the spec's "Optional means post-onboard" model. New `src/lib/tools.ts`
+  registry — Tool entries are data, not code: `id`, `binary`, `detect`
+  argv, `prereqs`, `installSteps`. Four kinds of step: `cargo-install`,
+  `npm-global`, `shell-script`, `manual` (no automated path — surfaces
+  the install URL). `installTool()` streams stdout / stderr line-by-line
+  to a callback so the UI shows progress instead of looking like a hang.
+  New `src/commands/Add.tsx`: list view (`nostr-station list` /
+  `nostr-station add`) shows every tool with ✓ / ○ install state +
+  detected version; install view runs detect → confirm (or `--yes`) →
+  installing (with last-12-lines stream) → done. Initial tools: `ngit`,
+  `nak`, `stacks`, `nsyte`. 7 new tests including a planted-stub
+  fakebin-on-augmented-PATH detection round-trip.
+
+End state: 161 tests passing, type-check clean. The full happy path is
+`curl … | bash` → ~10s → browser opens at `/setup` → scan QR → tap
+approve → verify pipeline → dashboard. Codebase footprint is now ~12k
+LoC TS/TSX backend + ~7k LoC dashboard SPA + ~2k LoC tests, down from
+~17k + ~7k + ~3.5k.
+
 ### Added
 - **`AGENTS.md` explicit support — Editor TUI surfaces it, contract pinned with tests.** `EDITOR_FILENAMES` already mapped both `codex` and `other` to `AGENTS.md`, and `symlinkEditorFile` already handled the file/subdir mechanics — no code change there. The `nostr-station editor` Ink TUI gains a clarifying paragraph above the picker explaining that AGENTS.md is the canonical target for Codex and Stacks Dork: it gives those tools environmental awareness (relay URL, signer status, NIPs available) without overriding their identity. The Nori persona's Section 5 (added in Item 1) already mentions this. New 8-test suite (`tests/editor-symlink.test.ts`) pins the contract: codex + other both land on AGENTS.md, the result is a symlink (not a file copy — switching tools mustn't quietly stale), the relative target is `NOSTR_STATION.md`, the copilot subdir case (`.github/copilot-instructions.md`) creates parent dirs, re-running on the same editor is idempotent (no EEXIST), switching editors leaves the previous tool's link intact (developers can flip between Codex and Claude Code without losing either file), and the documented EDITOR_FILENAMES table round-trips byte-identically.
 - **Per-project chat overlay — `project-context.md`.** New developer-authored file at any project root, read on every chat turn by `ai-context.ts`'s `projectContext()` and spliced into the system prompt under `## Project context overlay` *(after* the README excerpt — tail placement gives the most intentional guidance the best survival odds against pathological truncation). Verbatim splice (no truncation — README is capped because every project has one whether it's AI-facing or not, but `project-context.md` is *deliberately* AI-facing and its length is the length the developer chose). Empty / whitespace-only / missing files all silently omit the section — no "auto-create" path; the file is intentional or it doesn't exist. New `readProjectContext(projectPath): string | null` helper, exported for testability. 9 unit tests cover present / missing / empty / whitespace-only / unreadable / rich-markdown round-trip / `buildAiContext` integration showing the section header lands and sits after the README. A header comment in `ai-context.ts` documents the `## Wiki namespaces` convention developers can use inside the file (today it's spliced verbatim; a future pass will parse the section to gate `/wiki:lookup` namespaces).

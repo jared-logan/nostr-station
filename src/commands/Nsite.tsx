@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { P } from '../onboard/components/palette.js';
-import { Prompt } from '../onboard/components/Prompt.js';
-import { Select } from '../onboard/components/Select.js';
+import { P } from '../cli-ui/palette.js';
+import { Prompt } from '../cli-ui/Prompt.js';
+import { Select } from '../cli-ui/Select.js';
 import { execa, type ExecaError } from 'execa';
 import { execSync } from 'child_process';
 import fs from 'fs';

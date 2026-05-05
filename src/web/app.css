@@ -1,5 +1,5 @@
 /* nostr-station dashboard — dark terminal aesthetic, nostr-purple accent.
-   Matches the ostrich-palette tokens from src/onboard/components/palette.ts
+   Matches the ostrich-palette tokens from src/cli-ui/palette.ts
    so the CLI and web UI read as the same product. */
 
 :root {
@@ -3719,4 +3719,56 @@ body.term-expanded .term-bar-toggle .term-chevron {
   line-height: 1.5;
   margin-bottom: 14px;
 }
+
+/* ── /setup Amber QR pairing stage ───────────────────────────────────────── */
+.setup-amber-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0;
+}
+.setup-amber-qr {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 280px;
+  height: 280px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+.setup-amber-qr svg { width: 100%; height: 100%; display: block; }
+.setup-amber-status { font-size: 13px; text-align: center; }
+.setup-amber-status .ok  { color: var(--success); }
+.setup-amber-status .err { color: var(--error); }
+.setup-amber-help {
+  font-size: 12px;
+  text-align: center;
+  max-width: 360px;
+  line-height: 1.5;
+}
+
+/* ── /setup verify stage (live signing pipeline test) ────────────────────── */
+.setup-verify-stage  { display: flex; flex-direction: column; gap: 14px; padding: 8px 0; }
+.setup-verify-steps  {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 13px; font-family: var(--font-mono, monospace);
+}
+.setup-verify-step {
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+.setup-verify-step .bullet { display: inline-block; width: 1.4em; font-weight: bold; }
+.setup-verify-step.pending .bullet { color: var(--text-dim); }
+.setup-verify-step.ok       { border-color: var(--success); }
+.setup-verify-step.ok       .bullet { color: var(--success); }
+.setup-verify-step.err      { border-color: var(--error); }
+.setup-verify-step.err      .bullet { color: var(--error); }
+.setup-verify-status        { font-size: 13px; text-align: center; }
+.setup-verify-status .ok    { color: var(--success); font-weight: 500; }
+.setup-verify-status .err   { color: var(--error); }
 

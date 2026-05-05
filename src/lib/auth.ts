@@ -236,11 +236,26 @@ export interface AuthStatus {
   requireAuth:     boolean;
   localhostExempt: boolean;
   containerMode:   boolean;
+  // True when nostr-station is running an in-process Nostr relay (the
+  // default for the host-Node deployment). The /setup wizard uses this
+  // to skip the legacy "install relay" stage — the relay is already up
+  // and serving on ws://127.0.0.1:7777 by the time the wizard renders.
+  inprocRelay:     boolean;
   session?: {
     createdAt: number;
     expiresAt: number;
     npub:      string;
   };
+}
+
+// True when this process is running the in-process relay. Mirrors the
+// shouldStartInprocRelay() decision in web-server.ts (kept here so auth
+// stays free of cross-module imports). Container mode and the explicit
+// STATION_INPROC_RELAY=0 opt-out short-circuit the default.
+function inprocRelayActive(): boolean {
+  if (isContainerMode()) return false;
+  if (process.env.STATION_INPROC_RELAY === '0') return false;
+  return true;
 }
 
 export function authStatus(req: http.IncomingMessage): AuthStatus {
@@ -255,6 +270,7 @@ export function authStatus(req: http.IncomingMessage): AuthStatus {
     requireAuth,
     localhostExempt: exempt,
     containerMode:   isContainerMode(),
+    inprocRelay:     inprocRelayActive(),
     authenticated:   !!session || exempt,
     session: session
       ? { createdAt: session.createdAt, expiresAt: session.expiresAt, npub: session.npub }

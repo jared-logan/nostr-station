@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import { Select } from '../onboard/components/Select.js';
-import { P } from '../onboard/components/palette.js';
-import { detectPlatform } from '../lib/detect.js';
-import { symlinkEditorFile, EDITOR_FILENAMES } from '../lib/services.js';
+import { Select } from '../cli-ui/Select.js';
+import { P } from '../cli-ui/palette.js';
+import { symlinkEditorFile, EDITOR_FILENAMES } from '../lib/editor.js';
 
 interface EditorProps {}
 
@@ -12,8 +11,6 @@ export const Editor: React.FC<EditorProps> = () => {
   const [result, setResult] = useState<{ editor: string; linked: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const platform = detectPlatform();
-
   const options = Object.entries(EDITOR_FILENAMES).map(([value, filename]) => ({
     label: `${value.padEnd(14)} → ${filename}`,
     value,
@@ -21,7 +18,7 @@ export const Editor: React.FC<EditorProps> = () => {
 
   const handleSelect = (item: { value: string }) => {
     try {
-      const linkPath = symlinkEditorFile(platform, item.value);
+      const linkPath = symlinkEditorFile(item.value);
       const filename = EDITOR_FILENAMES[item.value] ?? 'AGENTS.md';
       setResult({ editor: item.value, linked: filename });
       setDone(true);
@@ -74,7 +71,7 @@ export const Editor: React.FC<EditorProps> = () => {
           </Text>
           <Box marginTop={1}>
             <Text color={P.muted}>
-              {`~/projects/${result.linked} now points to your context file.`}
+              {`~/nostr-station/projects/${result.linked} now points to your context file.`}
             </Text>
           </Box>
         </Box>

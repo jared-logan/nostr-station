@@ -20,8 +20,8 @@
 import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import TextInput from 'ink-text-input';
-import { P } from '../onboard/components/palette.js';
-import { Select } from '../onboard/components/Select.js';
+import { P } from '../cli-ui/palette.js';
+import { Select } from '../cli-ui/Select.js';
 import {
   PROVIDERS, getProvider, keychainAccountFor,
   type Provider, type ApiProvider,

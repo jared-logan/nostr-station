@@ -1,20 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { execa } from 'execa';
-import { execSync } from 'child_process';
-import net from 'net';
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
-import { P } from '../onboard/components/palette.js';
-import { Select } from '../onboard/components/Select.js';
+import { P } from '../cli-ui/palette.js';
+import { Select } from '../cli-ui/Select.js';
 import { getKeychain } from '../lib/keychain.js';
-import { addToWhitelist } from '../lib/relay-config.js';
+// addToWhitelist + restartRelay are gone — the in-process relay has no
+// NIP-42 auth or whitelist (yet), so seed publishes directly.
 
 interface SeedProps {
   eventCount: number;
   full: boolean;
 }
 
-const RELAY_URL = 'ws://localhost:8080';
+// In-process relay defaults; honors the env vars web-server.ts publishes
+// when the dashboard is already running so a `seed --full` against a
+// non-default port still hits the right relay.
+const RELAY_HOST = process.env.RELAY_HOST || '127.0.0.1';
+const RELAY_PORT = process.env.RELAY_PORT || '7777';
+const RELAY_URL  = `ws://${RELAY_HOST}:${RELAY_PORT}`;
 
 const NOTE_CONTENT = [
   'Testing the local relay — hello nostr!',
@@ -116,40 +120,6 @@ async function ensureSeedIdentity(): Promise<{ nsec: string; npub: string; fresh
   return { nsec, npub, freshlyGenerated: true };
 }
 
-// ── Relay lifecycle helpers ────────────────────────────────────────────────
-
-function serviceCmd(action: 'start' | 'stop'): string {
-  const isMac = process.platform === 'darwin';
-  const label = 'com.nostr-station.relay';
-  if (isMac) return `launchctl ${action} ${label}`;
-  return `systemctl --user ${action} nostr-relay.service`;
-}
-
-async function waitForRelayListening(port = 8080, timeoutMs = 10_000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const up = await new Promise<boolean>(resolve => {
-      const sock = net.createConnection({ host: '127.0.0.1', port }, () => {
-        sock.end();
-        resolve(true);
-      });
-      sock.on('error', () => resolve(false));
-      sock.setTimeout(500, () => { sock.destroy(); resolve(false); });
-    });
-    if (up) return true;
-    await new Promise(r => setTimeout(r, 250));
-  }
-  return false;
-}
-
-async function restartRelay(): Promise<boolean> {
-  try { execSync(serviceCmd('stop'), { stdio: 'pipe', timeout: 5000 }); } catch { /* idempotent */ }
-  await new Promise(r => setTimeout(r, 500));
-  try { execSync(serviceCmd('start'), { stdio: 'pipe', timeout: 5000 }); }
-  catch { return false; }
-  return waitForRelayListening();
-}
-
 export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
   const [phase, setPhase] = useState<
     'preparing' | 'checking' | 'confirm' | 'seeding' | 'done' | 'error'
@@ -178,38 +148,10 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
       setSeedNsec(ident.nsec);
       setSeedNpub(ident.npub);
 
-      // 2. Ensure the npub is in the relay whitelist. Idempotent — returns
-      // already:true if it was already there (common path on runs 2+).
-      setPrepareStatus('Whitelisting seed identity…');
-      let restartNeeded = ident.freshlyGenerated;
-      try {
-        const r = addToWhitelist(ident.npub);
-        if (!r.ok) {
-          setErrorMsg(`Could not whitelist seed identity: ${r.hex}`);
-          setPhase('error');
-          return;
-        }
-        if (!r.already) restartNeeded = true;
-      } catch (e: any) {
-        setErrorMsg(`Whitelist write failed: ${e?.message ?? 'unknown'}`);
-        setPhase('error');
-        return;
-      }
+      // (whitelist + relay restart removed — the in-process relay accepts
+      // any signed event from any pubkey. NIP-42 is a future hardening pass.)
 
-      // 3. If the whitelist file just changed, the relay needs to reload
-      // the config — nostr-rs-relay only reads config.toml at startup.
-      // Subsequent seed runs skip this step entirely.
-      if (restartNeeded) {
-        setPrepareStatus('Restarting relay to pick up whitelist…');
-        const ok = await restartRelay();
-        if (!ok) {
-          setErrorMsg('Relay restart failed. Try `nostr-station relay restart` and re-run seed.');
-          setPhase('error');
-          return;
-        }
-      }
-
-      // 4. Now that we can reach the relay with an authenticated,
+      // 2. Now that we can reach the relay with an authenticated,
       // whitelisted identity, see how many events it already has — the
       // confirm prompt depends on this count.
       setPrepareStatus('Counting existing events…');

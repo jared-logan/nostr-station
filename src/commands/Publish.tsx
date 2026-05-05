@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { P } from '../onboard/components/palette.js';
+import { P } from '../cli-ui/palette.js';
 import {
   getRemotes, isNgitConfigured, getUnpushedCommits,
   getCurrentBranch, isGitRepo, pushToRemote,

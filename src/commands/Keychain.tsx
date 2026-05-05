@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
-import { P } from '../onboard/components/palette.js';
+import { P } from '../cli-ui/palette.js';
 import {
   getKeychain, getKeychainBackendName,
   ALL_KEYS, type KeychainKey,

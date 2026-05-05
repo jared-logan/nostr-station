@@ -7,6 +7,15 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Cancel any in-progress run for the same ref when a new push lands.
+# Without this, every force-push or new commit on a PR queued a fresh
+# run on top of the previous one — the queue could stack 3+ deep on a
+# busy branch and the yellow "in progress" dot would sit for hours
+# waiting for a runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-smoke:
     name: Build + CLI smoke
@@ -47,12 +56,11 @@ jobs:
         run: |
           output=$(nostr-station help)
           echo "$output"
-          # Match help output post-rename:
-          #   logs → folded into `relay logs`
-          #   push → publish
-          #   setup-editor → editor
-          # See commit ebeae84 for the rename.
-          for cmd in onboard doctor status update chat relay tui seed publish keychain nsite editor completion uninstall; do
+          # Surviving verbs after the simplified-architecture cut:
+          # onboard / doctor / update / tui / relay / uninstall were all
+          # deleted along with the host-install / Docker-stack legacy
+          # infra. `add` + `ai` are new first-class verbs.
+          for cmd in start stop status chat keychain ai add seed publish nsite editor completion; do
             echo "$output" | grep -qw "$cmd" || { echo "❌ Missing from help: $cmd"; exit 1; }
           done
           echo "✓ All commands listed in help"
@@ -102,25 +110,6 @@ jobs:
           print(f'OK: all {len(d)} keys present, all rows well-formed')
           print(f'info: {ok_count}/{len(d)} services healthy (not asserted in CI)')
           PY
-
-      - name: Banner tier detection present
-        run: |
-          # Banner uses a three-tier capability detector — plain / safe / full —
-          # so unknown terminals fall back to plain-text rather than rendering
-          # double-width box-drawing chars. Guard all three tiers + the
-          # NOSTR_STATION_BANNER escape hatch so a future refactor can't
-          # silently revert to an unconditional full banner.
-          f=src/onboard/components/Banner.tsx
-          for token in 'detectTier' "'plain'" "'safe'" "'full'" 'NOSTR_STATION_BANNER'; do
-            grep -q "$token" "$f" || { echo "❌ Banner tier check missing: $token"; exit 1; }
-          done
-          echo "✓ Banner tier detection wired (plain/safe/full + env override)"
-
-      - name: Select double-arrow fix present
-        run: |
-          grep -q "indicatorComponent" src/onboard/components/Select.tsx \
-            || { echo "❌ Select indicator override missing"; exit 1; }
-          echo "✓ Select indicator override wired"
 
       - name: Version pinning constants present
         run: |
