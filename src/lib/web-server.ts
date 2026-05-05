@@ -858,6 +858,36 @@ export async function startWebServer(port: number): Promise<void> {
       //   knownRoles — owner npub from identity.json, plus best-effort
       //     watchdog/seed npubs derived from keychain nsec slots so the
       //     whitelist editor can label entries by role.
+      // ── Relay lifecycle ───────────────────────────────────────────────
+      // start/stop/restart the in-process relay from the Relay panel
+      // (app.js:1925). Pre-architectural-simplification this drove
+      // launchctl/systemctl on a separate nostr-rs-relay daemon; now it
+      // operates on the in-process Relay handle directly. STATION_INPROC_RELAY=0
+      // is an opt-out: maybeStartInprocRelay no-ops in that case, so a
+      // user who explicitly disabled the embedded relay sees a successful
+      // {up:false} response rather than a confusing error.
+      const relayActionMatch = url.match(/^\/api\/relay\/(start|stop|restart)$/);
+      if (relayActionMatch && method === 'POST') {
+        const action = relayActionMatch[1];
+        try {
+          if (action === 'stop' || action === 'restart') {
+            if (inprocRelay) {
+              await inprocRelay.stop();
+              inprocRelay = null;
+            }
+          }
+          if (action === 'start' || action === 'restart') {
+            await maybeStartInprocRelay();
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, action, up: inprocRelay !== null }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, action, error: String(e?.message || e) }));
+        }
+        return;
+      }
+
       // ── Relay sqlite DB stats ─────────────────────────────────────────
       // Used by the Relay panel's database section (app.js:1908). Sums the
       // sqlite main file plus its WAL/SHM sidecars so a relay under active
