@@ -86,7 +86,22 @@ export class Relay {
       try { sub.ws.close(1001, 'relay stopping'); } catch {}
     }
     this.subs.clear();
+    // Hard-terminate any clients the WebSocketServer still tracks. Without
+    // this, `wss.close()` waits for graceful close handshakes and
+    // `http.close()` waits for the underlying TCP sockets to drain — which
+    // races on slow runners (notably GitHub Actions) and can leave
+    // Relay.stop() pending for minutes when a test client's CLOSE frame
+    // hadn't been ACKed yet.
+    if (this.wss) {
+      for (const client of this.wss.clients) {
+        try { client.terminate(); } catch {}
+      }
+    }
     await new Promise<void>(resolve => this.wss?.close(() => resolve()));
+    // closeAllConnections (Node 18.2+) force-closes any remaining
+    // keep-alive sockets so http.close() can resolve immediately instead
+    // of waiting for keep-alive timeout.
+    this.http?.closeAllConnections?.();
     await new Promise<void>(resolve => this.http?.close(() => resolve()));
     this.store.close();
   }
