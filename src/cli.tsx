@@ -9,6 +9,7 @@ import { Nsite }      from './commands/Nsite.js';
 import { Keychain }   from './commands/Keychain.js';
 import { Publish }    from './commands/Publish.js';
 import { Chat }       from './commands/Chat.js';
+import { Add }        from './commands/Add.js';
 import { Ai, type AiAction } from './commands/Ai.js';
 import { getProvider as getAiProvider } from './lib/ai-providers.js';
 import { getKeychain }    from './lib/keychain.js';
@@ -166,6 +167,20 @@ switch (command) {
     console.log(`nostr-station ${VERSION}`);
     break;
 
+  case 'add':
+  case 'list': {
+    // `nostr-station add` (no tool)         → list available tools + install state
+    // `nostr-station list`                  → same as bare add
+    // `nostr-station add <tool>`            → install (interactive y/N confirm)
+    // `nostr-station add <tool> --yes`      → install without prompting
+    const toolId = command === 'list' ? undefined : args[0];
+    if (toolId && !flag('--yes')) {
+      requireInteractive('add', 'Pass --yes to skip the confirmation.');
+    }
+    render(React.createElement(Add, { toolId, yes: flag('--yes') }));
+    break;
+  }
+
   case 'ai': {
     // ai                        → list
     // ai list                   → list
@@ -246,6 +261,8 @@ function printHelp() {
     chat                             Web dashboard at localhost:3000
     keychain                         Store, rotate, and inspect credentials in the OS keychain
     ai                               Manage AI providers — add, remove, list, set defaults
+    add [tool]                       Install an optional tool (ngit, nak, stacks, nsyte) — bare lists them
+    list                             Same as bare 'add' — list optional tools + install state
     seed                             Publish test events to your relay
     publish                          Publish current repo to GitHub + Nostr (ngit) simultaneously
     nsite                            Publish a static site to Nostr via nsyte
@@ -274,6 +291,12 @@ function printHelp() {
     nsite status                     Compare live site with local build
     nsite open [--titan]             Open gateway URL (or copy nsite:// URL)
 
+  ADD SUBCOMMANDS (optional tools)
+    add                              List available tools with install state
+    add <tool>                       Install (interactive y/N confirm)
+    add <tool> --yes                 Install without prompting
+    Available tools: ngit, nak, stacks, nsyte
+
   FLAGS
     chat       --port <n>
     status     --json
@@ -281,6 +304,7 @@ function printHelp() {
     nsite      --titan   --yes
     seed       --events <n>  --full
     keychain   get --raw
+    add        --yes
     completion --shell zsh|bash  --install  --print
   `);
 }
