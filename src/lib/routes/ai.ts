@@ -34,6 +34,15 @@ import {
 } from '../ai-config.js';
 import { buildAiContext } from '../ai-context.js';
 import { isNsec } from '../identity.js';
+import {
+  streamAnthropicWithTools, streamOpenAICompatWithTools,
+} from '../ai-tools/tool-loop.js';
+import {
+  createSession, destroySession, resolveApproval,
+  type ApprovalDecision,
+} from '../ai-tools/approval-gate.js';
+import type { ToolContext } from '../ai-tools/index.js';
+import { readProjectPermissions } from '../project-config.js';
 import { getKeychain } from '../keychain.js';
 import { getProject } from '../projects.js';
 import { readBody } from './_shared.js';
@@ -469,6 +478,7 @@ export async function handleAi(
       ? parsed.model.slice(0, 160)
       : null;
     const projectId: string | null = typeof parsed.projectId === 'string' ? parsed.projectId : null;
+    const project = projectId ? getProject(projectId) : null;
 
     // All failure modes emit SSE so the Chat pane's EventSource-like
     // reader gets a consistent shape — `data: {error: "..."}` + `[DONE]`.
@@ -556,14 +566,63 @@ export async function handleAi(
       providerName: provider.displayName,
     };
 
+    // Tool context: only enabled when an active project is selected
+    // AND the project has a path. Without a path, tools have nothing
+    // to operate on (and runTool would error per-call). Permissions
+    // resolve project-override → station default 'read-only'.
+    let toolCtx: ToolContext | null = null;
+    if (project && project.path) {
+      const permLocal = readProjectPermissions(project);
+      toolCtx = {
+        project,
+        permissions: permLocal?.mode ?? 'read-only',
+      };
+    }
+
+    // Approval session for the duration of this chat turn. The first
+    // SSE frame the loop emits is { session: sessionId } so the
+    // client knows the id to use for /api/ai/chat/approve.
+    const sessionId = createSession();
     try {
-      if (isAnth) await streamAnthropic(messages, system, runtimeCfg, res);
-      else        await streamOpenAICompat(messages, system, runtimeCfg, res);
+      if (isAnth) await streamAnthropicWithTools(messages, system, runtimeCfg, res, toolCtx, sessionId);
+      else        await streamOpenAICompatWithTools(messages, system, runtimeCfg, res, toolCtx, sessionId);
     } catch (e: any) {
       res.write(`data: ${JSON.stringify({ error: String(e.message ?? e) })}\n\n`);
+    } finally {
+      destroySession(sessionId);
     }
     res.write('data: [DONE]\n\n');
     res.end();
+    return true;
+  }
+
+  // ── Approval response — resolves a pending tool-call gate ─────────
+  if (url === '/api/ai/chat/approve' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid JSON body' }));
+      return true;
+    }
+    const sessionId  = String(parsed.sessionId ?? '');
+    const approvalId = String(parsed.approvalId ?? '');
+    const decision   = parsed.decision === 'approve' ? 'approve'
+                     : parsed.decision === 'reject'  ? 'reject'
+                     : null;
+    if (!sessionId || !approvalId || !decision) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'sessionId, approvalId, and decision (approve|reject) are required' }));
+      return true;
+    }
+    const ok = resolveApproval(sessionId, approvalId, decision as ApprovalDecision);
+    if (!ok) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'approval not found (already resolved or session expired)' }));
+      return true;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
     return true;
   }
 
