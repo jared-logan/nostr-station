@@ -1856,10 +1856,102 @@ const ChatPanel = (() => {
     history.push({ role: 'user', content: text });
     addMsg('user', text);
     const bodyEl = addMsg('asst', '');
+    // Body is now a fragment sequence: text spans and tool-call blocks
+    // appended in stream order. The cursor lives in a tail text span
+    // that becomes the destination for new text deltas.
+    bodyEl.classList.add('asst-body');
+    let textSpan = document.createElement('span');
+    textSpan.className = 'asst-text';
+    bodyEl.appendChild(textSpan);
     const cur = document.createElement('span');
     cur.className = 'cursor';
     bodyEl.appendChild(cur);
     let full = '';
+    let sessionId = null;
+    const toolCallEls = new Map(); // id → DOM element
+
+    function appendText(t) {
+      full += t;
+      textSpan.textContent = (textSpan.textContent || '') + t;
+      feed.scrollTop = feed.scrollHeight;
+    }
+    function startNewTextSpan() {
+      // After a tool-call block, future text deltas should land in a
+      // fresh span so the rendering reads top-to-bottom.
+      textSpan = document.createElement('span');
+      textSpan.className = 'asst-text';
+      // Insert before the cursor so the cursor stays at the tail.
+      bodyEl.insertBefore(textSpan, cur);
+    }
+    function renderToolCall(id, name, args) {
+      const el = document.createElement('div');
+      el.className = 'tool-call pending';
+      el.dataset.id = id;
+      el.innerHTML = `
+        <div class="tc-head">
+          <span class="tc-status">▸</span>
+          <span class="tc-name">${escapeHtml(name)}</span>
+          <span class="tc-summary"></span>
+        </div>
+        <pre class="tc-args">${escapeHtml(JSON.stringify(args, null, 2))}</pre>
+      `;
+      // Toggle expand/collapse on header click.
+      el.querySelector('.tc-head').addEventListener('click', () => el.classList.toggle('expanded'));
+      bodyEl.insertBefore(el, cur);
+      startNewTextSpan();
+      toolCallEls.set(id, el);
+      feed.scrollTop = feed.scrollHeight;
+      return el;
+    }
+    function updateToolResult(id, ok, summary, error) {
+      const el = toolCallEls.get(id);
+      if (!el) return;
+      el.classList.remove('pending');
+      el.classList.add(ok ? 'ok' : 'err');
+      const status = el.querySelector('.tc-status');
+      if (status) status.textContent = ok ? '✓' : '✗';
+      const sum = el.querySelector('.tc-summary');
+      if (sum) sum.textContent = ok ? (summary || 'done') : (error || 'failed');
+    }
+    function renderApprovalRequest(id, approvalId, name, args, preview) {
+      const el = renderToolCall(id, name, args);
+      el.classList.add('awaiting-approval');
+      const head = el.querySelector('.tc-head');
+      if (head) head.querySelector('.tc-status').textContent = '⚠';
+      const previewEl = document.createElement('pre');
+      previewEl.className = 'tc-preview';
+      previewEl.textContent = typeof preview === 'string' ? preview : JSON.stringify(preview, null, 2);
+      el.appendChild(previewEl);
+      const actions = document.createElement('div');
+      actions.className = 'tc-actions';
+      const approveBtn = document.createElement('button');
+      approveBtn.className = 'primary';
+      approveBtn.textContent = 'Approve';
+      const rejectBtn = document.createElement('button');
+      rejectBtn.className = 'danger';
+      rejectBtn.textContent = 'Reject';
+      actions.appendChild(approveBtn);
+      actions.appendChild(rejectBtn);
+      el.appendChild(actions);
+      const respond = async (decision) => {
+        approveBtn.disabled = true;
+        rejectBtn.disabled  = true;
+        actions.style.opacity = 0.6;
+        try {
+          await api('/api/ai/chat/approve', {
+            method:  'POST',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify({ sessionId, approvalId, decision }),
+          });
+        } catch (e) {
+          toast('Approval failed', e.message, 'err');
+        }
+      };
+      approveBtn.addEventListener('click', () => respond('approve'));
+      rejectBtn.addEventListener('click',  () => respond('reject'));
+      // Auto-expand approval prompts so the user can see the diff.
+      el.classList.add('expanded');
+    }
 
     try {
       // /api/ai/chat handles provider resolution + project context
@@ -1897,12 +1989,8 @@ const ChatPanel = (() => {
           try {
             const p = JSON.parse(d);
             if (p.error) throw new Error(p.error);
+            if (p.session) { sessionId = p.session; continue; }
             if (p.model) {
-              // Server emits this twice: once at stream-open with the
-              // requested model, and again if the upstream API returns a
-              // more fully-qualified id (Anthropic's message_start carries
-              // e.g. "claude-opus-4-6-20240229"). Always overwrite — the
-              // later value is the more accurate one.
               const lbl = bodyEl.parentElement?.querySelector('.lbl');
               if (lbl) {
                 let tag = lbl.querySelector('.model-tag');
@@ -1913,22 +2001,23 @@ const ChatPanel = (() => {
                 }
                 tag.textContent = p.model;
               }
+              continue;
             }
-            if (p.content) {
-              full += p.content;
-              bodyEl.textContent = full;
-              bodyEl.appendChild(cur);
-              feed.scrollTop = feed.scrollHeight;
-            }
+            if (typeof p.content === 'string') { appendText(p.content); continue; }
+            if (p.type === 'tool_call_start') { renderToolCall(p.id, p.name, p.args); continue; }
+            if (p.type === 'approval_request') { renderApprovalRequest(p.id, p.approvalId, p.name, p.args, p.preview); continue; }
+            if (p.type === 'tool_result') { updateToolResult(p.id, !!p.ok, p.summary, p.error); continue; }
           } catch (e) {
             if (e.message && !e.message.startsWith('{')) throw e;
           }
         }
       }
     } catch (e) {
-      bodyEl.textContent = '✗ ' + e.message;
+      const errEl = document.createElement('div');
+      errEl.className = 'asst-error';
+      errEl.textContent = '✗ ' + e.message;
+      bodyEl.appendChild(errEl);
       bodyEl.parentElement.className = 'msg error';
-      full = '';
     }
     cur.remove();
     if (full) history.push({ role: 'assistant', content: full });
