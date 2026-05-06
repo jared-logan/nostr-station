@@ -1804,7 +1804,23 @@ const RelayPanel = (() => {
       if (rc?.url) relayUrl = rc.url;
     } catch { /* fall through to default */ }
     if (!relayUrl) relayUrl = `ws://${location.hostname}:7777`;
+    paintNakHelpCommands(relayUrl);
     return relayUrl;
+  }
+
+  // Help-card nak example commands carry the relay URL inline. Paint
+  // them from the resolved URL so STATION_INPROC_RELAY_PORT overrides
+  // produce copy-pasteable commands instead of always-:7777 stubs.
+  // The pre elements use `data-template` with a {url} placeholder; the
+  // <span class="code"> child holds the visible text, the data-cmd
+  // attribute (copy-button source) gets refreshed in lockstep.
+  function paintNakHelpCommands(url) {
+    for (const pre of document.querySelectorAll('.help-card pre[data-template]')) {
+      const cmd = pre.dataset.template.replace('{url}', url);
+      pre.dataset.cmd = cmd;
+      const code = pre.querySelector('.code');
+      if (code) code.textContent = cmd;
+    }
   }
 
   async function connect() {
@@ -1878,9 +1894,18 @@ const RelayPanel = (() => {
     try {
       const s = await api('/api/status');
       const r = s.find(x => x.id === 'relay');
-      const u = relayUrl || `ws://${location.hostname}:7777`;
-      $('relay-status').textContent = r?.state === 'ok' ? `up · ${u}` : r?.state === 'warn' ? 'installed (down)' : 'not installed';
-      $('relay-status').style.color = r?.state === 'ok' ? 'var(--success)' : r?.state === 'warn' ? 'var(--warn)' : 'var(--error)';
+      // gatherStatus emits "ws://host:port ✓" for the relay row's value,
+      // so use that directly instead of falling back to a hardcoded
+      // default. The ensureRelayUrl cache may not have populated yet on
+      // the first refresh tick (it resolves on connect), and a fallback
+      // to :7777 here would silently misrepresent a custom port.
+      const upUrl = (r?.value || '').replace(/\s*✓\s*$/, '').trim();
+      $('relay-status').textContent = r?.state === 'ok' ? `up · ${upUrl}`
+                                    : r?.state === 'warn' ? 'installed (down)'
+                                    : 'not installed';
+      $('relay-status').style.color = r?.state === 'ok' ? 'var(--success)'
+                                    : r?.state === 'warn' ? 'var(--warn)'
+                                    : 'var(--error)';
     } catch {}
     try {
       const dbStats = await api('/api/relay/database/stats');
