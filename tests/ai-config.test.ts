@@ -81,10 +81,10 @@ test('setProviderEntry: merges into existing without clobbering', () => {
 
 test('setProviderEntry: passing null deletes the entry', () => {
   setProviderEntry('anthropic', { keyRef: 'keychain:ai:anthropic' });
-  setProviderEntry('openrouter', { keyRef: 'keychain:ai:openrouter' });
+  setProviderEntry('opencode-zen', { keyRef: 'keychain:ai:opencode-zen' });
   const cfg = setProviderEntry('anthropic', null);
   assert.equal(cfg.providers.anthropic, undefined);
-  assert.ok(cfg.providers.openrouter);
+  assert.ok(cfg.providers['opencode-zen']);
 });
 
 // ── setDefault ────────────────────────────────────────────────────────────

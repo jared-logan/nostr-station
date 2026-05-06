@@ -365,32 +365,23 @@ function activatePanel(name) {
 
 window.addEventListener('hashchange', () => activatePanel(currentPanel()));
 
-// ── Providers (mirrors src/lib/web-server.ts PROVIDERS) ──────────────────
+// ── Providers (mirrors src/lib/ai-providers.ts PROVIDERS) ────────────────
 // Display labels + per-provider default model lists for the chat/config
-// switcher. Ollama models are hydrated live via /api/ollama/models.
-
-// Model lists per provider-id — client-side lookup for the Chat pane's
-// model dropdown. Ollama is dynamic (probes the local daemon's /api/tags
-// via /api/ollama/models); everything else is a hand-curated list of the
-// models we expect users to want, with the first entry matching the
-// registry default in src/lib/ai-providers.ts.
+// switcher. Curated list — Anthropic + Nostr-native paid relays + a
+// Custom escape hatch. Anyone wanting OpenAI / OpenRouter / Groq /
+// Gemini / Ollama / LM Studio / Maple sets up a Custom Provider with
+// the relevant baseUrl + model id.
 //
-// IDs must match the ai-providers.ts registry (not the v0.x PROVIDER_LIST
-// names — 'payperq' not 'ppq').
+// Custom has no curated model list — users type their own model name in
+// the model field; the dropdown collapses to a free-text input.
+//
+// IDs must match the ai-providers.ts registry exactly.
 const PROVIDER_LIST = [
-  { value: 'anthropic',    label: 'Anthropic',    models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
-  { value: 'openai',       label: 'OpenAI',       models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1-preview', 'o1-mini'] },
-  { value: 'openrouter',   label: 'OpenRouter',   models: ['anthropic/claude-sonnet-4', 'openai/gpt-4o', 'google/gemini-2.5-pro', 'deepseek/deepseek-chat'] },
-  { value: 'opencode-zen', label: 'OpenCode Zen', models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'gpt-4o', 'gemini-2.5-pro'] },
-  { value: 'groq',         label: 'Groq',         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'] },
-  { value: 'gemini',       label: 'Google Gemini', models: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'] },
-  { value: 'mistral',      label: 'Mistral',      models: ['mistral-large-latest', 'mistral-small-latest', 'codestral-latest'] },
-  { value: 'routstr',      label: 'Routstr ⚡',    models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
-  { value: 'payperq',      label: 'PayPerQ ⚡',    models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
-  { value: 'ollama',       label: 'Ollama (local)', models: [], dynamic: true },
-  { value: 'lmstudio',     label: 'LM Studio',    models: ['default'] },
-  { value: 'maple',        label: 'Maple 🔒',      models: ['claude-sonnet-4', 'claude-opus-4-6'] },
-  { value: 'custom',       label: 'Custom',       models: ['default'] },
+  { value: 'anthropic',    label: 'Anthropic',     models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
+  { value: 'opencode-zen', label: 'OpenCode Zen',  models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'gpt-4o', 'gemini-2.5-pro'] },
+  { value: 'payperq',      label: 'PayPerQ ⚡',     models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
+  { value: 'routstr',      label: 'Routstr ⚡',     models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
+  { value: 'custom',       label: 'Custom Provider', models: [] },
 ];
 
 // ai-config cache — read-once per ~3s to avoid refetching when Chat
@@ -410,20 +401,25 @@ function invalidateAiCfg() { _aiCfgCache.data = null; }
 async function modelsFor(provider) {
   // 1. Live-fetched list cached in ai-config wins — that's what the
   //    user's key is actually entitled to, not our stale hardcoded list.
+  let configuredModel = null;
   try {
     const cfg = await getAiCfg();
-    const known = cfg?.providers?.[provider]?.knownModels;
+    const entry = cfg?.providers?.[provider];
+    const known = entry?.knownModels;
     if (Array.isArray(known) && known.length) return known;
+    // Fall through, but stash the user's saved model id so we can
+    // surface it as a single-item list when there's no curated set
+    // (Custom Provider in particular ships with empty PROVIDER_LIST
+    // models — without this, the dropdown stays empty and the user's
+    // configured model can't be picked).
+    if (typeof entry?.model === 'string' && entry.model) configuredModel = entry.model;
   } catch {}
   // 2. Hand-curated fallback from PROVIDER_LIST.
   const p = PROVIDER_LIST.find(x => x.value === provider);
-  if (!p) return [];
-  if (!p.dynamic) return p.models;
-  // 3. Ollama: dynamic probe of the local daemon.
-  try {
-    const { models } = await api('/api/ollama/models');
-    return models.length ? models : ['llama3.2'];
-  } catch { return ['llama3.2']; }
+  const curated = p ? p.models : [];
+  if (curated.length) return curated;
+  // 3. Last resort — the user's configured model id, if any.
+  return configuredModel ? [configuredModel] : [];
 }
 
 // ── Header (AI config chips removed — identity chip + relay dot only) ────
@@ -1870,10 +1866,102 @@ const ChatPanel = (() => {
     history.push({ role: 'user', content: text });
     addMsg('user', text);
     const bodyEl = addMsg('asst', '');
+    // Body is now a fragment sequence: text spans and tool-call blocks
+    // appended in stream order. The cursor lives in a tail text span
+    // that becomes the destination for new text deltas.
+    bodyEl.classList.add('asst-body');
+    let textSpan = document.createElement('span');
+    textSpan.className = 'asst-text';
+    bodyEl.appendChild(textSpan);
     const cur = document.createElement('span');
     cur.className = 'cursor';
     bodyEl.appendChild(cur);
     let full = '';
+    let sessionId = null;
+    const toolCallEls = new Map(); // id → DOM element
+
+    function appendText(t) {
+      full += t;
+      textSpan.textContent = (textSpan.textContent || '') + t;
+      feed.scrollTop = feed.scrollHeight;
+    }
+    function startNewTextSpan() {
+      // After a tool-call block, future text deltas should land in a
+      // fresh span so the rendering reads top-to-bottom.
+      textSpan = document.createElement('span');
+      textSpan.className = 'asst-text';
+      // Insert before the cursor so the cursor stays at the tail.
+      bodyEl.insertBefore(textSpan, cur);
+    }
+    function renderToolCall(id, name, args) {
+      const el = document.createElement('div');
+      el.className = 'tool-call pending';
+      el.dataset.id = id;
+      el.innerHTML = `
+        <div class="tc-head">
+          <span class="tc-status">▸</span>
+          <span class="tc-name">${escapeHtml(name)}</span>
+          <span class="tc-summary"></span>
+        </div>
+        <pre class="tc-args">${escapeHtml(JSON.stringify(args, null, 2))}</pre>
+      `;
+      // Toggle expand/collapse on header click.
+      el.querySelector('.tc-head').addEventListener('click', () => el.classList.toggle('expanded'));
+      bodyEl.insertBefore(el, cur);
+      startNewTextSpan();
+      toolCallEls.set(id, el);
+      feed.scrollTop = feed.scrollHeight;
+      return el;
+    }
+    function updateToolResult(id, ok, summary, error) {
+      const el = toolCallEls.get(id);
+      if (!el) return;
+      el.classList.remove('pending');
+      el.classList.add(ok ? 'ok' : 'err');
+      const status = el.querySelector('.tc-status');
+      if (status) status.textContent = ok ? '✓' : '✗';
+      const sum = el.querySelector('.tc-summary');
+      if (sum) sum.textContent = ok ? (summary || 'done') : (error || 'failed');
+    }
+    function renderApprovalRequest(id, approvalId, name, args, preview) {
+      const el = renderToolCall(id, name, args);
+      el.classList.add('awaiting-approval');
+      const head = el.querySelector('.tc-head');
+      if (head) head.querySelector('.tc-status').textContent = '⚠';
+      const previewEl = document.createElement('pre');
+      previewEl.className = 'tc-preview';
+      previewEl.textContent = typeof preview === 'string' ? preview : JSON.stringify(preview, null, 2);
+      el.appendChild(previewEl);
+      const actions = document.createElement('div');
+      actions.className = 'tc-actions';
+      const approveBtn = document.createElement('button');
+      approveBtn.className = 'primary';
+      approveBtn.textContent = 'Approve';
+      const rejectBtn = document.createElement('button');
+      rejectBtn.className = 'danger';
+      rejectBtn.textContent = 'Reject';
+      actions.appendChild(approveBtn);
+      actions.appendChild(rejectBtn);
+      el.appendChild(actions);
+      const respond = async (decision) => {
+        approveBtn.disabled = true;
+        rejectBtn.disabled  = true;
+        actions.style.opacity = 0.6;
+        try {
+          await api('/api/ai/chat/approve', {
+            method:  'POST',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify({ sessionId, approvalId, decision }),
+          });
+        } catch (e) {
+          toast('Approval failed', e.message, 'err');
+        }
+      };
+      approveBtn.addEventListener('click', () => respond('approve'));
+      rejectBtn.addEventListener('click',  () => respond('reject'));
+      // Auto-expand approval prompts so the user can see the diff.
+      el.classList.add('expanded');
+    }
 
     try {
       // /api/ai/chat handles provider resolution + project context
@@ -1911,12 +1999,8 @@ const ChatPanel = (() => {
           try {
             const p = JSON.parse(d);
             if (p.error) throw new Error(p.error);
+            if (p.session) { sessionId = p.session; continue; }
             if (p.model) {
-              // Server emits this twice: once at stream-open with the
-              // requested model, and again if the upstream API returns a
-              // more fully-qualified id (Anthropic's message_start carries
-              // e.g. "claude-opus-4-6-20240229"). Always overwrite — the
-              // later value is the more accurate one.
               const lbl = bodyEl.parentElement?.querySelector('.lbl');
               if (lbl) {
                 let tag = lbl.querySelector('.model-tag');
@@ -1927,22 +2011,23 @@ const ChatPanel = (() => {
                 }
                 tag.textContent = p.model;
               }
+              continue;
             }
-            if (p.content) {
-              full += p.content;
-              bodyEl.textContent = full;
-              bodyEl.appendChild(cur);
-              feed.scrollTop = feed.scrollHeight;
-            }
+            if (typeof p.content === 'string') { appendText(p.content); continue; }
+            if (p.type === 'tool_call_start') { renderToolCall(p.id, p.name, p.args); continue; }
+            if (p.type === 'approval_request') { renderApprovalRequest(p.id, p.approvalId, p.name, p.args, p.preview); continue; }
+            if (p.type === 'tool_result') { updateToolResult(p.id, !!p.ok, p.summary, p.error); continue; }
           } catch (e) {
             if (e.message && !e.message.startsWith('{')) throw e;
           }
         }
       }
     } catch (e) {
-      bodyEl.textContent = '✗ ' + e.message;
+      const errEl = document.createElement('div');
+      errEl.className = 'asst-error';
+      errEl.textContent = '✗ ' + e.message;
+      bodyEl.appendChild(errEl);
       bodyEl.parentElement.className = 'msg error';
-      full = '';
     }
     cur.remove();
     if (full) history.push({ role: 'assistant', content: full });
@@ -4199,6 +4284,16 @@ const ProjectsPanel = (() => {
         </div>
       </div>
 
+      <div class="tab-section" id="pcfg-section">
+        <h3>AI configuration</h3>
+        <div class="muted">
+          Per-project overrides for the Chat pane. Empty fields inherit
+          the station defaults from <a href="#config">Config</a>.
+          Stored at <code>${escapeHtml(p.path || '<no path>')}/.nostr-station/</code>.
+        </div>
+        <div class="pcfg-body">loading…</div>
+      </div>
+
       <div class="danger-zone">
         <h4>Danger zone</h4>
         <div class="row">
@@ -4223,6 +4318,16 @@ const ProjectsPanel = (() => {
         ` : ''}
       </div>
     `;
+
+    // Lazy-load the AI config bundle. We don't block the rest of the
+    // Settings tab on it — the panel renders immediately and the AI
+    // section fills in as soon as /api/projects/:id/ai-config returns.
+    if (p.path) {
+      paintProjectAiConfig(container.querySelector('#pcfg-section .pcfg-body'), p);
+    } else {
+      const sec = container.querySelector('#pcfg-section .pcfg-body');
+      if (sec) sec.innerHTML = '<div class="muted">Project has no local path — AI config requires a path.</div>';
+    }
 
     container.querySelector('.save-name').addEventListener('click', async () => {
       const v = container.querySelector('.s-name').value.trim();
@@ -4353,6 +4458,105 @@ const ProjectsPanel = (() => {
         }
       });
     }
+  }
+
+  async function paintProjectAiConfig(root, p) {
+    if (!root) return;
+    let bundle, providers;
+    try {
+      [bundle, providers] = await Promise.all([
+        api(`/api/projects/${p.id}/ai-config`),
+        api('/api/ai/providers').catch(() => null),
+      ]);
+    } catch (e) {
+      root.innerHTML = `<div style="color:var(--warn)">Failed to load AI config: ${escapeHtml(e.message)}</div>`;
+      return;
+    }
+    const apiProviders = (providers?.providers || []).filter(x => x.type === 'api');
+    const provOpts = apiProviders.map(p =>
+      `<option value="${escapeHtml(p.id)}" ${bundle.chat?.provider === p.id ? 'selected' : ''}>${escapeHtml(p.displayName)}</option>`
+    ).join('');
+
+    const tmplChip = bundle.template
+      ? `<span class="chip" style="background:var(--accent-soft);color:var(--accent)">${escapeHtml(bundle.template.templateName)}</span>
+         <span style="color:var(--text-dim);font-size:11px;margin-left:6px">scaffolded ${escapeHtml(fmtAgoIso(bundle.template.scaffoldedAt))}${bundle.template.sourceUrl ? ` from <code>${escapeHtml(bundle.template.sourceUrl)}</code>` : ''}</span>`
+      : '<span style="color:var(--text-dim)">No template recorded — project predates the registry or was created from a raw URL.</span>';
+
+    const legacyBanner = bundle.legacyContext
+      ? `<div class="callout" style="margin-bottom:10px">
+           <strong>Legacy file detected.</strong> A <code>project-context.md</code> exists at the project root.
+           Save below to migrate it under <code>.nostr-station/</code> (the legacy file stays — delete it manually when ready).
+         </div>` : '';
+
+    root.innerHTML = `
+      ${legacyBanner}
+      <div class="pcfg-row">
+        <div class="pcfg-label">Template</div>
+        <div class="pcfg-value">${tmplChip}</div>
+      </div>
+
+      <div class="pcfg-row">
+        <div class="pcfg-label">Provider override</div>
+        <div class="pcfg-value">
+          <select class="pcfg-provider">
+            <option value="">— Inherit station default —</option>
+            ${provOpts}
+          </select>
+          <input class="pcfg-model" type="text" placeholder="model id (optional)" value="${escapeHtml(bundle.chat?.model || '')}" style="margin-left:8px;min-width:220px">
+        </div>
+      </div>
+
+      <div class="pcfg-row">
+        <div class="pcfg-label">Permissions</div>
+        <div class="pcfg-value">
+          <select class="pcfg-permissions">
+            <option value="">— Inherit station default —</option>
+            <option value="read-only" ${bundle.permissions?.mode === 'read-only' ? 'selected' : ''}>Read-only (writes need approval)</option>
+            <option value="auto-edit" ${bundle.permissions?.mode === 'auto-edit' ? 'selected' : ''}>Auto-edit (file writes auto-approved)</option>
+            <option value="yolo"      ${bundle.permissions?.mode === 'yolo'      ? 'selected' : ''}>YOLO (everything auto-approved)</option>
+          </select>
+        </div>
+      </div>
+
+      <label class="field-label" style="margin-top:14px">System prompt override</label>
+      <textarea class="pcfg-system-prompt" rows="6" placeholder="Empty = inherit station default. Supports {{ variable }} interpolation.">${escapeHtml(bundle.systemPrompt || '')}</textarea>
+
+      <label class="field-label" style="margin-top:14px">Project context overlay</label>
+      <textarea class="pcfg-project-context" rows="6" placeholder="Markdown — spliced verbatim into the system prompt at chat time.">${escapeHtml(bundle.projectContext || '')}</textarea>
+
+      <div class="step-actions" style="margin-top:14px">
+        <button class="primary pcfg-save">Save AI config</button>
+      </div>
+    `;
+
+    root.querySelector('.pcfg-save').addEventListener('click', async () => {
+      const provider = root.querySelector('.pcfg-provider').value;
+      const model    = root.querySelector('.pcfg-model').value.trim();
+      const perm     = root.querySelector('.pcfg-permissions').value;
+      const sys      = root.querySelector('.pcfg-system-prompt').value;
+      const ctx      = root.querySelector('.pcfg-project-context').value;
+
+      const body = {
+        // null clears the override file; empty string is treated as
+        // "still empty content," which read-helpers treat as null
+        // anyway. Keep them distinct so the user can clear cleanly.
+        systemPrompt:   sys.trim() === '' ? null : sys,
+        projectContext: ctx.trim() === '' ? null : ctx,
+        permissions:    perm ? { mode: perm } : null,
+        chat:           (provider || model) ? { provider: provider || undefined, model: model || undefined } : null,
+      };
+      try {
+        await api(`/api/projects/${p.id}/ai-config`, {
+          method:  'PUT',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify(body),
+        });
+        toast('AI config saved', '', 'ok');
+        paintProjectAiConfig(root, p);
+      } catch (e) {
+        toast('Save failed', e.message, 'err');
+      }
+    });
   }
 
   async function patchAndReload(id, patch) {
@@ -4890,14 +5094,14 @@ const ProjectsPanel = (() => {
   //   nostr://… | naddr1…   → /api/ngit/clone + detect + register
   //   https/git/ssh git URL → /api/projects/new with source:'git-url'
   //
-  // The "Use MKStack" button quick-fills the gitlab URL for Soapbox's
-  // MKStack React template — the same URL shakespeare.diy clones. This
-  // bypasses the broken stacks-mkstack nostr-lookup flow entirely.
+  // The "Template" dropdown reads /api/templates and quick-fills the URL
+  // for whatever entry the user picks. MKStack is the seeded default.
+  // Users can add their own templates in Config → Project Templates;
+  // they show up here automatically.
   //
   // "Scan my ngit repos" closes this modal and opens the Discover flow
   // — slightly faster than pasting an naddr for users who just want to
   // pick from their own published repos.
-  const MKSTACK_URL = 'https://gitlab.com/soapbox-pub/mkstack.git';
 
   function isNostrCloneUrl(s) {
     const v = String(s || '').trim();
@@ -4965,6 +5169,19 @@ const ProjectsPanel = (() => {
     let ownerNpub = null;
     try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
 
+    // Load the templates registry up front so the picker is rendered
+    // with the live list. Failures here are non-fatal — the modal still
+    // works for raw-URL imports; the user just doesn't see the picker.
+    let templates = [];
+    try {
+      const r = await api('/api/templates');
+      if (r && Array.isArray(r.templates)) templates = r.templates;
+    } catch { /* leave empty — picker is omitted */ }
+    const gitTemplates = templates.filter(t => t.source?.type === 'git-url');
+    const templateOpts = gitTemplates.map(t =>
+      `<option value="${escapeHtml(t.id)}" data-url="${escapeHtml(t.source.url)}">${escapeHtml(t.name)}</option>`
+    ).join('');
+
     const body = document.createElement('div');
     body.className = 'import-repo-form';
     body.innerHTML = `
@@ -4975,12 +5192,21 @@ const ProjectsPanel = (() => {
           Path: <code id="ir-path-preview">${escapeHtml(`${(window.__homeDir || '~')}/projects/…`)}</code>
         </div>
       </label>
+      ${gitTemplates.length ? `
+      <label class="np-field">
+        <span class="np-label">Template <span style="color:var(--text-dim);font-weight:400">(optional)</span></span>
+        <select id="ir-template">
+          <option value="">— Pick a template to quick-fill the URL —</option>
+          ${templateOpts}
+        </select>
+        <div class="np-hint" id="ir-template-hint" style="margin-top:6px"></div>
+      </label>
+      ` : ''}
       <label class="np-field">
         <span class="np-label">Repository URL</span>
         <input id="ir-url" type="text" autocomplete="off"
                placeholder="https://github.com/you/repo.git  ·  nostr://…  ·  naddr1…" />
         <div class="ir-url-actions">
-          <button type="button" class="ir-quick-mkstack">Use MKStack</button>
           <button type="button" class="ir-quick-scan">Scan my ngit repos…</button>
         </div>
       </label>
@@ -5016,8 +5242,16 @@ const ProjectsPanel = (() => {
     const nameInput = body.querySelector('#ir-name');
     const urlInput  = body.querySelector('#ir-url');
     const preview   = body.querySelector('#ir-path-preview');
-    const mkstackBtn = body.querySelector('.ir-quick-mkstack');
-    const scanBtn    = body.querySelector('.ir-quick-scan');
+    const tmplSel   = body.querySelector('#ir-template');
+    const tmplHint  = body.querySelector('#ir-template-hint');
+    const scanBtn   = body.querySelector('.ir-quick-scan');
+
+    // Tracks which templateId the user picked (if any). When a template
+    // is selected we forward `templateId` to /api/projects/new so the
+    // server resolves the source server-side AND records the template
+    // on the project. If the user types a URL by hand instead, this
+    // stays null and we send `source: { type: 'git-url', url }`.
+    let pickedTemplateId = null;
 
     const updateState = () => {
       const slug = slugifyClient(nameInput.value);
@@ -5027,16 +5261,40 @@ const ProjectsPanel = (() => {
       createBtn.disabled = !slug || !urlOk;
     };
     nameInput.addEventListener('input', updateState);
-    urlInput.addEventListener('input',  updateState);
+    urlInput.addEventListener('input', () => {
+      // Clearing the picker when the user edits the URL by hand keeps
+      // the form honest — we don't want to send a stale templateId for
+      // a URL the user replaced.
+      if (tmplSel && tmplSel.value && urlInput.value !== templates.find(t => t.id === tmplSel.value)?.source?.url) {
+        tmplSel.value = '';
+        pickedTemplateId = null;
+        if (tmplHint) tmplHint.textContent = '';
+      }
+      updateState();
+    });
     nameInput.focus();
 
     cancelBtn.addEventListener('click', () => modal.close());
-    mkstackBtn.addEventListener('click', () => {
-      urlInput.value = MKSTACK_URL;
-      if (!nameInput.value.trim()) nameInput.value = 'mkstack-app';
-      updateState();
-      nameInput.focus();
-    });
+
+    if (tmplSel) {
+      tmplSel.addEventListener('change', () => {
+        const id = tmplSel.value;
+        if (!id) {
+          pickedTemplateId = null;
+          if (tmplHint) tmplHint.textContent = '';
+          return;
+        }
+        const t = templates.find(x => x.id === id);
+        if (!t) return;
+        pickedTemplateId = id;
+        urlInput.value = t.source?.url || '';
+        if (!nameInput.value.trim()) nameInput.value = `${t.id}-app`;
+        if (tmplHint) tmplHint.textContent = t.description;
+        updateState();
+        nameInput.focus();
+      });
+    }
+
     scanBtn.addEventListener('click', () => {
       modal.close();
       openDiscoverModal();
@@ -5108,15 +5366,17 @@ const ProjectsPanel = (() => {
       } else {
         // Standard git URL — goes through the scaffold endpoint which
         // clones, wipes inherited history, and registers in one shot.
+        // When the user picked a template, send templateId so the
+        // server resolves the source from the registry AND records the
+        // template on the project; otherwise send source.url verbatim.
+        const reqBody = pickedTemplateId
+          ? { name, templateId: pickedTemplateId, identity: identityPayload(identity) }
+          : { name, source: { type: 'git-url', url }, identity: identityPayload(identity) };
         const result = await openExecModal({
           title: `Importing ${coll.slug}`,
           subtitle: `git clone ${url} → ${coll.path}`,
           endpoint: '/api/projects/new',
-          body: {
-            name,
-            source: { type: 'git-url', url },
-            identity: identityPayload(identity),
-          },
+          body: reqBody,
         });
         if (result.ok && result.info?.project) {
           toast('Project imported', result.info.project.name, 'ok');
@@ -6542,7 +6802,7 @@ const ConfigPanel = (() => {
       <div class="config-section">
         <h3>AI Providers</h3>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Terminal-native tools (Claude Code, OpenCode) launch in the terminal panel with cwd scoped to the selected project.
+          Terminal-native tools (Claude Code, OpenCode Go) launch in the terminal panel with cwd scoped to the selected project.
           API providers stream through the Chat pane via <code>/api/ai/chat</code>.
         </div>
         ${renderAiProviders(aiList)}
@@ -6554,6 +6814,17 @@ const ConfigPanel = (() => {
           Per-provider keys live in the OS keychain as <code>ai:&lt;provider&gt;</code>.
           Config file: <code>~/.nostr-station/ai-config.json</code>.
         </div>
+      </div>
+
+      <div class="config-section" id="cfg-templates-section">
+        <h3>Project Templates</h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+          Templates available to the New Project flow (and to the AI when
+          it picks a starting point for a fresh project). Built-in
+          templates can be edited or reset; user-added ones can be
+          deleted. Stored at <code>~/.config/nostr-station/templates.json</code>.
+        </div>
+        <div id="cfg-templates-list">loading…</div>
       </div>
 
       <div class="config-section">
@@ -6651,6 +6922,12 @@ const ConfigPanel = (() => {
     // aiList is captured explicitly; wireAiProviders() lives at the panel
     // scope and can't reach render()'s param otherwise.
     wireAiProviders(aiList);
+
+    // Templates registry section — fetched + rendered after the rest of
+    // the panel paints. Failures are non-fatal (the section shows an
+    // inline error). The /api/templates endpoint self-heals so the
+    // first render after a fresh install seeds the built-ins.
+    refreshTemplates();
 
     // NGIT default relay — persists to identity.json via /api/identity/set.
     const ngitInput  = $('cfg-ngit-relay-input');
@@ -6777,6 +7054,18 @@ const ConfigPanel = (() => {
           ${termOpts ? `<optgroup label="Terminal-native">${termOpts}</optgroup>` : ''}
           ${apiOpts  ? `<optgroup label="API">${apiOpts}</optgroup>` : ''}
         </select>
+        <div id="ai-add-customrow" class="ai-add-custom" style="display:none;margin-top:8px;display:none">
+          <div class="np-hint" style="margin-bottom:8px">
+            Custom Provider — point at any OpenAI-compatible endpoint.
+            Examples: <code>https://api.openai.com/v1</code>,
+            <code>https://api.groq.com/openai/v1</code>,
+            <code>http://localhost:11434/v1</code> (Ollama).
+          </div>
+          <label class="field-label">Base URL</label>
+          <input id="ai-add-baseurl" type="text" autocomplete="off" placeholder="https://api.example.com/v1">
+          <label class="field-label">Default model id</label>
+          <input id="ai-add-model" type="text" autocomplete="off" placeholder="gpt-4o-mini, llama3.2, etc.">
+        </div>
         <div id="ai-add-keyrow" class="keyrow" style="margin-top:8px;display:none">
           <div class="keyfield">
             <input id="ai-add-key" type="password" autocomplete="off" placeholder="paste provider key (sk-…)">
@@ -6786,6 +7075,9 @@ const ConfigPanel = (() => {
           </div>
           <button class="primary" id="ai-add-save" type="button">add</button>
           <button id="ai-add-cancel" type="button">cancel</button>
+        </div>
+        <div class="np-hint" id="ai-add-keyhint" style="margin-top:6px;display:none">
+          For local daemons that don't need a key, type <code>none</code>.
         </div>
       </div>
     ` : '';
@@ -6891,29 +7183,41 @@ const ConfigPanel = (() => {
     // inline key input.
     const sel = $('ai-add-select');
     if (!sel) return;
-    const keyRow    = $('ai-add-keyrow');
-    const keyInput  = $('ai-add-key');
-    const keyEye    = $('ai-add-eye');
-    const saveBtn   = $('ai-add-save');
-    const cancelBtn = $('ai-add-cancel');
+    const keyRow      = $('ai-add-keyrow');
+    const keyInput    = $('ai-add-key');
+    const keyEye      = $('ai-add-eye');
+    const keyHint     = $('ai-add-keyhint');
+    const customRow   = $('ai-add-customrow');
+    const baseUrlInp  = $('ai-add-baseurl');
+    const modelInp    = $('ai-add-model');
+    const saveBtn     = $('ai-add-save');
+    const cancelBtn   = $('ai-add-cancel');
+
+    function hideAdd() {
+      keyRow.style.display = 'none';
+      if (customRow) customRow.style.display = 'none';
+      if (keyHint)   keyHint.style.display   = 'none';
+    }
+    hideAdd();
 
     sel.addEventListener('change', async () => {
       const id = sel.value;
-      if (!id) { keyRow.style.display = 'none'; return; }
+      if (!id) { hideAdd(); return; }
       // Find the chosen provider's type by matching against the current
       // aiList closure — cheap linear search is fine, <20 entries.
       const chosen = (aiList?.providers || []).find(x => x.id === id);
-      if (!chosen) { keyRow.style.display = 'none'; return; }
+      if (!chosen) { hideAdd(); return; }
 
       if (chosen.type === 'terminal-native') {
         // No key. Enable immediately.
         await enableTerminalProvider(id);
         sel.value = '';
-      } else if (isBareKeyProvider(id)) {
-        // Local daemons (ollama / lmstudio / maple) don't need a real
-        // key — adding them just means creating an ai-config entry so
-        // they appear in the Chat dropdown. Server fills in the bareKey
-        // sentinel at request time.
+      } else if (chosen.bareKey) {
+        // bareKey providers don't need a real key — adding them just
+        // means creating an ai-config entry so they appear in the Chat
+        // dropdown. Server fills in the bareKey sentinel at request
+        // time. (No curated provider currently sets bareKey, but the
+        // registry shape supports it.)
         await addBareKeyProvider(id);
         sel.value = '';
       } else {
@@ -6921,7 +7225,19 @@ const ConfigPanel = (() => {
         keyRow.style.display = '';
         keyInput.value = '';
         keyInput.type  = 'password';
-        keyInput.focus();
+        if (id === 'custom') {
+          // Custom Provider needs baseUrl + model id alongside the key.
+          // Pre-fill from the registry default if any (empty for custom).
+          customRow.style.display = '';
+          baseUrlInp.value = chosen.baseUrl || '';
+          modelInp.value   = chosen.model   || '';
+          if (keyHint) keyHint.style.display = '';
+          baseUrlInp.focus();
+        } else {
+          customRow.style.display = 'none';
+          if (keyHint) keyHint.style.display = 'none';
+          keyInput.focus();
+        }
       }
     });
 
@@ -6933,8 +7249,39 @@ const ConfigPanel = (() => {
       const id  = sel.value;
       const key = keyInput.value;
       if (!id || !key) return;
+
+      // Custom Provider: baseUrl is required (registry has no default).
+      // Model is strongly recommended; if the user leaves it blank we
+      // still save — they can set it later via Fetch Models.
+      if (id === 'custom') {
+        const baseUrl = (baseUrlInp.value || '').trim();
+        if (!baseUrl) {
+          toast('Base URL required', 'Custom Provider needs an OpenAI-compat endpoint URL.', 'warn');
+          return;
+        }
+        if (!/^https?:\/\//i.test(baseUrl)) {
+          toast('Bad base URL', 'Must start with http:// or https://', 'warn');
+          return;
+        }
+      }
+
       saveBtn.disabled = true;
       try {
+        // For Custom Provider, persist baseUrl + model FIRST so the
+        // entry exists when the key-save below references it. POST
+        // /api/ai/config is keyRef-safe (rejects keys), so this is
+        // a clean two-step.
+        if (id === 'custom') {
+          const baseUrl = baseUrlInp.value.trim();
+          const model   = modelInp.value.trim();
+          await api('/api/ai/config', {
+            method:  'POST',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify({
+              providers: { [id]: { baseUrl, ...(model ? { model } : {}) } },
+            }),
+          });
+        }
         const r = await api(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -6965,16 +7312,23 @@ const ConfigPanel = (() => {
     });
 
     cancelBtn?.addEventListener('click', () => {
-      keyRow.style.display = 'none';
+      hideAdd();
       sel.value = '';
       keyInput.value = '';
+      if (baseUrlInp) baseUrlInp.value = '';
+      if (modelInp)   modelInp.value   = '';
     });
   }
 
-  // Local-daemon provider ids that accept a sentinel / empty key and don't
-  // need a keychain entry. Mirrors the bareKey set in ai-providers.ts.
-  function isBareKeyProvider(id) {
-    return id === 'ollama' || id === 'lmstudio' || id === 'maple';
+  // Provider ids that accept a sentinel / empty key and don't need a
+  // keychain entry. Derived from the live /api/ai/providers payload
+  // (each entry carries `bareKey: true|false`). The curated registry
+  // currently has no bareKey providers — kept as a helper because the
+  // registry shape supports them, and the setup wizard pre-loads its
+  // own provider list earlier than this helper runs.
+  function isBareKeyProvider(id, list) {
+    const p = (list?.providers || []).find(x => x.id === id);
+    return !!(p && p.bareKey);
   }
 
   async function addBareKeyProvider(id) {
@@ -7009,6 +7363,218 @@ const ConfigPanel = (() => {
     } catch (e) {
       toast('Enable failed', e.message, 'err');
     }
+  }
+
+  // ── Templates registry section ──────────────────────────────────────
+  //
+  // Renders the Project Templates list under the AI Providers section.
+  // Builtins (currently MKStack) get a "Reset" affordance instead of
+  // "Delete" — readTemplates() guarantees they always exist on disk so
+  // delete is a server-rejected no-op anyway. User-added templates get
+  // edit + delete; new ones are added via the inline form.
+
+  async function refreshTemplates() {
+    const root = $('cfg-templates-list');
+    if (!root) return;
+    let templates = [];
+    try {
+      const r = await api('/api/templates');
+      templates = Array.isArray(r?.templates) ? r.templates : [];
+    } catch (e) {
+      root.innerHTML = `<div style="color:var(--warn);font-size:12px">Failed to load templates: ${escapeHtml(e.message)}</div>`;
+      return;
+    }
+    root.innerHTML = renderTemplatesList(templates);
+    wireTemplatesList(root, templates);
+  }
+
+  function renderTemplatesList(templates) {
+    const cards = templates.map(renderTemplateCard).join('');
+    return `
+      <div class="tmpl-list">${cards}</div>
+      <details class="tmpl-add" style="margin-top:14px">
+        <summary style="cursor:pointer;color:var(--accent)">+ Add Project Template</summary>
+        <div class="tmpl-add-form" style="margin-top:10px;display:flex;flex-direction:column;gap:8px;max-width:560px">
+          <label class="np-field">
+            <span class="np-label">ID</span>
+            <input class="tmpl-new-id" type="text" placeholder="my-template" autocomplete="off" />
+            <div class="np-hint">Lowercase letters, digits, dashes. Used as the registry key.</div>
+          </label>
+          <label class="np-field">
+            <span class="np-label">Name</span>
+            <input class="tmpl-new-name" type="text" placeholder="My Template" autocomplete="off" />
+          </label>
+          <label class="np-field">
+            <span class="np-label">Description</span>
+            <textarea class="tmpl-new-desc" rows="3" placeholder="What this template is for. The AI sees this text when picking a template."></textarea>
+          </label>
+          <label class="np-field">
+            <span class="np-label">Git URL</span>
+            <input class="tmpl-new-url" type="text" placeholder="https://github.com/you/template.git" autocomplete="off" />
+          </label>
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button class="primary tmpl-new-save" type="button">Add template</button>
+          </div>
+        </div>
+      </details>
+    `;
+  }
+
+  function renderTemplateCard(t) {
+    const sourceLabel = t.source?.type === 'git-url'
+      ? `<code class="cmd-inline">${escapeHtml(t.source.url)}</code>`
+      : '<em>local-only (blank canvas)</em>';
+    const builtinChip = t.builtin
+      ? '<span class="chip" style="background:var(--accent-soft);color:var(--accent);margin-left:8px">built-in</span>'
+      : '';
+    const actions = t.builtin
+      ? `<button class="tmpl-edit" data-id="${escapeHtml(t.id)}">Edit</button>
+         <button class="tmpl-reset" data-id="${escapeHtml(t.id)}">Reset</button>`
+      : `<button class="tmpl-edit" data-id="${escapeHtml(t.id)}">Edit</button>
+         <button class="danger tmpl-delete" data-id="${escapeHtml(t.id)}">Delete</button>`;
+    return `
+      <div class="tmpl-card" data-id="${escapeHtml(t.id)}">
+        <div class="tmpl-head">
+          <div class="tmpl-name">${escapeHtml(t.name)}${builtinChip}</div>
+          <div class="tmpl-id" style="color:var(--text-dim);font-size:11px"><code>${escapeHtml(t.id)}</code></div>
+        </div>
+        <div class="tmpl-desc" style="font-size:12px;color:var(--text-dim);margin-top:6px;white-space:pre-wrap">${escapeHtml(t.description)}</div>
+        <div class="tmpl-source" style="margin-top:8px;font-size:11px">${sourceLabel}</div>
+        <div class="tmpl-actions" style="margin-top:10px;display:flex;gap:6px">${actions}</div>
+      </div>
+    `;
+  }
+
+  function wireTemplatesList(root, templates) {
+    root.querySelectorAll('.tmpl-edit').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.id;
+        const t = templates.find(x => x.id === id);
+        if (t) openEditTemplateModal(t);
+      });
+    });
+    root.querySelectorAll('.tmpl-delete').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        if (!confirm(`Delete template "${id}"?`)) return;
+        try {
+          await api(`/api/templates/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          toast('Template deleted', id, 'ok');
+          refreshTemplates();
+        } catch (e) {
+          toast('Delete failed', e.message, 'err');
+        }
+      });
+    });
+    root.querySelectorAll('.tmpl-reset').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        if (!confirm(`Reset built-in template "${id}" to its default values? Your edits will be lost.`)) return;
+        try {
+          await api(`/api/templates/${encodeURIComponent(id)}/reset`, { method: 'POST' });
+          toast('Template reset', id, 'ok');
+          refreshTemplates();
+        } catch (e) {
+          toast('Reset failed', e.message, 'err');
+        }
+      });
+    });
+
+    // Add form submit.
+    const saveBtn = root.querySelector('.tmpl-new-save');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        const id   = root.querySelector('.tmpl-new-id')?.value.trim() || '';
+        const name = root.querySelector('.tmpl-new-name')?.value.trim() || '';
+        const desc = root.querySelector('.tmpl-new-desc')?.value.trim() || '';
+        const url  = root.querySelector('.tmpl-new-url')?.value.trim() || '';
+        if (!id || !name || !desc || !url) {
+          toast('All fields required', '', 'warn');
+          return;
+        }
+        const body = {
+          id, name, description: desc,
+          source: { type: 'git-url', url },
+        };
+        try {
+          await api('/api/templates', {
+            method:  'POST',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify(body),
+          });
+          toast('Template added', id, 'ok');
+          refreshTemplates();
+        } catch (e) {
+          toast('Add failed', e.message, 'err');
+        }
+      });
+    }
+  }
+
+  function openEditTemplateModal(t) {
+    const body = document.createElement('div');
+    body.className = 'tmpl-edit-form';
+    body.style.display = 'flex';
+    body.style.flexDirection = 'column';
+    body.style.gap = '10px';
+    body.innerHTML = `
+      <label class="np-field">
+        <span class="np-label">Name</span>
+        <input class="tmpl-edit-name" type="text" value="${escapeHtml(t.name)}" autocomplete="off" />
+      </label>
+      <label class="np-field">
+        <span class="np-label">Description</span>
+        <textarea class="tmpl-edit-desc" rows="5">${escapeHtml(t.description)}</textarea>
+      </label>
+      ${t.source?.type === 'git-url' ? `
+      <label class="np-field">
+        <span class="np-label">Git URL</span>
+        <input class="tmpl-edit-url" type="text" value="${escapeHtml(t.source.url)}" autocomplete="off" />
+      </label>
+      ` : ''}
+      <div class="np-hint">ID and source type are immutable. To change them, delete this template and create a new one.</div>
+    `;
+
+    const foot = document.createElement('div');
+    foot.style.display = 'flex';
+    foot.style.gap = '8px';
+    foot.style.justifyContent = 'flex-end';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'primary';
+    saveBtn.textContent = 'Save';
+    foot.appendChild(cancelBtn);
+    foot.appendChild(saveBtn);
+
+    const modal = openModal({
+      title: `Edit template: ${t.name}`,
+      subtitle: t.builtin ? 'Built-in template — editable; click Reset to restore defaults.' : 'User-added template',
+      body, footer: foot,
+    });
+    cancelBtn.addEventListener('click', () => modal.close());
+    saveBtn.addEventListener('click', async () => {
+      const patch = {
+        name:        body.querySelector('.tmpl-edit-name')?.value.trim() || t.name,
+        description: body.querySelector('.tmpl-edit-desc')?.value.trim() || t.description,
+      };
+      const urlEl = body.querySelector('.tmpl-edit-url');
+      if (urlEl) {
+        patch.source = { type: 'git-url', url: urlEl.value.trim() };
+      }
+      try {
+        await api(`/api/templates/${encodeURIComponent(t.id)}`, {
+          method:  'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify(patch),
+        });
+        toast('Template updated', t.id, 'ok');
+        modal.close();
+        refreshTemplates();
+      } catch (e) {
+        toast('Update failed', e.message, 'err');
+      }
+    });
   }
 
   async function setAiDefault(kind, id) {
@@ -8270,9 +8836,10 @@ const SetupWizard = (() => {
       const saveBtn = $('setup-ai-save');
       const cancelBtn = $('setup-ai-cancel');
 
-      // bareKey providers are local daemons that don't need an API key —
-      // matches the main dashboard's classification (see isBareKeyProvider).
-      const BARE_KEY_IDS = ['ollama', 'lmstudio', 'maple'];
+      // bareKey providers don't need an API key — derived from the
+      // /api/ai/providers payload (`chosen.bareKey`). The curated
+      // registry currently has none, but the branch stays for future
+      // additions.
 
       sel.addEventListener('change', async () => {
         const id = sel.value;
@@ -8288,7 +8855,7 @@ const SetupWizard = (() => {
           paint();
           return;
         }
-        if (BARE_KEY_IDS.includes(id)) {
+        if (chosen.bareKey) {
           try {
             await patchConfig({ providers: { [id]: {} } });
             toast(`Added ${chosen.displayName}`, '', 'ok');

@@ -83,6 +83,7 @@ import {
 } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { handleNvpn } from './routes/nvpn.js';
+import { handleTemplates } from './routes/templates.js';
 
 // ── Static assets ─────────────────────────────────────────────────────────────
 //
@@ -220,14 +221,14 @@ function parseClaudeEnv(homeDir: string): { baseUrl: string; model: string } {
 }
 
 function inferProviderName(baseUrl: string): string {
-  if (baseUrl.includes('openrouter'))  return 'OpenRouter';
+  // Display-name lookup for the legacy ~/.claude_env migration path.
+  // Curated providers map to their registry display name; everything
+  // else lands under "Custom Provider" — same as the Custom entry in
+  // ai-providers.ts.
+  if (baseUrl.includes('opencode.ai')) return 'OpenCode Zen';
   if (baseUrl.includes('routstr'))     return 'Routstr';
   if (baseUrl.includes('ppq.ai'))      return 'PayPerQ';
-  if (baseUrl.includes('opencode.ai')) return 'OpenCode Zen';
-  if (baseUrl.includes(':8081'))       return 'Maple';
-  if (baseUrl.includes(':11434'))      return 'Ollama';
-  if (baseUrl.includes(':1234'))       return 'LM Studio';
-  return 'Custom';
+  return 'Custom Provider';
 }
 
 // Describes what we can show in the UI without an API key (provider name,
@@ -253,8 +254,10 @@ async function loadProviderConfig(): Promise<{ cfg: ProviderConfig | null; meta:
     }
   } catch {}
 
-  // Anthropic demands a real key; OpenAI-compat providers may accept "none"
-  // (Ollama, LM Studio) so an empty key there still counts as configured.
+  // Anthropic demands a real key; OpenAI-compat Custom Providers
+  // pointing at local daemons (Ollama / LM Studio / etc.) may use a
+  // sentinel — the values below skip the "configured?" check so an
+  // empty key there still passes.
   const bareKeys = new Set(['none', 'ollama', 'lm-studio', 'maple-desktop-auto']);
   const isBare = bareKeys.has(apiKey);
   if (isAnthropic && !apiKey) {
@@ -1671,11 +1674,16 @@ export async function startWebServer(port: number): Promise<void> {
       // buttons and the Logs panel's nostr-vpn meta strip.
       if (await handleNvpn(req, res, url, method)) return;
 
-      // ── AI provider system + local model probes (extracted to routes/ai.ts)
-      // Covers /api/ollama/models, /api/lmstudio/models, /api/ai/providers,
-      // /api/ai/config, /api/ai/providers/:id/key (POST/DELETE),
+      // ── AI provider system (extracted to routes/ai.ts)
+      // Covers /api/ai/providers, /api/ai/config,
+      // /api/ai/providers/:id/key (POST/DELETE),
       // /api/ai/providers/:id/models, and /api/ai/chat.
       if (await handleAi(req, res, url, method)) return;
+
+      // ── Project templates registry (routes/templates.ts)
+      // Covers /api/templates GET/POST and /api/templates/:id
+      // GET/PATCH/DELETE + /api/templates/:id/reset.
+      if (await handleTemplates(req, res, url, method)) return;
 
       // ── Terminal HTTP surface (extracted to routes/terminal.ts) ───────
       // Covers /api/terminal/capability, /api/terminal, /api/terminal/create,

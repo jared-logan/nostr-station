@@ -102,12 +102,31 @@ src/
                               /setup wizard endpoints; /api/* router;
                               SSE streaming; mounts in-process relay
                               alongside the dashboard.
+    project-config.ts         Per-project .nostr-station/ dir reader/writer:
+                              system-prompt.md, project-context.md,
+                              template.json, permissions.json, chat.json
+    prompt-render.ts          Tiny mustache/jinja-like templating engine
+                              ({{ var }}, {% if %}, {% for %}) used by the
+                              system-prompt pipeline
+    templates.ts              Project-templates registry (built-in MKStack
+                              + user-added entries) at
+                              ~/.config/nostr-station/templates.json
+    ai-tools/
+      index.ts                Tool dispatcher + provider-spec adapters
+      path-safety.ts          resolveProjectPath — the security guard
+      fs.ts                   list_dir/read_file/write_file/apply_patch/delete_file
+      git.ts                  git_status/log/diff/commit (project-scoped)
+      exec.ts                 run_command (argv only; argv denylist)
+      approval-gate.ts        In-memory pending-approvals registry
+      tool-loop.ts            Anthropic + OpenAI-compat tool round-trip flows
     routes/
       _shared.ts              readBody + streamExec helpers
-      ai.ts                   /api/ai/* (providers, config, chat, models)
+      ai.ts                   /api/ai/* (providers, config, chat, models, approve)
       identity.ts             /api/identity/* (config, set, relays, profile)
       ngit.ts                 /api/ngit/* (discover, clone, account)
-      projects.ts             /api/projects/* (CRUD, git-state, sync, snapshot)
+      projects.ts             /api/projects/* (CRUD, git-state, sync, snapshot,
+                              ai-config)
+      templates.ts            /api/templates/* (list, CRUD, reset built-in)
       terminal.ts             /api/terminal/* + WS upgrade
   web/
     index.html                Dashboard shell — panels, sidebar, identity
@@ -115,7 +134,7 @@ src/
     app.css                   Dashboard styling
     terminal.js               xterm.js + WS client for the terminal panel
     nori.svg                  Logo
-tests/                        node:test via tsx (~2k LoC, ~160 tests)
+tests/                        node:test via tsx (~2k LoC, 400+ tests)
 ```
 
 ## Key design decisions
@@ -142,17 +161,81 @@ Registry at `src/lib/tools.ts` is data: `id`, `binary`, `detect` argv,
 is a one-record diff. Step kinds: `cargo-install`, `npm-global`,
 `shell-script`, `manual` (no automated path — surfaces install URL).
 
-**AI provider agnostic.** Two surfaces:
-- **Terminal-native** (Claude Code, OpenCode) — spawned as PTY tabs;
-  each owns its own auth.
-- **API** (Anthropic, OpenAI, OpenRouter, OpenCode Zen, Groq, Mistral,
-  Gemini, Routstr, PayPerQ, Ollama, LM Studio, Maple) — proxied via
-  `/api/ai/chat` with keys in per-provider keychain slots
-  `ai:<provider-id>`.
+**AI provider agnostic but curated.** Two surfaces:
+- **Terminal-native** (Claude Code, OpenCode Go) — spawned as PTY
+  tabs; each owns its own auth.
+- **API** — Nostr-native first: Anthropic, OpenCode Zen, PayPerQ ⚡,
+  Routstr ⚡, plus a Custom Provider entry for any OpenAI-compat
+  endpoint (covers OpenAI / Groq / Gemini / Ollama / LM Studio /
+  self-hosted). Proxied via `/api/ai/chat` with keys in per-provider
+  keychain slots `ai:<provider-id>`.
 
 Separate defaults for `terminal` and `chat`. Register new providers in
 `ai-providers.ts` only — consumers (Config panel, Chat pane, `ai` CLI,
 `/api/ai/providers`) enumerate the registry at runtime.
+
+**Project AI configuration is layered.** Three resolution levels for
+every chat-pane decision:
+
+1. `<project>/.nostr-station/<file>` (per-project override)
+2. `~/.config/nostr-station/<file>` (global default — future)
+3. Built-in default in code
+
+Files in `<project>/.nostr-station/`:
+- `system-prompt.md` — full template override; gets the same
+  `{{ var }}` / `{% if %}` / `{% for %}` surface as the built-in
+- `project-context.md` — verbatim overlay spliced into the system
+  prompt (also reads legacy `<project>/project-context.md`)
+- `template.json` — `{ templateId, templateName, sourceUrl,
+  scaffoldedAt }`; the AI sees this in the env block
+- `permissions.json` — `{ mode: 'read-only' | 'auto-edit' | 'yolo' }`
+  drives the tool-call approval gate
+- `chat.json` — `{ provider, model }` per-project AI override
+- `.gitignore` — keeps `permissions.json` + `chat.json` out of git
+  but commits the shareable files
+
+`src/lib/project-config.ts` is the single source of truth for reads
++ writes. `seedProjectConfig(project, template)` runs once at
+scaffold time; never overwrites existing files.
+
+**Project templates are user-editable.** Registry at
+`~/.config/nostr-station/templates.json`. Built-in MKStack is
+self-healing — deleting it from the JSON re-seeds on next read.
+Built-in description is editable; `Reset` restores. User-added
+templates fully CRUD via Config → Project Templates.
+
+**System prompt is templated, not stitched.** `ai-context.ts`
+resolves the source (project override → built-in
+`DEFAULT_PROMPT_TEMPLATE`) and renders through `prompt-render.ts` —
+a 200-line dependency-free mustache-like engine that supports
+`{{ var.path }}`, `{% if expr %}…{% else %}…{% endif %}`,
+`{% for x in xs %}…{% endfor %}`, and string-literal equality.
+Variables: `mode` (init/edit), `model.fullId`, `date`, `cwd`,
+`repositoryUrl`, `deployedUrl`, `projectTemplate`, `user`,
+`config.templates`, `permissions`, `recentCommits`, `README`,
+`projectContextOverlay`. Missing variables silently render to empty
+string; the renderer evaluates no user code.
+
+**AI tools are project-scoped + path-safe + permission-gated.**
+`src/lib/ai-tools/` exposes `list_dir`, `read_file`, `write_file`,
+`apply_patch`, `delete_file`, `git_status`, `git_log`, `git_diff`,
+`git_commit`, `run_command`. Every path goes through
+`resolveProjectPath()` which rejects absolutes, `..` traversal,
+NUL bytes, and symlink escapes (canonicalizes the longest existing
+ancestor and re-checks). `run_command` is argv-only with a denylist
+of obvious footguns (`rm -rf`, `git push --force`, `npm publish`,
+`curl`, `wget`, `sudo`).
+
+Permissions:
+- `read-only` (default): write/exec require user approval
+- `auto-edit`: file writes auto-approved; exec still gated
+- `yolo`: everything auto-approved (banner-warned)
+
+Approval gate (`approval-gate.ts`) is an in-memory map keyed by
+session UUID. The chat tool-loop (`tool-loop.ts`) emits SSE
+`approval_request` and awaits a Promise that the
+`/api/ai/chat/approve` route resolves. Sessions are scoped to one
+chat turn; cleanup runs in `finally{}`.
 
 **Owner authentication for the dashboard.** NIP-98 challenge/response;
 every `/api/*` endpoint requires a session token issued only to the
@@ -256,3 +339,16 @@ derives from there.
 8. **`install.sh` stays one curl command.** No `sudo`, no `apt-get`,
    no Docker, no Rust prereq checks. Inner loop: install Node via nvm
    if missing → npm install -g → exec.
+9. **AI tool path-safety must not be relaxed.** Every fs / exec tool
+   resolves its input via `resolveProjectPath()` in
+   `src/lib/ai-tools/path-safety.ts` and rejects on absolute paths,
+   `..` traversal, NUL bytes, and symlink escape. The `tests/path-
+   safety.test.ts` suite is the spec — tests there should grow, not
+   shrink. The `run_command` argv denylist is defense-in-depth, not
+   the primary guard.
+10. **Tool calls under read-only permissions require explicit user
+    approval.** Server-side `requiresApproval()` is the single source
+    of truth — providers MUST call it before dispatching. The chat
+    UI's Approve/Reject buttons surface the gate; YOLO mode bypasses
+    the gate but not the visibility (the call still renders before
+    execution).

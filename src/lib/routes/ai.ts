@@ -4,9 +4,7 @@
  * auth, CSRF, and DNS-rebinding checks before any of these handlers see
  * the request.
  *
- * Surface (verbatim from the pre-refactor inline blocks):
- *   GET    /api/ollama/models                — local Ollama probe
- *   GET    /api/lmstudio/models              — local LM Studio probe
+ * Surface:
  *   GET    /api/ai/providers                 — registry + per-provider state
  *   GET    /api/ai/config                    — raw ai-config.json
  *   POST   /api/ai/config                    — partial merge (no keys)
@@ -35,8 +33,16 @@ import {
   type ProviderConfig as AiProviderConfig,
 } from '../ai-config.js';
 import { buildAiContext } from '../ai-context.js';
-import { probeOllama, probeLmStudio } from '../detect.js';
 import { isNsec } from '../identity.js';
+import {
+  streamAnthropicWithTools, streamOpenAICompatWithTools,
+} from '../ai-tools/tool-loop.js';
+import {
+  createSession, destroySession, resolveApproval,
+  type ApprovalDecision,
+} from '../ai-tools/approval-gate.js';
+import type { ToolContext } from '../ai-tools/index.js';
+import { readProjectPermissions } from '../project-config.js';
 import { getKeychain } from '../keychain.js';
 import { getProject } from '../projects.js';
 import { readBody } from './_shared.js';
@@ -171,6 +177,11 @@ export async function streamOpenAICompat(
   const url = completionsUrl(cfg.baseUrl);
 
   const headers: Record<string, string> = { 'content-type': 'application/json' };
+  // Bare-key sentinels skip the Authorization header — useful when a
+  // Custom Provider points at a local daemon (Ollama / LM Studio / etc.)
+  // that rejects bearer tokens. Curated providers all need real keys;
+  // 'none' is the generic skip token, the others remain for users
+  // migrating Custom configs from the previous registry.
   const bareKeys = new Set(['none', 'ollama', 'lm-studio', 'maple-desktop-auto']);
   if (cfg.apiKey && !bareKeys.has(cfg.apiKey)) {
     headers['Authorization'] = `Bearer ${cfg.apiKey}`;
@@ -226,19 +237,6 @@ export async function handleAi(
   url: string,
   method: string,
 ): Promise<boolean> {
-  if (url === '/api/ollama/models' && method === 'GET') {
-    const models = await probeOllama();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ models: models ?? [] }));
-    return true;
-  }
-  if (url === '/api/lmstudio/models' && method === 'GET') {
-    const models = await probeLmStudio();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ models: models ?? [] }));
-    return true;
-  }
-
   // ── AI provider system (Step 4) ───────────────────────────────────
   //
   // Endpoints here talk to ai-config.json + per-provider keychain slots
@@ -480,6 +478,7 @@ export async function handleAi(
       ? parsed.model.slice(0, 160)
       : null;
     const projectId: string | null = typeof parsed.projectId === 'string' ? parsed.projectId : null;
+    const project = projectId ? getProject(projectId) : null;
 
     // All failure modes emit SSE so the Chat pane's EventSource-like
     // reader gets a consistent shape — `data: {error: "..."}` + `[DONE]`.
@@ -556,7 +555,7 @@ export async function handleAi(
     // Build the context block + merge with any caller-supplied system
     // prompt already in messages. We prepend rather than overwrite so
     // future per-prompt system messages still apply.
-    const ctx = buildAiContext(projectId);
+    const ctx = buildAiContext(projectId, { provider: providerId, fullId: model });
     const system = ctx.text;
 
     const runtimeCfg: ProviderConfig = {
@@ -567,14 +566,80 @@ export async function handleAi(
       providerName: provider.displayName,
     };
 
+    // Tool context: only enabled when an active project is selected
+    // AND the project has a path. Without a path, tools have nothing
+    // to operate on (and runTool would error per-call). Permissions
+    // resolve project-override → station default 'read-only'.
+    let toolCtx: ToolContext | null = null;
+    if (project && project.path) {
+      const permLocal = readProjectPermissions(project);
+      toolCtx = {
+        project,
+        permissions: permLocal?.mode ?? 'read-only',
+      };
+    }
+
+    // Approval session for the duration of this chat turn. The first
+    // SSE frame the loop emits is { session: sessionId } so the
+    // client knows the id to use for /api/ai/chat/approve.
+    //
+    // If the client disconnects mid-stream (browser closes, tab
+    // refreshes) we destroySession() on the close event — that
+    // resolves any pending awaitApproval() Promises with 'reject'
+    // so the tool-loop can unwind instead of hanging forever on a
+    // dangling Promise. Without this, an abandoned approval would
+    // leak both an in-memory session entry AND keep the upstream
+    // provider request alive indefinitely.
+    const sessionId = createSession();
+    let disconnected = false;
+    const onClose = () => {
+      disconnected = true;
+      destroySession(sessionId);
+    };
+    req.on('close', onClose);
     try {
-      if (isAnth) await streamAnthropic(messages, system, runtimeCfg, res);
-      else        await streamOpenAICompat(messages, system, runtimeCfg, res);
+      if (isAnth) await streamAnthropicWithTools(messages, system, runtimeCfg, res, toolCtx, sessionId);
+      else        await streamOpenAICompatWithTools(messages, system, runtimeCfg, res, toolCtx, sessionId);
     } catch (e: any) {
-      res.write(`data: ${JSON.stringify({ error: String(e.message ?? e) })}\n\n`);
+      if (!disconnected) {
+        try { res.write(`data: ${JSON.stringify({ error: String(e.message ?? e) })}\n\n`); } catch {}
+      }
+    } finally {
+      req.off('close', onClose);
+      destroySession(sessionId);
     }
     res.write('data: [DONE]\n\n');
     res.end();
+    return true;
+  }
+
+  // ── Approval response — resolves a pending tool-call gate ─────────
+  if (url === '/api/ai/chat/approve' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid JSON body' }));
+      return true;
+    }
+    const sessionId  = String(parsed.sessionId ?? '');
+    const approvalId = String(parsed.approvalId ?? '');
+    const decision   = parsed.decision === 'approve' ? 'approve'
+                     : parsed.decision === 'reject'  ? 'reject'
+                     : null;
+    if (!sessionId || !approvalId || !decision) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'sessionId, approvalId, and decision (approve|reject) are required' }));
+      return true;
+    }
+    const ok = resolveApproval(sessionId, approvalId, decision as ApprovalDecision);
+    if (!ok) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'approval not found (already resolved or session expired)' }));
+      return true;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
     return true;
   }
 

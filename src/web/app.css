@@ -4371,3 +4371,138 @@ body.term-expanded .term-bar-toggle .term-chevron {
 .setup-verify-status .ok    { color: var(--success); font-weight: 500; }
 .setup-verify-status .err   { color: var(--error); }
 
+
+/* ── Project Templates section (Config panel) ─────────────────────────── */
+
+.tmpl-list {
+  display: grid;
+  gap: 10px;
+}
+.tmpl-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 12px 14px;
+}
+.tmpl-card .tmpl-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tmpl-card .tmpl-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.tmpl-card .tmpl-actions button {
+  font-size: 11px;
+  padding: 4px 10px;
+}
+.tmpl-add summary {
+  font-size: 12px;
+  font-weight: 500;
+}
+.tmpl-add-form .np-field {
+  margin-bottom: 0;
+}
+
+/* ── Per-project AI configuration (Settings tab > AI configuration) ──── */
+
+.pcfg-row {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.pcfg-row:first-child { border-top: 0; }
+.pcfg-label {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.pcfg-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pcfg-system-prompt,
+.pcfg-project-context {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+/* ── Chat tool calls (commit 7 of project optimizations PR) ─────────── */
+
+.asst-body { display: block; }
+.asst-text { white-space: pre-wrap; }
+
+.tool-call {
+  display: block;
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg);
+  font-size: 12px;
+  font-family: var(--mono);
+  overflow: hidden;
+}
+.tool-call .tc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.tool-call .tc-status { width: 14px; text-align: center; color: var(--text-dim); }
+.tool-call .tc-name   { font-weight: 600; }
+.tool-call .tc-summary { color: var(--text-dim); margin-left: auto; }
+.tool-call .tc-args,
+.tool-call .tc-preview {
+  display: none;
+  padding: 8px 10px;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-card);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  max-height: 240px;
+  overflow: auto;
+}
+.tool-call.expanded .tc-args,
+.tool-call.expanded .tc-preview { display: block; }
+.tool-call.pending .tc-status { color: var(--accent); animation: tc-pulse 1.2s ease-in-out infinite; }
+.tool-call.ok      .tc-status { color: var(--success); }
+.tool-call.err     .tc-status { color: var(--error); }
+.tool-call.err     { border-color: var(--error); }
+.tool-call.awaiting-approval {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, var(--bg));
+}
+.tool-call .tc-actions {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.tool-call .tc-actions button { font-size: 11px; padding: 4px 12px; }
+
+@keyframes tc-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+.asst-error { color: var(--error); margin-top: 6px; font-size: 12px; }

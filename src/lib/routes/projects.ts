@@ -49,6 +49,12 @@ import {
   isStacksProject, validateProjectPath,
 } from '../projects.js';
 import { checkCollision, scaffoldProject } from '../project-scaffold.js';
+import { getTemplate } from '../templates.js';
+import {
+  ensureConfigDir, readProjectAiConfig,
+  writeSystemPromptOverride, writeProjectContextOverlay,
+  writeProjectPermissions, writeProjectChatOverride,
+} from '../project-config.js';
 import { isValidRelayUrl } from '../identity.js';
 import {
   getProjectGitState, syncProject, snapshotProject, fetchNgitProposals,
@@ -170,19 +176,34 @@ export async function handleProjects(
     }
     const name = String(parsed.name || '');
 
-    // Two source types here: 'local-only' (plain git init) and
-    // 'git-url' (git clone + freshen). ngit clones go through the
-    // dedicated /api/ngit/clone path because they validate the
-    // nostr:// / naddr1 URL format and use the existing Scan flow.
-    // Default to local-only on unknown / missing source so we never
-    // accidentally shell out to something unexpected.
-    const src = parsed.source;
+    // Three input shapes here, resolved in priority order:
+    //   1. `templateId` — registry lookup → use that template's source.
+    //   2. `source: { type: 'git-url', url }` — explicit clone URL.
+    //   3. `source: { type: 'local-only' }` (or anything unrecognized)
+    //      — plain `git init` blank-canvas project.
+    //
+    // ngit clones go through the dedicated /api/ngit/clone path because
+    // they validate the nostr:// / naddr1 URL format and use the
+    // existing Scan flow. Default to local-only on unknown / missing
+    // input so we never accidentally shell out to something unexpected.
+    const templateId = typeof parsed.templateId === 'string' ? parsed.templateId : null;
     let source: import('../project-scaffold.js').ScaffoldSource = { type: 'local-only' };
-    if (src && typeof src === 'object') {
-      if (src.type === 'git-url' && typeof src.url === 'string') {
-        source = { type: 'git-url', url: src.url };
-      } else if (src.type === 'local-only') {
-        source = { type: 'local-only' };
+    if (templateId) {
+      const t = getTemplate(templateId);
+      if (!t) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `template "${templateId}" not found` }));
+        return true;
+      }
+      source = t.source;
+    } else {
+      const src = parsed.source;
+      if (src && typeof src === 'object') {
+        if (src.type === 'git-url' && typeof src.url === 'string') {
+          source = { type: 'git-url', url: src.url };
+        } else if (src.type === 'local-only') {
+          source = { type: 'local-only' };
+        }
       }
     }
     // Identity: station-default unless the client explicitly opts
@@ -200,7 +221,7 @@ export async function handleProjects(
         bunkerUrl:  typeof rawIdent.bunkerUrl === 'string' ? rawIdent.bunkerUrl.trim() : null,
       };
     }
-    await scaffoldProject(name, source, res, identity);
+    await scaffoldProject(name, source, res, identity, templateId);
     return true;
   }
 
@@ -622,6 +643,81 @@ export async function handleProjects(
       const result = await snapshotProject(project, message);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
+      return true;
+    }
+
+    // ── Per-project AI configuration bundle ─────────────────────────
+    //
+    // Read returns the merged view: each field is null when the project
+    // doesn't override that layer (caller falls through to global →
+    // built-in resolution server-side at chat time). Write accepts a
+    // partial bundle and persists each present field. Nulls explicitly
+    // clear the override (the file is removed).
+    if (tail === 'ai-config' && method === 'GET') {
+      if (!project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'project has no local path' }));
+        return true;
+      }
+      const bundle = readProjectAiConfig(project);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(bundle));
+      return true;
+    }
+    if (tail === 'ai-config' && method === 'PUT') {
+      if (!project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'project has no local path' }));
+        return true;
+      }
+      let parsed: any = {};
+      try { parsed = JSON.parse(await readBody(req)); }
+      catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'bad json' }));
+        return true;
+      }
+      try {
+        ensureConfigDir(project);
+        // systemPrompt: string → write; null → remove file; undefined → ignore.
+        if (parsed.systemPrompt === null) {
+          const p = path.join(project.path, '.nostr-station', 'system-prompt.md');
+          try { fs.unlinkSync(p); } catch {}
+        } else if (typeof parsed.systemPrompt === 'string') {
+          writeSystemPromptOverride(project, parsed.systemPrompt);
+        }
+        if (parsed.projectContext === null) {
+          const p = path.join(project.path, '.nostr-station', 'project-context.md');
+          try { fs.unlinkSync(p); } catch {}
+        } else if (typeof parsed.projectContext === 'string') {
+          writeProjectContextOverlay(project, parsed.projectContext);
+        }
+        if (parsed.permissions === null) {
+          const p = path.join(project.path, '.nostr-station', 'permissions.json');
+          try { fs.unlinkSync(p); } catch {}
+        } else if (parsed.permissions && typeof parsed.permissions === 'object'
+                   && (parsed.permissions.mode === 'read-only'
+                       || parsed.permissions.mode === 'auto-edit'
+                       || parsed.permissions.mode === 'yolo')) {
+          writeProjectPermissions(project, { mode: parsed.permissions.mode });
+        }
+        if (parsed.chat === null) {
+          const p = path.join(project.path, '.nostr-station', 'chat.json');
+          try { fs.unlinkSync(p); } catch {}
+        } else if (parsed.chat && typeof parsed.chat === 'object') {
+          const ch: { provider?: string; model?: string } = {};
+          if (typeof parsed.chat.provider === 'string') ch.provider = parsed.chat.provider;
+          if (typeof parsed.chat.model    === 'string') ch.model    = parsed.chat.model;
+          writeProjectChatOverride(project, ch);
+        }
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e?.message || 'write failed' }));
+        return true;
+      }
+      const bundle = readProjectAiConfig(project);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(bundle));
       return true;
     }
 
