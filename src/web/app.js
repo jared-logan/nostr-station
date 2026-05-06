@@ -3535,10 +3535,16 @@ const ProjectsPanel = (() => {
     }
 
     // Tabs — only for enabled capabilities; Settings always shown.
+    // The Proposals tab piggybacks on ngit capability + a configured
+    // remote: with no remote there's nothing to query for, and the
+    // existing `ngit` tab already swaps to an Initialize form in that
+    // state. Surfacing a separate Proposals tab keeps the list-y view
+    // distinct from the operations tab (push / settings).
     const tabs = [
       { key: 'overview', label: 'Overview' },
       p.capabilities.git   && { key: 'git',   label: 'Git' },
       p.capabilities.ngit  && { key: 'ngit',  label: 'ngit' },
+      (p.capabilities.ngit && p.remotes.ngit) && { key: 'proposals', label: 'Proposals' },
       p.capabilities.nsite && { key: 'nsite', label: 'nsite' },
       { key: 'settings', label: 'Settings' },
     ].filter(Boolean);
@@ -3602,10 +3608,11 @@ const ProjectsPanel = (() => {
   function renderTab(container, p) {
     container.innerHTML = '';
     if (state.tab === 'overview') renderOverview(container, p);
-    else if (state.tab === 'git')     renderGitTab(container, p);
-    else if (state.tab === 'ngit')    renderNgitTab(container, p);
-    else if (state.tab === 'nsite')   renderNsiteTab(container, p);
-    else if (state.tab === 'settings') renderSettingsTab(container, p);
+    else if (state.tab === 'git')       renderGitTab(container, p);
+    else if (state.tab === 'ngit')      renderNgitTab(container, p);
+    else if (state.tab === 'proposals') renderProposalsTab(container, p);
+    else if (state.tab === 'nsite')     renderNsiteTab(container, p);
+    else if (state.tab === 'settings')  renderSettingsTab(container, p);
   }
 
   async function renderOverview(container, p) {
@@ -3748,8 +3755,14 @@ const ProjectsPanel = (() => {
       ? 'station identity'
       : `${truncNpub(p.identity.npub || '')}${p.identity.bunkerUrl ? ' · bunker configured' : ''}`;
     const alsoGit = p.capabilities.git
-      ? `<div class="muted" style="margin-top:8px"><code>nostr-station publish</code> handles both the GitHub and ngit remotes simultaneously. The "Publish to ngit" button below only pushes ngit.</div>`
+      ? `<div class="muted" style="margin-top:8px"><code>nostr-station publish</code> handles both the GitHub and ngit remotes simultaneously. The buttons here only act on the ngit remote.</div>`
       : '';
+    // Layout follows shakespeare.diy's clean ngit popover: repo URL
+    // header, then the Sync/Pull/Push triad as the primary verbs, then
+    // signing details + value-add (Send as proposal) below. "Sync" is
+    // bidir (pull + push) — the "just do the thing" verb users reach
+    // for first; Pull and Push remain available as discrete primitives
+    // for the rare case where a user wants only one half.
     container.innerHTML = `
       <div class="tab-section">
         <h3>Nostr remote</h3>
@@ -3759,16 +3772,125 @@ const ProjectsPanel = (() => {
         </div>
       </div>
       <div class="tab-section">
+        <h3>Sync</h3>
+        <div class="ngit-verb-row">
+          <button class="primary ngit-sync-btn">Sync</button>
+          <button class="ngit-pull-btn">Pull</button>
+          <button class="ngit-push-btn">Push</button>
+        </div>
+        <div class="muted" style="margin-top:6px;font-size:11px">
+          <strong>Sync</strong> pulls then pushes in one click.
+          <strong>Pull</strong> = <code>ngit fetch</code> + fast-forward merge.
+          <strong>Push</strong> = <code>ngit push</code> (Amber signs on your phone).
+        </div>
+        <label class="ngit-autosync" style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;cursor:pointer">
+          <input type="checkbox" class="ngit-autosync-input" ${p.autoSync ? 'checked' : ''}>
+          <span>Automatic sync</span>
+          <span class="muted" style="font-size:11px">— pull every 5 minutes</span>
+        </label>
+        <div class="ngit-send-section" style="margin-top:14px">
+          <button class="ngit-send-btn" style="display:none"></button>
+          <span class="muted ngit-send-hint" style="display:none;font-size:11px">
+            no commits ahead — switch to a feature branch and commit first
+          </span>
+        </div>
+      </div>
+      <div class="tab-section">
         <h3>Signing</h3>
         <div class="overview-kv"><div class="k">identity</div><div class="v">${escapeHtml(signing)}</div></div>
         <div class="muted">Pushes to the ngit remote trigger Amber signing on your phone.</div>
         ${alsoGit}
       </div>
-      <div class="tab-section">
-        <button class="primary ngit-push-btn">Publish to ngit</button>
-      </div>
     `;
     container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+
+    // Send-as-proposal gate: only meaningful when the local branch has
+    // commits the upstream doesn't. /git-state hands back an `ahead`
+    // count parsed from `git status --porcelain=v2 --branch`. We
+    // render the button hidden by default, reveal it after the async
+    // probe returns. Hint replaces the button when ahead is 0 so the
+    // user knows why nothing's happening, rather than seeing a missing
+    // affordance with no explanation.
+    (async () => {
+      const sendBtn  = container.querySelector('.ngit-send-btn');
+      const sendHint = container.querySelector('.ngit-send-hint');
+      if (!sendBtn || !sendHint) return;
+      let st = null;
+      try { st = await api(`/api/projects/${p.id}/git-state`); } catch {}
+      const ahead = Number(st?.ahead || 0);
+      if (ahead > 0) {
+        sendBtn.style.display  = '';
+        sendBtn.textContent    = `Send as proposal (${ahead} commit${ahead === 1 ? '' : 's'})`;
+        sendBtn.addEventListener('click', () => {
+          openExecModal({
+            title:    `Send proposal · ${p.name}`,
+            subtitle: 'ngit send  (Amber will sign on your phone)',
+            endpoint: `/api/projects/${p.id}/ngit/send`,
+          }).then(r => {
+            if (r.ok) toast('Proposal sent', '', 'ok');
+            else      toast('ngit send failed', `exit ${r.code}`, 'err');
+          });
+        });
+      } else {
+        sendHint.style.display = '';
+      }
+    })();
+
+    // Auto-sync checkbox — toggles persisted Project.autoSync via PATCH.
+    // The server-side AutoSyncManager.reconcile(id) hook arms/disarms
+    // the interval inside the same response, so a flip takes effect
+    // without the user having to wait for the next tick.
+    const autoSyncInput = container.querySelector('.ngit-autosync-input');
+    if (autoSyncInput) {
+      autoSyncInput.addEventListener('change', async () => {
+        const next = !!autoSyncInput.checked;
+        autoSyncInput.disabled = true;
+        try {
+          await api(`/api/projects/${p.id}`, {
+            method:  'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify({ autoSync: next }),
+          });
+          p.autoSync = next;
+          toast(next ? 'Auto-sync on' : 'Auto-sync off', '', 'ok');
+        } catch (e) {
+          autoSyncInput.checked = !next;
+          toast('Auto-sync update failed', e?.message || '', 'err');
+        } finally {
+          autoSyncInput.disabled = false;
+        }
+      });
+    }
+
+    container.querySelector('.ngit-sync-btn').addEventListener('click', () => {
+      // Bidir — the primary verb. Streams both phases (fetch then push)
+      // in one modal. Server skips push if pull fails.
+      openExecModal({
+        title:    `ngit sync · ${p.name}`,
+        subtitle: 'pull (ngit fetch + ff-merge) then push',
+        endpoint: `/api/projects/${p.id}/ngit/sync`,
+      }).then(r => {
+        if (r.ok) toast('ngit sync complete', '', 'ok');
+        else      toast('ngit sync failed', `exit ${r.code}`, 'err');
+        if (state.view === 'detail' && state.projectId === p.id) render();
+      });
+    });
+
+    container.querySelector('.ngit-pull-btn').addEventListener('click', () => {
+      // Pull-only — reuses the existing /api/projects/:id/sync endpoint
+      // which does ngit fetch + ff-merge + proposals query for ngit
+      // projects. Same code path as the card-grid Sync icon.
+      openExecModal({
+        title:    `ngit pull · ${p.name}`,
+        subtitle: 'ngit fetch + ff-merge',
+        endpoint: `/api/projects/${p.id}/sync`,
+      }).then(r => {
+        if (r.ok) toast('ngit pull complete', '', 'ok');
+        else      toast('ngit pull failed', `exit ${r.code}`, 'err');
+        if (state.view === 'detail' && state.projectId === p.id) render();
+      });
+    });
+
     container.querySelector('.ngit-push-btn').addEventListener('click', () => {
       // ngit push is interactive once Amber gets involved (sign prompts).
       // Prefer the terminal panel; keep the SSE modal as fallback for
@@ -3786,6 +3908,127 @@ const ProjectsPanel = (() => {
         else      toast('ngit push failed', `exit ${r.code}`, 'err');
       });
     });
+  }
+
+  // Truncate a 64-hex pubkey for display. Used by the proposals list —
+  // the npub is rebuilt by the server but we only show it short.
+  function shortPubkey(hex) {
+    if (!hex || typeof hex !== 'string') return '';
+    if (hex.length <= 16) return hex;
+    return `${hex.slice(0, 8)}…${hex.slice(-4)}`;
+  }
+
+  // Cache the latest proposals payload per project so re-rendering the
+  // tab (e.g. after a Download finishes) doesn't refetch unless the
+  // user explicitly asks via the Refresh button.
+  const proposalsCache = new Map();
+
+  async function renderProposalsTab(container, p) {
+    // The "View latest patch" button at top runs `git log -p -5` via
+    // the project's exec whitelist. Useful right after a Download —
+    // HEAD is on the proposal branch so the user sees its commits as
+    // diffs without leaving the dashboard.
+    container.innerHTML = `
+      <div class="tab-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <h3 style="margin:0">Open proposals</h3>
+          <div style="display:flex;gap:8px">
+            <button class="proposals-view-patch">View latest patch</button>
+            <button class="proposals-refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="muted" style="margin-bottom:12px">
+          NIP-34 kind-1617 proposals tagged against this repo's coordinates.
+          Queried from your read relays via <code>nak</code>.
+          Downloading runs <code>ngit pr checkout &lt;id&gt;</code> in the project directory.
+        </div>
+        <div class="proposals-list" id="proposals-list">
+          <div class="muted">loading…</div>
+        </div>
+      </div>
+    `;
+
+    const listEl = container.querySelector('#proposals-list');
+
+    const runDownload = async (proposalId, title) => {
+      const r = await openExecModal({
+        title:    `Download proposal · ${p.name}`,
+        subtitle: `ngit pr checkout ${proposalId.slice(0, 12)}…`,
+        endpoint: `/api/projects/${p.id}/ngit/download`,
+        body:     { proposalId },
+      });
+      if (r.ok) {
+        toast(`Checked out: ${title || proposalId.slice(0, 8)}`,
+              'View latest patch to see commits', 'ok');
+      } else {
+        toast('Download failed', `exit ${r.code}`, 'err');
+      }
+    };
+
+    const renderRows = (proposals) => {
+      if (!Array.isArray(proposals) || proposals.length === 0) {
+        listEl.innerHTML = `<div class="muted">No open proposals found on configured relays.</div>`;
+        return;
+      }
+      // Freshest first matches the server's sort, but we re-apply on the
+      // client so a stale cache doesn't surprise the user if the server
+      // contract ever drifts.
+      const rows = [...proposals].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      listEl.innerHTML = rows.map(r => `
+        <div class="proposal-row" data-id="${escapeHtml(r.id)}">
+          <div class="proposal-main">
+            <div class="proposal-title">${escapeHtml(r.title || r.id.slice(0, 8))}</div>
+            <div class="proposal-meta muted">
+              <span class="k">author</span>
+              <code class="cmd-inline">${escapeHtml(shortPubkey(r.pubkey))}</code>
+              · <span class="k">${escapeHtml(fmtAgoIso(new Date((r.createdAt || 0) * 1000).toISOString()))}</span>
+              · <span class="k">id</span>
+              <code class="cmd-inline">${escapeHtml(r.id.slice(0, 12))}…</code>
+            </div>
+          </div>
+          <div class="proposal-actions">
+            <button class="primary proposal-download" data-id="${escapeHtml(r.id)}"
+              data-title="${escapeHtml(r.title || '')}">Download</button>
+            <span class="copy-slot" data-copy="${escapeHtml(r.id)}"></span>
+          </div>
+        </div>
+      `).join('');
+      listEl.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+      listEl.querySelectorAll('.proposal-download').forEach(btn => {
+        btn.addEventListener('click', () => runDownload(btn.dataset.id, btn.dataset.title));
+      });
+    };
+
+    const fetchAndRender = async () => {
+      try {
+        const r = await api(`/api/projects/${p.id}/ngit/proposals`);
+        const proposals = Array.isArray(r?.proposals) ? r.proposals : [];
+        proposalsCache.set(p.id, proposals);
+        renderRows(proposals);
+      } catch (e) {
+        listEl.innerHTML = `<div class="muted">Failed to load proposals: ${escapeHtml(e?.message || String(e))}</div>`;
+      }
+    };
+
+    container.querySelector('.proposals-refresh').addEventListener('click', () => {
+      listEl.innerHTML = `<div class="muted">refreshing…</div>`;
+      fetchAndRender();
+    });
+
+    container.querySelector('.proposals-view-patch').addEventListener('click', () => {
+      openExecModal({
+        title:    `Latest patch · ${p.name}`,
+        subtitle: 'git log -p -5  (current branch)',
+        endpoint: `/api/projects/${p.id}/exec`,
+        body:     { cmd: 'git-log-patch' },
+      });
+    });
+
+    // Use the cache when it's hot to avoid the 5s relay query on every
+    // tab switch; otherwise fetch fresh.
+    const cached = proposalsCache.get(p.id);
+    if (Array.isArray(cached)) renderRows(cached);
+    else                       fetchAndRender();
   }
 
   async function renderNgitInitForm(container, p) {
@@ -8077,11 +8320,14 @@ const SetupWizard = (() => {
   }
 
   // ── ngit signing ─────────────────────────────────────────────────────
-  // Two jobs: stash the default ngit relay (used when initialising new
-  // repos) and hand off to the embedded terminal for `ngit account
-  // login`. The terminal drawer renders the nostrconnect QR — the user
-  // scans with Amber on their phone and the session completes in the
-  // same browser tab, no shell hand-off required.
+  // Three jobs: install the ngit binary (was a separate Status-panel
+  // step pre-fix; promoted here so first-run users hit the install path
+  // before they ever see Status), stash the default ngit relay (used
+  // when initialising new repos), and hand off to the embedded terminal
+  // for `ngit account login`. The terminal drawer renders the
+  // nostrconnect QR — the user scans with Amber on their phone and the
+  // session completes in the same browser tab, no shell hand-off
+  // required.
   async function renderNgit() {
     // Pre-fill the relay field from whatever identity.json already has.
     let existingRelay = '';
@@ -8090,12 +8336,36 @@ const SetupWizard = (() => {
       if (cfg?.ngitRelay) existingRelay = cfg.ngitRelay;
     } catch {}
 
+    // Probe ngit binary presence via /api/status. The 'ngit' row's
+    // state is 'err' when the binary isn't on PATH, 'warn' when it is
+    // but no default relay is set, 'ok' when both. We only need
+    // installed-or-not here — relay config gets its own field below.
+    const probeNgitInstalled = async () => {
+      try {
+        const rows = await api('/api/status');
+        const row  = (rows || []).find(r => r.id === 'ngit');
+        return row && row.state !== 'err';
+      } catch { return false; }
+    };
+    let ngitInstalled = await probeNgitInstalled();
+
     const termAvailable = !!window.NSTerminal?.isAvailable?.();
 
     root.innerHTML = shell(
       'ngit signing via Amber',
       'ngit publishes repo events to Nostr — signed by your phone.',
       `
+        <div class="setup-field" id="setup-ngit-binary-field">
+          <label>ngit binary</label>
+          <div id="setup-ngit-binary-state"></div>
+          <div class="setup-hint muted" style="margin-top:8px">
+            Downloads the verified release binary from
+            <code>github.com/DanConwayDev/ngit-cli</code>
+            (sha256-pinned in versions.ts) and installs to
+            <code>/usr/local/bin/ngit</code>.
+          </div>
+        </div>
+
         <div class="setup-field">
           <label>Default ngit relay</label>
           <div class="setup-row">
@@ -8112,6 +8382,10 @@ const SetupWizard = (() => {
           ${termAvailable ? `
             <div class="setup-ngit-amber">
               <button class="primary" id="setup-ngit-amber-btn">Connect Amber →</button>
+              <div class="setup-hint muted" style="margin-top:8px"
+                id="setup-ngit-amber-gate-hint">
+                Install ngit first — Amber pairing runs <code>ngit account login</code>.
+              </div>
               <div class="setup-hint muted" style="margin-top:8px">
                 Opens a terminal and runs <code>ngit account login</code>.
                 Scan the nostrconnect:// QR with Amber, approve on your phone,
@@ -8135,6 +8409,73 @@ const SetupWizard = (() => {
         </div>
       `,
     );
+
+    // Render the binary-state row. Re-runnable so a successful install
+    // flips the row from "Install" to "✓ installed" without re-mounting
+    // the whole stage and losing the relay input the user already typed.
+    // Also drives the Connect Amber gate below: `ngit account login`
+    // can't run while the binary is missing, so the button stays
+    // disabled with a hint until install completes.
+    const renderBinaryState = () => {
+      const host = $('setup-ngit-binary-state');
+      if (!host) return;
+      if (ngitInstalled) {
+        host.innerHTML = `
+          <div class="setup-row" style="align-items:center;gap:8px">
+            <span class="bin-indicator bin-indicator-ok">✓</span>
+            <span>installed</span>
+          </div>
+        `;
+      } else {
+        host.innerHTML = `
+          <div class="setup-row" style="align-items:center;gap:8px">
+            <span class="bin-indicator bin-indicator-err">✗</span>
+            <span>not installed</span>
+            <button class="primary" id="setup-ngit-install-btn"
+              style="margin-left:auto">Install ngit</button>
+          </div>
+        `;
+        const btn = $('setup-ngit-install-btn');
+        btn.addEventListener('click', async () => {
+          const r = await openExecModal({
+            title:    'Install ngit',
+            subtitle: 'Installing ngit…',
+            endpoint: '/api/exec/install/ngit',
+          });
+          if (r.ok) {
+            toast('ngit install finished', '', 'ok');
+            ngitInstalled = await probeNgitInstalled();
+            renderBinaryState();
+            syncAmberGate();
+          } else {
+            toast(`ngit install exited ${r.code}`, '', 'err');
+          }
+        });
+      }
+    };
+
+    // Connect Amber depends on `ngit account login` being executable.
+    // Disabling the button (rather than hiding it) keeps the affordance
+    // visible so the user understands the dependency, with a hint
+    // pointing back at the install row above. Re-enabled by
+    // renderBinaryState's post-install handler.
+    const syncAmberGate = () => {
+      const btn  = $('setup-ngit-amber-btn');
+      const hint = $('setup-ngit-amber-gate-hint');
+      if (!btn) return;
+      if (ngitInstalled) {
+        btn.disabled = false;
+        btn.title    = '';
+        if (hint) hint.style.display = 'none';
+      } else {
+        btn.disabled = true;
+        btn.title    = 'Install ngit first (above)';
+        if (hint) hint.style.display = '';
+      }
+    };
+
+    renderBinaryState();
+    syncAmberGate();
 
     root.querySelector('.setup-back').addEventListener('click', back);
     root.querySelector('#setup-ngit-skip').addEventListener('click', next);

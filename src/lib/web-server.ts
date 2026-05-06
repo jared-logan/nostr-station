@@ -36,9 +36,11 @@ import type { Relay } from '../relay/index.js';
 import { LogBuffer, type LogLine } from './log-buffer.js';
 import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
+import { AutoSyncManager } from './auto-sync.js';
 import { installNostrVpn } from './nvpn-installer.js';
 import { probeNvpnStatus, startNvpnLogTail } from './nvpn.js';
 import { installNak } from './nak-installer.js';
+import { installNgit } from './ngit-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 import {
   readIdentity, setSetupComplete, isNsec,
@@ -66,6 +68,7 @@ import {
   readBody, streamExec, streamExecError,
   CLI_BIN, CLI_SPAWN,
   getActiveChatProjectId,
+  setAutoSyncRef,
   type CmdSpec,
 } from './routes/_shared.js';
 import { handleProjects } from './routes/projects.js';
@@ -383,6 +386,17 @@ const logBuffers = {
 // opts out for tests / minimal deployments.
 let watchdog: Watchdog | null = null;
 
+// Auto-sync scheduler. Module-level singleton so the PATCH /api/projects/:id
+// route handler can reach in and reconcile a single project after the
+// user toggles the persisted autoSync flag — letting the change take
+// effect inside the request/response cycle rather than waiting for the
+// next interval tick. Lazy-init below so tests that don't boot the
+// server never spin up the timer set.
+let autoSync: AutoSyncManager | null = null;
+export function getAutoSyncManager(): AutoSyncManager | null {
+  return autoSync;
+}
+
 // nvpn daemon log tailer. Started best-effort once at server boot; pumps
 // the daemon's own log file into logBuffers.vpn so /api/logs/vpn streams
 // real lines instead of the static "tail it manually" hint that used to
@@ -551,6 +565,13 @@ async function maybeStartInprocRelay(): Promise<void> {
   process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);
   logBuffers.relay.info(`relay listening on ws://127.0.0.1:${port}`);
   await maybeStartWatchdog();
+  if (process.env.STATION_DISABLE_AUTO_SYNC !== '1') {
+    autoSync = new AutoSyncManager();
+    autoSync.start();
+    // Bridge the singleton through routes/_shared.ts so the project
+    // PATCH route can call reconcile(id) without a cyclic import.
+    setAutoSyncRef(autoSync);
+  }
 }
 
 async function maybeStartWatchdog(): Promise<void> {
@@ -1233,10 +1254,12 @@ export async function startWebServer(port: number): Promise<void> {
       // ── Status panel install button ───────────────────────────────────
       // POST /api/exec/install/<slug> — drives the Status row "Install"
       // CTA (app.js:1255). Most slugs flow through installTool() from
-      // src/lib/tools.ts (cargo/npm/manual installers); `nak` has its
-      // own GitHub-release-binary path (src/lib/nak-installer.ts) since
-      // upstream ships it as a single Go binary, not a Rust crate.
-      // Bigger flows (nvpn) keep their own dedicated setup endpoint
+      // src/lib/tools.ts (npm-global / manual installers). `nak` and
+      // `ngit` each have their own GitHub-release-binary installer
+      // (src/lib/{nak,ngit}-installer.ts) — both used to be cargo
+      // entries, but install.sh deliberately doesn't ship Rust, so the
+      // prereq check rejected every fresh-install user. Bigger flows
+      // (nvpn) keep their own dedicated setup endpoint
       // (/api/setup/nvpn/install above).
       const installMatch = url.match(/^\/api\/exec\/install\/([a-z][a-z0-9-]*)$/);
       if (installMatch && method === 'POST') {
@@ -1264,9 +1287,24 @@ export async function startWebServer(port: number): Promise<void> {
           return;
         }
 
+        if (slug === 'ngit') {
+          try {
+            const result = await installNgit((line) => emit({ line, stream: 'stdout' }));
+            if (!result.ok && result.detail) {
+              emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
+            }
+            emit({ done: true, code: result.ok ? 0 : (result.warn ? 0 : 1) });
+          } catch (e: any) {
+            emit({ line: String(e?.message || e), stream: 'stderr' });
+            emit({ done: true, code: -1 });
+          }
+          try { res.end(); } catch {}
+          return;
+        }
+
         const tool = getTool(slug);
         if (!tool) {
-          const supported = ['nak', ...Object.keys(TOOLS)].sort();
+          const supported = ['nak', 'ngit', ...Object.keys(TOOLS)].sort();
           emit({
             line:   `'${slug}' is not a known optional tool. Supported: ${supported.join(', ')}.`,
             stream: 'stderr',

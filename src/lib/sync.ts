@@ -319,7 +319,7 @@ export async function syncProject(project: Project): Promise<SyncResult> {
 // we can't determine the repo coords, return an empty array rather
 // than failing the whole sync.
 
-async function fetchNgitProposals(project: Project): Promise<NgitProposal[]> {
+export async function fetchNgitProposals(project: Project): Promise<NgitProposal[]> {
   const remote = project.remotes?.ngit ?? '';
   if (!remote) return [];
 

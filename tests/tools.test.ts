@@ -31,13 +31,17 @@ test('registry: every tool has the required shape', () => {
 });
 
 test('registry: known tools are present', () => {
-  // `nak` is intentionally NOT in this registry — it has its own
-  // GitHub-release installer (src/lib/nak-installer.ts) because the
-  // nak crate on crates.io is unrelated to fiatjaf's Go binary.
-  for (const id of ['ngit', 'stacks', 'nsyte']) {
+  // `nak` and `ngit` are intentionally NOT in this registry — each has
+  // its own GitHub-release installer (src/lib/{nak,ngit}-installer.ts).
+  // nak's crates.io entry is unrelated to fiatjaf's Go binary; ngit's
+  // cargo install path required Rust on the host, which install.sh
+  // deliberately doesn't ship — so the prereq check rejected fresh
+  // installs every time.
+  for (const id of ['stacks', 'nsyte']) {
     assert.ok(getTool(id), `expected ${id} in TOOLS`);
   }
-  assert.equal(getTool('nak'), null, 'nak must be served by the dedicated installer');
+  assert.equal(getTool('nak'),  null, 'nak must be served by the dedicated installer');
+  assert.equal(getTool('ngit'), null, 'ngit must be served by the dedicated installer');
 });
 
 test('getTool: returns null for unknown id', () => {

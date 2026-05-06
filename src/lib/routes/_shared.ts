@@ -156,3 +156,20 @@ export function getActiveChatProjectId(): string | null {
 export function setActiveChatProjectId(id: string | null): void {
   activeChatProjectId = id;
 }
+
+// Auto-sync manager bridge. The orchestrator (`web-server.ts`) instantiates
+// AutoSyncManager at startup and registers it here; the project PATCH
+// route reads it back to call `reconcile(id)` after a toggle, so the
+// flag takes effect inside the request/response cycle. Same shape as
+// the chat-context bridge above — single source of truth, no cyclic
+// imports between routes/* and web-server.ts.
+//
+// Typed loosely (`unknown`) to keep this module free of the heavier
+// AutoSyncManager class import; consumers narrow at the call site.
+let autoSyncRef: { reconcile: (id: string) => void } | null = null;
+export function getAutoSyncRef(): { reconcile: (id: string) => void } | null {
+  return autoSyncRef;
+}
+export function setAutoSyncRef(ref: { reconcile: (id: string) => void } | null): void {
+  autoSyncRef = ref;
+}

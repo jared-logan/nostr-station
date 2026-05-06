@@ -72,25 +72,17 @@ export interface InstallResult {
 // ── Registry ───────────────────────────────────────────────────────────────
 
 export const TOOLS: Record<string, Tool> = {
-  ngit: {
-    id:          'ngit',
-    name:        'ngit',
-    description: 'Nostr-native git remote — push commits + signed events to Nostr relays.',
-    binary:      'ngit',
-    detect:      ['ngit', '--version'],
-    prereqs:     ['Rust toolchain (rustup) — install at https://rustup.rs'],
-    installSteps: [
-      { kind: 'cargo-install', display: 'cargo install ngit', argv: ['cargo', 'install', 'ngit'] },
-    ],
-  },
-
-  // `nak` is intentionally NOT in this registry — it has its own
-  // installer (src/lib/nak-installer.ts) that downloads the verified
-  // GitHub release binary. The earlier `cargo install nak` entry was a
-  // double footgun: it required Rust on the host AND it pointed at an
-  // unrelated `nak` crate on crates.io (the well-known nak is fiatjaf's
-  // Go binary, not a Rust package). Web-server's /api/exec/install/<slug>
-  // dispatches to installNak when slug==='nak'; everything else flows
+  // `nak` and `ngit` are intentionally NOT in this registry — each has
+  // its own installer (src/lib/{nak,ngit}-installer.ts) that downloads
+  // the verified GitHub release binary. Both used to be cargo entries:
+  //   - nak: `cargo install nak` was a double footgun (needed Rust AND
+  //     pointed at an unrelated crates.io package — the real nak is
+  //     fiatjaf's Go binary).
+  //   - ngit: `cargo install ngit` was the right package but install.sh
+  //     deliberately doesn't ship Rust, so the prereq check rejected
+  //     every fresh-install user with "cargo not found on PATH".
+  // Web-server's /api/exec/install/<slug> dispatches to installNak /
+  // installNgit when slug==='nak' / 'ngit'; everything else flows
   // through this registry.
 
   stacks: {
