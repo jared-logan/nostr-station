@@ -37,6 +37,7 @@ import type { Relay } from '../relay/index.js';
 import { LogBuffer, type LogLine } from './log-buffer.js';
 import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
+import { installNostrVpn } from './nvpn-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 // relay-config / services / install were the host-install era's
 // LaunchAgent/systemd/cargo plumbing; all gone now that the relay
@@ -1171,6 +1172,40 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
+
+      // ── nvpn installer ────────────────────────────────────────────────
+      // Wizard renderVpn (app.js:7141) drives this endpoint. NDJSON
+      // wire format — one JSON line per progress event — matches the
+      // pre-deletion shape the wizard already speaks. The installer
+      // itself is in src/lib/nvpn-installer.ts; this handler just
+      // streams its progress callbacks back to the browser.
+      if (url === '/api/setup/nvpn/install' && method === 'POST') {
+        res.writeHead(200, {
+          'Content-Type':      'application/x-ndjson',
+          'Cache-Control':     'no-cache',
+          'Connection':        'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        try {
+          const result = await installNostrVpn((s) => {
+            try { res.write(JSON.stringify({ type: 'progress', step: s }) + '\n'); } catch {}
+          });
+          res.write(JSON.stringify({
+            type:   'done',
+            ok:     result.ok,
+            warn:   !!result.warn,
+            detail: result.detail ?? '',
+          }) + '\n');
+        } catch (e: any) {
+          res.write(JSON.stringify({
+            type:   'done',
+            ok:     false,
+            detail: String(e?.message ?? e),
+          }) + '\n');
+        }
+        res.end();
+        return;
+      }
 
       // ── Watchdog lifecycle + status ───────────────────────────────────
       // The in-Node watchdog publishes a kind-1 heartbeat to the local

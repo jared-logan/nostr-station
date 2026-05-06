@@ -109,6 +109,31 @@ export function hasBin(name: string): boolean {
   return findBin(name) !== null;
 }
 
+// Resolve the Rust-target triple upstream (mmalmi/nostr-vpn) publishes
+// per (os, arch). Linux builds are statically linked against musl so they
+// run on any distro without glibc-version pins — there is NO `-gnu` asset.
+// macOS x86_64 is unsupported upstream — installer surfaces a clear error
+// rather than 404'ing on the download URL.
+export function getNvpnTarget(): string | null {
+  const arch = process.arch;
+  if (process.platform === 'darwin') {
+    if (arch === 'arm64') return 'aarch64-apple-darwin';
+    return null;  // x86_64-apple-darwin: upstream does not publish this asset
+  }
+  if (process.platform === 'linux') {
+    if (arch === 'arm64') return 'aarch64-unknown-linux-musl';
+    if (arch === 'x64')   return 'x86_64-unknown-linux-musl';
+  }
+  return null;
+}
+
+// User-writable install dir for binaries we drop in by hand (nvpn). Same
+// path cargo uses, so anything that already had cargo-installed tools on
+// PATH gets the new binary on PATH too.
+export function getCargoBin(): string {
+  return path.join(os.homedir(), '.cargo', 'bin');
+}
+
 // Local alias — keeps detectPlatform / detectInstalled call sites terse.
 const has = hasBin;
 

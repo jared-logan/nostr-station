@@ -6144,7 +6144,7 @@ const SetupWizard = (() => {
   // live signing-pipeline verification — together those replace the
   // legacy "paste an npub" identity stage with the spec's "scan, tap,
   // proven" flow.
-  const STAGES_INPROC    = ['welcome', 'amber', 'verify', 'ai', 'ngit', 'done'];
+  const STAGES_INPROC    = ['welcome', 'amber', 'verify', 'ai', 'ngit', 'vpn', 'done'];
   let STAGES = STAGES_HOST;
   let stageIdx = 0;
   const state = { npub: '', profile: null };
