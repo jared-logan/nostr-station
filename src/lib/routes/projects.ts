@@ -21,8 +21,12 @@
  *   POST   /api/projects/:id/git/push          — SSE
  *   POST   /api/projects/:id/stacks/deploy     — SSE
  *   GET    /api/projects/:id/ngit/status
+ *   GET    /api/projects/:id/ngit/proposals    — kind-1617 list
  *   POST   /api/projects/:id/ngit/push         — SSE
  *   POST   /api/projects/:id/ngit/init         — SSE
+ *   POST   /api/projects/:id/ngit/download     — SSE: ngit pr checkout <id>
+ *   POST   /api/projects/:id/ngit/send         — SSE: ngit send (current branch)
+ *   POST   /api/projects/:id/ngit/sync         — SSE: ngit fetch + ff-merge + ngit push
  *   POST   /api/projects/:id/exec              — SSE
  *   POST   /api/projects/:id/nsite/deploy      — SSE
  *   GET    /api/projects/:id/git-state         — sync.getProjectGitState
@@ -38,7 +42,7 @@ import http from 'http';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import {
   readProjects, getProject, createProject, updateProject, deleteProject,
   detectPath, projectGitStatus, projectGitLog, resolveProjectContext,
@@ -47,10 +51,11 @@ import {
 import { checkCollision, scaffoldProject } from '../project-scaffold.js';
 import { isValidRelayUrl } from '../identity.js';
 import {
-  getProjectGitState, syncProject, snapshotProject,
+  getProjectGitState, syncProject, snapshotProject, fetchNgitProposals,
 } from '../sync.js';
 import {
   readBody, streamExec, streamExecError, setActiveChatProjectId,
+  getAutoSyncRef,
   CLI_BIN, type CmdSpec,
 } from './_shared.js';
 
@@ -225,6 +230,10 @@ export async function handleProjects(
         res.end(JSON.stringify({ error: r.error }));
         return true;
       }
+      // If autoSync changed (or any other field — cheap to always
+      // call), reconcile the manager so the toggle takes effect
+      // inside this response, not on the next interval tick.
+      try { getAutoSyncRef()?.reconcile(id); } catch {}
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(r.project));
       return true;
@@ -365,12 +374,126 @@ export async function handleProjects(
       }));
       return true;
     }
+    if (tail === 'ngit/proposals' && method === 'GET') {
+      // Same kind-1617 query that the sync flow runs, exposed on its
+      // own URL so the project drawer's Proposals tab can refresh
+      // independently — opening the tab shouldn't trigger a fetch +
+      // fast-forward, just the relay query. Returns an empty array
+      // when the project has no ngit remote (rather than 400) so the
+      // tab can render a friendly empty state without branching on
+      // HTTP status.
+      const proposals = await fetchNgitProposals(project).catch(() => []);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ proposals }));
+      return true;
+    }
     if (tail === 'ngit/push' && method === 'POST') {
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
       streamExec({ bin: 'ngit', args: ['push'] }, res, req, project.path);
       return true;
     }
 
+    if (tail === 'ngit/sync' && method === 'POST') {
+      // Bidirectional sync à la Shakespeare's clean ngit popover:
+      // pull (ngit fetch) then push (ngit push), in one SSE stream.
+      // Two separate child processes share one response so the user
+      // sees both phases scrolling in the same modal — and so a
+      // failure in phase 1 cleanly skips phase 2 with a clear marker.
+      //
+      // Kept distinct from /api/projects/:id/sync (the card-grid
+      // icon) which is intentionally pull-only + ff-merge + proposals
+      // query. That endpoint stays as-is; this one is the verb users
+      // reach for when they want "pull + push, just do the thing".
+      if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+      res.writeHead(200, {
+        'Content-Type':  'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection':    'keep-alive',
+      });
+      const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+      const env = { ...process.env, NO_COLOR: '1', TERM: 'dumb' };
+      const cwd = project.path;
+      let killed = false;
+      const onClientClose = () => { killed = true; };
+      req.on('close', onClientClose);
+
+      const runPhase = (label: string, args: string[]): Promise<number> =>
+        new Promise((resolve) => {
+          if (killed) return resolve(-1);
+          emit({ line: `▸ ${label}`, stream: 'stdout' });
+          const child = spawn('ngit', args, { stdio: ['ignore', 'pipe', 'pipe'], env, cwd });
+          const pipe = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+            for (const line of chunk.toString().split('\n')) {
+              if (line.length) emit({ line, stream });
+            }
+          };
+          child.stdout.on('data', pipe('stdout'));
+          child.stderr.on('data', pipe('stderr'));
+          child.on('error', (e) => {
+            emit({ line: String(e.message || e), stream: 'stderr' });
+            resolve(-1);
+          });
+          child.on('close', (code) => resolve(code ?? -1));
+          // Honour client-disconnect during the phase, not just between phases.
+          req.on('close', () => { try { child.kill(); } catch {} });
+        });
+
+      try {
+        const fetchCode = await runPhase('ngit fetch', ['fetch']);
+        if (fetchCode !== 0) {
+          emit({ line: `pull failed (exit ${fetchCode}) — skipping push`, stream: 'stderr' });
+          emit({ done: true, code: fetchCode });
+          try { res.end(); } catch {}
+          return true;
+        }
+        const pushCode = await runPhase('ngit push', ['push']);
+        emit({ done: true, code: pushCode });
+      } finally {
+        try { res.end(); } catch {}
+      }
+      return true;
+    }
+    if (tail === 'ngit/send' && method === 'POST') {
+      // Opens a proposal (kind-1617 + patch events) from the current
+      // branch by spawning `ngit send`. ngit pulls the branch state
+      // and signing identity from the local repo + Amber session;
+      // there are no user-supplied args to validate. The frontend
+      // gates the button on (ngit cap + non-default branch + ahead
+      // count > 0) so the SSE modal only opens with something to
+      // actually send. Streaming output here is essential — `ngit
+      // send` triggers Amber sign prompts on the user's phone, and
+      // the modal is how the user knows to look at their device.
+      if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+      streamExec(
+        { bin: 'ngit', args: ['send'], env: { NO_COLOR: '1', TERM: 'dumb' } },
+        res, req, project.path,
+      );
+      return true;
+    }
+    if (tail === 'ngit/download' && method === 'POST') {
+      // Wraps `ngit pr checkout <event-id>` for the Proposals tab's
+      // Download button. The event id arrives in a JSON body and is
+      // validated as 64 lowercase hex chars before being handed to
+      // ngit as a fixed argv element — same defense-in-depth pattern
+      // as the relay validation in ngit/init below. spawn is shell-
+      // free, so this is belt-and-suspenders, but it also keeps
+      // garbage out of logs and the SSE stream.
+      if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+      let parsed: any = {};
+      try { parsed = JSON.parse(await readBody(req)); }
+      catch { res.writeHead(400); res.end('bad json'); return true; }
+      const rawId = String(parsed.proposalId || '').trim().toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(rawId)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'proposalId must be a 64-char hex event id' }));
+        return true;
+      }
+      streamExec(
+        { bin: 'ngit', args: ['pr', 'checkout', rawId], env: { NO_COLOR: '1', TERM: 'dumb' } },
+        res, req, project.path,
+      );
+      return true;
+    }
     if (tail === 'ngit/init' && method === 'POST') {
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
       // Relay URL arrives in a JSON body and is validated strictly before
@@ -402,7 +525,14 @@ export async function handleProjects(
       const cmd = String(parsed.cmd || '');
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
       let spec: CmdSpec | null = null;
-      if (cmd === 'git-status') spec = { bin: 'git', args: ['status'] };
+      if (cmd === 'git-status')     spec = { bin: 'git', args: ['status'] };
+      // Patch view for the Proposals tab — `git log -p -5` shows the
+      // last 5 commits as full diffs. After `ngit pr checkout`, HEAD
+      // sits on the proposal branch so the user sees its commits.
+      // We don't pin against the default branch (no portable way to
+      // detect "main" vs "master" vs project-specific) — a fixed N
+      // is enough for the cheap-review-then-open-in-editor flow.
+      if (cmd === 'git-log-patch') spec = { bin: 'git', args: ['log', '-p', '-5'] };
       if (!spec) { res.writeHead(400); res.end('unknown exec cmd'); return true; }
       streamExec(spec, res, req, project.path);
       return true;
