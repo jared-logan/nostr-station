@@ -256,6 +256,26 @@ export class Relay {
     return `ws://${this.host}:${this.port}`;
   }
 
+  // In-process event injection for trusted callers (the watchdog
+  // heartbeat loop, future server-internal publishers). Skips the
+  // wire-protocol round-trip but still runs signature verification +
+  // EventStore.add and fans out to live subscribers, so REQs see the
+  // event the same as if it had arrived over WebSocket. Throws on
+  // invalid signature so a bug in a caller can't smuggle garbage in.
+  publishLocal(ev: NostrEvent): void {
+    let valid = false;
+    try { valid = verifyEvent(ev as any); } catch { valid = false; }
+    if (!valid) throw new Error('publishLocal: bad signature');
+    const result = this.store.add(ev);
+    if (result.duplicate) return;
+    for (const [key, sub] of this.subs) {
+      if (eventMatchesAny(ev, sub.filters)) {
+        const subId = key.split(':').slice(1).join(':');
+        sendJson(sub.ws, ['EVENT', subId, ev]);
+      }
+    }
+  }
+
   private handleEvent(ws: WebSocket, raw: unknown): void {
     if (!isEvent(raw)) return ok(ws, '', false, 'invalid: not an event object');
 

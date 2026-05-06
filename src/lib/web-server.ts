@@ -36,6 +36,7 @@ import { DEFAULT_DB_PATH } from '../relay/store.js';
 import type { Relay } from '../relay/index.js';
 import { LogBuffer, type LogLine } from './log-buffer.js';
 import { getTool, installTool, TOOLS } from './tools.js';
+import { Watchdog } from './watchdog.js';
 import { hexToNpub, npubToHex } from './identity.js';
 // relay-config / services / install were the host-install era's
 // LaunchAgent/systemd/cargo plumbing; all gone now that the relay
@@ -382,15 +383,21 @@ function isRelayUp(): boolean {
 let inprocRelay: Relay | null = null;
 
 // Per-channel log ring buffers for the Logs panel. The relay buffer is
-// fed by Relay.onLog hooks (see maybeStartInprocRelay below). Watchdog
-// and vpn buffers are constructed eagerly so /api/logs/{watchdog,vpn}
-// can return stable "pending" status frames in 1.9; they'll start
-// receiving real lines once Phase 2 wires them up.
+// fed by Relay.onLog hooks (see maybeStartInprocRelay below). The
+// watchdog buffer is fed by the in-Node Watchdog (Phase 2.1). The vpn
+// buffer stays unfed for now; /api/logs/vpn returns a "pending" frame
+// until Phase 2.2 lands the installer.
 const logBuffers = {
   relay:    new LogBuffer(),
   watchdog: new LogBuffer(),
   vpn:      new LogBuffer(),
 } as const;
+
+// In-Node watchdog — heartbeats every 5 min through the local relay.
+// Started after maybeStartInprocRelay (it depends on the Relay handle
+// for whitelist registration + publishLocal). STATION_DISABLE_WATCHDOG=1
+// opts out for tests / minimal deployments.
+let watchdog: Watchdog | null = null;
 
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
@@ -545,13 +552,29 @@ async function maybeStartInprocRelay(): Promise<void> {
   });
   await r.start();
   inprocRelay = r;
-  logBuffers.relay.info(`relay listening on ws://127.0.0.1:${port}`);
   // Publish the relay address via env so gatherStatus + isRelayUp probe
   // the right port, and any descendant tooling (e.g. nak commands) sees
   // the same source of truth.
   process.env.RELAY_HOST = '127.0.0.1';
   process.env.RELAY_PORT = String(port);
   process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);
+  logBuffers.relay.info(`relay listening on ws://127.0.0.1:${port}`);
+  await maybeStartWatchdog();
+}
+
+async function maybeStartWatchdog(): Promise<void> {
+  if (process.env.STATION_DISABLE_WATCHDOG === '1') return;
+  if (watchdog || !inprocRelay) return;
+  const wd = new Watchdog({
+    relay: inprocRelay,
+    onLog: (level, text) => logBuffers.watchdog.push(level, text),
+  });
+  try {
+    await wd.start();
+    watchdog = wd;
+  } catch (e: any) {
+    logBuffers.watchdog.error(`watchdog start failed: ${e?.message || e}`);
+  }
 }
 
 export async function startWebServer(port: number): Promise<void> {
@@ -1149,6 +1172,40 @@ export async function startWebServer(port: number): Promise<void> {
       }
 
 
+      // ── Watchdog lifecycle + status ───────────────────────────────────
+      // The in-Node watchdog publishes a kind-1 heartbeat to the local
+      // relay on a recurring interval. Endpoints let the dashboard /
+      // CLI start, stop, or inspect it explicitly — separate from the
+      // relay's lifecycle (1.3) because some users may want the relay
+      // up without the watchdog (or vice versa).
+      if (url === '/api/watchdog/status' && method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(watchdog ? watchdog.status() : {
+          running: false, lastHeartbeatAt: null, npub: null, intervalMs: 0,
+        }));
+        return;
+      }
+      if (url === '/api/watchdog/start' && method === 'POST') {
+        try {
+          await maybeStartWatchdog();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, status: watchdog?.status() ?? null }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+        }
+        return;
+      }
+      if (url === '/api/watchdog/stop' && method === 'POST') {
+        if (watchdog) {
+          watchdog.stop();
+          watchdog = null;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
       // ── Status panel install button ───────────────────────────────────
       // POST /api/exec/install/<slug> — drives the Status row "Install"
       // CTA (app.js:1255). Pre-deletion this dispatched to the deleted
@@ -1205,7 +1262,6 @@ export async function startWebServer(port: number): Promise<void> {
       if (logsMatch && method === 'GET') {
         const channel = logsMatch[1] as 'relay' | 'watchdog' | 'vpn';
         const buf = logBuffers[channel];
-        const isRelay = channel === 'relay';
 
         res.writeHead(200, {
           'Content-Type':  'text/event-stream',
@@ -1215,30 +1271,47 @@ export async function startWebServer(port: number): Promise<void> {
         });
 
         // Status frame matches the shape Logs panel's renderBanner /
-        // renderMeta consume (app.js:4868). For the relay channel, the
-        // log "exists" iff the relay is up. For watchdog/vpn, surface
-        // pending state so the banner explains the empty stream.
-        const status =
-          isRelay
-            ? {
-                service:     'relay',
-                installed:   true,
-                running:     !!inprocRelay,
-                logExists:   true,
-                logPath:     '(in-memory ring buffer)',
-                stale:       false,
-                logMtimeMs:  Date.now(),
-              }
-            : {
-                service:     channel,
-                installed:   false,
-                running:     false,
-                logExists:   false,
-                logPath:     '(installer wiring pending)',
-                stale:       false,
-                logMtimeMs:  Date.now(),
-                note:        `${channel} installer wiring pending — Phase 2`,
-              };
+        // renderMeta consume (app.js:4868). Per channel:
+        //   relay     — running + log-buffer-backed
+        //   watchdog  — running iff the in-Node watchdog is alive,
+        //               carries watchdogNpub for the meta strip
+        //   vpn       — pending until Phase 2.2 installer lands
+        const status = (() => {
+          if (channel === 'relay') {
+            return {
+              service:    'relay',
+              installed:  true,
+              running:    !!inprocRelay,
+              logExists:  true,
+              logPath:    '(in-memory ring buffer)',
+              stale:      false,
+              logMtimeMs: Date.now(),
+            };
+          }
+          if (channel === 'watchdog') {
+            const s = watchdog?.status();
+            return {
+              service:        'watchdog',
+              installed:      true,
+              running:        !!s?.running,
+              logExists:      true,
+              logPath:        '(in-memory ring buffer)',
+              stale:          false,
+              logMtimeMs:     s?.lastHeartbeatAt ?? Date.now(),
+              watchdogNpub:   s?.npub ?? null,
+            };
+          }
+          return {
+            service:    channel,
+            installed:  false,
+            running:    false,
+            logExists:  false,
+            logPath:    '(installer wiring pending)',
+            stale:      false,
+            logMtimeMs: Date.now(),
+            note:       `${channel} installer wiring pending — Phase 2.2`,
+          };
+        })();
         res.write(`data: ${JSON.stringify({ status })}\n\n`);
 
         // Replay the ring on connect so the user sees recent history
@@ -1531,6 +1604,9 @@ export async function startWebServer(port: number): Promise<void> {
 
     server.on('close', () => {
       destroyAllTerminals();
+      // Stop the watchdog before the relay it depends on.
+      watchdog?.stop();
+      watchdog = null;
       // Stop the in-process relay alongside the dashboard. Errors are
       // swallowed because a half-stopped relay during shutdown is no
       // worse than a dropped log line.
