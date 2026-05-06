@@ -84,17 +84,14 @@ export const TOOLS: Record<string, Tool> = {
     ],
   },
 
-  nak: {
-    id:          'nak',
-    name:        'nak',
-    description: 'Nostr Army Knife — CLI for poking at relays, events, and keys.',
-    binary:      'nak',
-    detect:      ['nak', '--version'],
-    prereqs:     ['Rust toolchain (rustup) — install at https://rustup.rs'],
-    installSteps: [
-      { kind: 'cargo-install', display: 'cargo install nak', argv: ['cargo', 'install', 'nak'] },
-    ],
-  },
+  // `nak` is intentionally NOT in this registry — it has its own
+  // installer (src/lib/nak-installer.ts) that downloads the verified
+  // GitHub release binary. The earlier `cargo install nak` entry was a
+  // double footgun: it required Rust on the host AND it pointed at an
+  // unrelated `nak` crate on crates.io (the well-known nak is fiatjaf's
+  // Go binary, not a Rust package). Web-server's /api/exec/install/<slug>
+  // dispatches to installNak when slug==='nak'; everything else flows
+  // through this registry.
 
   stacks: {
     id:          'stacks',
@@ -155,10 +152,43 @@ export async function detectTool(t: Tool): Promise<DetectResult> {
 // short-circuit the run and return ok:false — the caller renders the
 // instruction and asks the user to do it by hand.
 
+// Pre-flight: each step kind needs a runner on PATH. Without this the
+// modal shows `▸ cargo install nak` followed by `spawn cargo ENOENT` and
+// the user is left guessing which dependency is missing.
+const RUNNER_FOR_KIND: Partial<Record<InstallStepKind, { bin: string; install: string }>> = {
+  'cargo-install': { bin: 'cargo', install: 'install Rust via https://rustup.rs' },
+  'npm-global':    { bin: 'npm',   install: 'install Node.js (npm ships with it) via https://nodejs.org' },
+  'shell-script':  { bin: 'curl',  install: 'install curl via your system package manager' },
+};
+
 export async function installTool(
   t:          Tool,
   onProgress: (line: string) => void,
 ): Promise<InstallResult> {
+  // Surface declared prereqs upfront so the user reads them before the
+  // first step runs. `prereqs` was always present on the Tool record
+  // ("surfaced in the UI before install" per the registry doc) but
+  // installTool used to skip straight to the cargo/npm/curl call —
+  // turning a missing-toolchain into a `spawn ENOENT` after the modal
+  // had already opened.
+  if (t.prereqs && t.prereqs.length > 0) {
+    onProgress(`Prerequisites:`);
+    for (const p of t.prereqs) onProgress(`  • ${p}`);
+  }
+  // Pre-flight runner detection. Each automated step kind needs a
+  // specific binary on PATH; if it isn't there, surface a clean
+  // actionable error before we even try to spawn. Faster + clearer
+  // than letting node fail with `spawn cargo ENOENT`.
+  for (const step of t.installSteps) {
+    const runner = RUNNER_FOR_KIND[step.kind];
+    if (runner && !hasBin(runner.bin)) {
+      return {
+        ok: false, ranSteps: 0,
+        detail: `prerequisite missing: \`${runner.bin}\` not found on PATH. ${runner.install}.`,
+      };
+    }
+  }
+
   let ran = 0;
   for (const step of t.installSteps) {
     if (step.kind === 'manual') {

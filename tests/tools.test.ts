@@ -31,9 +31,13 @@ test('registry: every tool has the required shape', () => {
 });
 
 test('registry: known tools are present', () => {
-  for (const id of ['ngit', 'nak', 'stacks', 'nsyte']) {
+  // `nak` is intentionally NOT in this registry — it has its own
+  // GitHub-release installer (src/lib/nak-installer.ts) because the
+  // nak crate on crates.io is unrelated to fiatjaf's Go binary.
+  for (const id of ['ngit', 'stacks', 'nsyte']) {
     assert.ok(getTool(id), `expected ${id} in TOOLS`);
   }
+  assert.equal(getTool('nak'), null, 'nak must be served by the dedicated installer');
 });
 
 test('getTool: returns null for unknown id', () => {
@@ -111,3 +115,23 @@ test('installTool: streams progress + reports failure on non-zero exit', async (
   // Step header + the script's stdout line should both have been streamed.
   assert.ok(lines.some(l => l.includes('about-to-fail')), 'progress should stream stdout');
 });
+
+test('installTool: surfaces declared prereqs before running steps', async () => {
+  // Use a manual step so installTool short-circuits before the
+  // missing-runner pre-flight could fire — we want to assert the
+  // prereqs lines land in `lines` regardless.
+  const fake = {
+    id: 'with-prereqs', name: 'with-prereqs', description: '', binary: 'whatever',
+    detect: ['whatever', '--version'] as [string, string],
+    prereqs: ['Rust toolchain (rustup) — install at https://rustup.rs', 'gcc'],
+    installSteps: [
+      { kind: 'manual' as const, display: 'manual step', argv: null },
+    ],
+  };
+  const lines: string[] = [];
+  await installTool(fake, l => lines.push(l));
+  assert.ok(lines.some(l => l === 'Prerequisites:'), 'should surface a prereqs header');
+  assert.ok(lines.some(l => l.includes('rustup')), 'should list each prereq');
+  assert.ok(lines.some(l => l.includes('gcc')),    'should list each prereq');
+});
+
