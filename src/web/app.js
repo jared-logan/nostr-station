@@ -1801,10 +1801,27 @@ const RelayPanel = (() => {
   const kindCounts = new Map();
   const pubkeys = new Set();
   let entered = false;
+  // Resolved on first connect from /api/relay-config so the panel
+  // tracks whatever port the in-process relay is actually on (default
+  // 7777, overridable via STATION_INPROC_RELAY_PORT). Pre-cleanup this
+  // was hardcoded to :8080 — the standalone nostr-rs-relay's port —
+  // and silently failed once that daemon was replaced by the in-process
+  // implementation.
+  let relayUrl = null;
 
-  function connect() {
+  async function ensureRelayUrl() {
+    if (relayUrl) return relayUrl;
+    try {
+      const rc = await api('/api/relay-config');
+      if (rc?.url) relayUrl = rc.url;
+    } catch { /* fall through to default */ }
+    if (!relayUrl) relayUrl = `ws://${location.hostname}:7777`;
+    return relayUrl;
+  }
+
+  async function connect() {
     disconnect();
-    const url = `ws://${location.hostname}:8080`;
+    const url = await ensureRelayUrl();
     try { ws = new WebSocket(url); }
     catch { setWsStatus('error'); return; }
     setWsStatus('connecting');
@@ -1850,7 +1867,8 @@ const RelayPanel = (() => {
   function renderEvents() {
     const el = $('relay-events');
     if (events.length === 0) {
-      el.innerHTML = `<div class="empty-state">Waiting for events…<div class="hint">Publish one: <code>nak event -k 1 --sec &lt;nsec&gt; "hello" ws://localhost:8080</code></div></div>`;
+      const u = relayUrl || `ws://${location.hostname}:7777`;
+      el.innerHTML = `<div class="empty-state">Waiting for events…<div class="hint">Publish one: <code>nak event -k 1 --sec &lt;nsec&gt; "hello" ${escapeHtml(u)}</code></div></div>`;
       return;
     }
     el.innerHTML = '';
@@ -1872,7 +1890,8 @@ const RelayPanel = (() => {
     try {
       const s = await api('/api/status');
       const r = s.find(x => x.id === 'relay');
-      $('relay-status').textContent = r?.state === 'ok' ? 'up · ws://localhost:8080' : r?.state === 'warn' ? 'installed (down)' : 'not installed';
+      const u = relayUrl || `ws://${location.hostname}:7777`;
+      $('relay-status').textContent = r?.state === 'ok' ? `up · ${u}` : r?.state === 'warn' ? 'installed (down)' : 'not installed';
       $('relay-status').style.color = r?.state === 'ok' ? 'var(--success)' : r?.state === 'warn' ? 'var(--warn)' : 'var(--error)';
     } catch {}
     try {
@@ -6591,26 +6610,15 @@ const SetupWizard = (() => {
   }
 
   // ── Relay ────────────────────────────────────────────────────────────
-  // This stage owns the full local-relay install: it writes the relay
-  // config.toml, the watchdog script + keypair, and the systemd/launchd
-  // unit files, then enables the service. The relay *binary* still has to
-  // be installed ahead of time (compile or prebuilt download via
-  // install.sh or `nostr-station onboard`) — that step isn't ported into
-  // the browser because it can take 10+ minutes.
-  //
-  // Three paint states map to three status rows:
-  //   ok    → relay is up, just move on.
-  //   warn  → binary present; might need unit install and/or start.
-  //           One idempotent "Install & start" button hits the setup
-  //           endpoint, which writes the units, enables them, and starts
-  //           the service. Also covers the "unit exists but stopped" case
-  //           since enable --now is a no-op-plus-start when already enabled.
-  //   error → binary missing. Point the user at `nostr-station onboard`
-  //           and leave the stage walkable so they can skip past.
+  // The in-process relay starts inside the dashboard process before the
+  // wizard renders, so this stage is informational: confirm the relay is
+  // listening on its socket, surface the URL the user's apps will publish
+  // to, and let them continue. We keep it as a wizard step because it's a
+  // useful "yes, this works end-to-end" beat between identity and AI.
   async function renderRelay() {
     root.innerHTML = shell(
       'Local relay',
-      'Your private Nostr relay running on ws://localhost:8080.',
+      'Your private Nostr relay, running in-process with the dashboard.',
       `
         <div class="setup-relay" id="setup-relay-body">
           <div class="muted"><span class="spinner"></span> Checking relay…</div>
@@ -6665,11 +6673,15 @@ const SetupWizard = (() => {
       }
 
       if (relay.state === 'ok') {
+        // relay.value is the canonical "ws://host:port ✓" string from
+        // gatherStatus. Strip the trailing checkmark for inline rendering;
+        // the dot to its left already conveys the ok state.
+        const url = (relay.value || '').replace(/\s*✓\s*$/, '').trim();
         bodyEl.innerHTML = `<div class="setup-relay-row ok">
           <span class="dot ok"></span>
           <div>
-            <div class="title">Relay running · <code>ws://localhost:8080</code></div>
-            <div class="muted">${escapeHtml(relay.value || '')}</div>
+            <div class="title">Relay running · <code>${escapeHtml(url)}</code></div>
+            <div class="muted">In-process — starts and stops with the dashboard.</div>
           </div>
         </div>`;
         nextBtn.disabled = false;
