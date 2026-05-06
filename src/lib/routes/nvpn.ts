@@ -30,7 +30,9 @@ import http from 'http';
 // @ts-expect-error — qrcode ships no types, CJS default export carries toString
 import QRCode from 'qrcode';
 import {
-  probeNvpnStatus, startNvpn, stopNvpn, restartNvpn, installNvpnService,
+  probeNvpnStatus, startNvpn, stopNvpn, restartNvpn,
+  installNvpnService, enableNvpnService, disableNvpnService, uninstallNvpnService,
+  uninstallNvpnCli, probeNvpnServiceStatus,
   nvpnRowStateFor,
   addParticipants, removeParticipants, addAdmins, removeAdmins,
   publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster,
@@ -105,6 +107,37 @@ export async function handleNvpn(
 
   if (url === '/api/nvpn/install-service' && method === 'POST') {
     const r = await installNvpnService();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // ── Service lifecycle (Feature 2) ─────────────────────────────────
+  // Status is unprivileged — supports the meta strip's pill display.
+  // Enable / disable / uninstall need sudo for system-supervisor paths
+  // (/etc/systemd/system or /Library/LaunchDaemons); we route through
+  // sudo -n and surface a clear hint when the cred cache is empty.
+  if (url === '/api/nvpn/service/status' && method === 'GET') {
+    const r = await probeNvpnServiceStatus();
+    await writeJson(res, 200, r);
+    return true;
+  }
+  if (url === '/api/nvpn/service/enable' && method === 'POST') {
+    const r = await enableNvpnService();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/service/disable' && method === 'POST') {
+    const r = await disableNvpnService();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/service/uninstall' && method === 'POST') {
+    const r = await uninstallNvpnService();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/cli/uninstall' && method === 'POST') {
+    const r = await uninstallNvpnCli();
     await writeJson(res, r.ok ? 200 : 500, r);
     return true;
   }

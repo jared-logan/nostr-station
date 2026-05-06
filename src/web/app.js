@@ -5129,11 +5129,12 @@ const LogsPanel = (() => {
     const slot = document.getElementById('vpn-meta-extra');
     if (!slot) return;
     slot.innerHTML = '<div class="muted vpn-meta-loading">loading details…</div>';
-    let data, roster;
+    let data, roster, svc;
     try {
-      [data, roster] = await Promise.all([
+      [data, roster, svc] = await Promise.all([
         api('/api/nvpn/status'),
         api('/api/nvpn/roster').catch(() => null),
+        api('/api/nvpn/service/status').catch(() => null),
       ]);
     } catch { slot.innerHTML = ''; return; }
 
@@ -5221,15 +5222,32 @@ const LogsPanel = (() => {
       </div>`;
     }
 
-    // Install-service fix-it path. Daemon up, no system unit registered
-    // → one-click retry of the install step the wizard might have skipped.
-    if (data.running && raw?.daemon?.service_loaded === false) {
-      html += `<div class="vpn-meta-row vpn-meta-subrow vpn-meta-fixit">
-        <span class="vpn-meta-label">auto-start</span>
-        <span class="muted">system service not registered — auto-start at boot won\'t work</span>
-        <button id="vpn-install-service">Install service</button>
-      </div>`;
+    // Service sub-block (Feature 2) — four pills + state-aware actions.
+    // Always shown when nvpn is installed, even if the service unit is
+    // missing (the user has to install it from somewhere). When the
+    // platform doesn't support a system service (svc.supported=false),
+    // we still surface the binary-version row but skip the boot pills.
+    if (svc) {
+      html += renderServiceBlock(svc);
     }
+
+    // Danger zone — Uninstall nvpn entirely. Always rendered when the
+    // binary is present so the user has an exit path; gated behind a
+    // type-to-confirm modal so a stray click can't wipe a working
+    // install. Reuses the same destructive-confirm primitive as the
+    // peer-remove flow.
+    html += `<div class="vpn-meta-danger">
+      <details>
+        <summary>Danger zone</summary>
+        <div class="vpn-meta-danger-body">
+          <p class="muted">Stops the daemon, removes the system service unit, and deletes the
+            <code>nvpn</code> binary from PATH. Network config + keypair stay in
+            <code>~/.config/nvpn/</code> until you delete them manually.</p>
+          <button id="vpn-uninstall-all" class="danger">Uninstall nvpn entirely</button>
+        </div>
+      </details>
+    </div>`;
+
     slot.innerHTML = html;
 
     // ── Wire up handlers after innerHTML ────────────────────────────
@@ -5238,16 +5256,57 @@ const LogsPanel = (() => {
     const netCopy = slot.querySelector('.vpn-meta-copy-network');
     if (netCopy && networkId) netCopy.appendChild(copyBtn(networkId));
 
-    const svc = slot.querySelector('#vpn-install-service');
-    if (svc) {
-      svc.addEventListener('click', async (e) => {
-        e.preventDefault(); svc.disabled = true;
+    // Service block buttons. Each calls the corresponding /api/nvpn/
+    // service/* endpoint and re-renders the meta block on success.
+    const wireSvcBtn = (id, endpoint, label, method = 'POST') => {
+      const btn = slot.querySelector(`#${id}`);
+      if (!btn) return;
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault(); btn.disabled = true;
         try {
-          const r = await api('/api/nvpn/install-service', { method: 'POST' });
-          toast(r?.ok ? 'service installed' : 'install-service failed', r?.detail || '', r?.ok ? 'ok' : 'err');
+          const r = await api(endpoint, { method });
+          toast(`${label}`, r?.detail || '', r?.ok === false ? 'err' : 'ok');
           loadVpnDetail();
+          refreshHealth();
         } catch { /* api() already toasted */ }
-        svc.disabled = false;
+        btn.disabled = false;
+      });
+    };
+    wireSvcBtn('vpn-svc-install',   '/api/nvpn/service/install',   'service installed');
+    wireSvcBtn('vpn-svc-enable',    '/api/nvpn/service/enable',    'auto-start enabled');
+    wireSvcBtn('vpn-svc-disable',   '/api/nvpn/service/disable',   'auto-start disabled');
+    wireSvcBtn('vpn-svc-reinstall', '/api/nvpn/service/install',   'service reinstalled');
+    wireSvcBtn('vpn-svc-uninstall', '/api/nvpn/service/uninstall', 'service unit removed');
+
+    // Danger-zone full uninstall. Type-to-confirm so a stray click can't
+    // wipe a working install. Sequence: stop daemon → uninstall service
+    // unit → uninstall-cli (removes binary from PATH).
+    const uninstallBtn = slot.querySelector('#vpn-uninstall-all');
+    if (uninstallBtn) {
+      uninstallBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const ok = await confirmDestructive({
+          title:        'Uninstall nostr-vpn?',
+          description:  'This stops the daemon, removes the system service unit, and deletes the nvpn binary from PATH. Your network config + keypair stay in ~/.config/nvpn/ until you delete them manually.',
+          typeToConfirm: 'uninstall',
+          confirmLabel: 'Uninstall',
+        });
+        if (!ok) return;
+        uninstallBtn.disabled = true;
+        try {
+          // Best-effort sequence; we surface each step's outcome but
+          // continue through the chain even if a step fails (e.g. the
+          // daemon was already stopped, or the service unit wasn't
+          // installed in the first place).
+          await api('/api/nvpn/stop', { method: 'POST' }).catch(() => null);
+          await api('/api/nvpn/service/uninstall', { method: 'POST' }).catch(() => null);
+          const r = await api('/api/nvpn/cli/uninstall', { method: 'POST' });
+          toast('nvpn uninstalled', r?.detail || '', 'ok');
+          refreshHealth();
+          [3_000, 10_000].forEach(ms => setTimeout(refreshHealth, ms));
+        } catch { /* api() already toasted */ }
+        uninstallBtn.disabled = false;
+        loadVpnDetail();
       });
     }
 
@@ -5494,6 +5553,65 @@ const LogsPanel = (() => {
       } catch { /* api() already toasted */ }
       submit.disabled = false;
     });
+  }
+
+  // Service sub-block (Feature 2). Four pills (installed / enabled at
+  // boot / loaded / running) plus state-aware action buttons. Sourced
+  // from `nvpn service status --json`. Pills don't go red — that's
+  // reserved for the binary-missing case which we don't reach here
+  // (renderServiceBlock is gated on the parent block's installed flag).
+  function renderServiceBlock(svc) {
+    if (!svc) return '';
+    if (!svc.supported) {
+      return `<div class="vpn-meta-row vpn-meta-subrow muted">
+        <span class="vpn-meta-label">service</span>
+        <span>system service not supported on this platform${
+          svc.binaryVersion ? ` · binary v${escapeHtml(svc.binaryVersion)}` : ''
+        }</span>
+      </div>`;
+    }
+    const pill = (label, on, dim = false) => {
+      const cls = on ? 'ok' : (dim ? 'muted' : 'warn');
+      const glyph = on ? '✓' : '✗';
+      return `<span class="vpn-svc-pill vpn-svc-pill-${cls}">${glyph} ${escapeHtml(label)}</span>`;
+    };
+    const enabledAtBoot = svc.installed && !svc.disabled;
+    const pills = [
+      pill('installed',     svc.installed),
+      pill('enabled at boot', enabledAtBoot, !svc.installed),
+      pill('loaded',        svc.loaded,    !svc.installed),
+      pill('running',       svc.running,   !svc.installed),
+    ].join('');
+
+    const actions = [];
+    if (!svc.installed) {
+      actions.push('<button id="vpn-svc-install" class="primary">Install service</button>');
+    } else {
+      if (svc.disabled) {
+        actions.push('<button id="vpn-svc-enable" class="primary">Enable boot</button>');
+      } else {
+        actions.push('<button id="vpn-svc-disable">Disable boot</button>');
+      }
+      actions.push('<button id="vpn-svc-reinstall">Reinstall</button>');
+      actions.push('<button id="vpn-svc-uninstall" class="danger">Remove service</button>');
+    }
+
+    const meta = [];
+    if (svc.binaryPath) meta.push(`bin: <code class="cmd-inline">${escapeHtml(svc.binaryPath)}</code>`);
+    if (svc.binaryVersion) meta.push(`v${escapeHtml(svc.binaryVersion)}`);
+    if (svc.label) meta.push(`unit: <code class="cmd-inline">${escapeHtml(svc.label)}</code>`);
+    if (svc.error) meta.push(`<span class="vpn-meta-err">${escapeHtml(svc.error)}</span>`);
+
+    return `<div class="vpn-meta-svc">
+      <div class="vpn-meta-row vpn-meta-subrow vpn-meta-svc-head">
+        <span class="vpn-meta-label">service</span>
+        <span class="vpn-svc-pills">${pills}</span>
+        <span class="vpn-meta-svc-actions">${actions.join('')}</span>
+      </div>
+      ${meta.length > 0
+        ? `<div class="vpn-meta-row vpn-meta-subrow muted vpn-meta-svc-meta">${meta.join(' · ')}</div>`
+        : ''}
+    </div>`;
   }
 
   // Normalize peer-list shape across upstream nvpn revisions. We've seen:

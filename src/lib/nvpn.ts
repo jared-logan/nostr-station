@@ -137,17 +137,131 @@ export async function restartNvpn(): Promise<ControlResult> {
   return { ok: true, detail: stop.ok ? 'restarted' : `started (stop hint: ${stop.detail})` };
 }
 
+// ── System service lifecycle ─────────────────────────────────────────────
+//
+// `nvpn service install` writes a systemd unit (linux) or launchd plist
+// (darwin) so the daemon survives reboot. install / enable / disable /
+// uninstall all need root for the system paths involved (/etc/systemd/
+// system, /Library/LaunchDaemons), so each shells through `sudo -n`.
+// Empty cred cache → fails fast with a clear stderr we surface in the
+// toast hint, mirroring the install pattern.
+//
+// `service status --json` is unprivileged — the dashboard polls it as
+// the source of truth for the meta strip's four-pill display
+// (installed / enabled at boot / loaded / running).
+
+const SERVICE_STATUS_TIMEOUT_MS = 4_000;
+const SERVICE_OP_TIMEOUT_MS     = 30_000;
+
+export interface NvpnServiceStatus {
+  supported:     boolean;
+  installed:     boolean;
+  // `disabled` is a system-supervisor concept: the unit is installed
+  // but won't auto-start at boot. Inverse of "enabled at boot."
+  disabled:      boolean;
+  loaded:        boolean;
+  running:       boolean;
+  pid:           number | null;
+  label:         string | null;
+  plistPath:     string | null;
+  binaryPath:    string | null;
+  binaryVersion: string | null;
+  raw:           Record<string, unknown> | null;
+  error:         string | null;
+}
+
+export async function probeNvpnServiceStatus(): Promise<NvpnServiceStatus> {
+  const binPath = findBin('nvpn');
+  if (!binPath) {
+    return {
+      supported: false, installed: false, disabled: false, loaded: false, running: false,
+      pid: null, label: null, plistPath: null, binaryPath: null, binaryVersion: null,
+      raw: null, error: 'nvpn binary not installed',
+    };
+  }
+  try {
+    const { stdout } = await execa(binPath, ['service', 'status', '--json'], {
+      timeout: SERVICE_STATUS_TIMEOUT_MS, stdio: 'pipe',
+    });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); }
+    catch { return svcErrorResponse('unparseable service status JSON'); }
+    return {
+      supported:     !!raw?.supported,
+      installed:     !!raw?.installed,
+      disabled:      !!raw?.disabled,
+      loaded:        !!raw?.loaded,
+      running:       !!raw?.running,
+      pid:           typeof raw?.pid === 'number' ? raw.pid : null,
+      label:         typeof raw?.label === 'string' ? raw.label : null,
+      plistPath:     typeof raw?.plist_path === 'string' ? raw.plist_path : null,
+      binaryPath:    typeof raw?.binary_path === 'string' ? raw.binary_path : null,
+      binaryVersion: typeof raw?.binary_version === 'string' ? raw.binary_version : null,
+      raw,
+      error:         null,
+    };
+  } catch (e: any) {
+    return svcErrorResponse(summarizeError(e));
+  }
+}
+
+function svcErrorResponse(error: string): NvpnServiceStatus {
+  return {
+    supported: false, installed: false, disabled: false, loaded: false, running: false,
+    pid: null, label: null, plistPath: null, binaryPath: null, binaryVersion: null,
+    raw: null, error,
+  };
+}
+
 // `sudo -n` so it fails fast on an empty cred cache. The dashboard runs
 // without a TTY for prompting; the user has to have run a sudo command
 // in the same shell session shortly beforehand for this to succeed.
-export async function installNvpnService(): Promise<ControlResult> {
+async function runServiceOp(
+  op: 'install' | 'enable' | 'disable' | 'uninstall',
+): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
-    await execa('sudo', ['-n', binPath, 'service', 'install'], {
-      timeout: 30_000, stdio: 'pipe',
+    await execa('sudo', ['-n', binPath, 'service', op], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
     });
-    return { ok: true, detail: 'service installed' };
+    return { ok: true, detail: `service ${op} ok` };
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    const needsPassword = /password is required|sudo:.*required/i.test(stderr);
+    if (needsPassword) {
+      return {
+        ok: false,
+        detail: `sudo cred cache empty — run \`sudo ${binPath} service ${op}\` manually, ` +
+                `then refresh the dashboard.`,
+      };
+    }
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+export const installNvpnService = (): Promise<ControlResult> => runServiceOp('install');
+export const enableNvpnService  = (): Promise<ControlResult> => runServiceOp('enable');
+export const disableNvpnService = (): Promise<ControlResult> => runServiceOp('disable');
+export const uninstallNvpnService = (): Promise<ControlResult> => runServiceOp('uninstall');
+
+// `nvpn uninstall-cli` removes the binary itself from PATH (mirror of
+// nvpn install-cli, which the installer runs to drop nvpn into
+// /usr/local/bin or /opt/homebrew/bin). May or may not need sudo
+// depending on the install location; we try sudo -n first and fall
+// back to a non-sudo invocation when the path is user-writable.
+export async function uninstallNvpnCli(): Promise<ControlResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  // Try without sudo first — most setups have nvpn in ~/.cargo/bin
+  // (user-writable) which doesn't need root.
+  try {
+    await execa(binPath, ['uninstall-cli'], { timeout: 15_000, stdio: 'pipe' });
+    return { ok: true, detail: 'cli removed from PATH' };
+  } catch { /* try with sudo */ }
+  try {
+    await execa('sudo', ['-n', binPath, 'uninstall-cli'], { timeout: 15_000, stdio: 'pipe' });
+    return { ok: true, detail: 'cli removed from PATH (via sudo)' };
   } catch (e: any) {
     return { ok: false, detail: summarizeError(e) };
   }
