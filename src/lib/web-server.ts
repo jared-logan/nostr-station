@@ -83,6 +83,7 @@ import {
 } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { handleNvpn } from './routes/nvpn.js';
+import { handleTemplates } from './routes/templates.js';
 
 // ── Static assets ─────────────────────────────────────────────────────────────
 //
@@ -1678,6 +1679,11 @@ export async function startWebServer(port: number): Promise<void> {
       // /api/ai/providers/:id/key (POST/DELETE),
       // /api/ai/providers/:id/models, and /api/ai/chat.
       if (await handleAi(req, res, url, method)) return;
+
+      // ── Project templates registry (routes/templates.ts)
+      // Covers /api/templates GET/POST and /api/templates/:id
+      // GET/PATCH/DELETE + /api/templates/:id/reset.
+      if (await handleTemplates(req, res, url, method)) return;
 
       // ── Terminal HTTP surface (extracted to routes/terminal.ts) ───────
       // Covers /api/terminal/capability, /api/terminal, /api/terminal/create,

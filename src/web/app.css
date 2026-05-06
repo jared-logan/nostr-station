@@ -4371,3 +4371,37 @@ body.term-expanded .term-bar-toggle .term-chevron {
 .setup-verify-status .ok    { color: var(--success); font-weight: 500; }
 .setup-verify-status .err   { color: var(--error); }
 
+
+/* ── Project Templates section (Config panel) ─────────────────────────── */
+
+.tmpl-list {
+  display: grid;
+  gap: 10px;
+}
+.tmpl-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 12px 14px;
+}
+.tmpl-card .tmpl-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tmpl-card .tmpl-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.tmpl-card .tmpl-actions button {
+  font-size: 11px;
+  padding: 4px 10px;
+}
+.tmpl-add summary {
+  font-size: 12px;
+  font-weight: 500;
+}
+.tmpl-add-form .np-field {
+  margin-bottom: 0;
+}

@@ -49,6 +49,7 @@ import {
   isStacksProject, validateProjectPath,
 } from '../projects.js';
 import { checkCollision, scaffoldProject } from '../project-scaffold.js';
+import { getTemplate } from '../templates.js';
 import { isValidRelayUrl } from '../identity.js';
 import {
   getProjectGitState, syncProject, snapshotProject, fetchNgitProposals,
@@ -170,19 +171,34 @@ export async function handleProjects(
     }
     const name = String(parsed.name || '');
 
-    // Two source types here: 'local-only' (plain git init) and
-    // 'git-url' (git clone + freshen). ngit clones go through the
-    // dedicated /api/ngit/clone path because they validate the
-    // nostr:// / naddr1 URL format and use the existing Scan flow.
-    // Default to local-only on unknown / missing source so we never
-    // accidentally shell out to something unexpected.
-    const src = parsed.source;
+    // Three input shapes here, resolved in priority order:
+    //   1. `templateId` — registry lookup → use that template's source.
+    //   2. `source: { type: 'git-url', url }` — explicit clone URL.
+    //   3. `source: { type: 'local-only' }` (or anything unrecognized)
+    //      — plain `git init` blank-canvas project.
+    //
+    // ngit clones go through the dedicated /api/ngit/clone path because
+    // they validate the nostr:// / naddr1 URL format and use the
+    // existing Scan flow. Default to local-only on unknown / missing
+    // input so we never accidentally shell out to something unexpected.
+    const templateId = typeof parsed.templateId === 'string' ? parsed.templateId : null;
     let source: import('../project-scaffold.js').ScaffoldSource = { type: 'local-only' };
-    if (src && typeof src === 'object') {
-      if (src.type === 'git-url' && typeof src.url === 'string') {
-        source = { type: 'git-url', url: src.url };
-      } else if (src.type === 'local-only') {
-        source = { type: 'local-only' };
+    if (templateId) {
+      const t = getTemplate(templateId);
+      if (!t) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `template "${templateId}" not found` }));
+        return true;
+      }
+      source = t.source;
+    } else {
+      const src = parsed.source;
+      if (src && typeof src === 'object') {
+        if (src.type === 'git-url' && typeof src.url === 'string') {
+          source = { type: 'git-url', url: src.url };
+        } else if (src.type === 'local-only') {
+          source = { type: 'local-only' };
+        }
       }
     }
     // Identity: station-default unless the client explicitly opts

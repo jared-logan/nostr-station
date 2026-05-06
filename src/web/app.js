@@ -4876,14 +4876,14 @@ const ProjectsPanel = (() => {
   //   nostr://… | naddr1…   → /api/ngit/clone + detect + register
   //   https/git/ssh git URL → /api/projects/new with source:'git-url'
   //
-  // The "Use MKStack" button quick-fills the gitlab URL for Soapbox's
-  // MKStack React template — the same URL shakespeare.diy clones. This
-  // bypasses the broken stacks-mkstack nostr-lookup flow entirely.
+  // The "Template" dropdown reads /api/templates and quick-fills the URL
+  // for whatever entry the user picks. MKStack is the seeded default.
+  // Users can add their own templates in Config → Project Templates;
+  // they show up here automatically.
   //
   // "Scan my ngit repos" closes this modal and opens the Discover flow
   // — slightly faster than pasting an naddr for users who just want to
   // pick from their own published repos.
-  const MKSTACK_URL = 'https://gitlab.com/soapbox-pub/mkstack.git';
 
   function isNostrCloneUrl(s) {
     const v = String(s || '').trim();
@@ -4951,6 +4951,19 @@ const ProjectsPanel = (() => {
     let ownerNpub = null;
     try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
 
+    // Load the templates registry up front so the picker is rendered
+    // with the live list. Failures here are non-fatal — the modal still
+    // works for raw-URL imports; the user just doesn't see the picker.
+    let templates = [];
+    try {
+      const r = await api('/api/templates');
+      if (r && Array.isArray(r.templates)) templates = r.templates;
+    } catch { /* leave empty — picker is omitted */ }
+    const gitTemplates = templates.filter(t => t.source?.type === 'git-url');
+    const templateOpts = gitTemplates.map(t =>
+      `<option value="${escapeHtml(t.id)}" data-url="${escapeHtml(t.source.url)}">${escapeHtml(t.name)}</option>`
+    ).join('');
+
     const body = document.createElement('div');
     body.className = 'import-repo-form';
     body.innerHTML = `
@@ -4961,12 +4974,21 @@ const ProjectsPanel = (() => {
           Path: <code id="ir-path-preview">${escapeHtml(`${(window.__homeDir || '~')}/projects/…`)}</code>
         </div>
       </label>
+      ${gitTemplates.length ? `
+      <label class="np-field">
+        <span class="np-label">Template <span style="color:var(--text-dim);font-weight:400">(optional)</span></span>
+        <select id="ir-template">
+          <option value="">— Pick a template to quick-fill the URL —</option>
+          ${templateOpts}
+        </select>
+        <div class="np-hint" id="ir-template-hint" style="margin-top:6px"></div>
+      </label>
+      ` : ''}
       <label class="np-field">
         <span class="np-label">Repository URL</span>
         <input id="ir-url" type="text" autocomplete="off"
                placeholder="https://github.com/you/repo.git  ·  nostr://…  ·  naddr1…" />
         <div class="ir-url-actions">
-          <button type="button" class="ir-quick-mkstack">Use MKStack</button>
           <button type="button" class="ir-quick-scan">Scan my ngit repos…</button>
         </div>
       </label>
@@ -5002,8 +5024,16 @@ const ProjectsPanel = (() => {
     const nameInput = body.querySelector('#ir-name');
     const urlInput  = body.querySelector('#ir-url');
     const preview   = body.querySelector('#ir-path-preview');
-    const mkstackBtn = body.querySelector('.ir-quick-mkstack');
-    const scanBtn    = body.querySelector('.ir-quick-scan');
+    const tmplSel   = body.querySelector('#ir-template');
+    const tmplHint  = body.querySelector('#ir-template-hint');
+    const scanBtn   = body.querySelector('.ir-quick-scan');
+
+    // Tracks which templateId the user picked (if any). When a template
+    // is selected we forward `templateId` to /api/projects/new so the
+    // server resolves the source server-side AND records the template
+    // on the project. If the user types a URL by hand instead, this
+    // stays null and we send `source: { type: 'git-url', url }`.
+    let pickedTemplateId = null;
 
     const updateState = () => {
       const slug = slugifyClient(nameInput.value);
@@ -5013,16 +5043,40 @@ const ProjectsPanel = (() => {
       createBtn.disabled = !slug || !urlOk;
     };
     nameInput.addEventListener('input', updateState);
-    urlInput.addEventListener('input',  updateState);
+    urlInput.addEventListener('input', () => {
+      // Clearing the picker when the user edits the URL by hand keeps
+      // the form honest — we don't want to send a stale templateId for
+      // a URL the user replaced.
+      if (tmplSel && tmplSel.value && urlInput.value !== templates.find(t => t.id === tmplSel.value)?.source?.url) {
+        tmplSel.value = '';
+        pickedTemplateId = null;
+        if (tmplHint) tmplHint.textContent = '';
+      }
+      updateState();
+    });
     nameInput.focus();
 
     cancelBtn.addEventListener('click', () => modal.close());
-    mkstackBtn.addEventListener('click', () => {
-      urlInput.value = MKSTACK_URL;
-      if (!nameInput.value.trim()) nameInput.value = 'mkstack-app';
-      updateState();
-      nameInput.focus();
-    });
+
+    if (tmplSel) {
+      tmplSel.addEventListener('change', () => {
+        const id = tmplSel.value;
+        if (!id) {
+          pickedTemplateId = null;
+          if (tmplHint) tmplHint.textContent = '';
+          return;
+        }
+        const t = templates.find(x => x.id === id);
+        if (!t) return;
+        pickedTemplateId = id;
+        urlInput.value = t.source?.url || '';
+        if (!nameInput.value.trim()) nameInput.value = `${t.id}-app`;
+        if (tmplHint) tmplHint.textContent = t.description;
+        updateState();
+        nameInput.focus();
+      });
+    }
+
     scanBtn.addEventListener('click', () => {
       modal.close();
       openDiscoverModal();
@@ -5094,15 +5148,17 @@ const ProjectsPanel = (() => {
       } else {
         // Standard git URL — goes through the scaffold endpoint which
         // clones, wipes inherited history, and registers in one shot.
+        // When the user picked a template, send templateId so the
+        // server resolves the source from the registry AND records the
+        // template on the project; otherwise send source.url verbatim.
+        const reqBody = pickedTemplateId
+          ? { name, templateId: pickedTemplateId, identity: identityPayload(identity) }
+          : { name, source: { type: 'git-url', url }, identity: identityPayload(identity) };
         const result = await openExecModal({
           title: `Importing ${coll.slug}`,
           subtitle: `git clone ${url} → ${coll.path}`,
           endpoint: '/api/projects/new',
-          body: {
-            name,
-            source: { type: 'git-url', url },
-            identity: identityPayload(identity),
-          },
+          body: reqBody,
         });
         if (result.ok && result.info?.project) {
           toast('Project imported', result.info.project.name, 'ok');
@@ -6528,7 +6584,7 @@ const ConfigPanel = (() => {
       <div class="config-section">
         <h3>AI Providers</h3>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Terminal-native tools (Claude Code, OpenCode) launch in the terminal panel with cwd scoped to the selected project.
+          Terminal-native tools (Claude Code, OpenCode Go) launch in the terminal panel with cwd scoped to the selected project.
           API providers stream through the Chat pane via <code>/api/ai/chat</code>.
         </div>
         ${renderAiProviders(aiList)}
@@ -6540,6 +6596,17 @@ const ConfigPanel = (() => {
           Per-provider keys live in the OS keychain as <code>ai:&lt;provider&gt;</code>.
           Config file: <code>~/.nostr-station/ai-config.json</code>.
         </div>
+      </div>
+
+      <div class="config-section" id="cfg-templates-section">
+        <h3>Project Templates</h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+          Templates available to the New Project flow (and to the AI when
+          it picks a starting point for a fresh project). Built-in
+          templates can be edited or reset; user-added ones can be
+          deleted. Stored at <code>~/.config/nostr-station/templates.json</code>.
+        </div>
+        <div id="cfg-templates-list">loading…</div>
       </div>
 
       <div class="config-section">
@@ -6637,6 +6704,12 @@ const ConfigPanel = (() => {
     // aiList is captured explicitly; wireAiProviders() lives at the panel
     // scope and can't reach render()'s param otherwise.
     wireAiProviders(aiList);
+
+    // Templates registry section — fetched + rendered after the rest of
+    // the panel paints. Failures are non-fatal (the section shows an
+    // inline error). The /api/templates endpoint self-heals so the
+    // first render after a fresh install seeds the built-ins.
+    refreshTemplates();
 
     // NGIT default relay — persists to identity.json via /api/identity/set.
     const ngitInput  = $('cfg-ngit-relay-input');
@@ -7001,6 +7074,218 @@ const ConfigPanel = (() => {
     } catch (e) {
       toast('Enable failed', e.message, 'err');
     }
+  }
+
+  // ── Templates registry section ──────────────────────────────────────
+  //
+  // Renders the Project Templates list under the AI Providers section.
+  // Builtins (currently MKStack) get a "Reset" affordance instead of
+  // "Delete" — readTemplates() guarantees they always exist on disk so
+  // delete is a server-rejected no-op anyway. User-added templates get
+  // edit + delete; new ones are added via the inline form.
+
+  async function refreshTemplates() {
+    const root = $('cfg-templates-list');
+    if (!root) return;
+    let templates = [];
+    try {
+      const r = await api('/api/templates');
+      templates = Array.isArray(r?.templates) ? r.templates : [];
+    } catch (e) {
+      root.innerHTML = `<div style="color:var(--warn);font-size:12px">Failed to load templates: ${escapeHtml(e.message)}</div>`;
+      return;
+    }
+    root.innerHTML = renderTemplatesList(templates);
+    wireTemplatesList(root, templates);
+  }
+
+  function renderTemplatesList(templates) {
+    const cards = templates.map(renderTemplateCard).join('');
+    return `
+      <div class="tmpl-list">${cards}</div>
+      <details class="tmpl-add" style="margin-top:14px">
+        <summary style="cursor:pointer;color:var(--accent)">+ Add Project Template</summary>
+        <div class="tmpl-add-form" style="margin-top:10px;display:flex;flex-direction:column;gap:8px;max-width:560px">
+          <label class="np-field">
+            <span class="np-label">ID</span>
+            <input class="tmpl-new-id" type="text" placeholder="my-template" autocomplete="off" />
+            <div class="np-hint">Lowercase letters, digits, dashes. Used as the registry key.</div>
+          </label>
+          <label class="np-field">
+            <span class="np-label">Name</span>
+            <input class="tmpl-new-name" type="text" placeholder="My Template" autocomplete="off" />
+          </label>
+          <label class="np-field">
+            <span class="np-label">Description</span>
+            <textarea class="tmpl-new-desc" rows="3" placeholder="What this template is for. The AI sees this text when picking a template."></textarea>
+          </label>
+          <label class="np-field">
+            <span class="np-label">Git URL</span>
+            <input class="tmpl-new-url" type="text" placeholder="https://github.com/you/template.git" autocomplete="off" />
+          </label>
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button class="primary tmpl-new-save" type="button">Add template</button>
+          </div>
+        </div>
+      </details>
+    `;
+  }
+
+  function renderTemplateCard(t) {
+    const sourceLabel = t.source?.type === 'git-url'
+      ? `<code class="cmd-inline">${escapeHtml(t.source.url)}</code>`
+      : '<em>local-only (blank canvas)</em>';
+    const builtinChip = t.builtin
+      ? '<span class="chip" style="background:var(--accent-soft);color:var(--accent);margin-left:8px">built-in</span>'
+      : '';
+    const actions = t.builtin
+      ? `<button class="tmpl-edit" data-id="${escapeHtml(t.id)}">Edit</button>
+         <button class="tmpl-reset" data-id="${escapeHtml(t.id)}">Reset</button>`
+      : `<button class="tmpl-edit" data-id="${escapeHtml(t.id)}">Edit</button>
+         <button class="danger tmpl-delete" data-id="${escapeHtml(t.id)}">Delete</button>`;
+    return `
+      <div class="tmpl-card" data-id="${escapeHtml(t.id)}">
+        <div class="tmpl-head">
+          <div class="tmpl-name">${escapeHtml(t.name)}${builtinChip}</div>
+          <div class="tmpl-id" style="color:var(--text-dim);font-size:11px"><code>${escapeHtml(t.id)}</code></div>
+        </div>
+        <div class="tmpl-desc" style="font-size:12px;color:var(--text-dim);margin-top:6px;white-space:pre-wrap">${escapeHtml(t.description)}</div>
+        <div class="tmpl-source" style="margin-top:8px;font-size:11px">${sourceLabel}</div>
+        <div class="tmpl-actions" style="margin-top:10px;display:flex;gap:6px">${actions}</div>
+      </div>
+    `;
+  }
+
+  function wireTemplatesList(root, templates) {
+    root.querySelectorAll('.tmpl-edit').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.id;
+        const t = templates.find(x => x.id === id);
+        if (t) openEditTemplateModal(t);
+      });
+    });
+    root.querySelectorAll('.tmpl-delete').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        if (!confirm(`Delete template "${id}"?`)) return;
+        try {
+          await api(`/api/templates/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          toast('Template deleted', id, 'ok');
+          refreshTemplates();
+        } catch (e) {
+          toast('Delete failed', e.message, 'err');
+        }
+      });
+    });
+    root.querySelectorAll('.tmpl-reset').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        if (!confirm(`Reset built-in template "${id}" to its default values? Your edits will be lost.`)) return;
+        try {
+          await api(`/api/templates/${encodeURIComponent(id)}/reset`, { method: 'POST' });
+          toast('Template reset', id, 'ok');
+          refreshTemplates();
+        } catch (e) {
+          toast('Reset failed', e.message, 'err');
+        }
+      });
+    });
+
+    // Add form submit.
+    const saveBtn = root.querySelector('.tmpl-new-save');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        const id   = root.querySelector('.tmpl-new-id')?.value.trim() || '';
+        const name = root.querySelector('.tmpl-new-name')?.value.trim() || '';
+        const desc = root.querySelector('.tmpl-new-desc')?.value.trim() || '';
+        const url  = root.querySelector('.tmpl-new-url')?.value.trim() || '';
+        if (!id || !name || !desc || !url) {
+          toast('All fields required', '', 'warn');
+          return;
+        }
+        const body = {
+          id, name, description: desc,
+          source: { type: 'git-url', url },
+        };
+        try {
+          await api('/api/templates', {
+            method:  'POST',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify(body),
+          });
+          toast('Template added', id, 'ok');
+          refreshTemplates();
+        } catch (e) {
+          toast('Add failed', e.message, 'err');
+        }
+      });
+    }
+  }
+
+  function openEditTemplateModal(t) {
+    const body = document.createElement('div');
+    body.className = 'tmpl-edit-form';
+    body.style.display = 'flex';
+    body.style.flexDirection = 'column';
+    body.style.gap = '10px';
+    body.innerHTML = `
+      <label class="np-field">
+        <span class="np-label">Name</span>
+        <input class="tmpl-edit-name" type="text" value="${escapeHtml(t.name)}" autocomplete="off" />
+      </label>
+      <label class="np-field">
+        <span class="np-label">Description</span>
+        <textarea class="tmpl-edit-desc" rows="5">${escapeHtml(t.description)}</textarea>
+      </label>
+      ${t.source?.type === 'git-url' ? `
+      <label class="np-field">
+        <span class="np-label">Git URL</span>
+        <input class="tmpl-edit-url" type="text" value="${escapeHtml(t.source.url)}" autocomplete="off" />
+      </label>
+      ` : ''}
+      <div class="np-hint">ID and source type are immutable. To change them, delete this template and create a new one.</div>
+    `;
+
+    const foot = document.createElement('div');
+    foot.style.display = 'flex';
+    foot.style.gap = '8px';
+    foot.style.justifyContent = 'flex-end';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'primary';
+    saveBtn.textContent = 'Save';
+    foot.appendChild(cancelBtn);
+    foot.appendChild(saveBtn);
+
+    const modal = openModal({
+      title: `Edit template: ${t.name}`,
+      subtitle: t.builtin ? 'Built-in template — editable; click Reset to restore defaults.' : 'User-added template',
+      body, footer: foot,
+    });
+    cancelBtn.addEventListener('click', () => modal.close());
+    saveBtn.addEventListener('click', async () => {
+      const patch = {
+        name:        body.querySelector('.tmpl-edit-name')?.value.trim() || t.name,
+        description: body.querySelector('.tmpl-edit-desc')?.value.trim() || t.description,
+      };
+      const urlEl = body.querySelector('.tmpl-edit-url');
+      if (urlEl) {
+        patch.source = { type: 'git-url', url: urlEl.value.trim() };
+      }
+      try {
+        await api(`/api/templates/${encodeURIComponent(t.id)}`, {
+          method:  'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify(patch),
+        });
+        toast('Template updated', t.id, 'ok');
+        modal.close();
+        refreshTemplates();
+      } catch (e) {
+        toast('Update failed', e.message, 'err');
+      }
+    });
   }
 
   async function setAiDefault(kind, id) {
