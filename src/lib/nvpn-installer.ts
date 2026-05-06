@@ -183,6 +183,23 @@ export async function installNostrVpn(onProgress: ProgressCallback = () => {}): 
     return fail('verify', `${nvpnBin} --help failed: ${stderr.trim().slice(0, 160) || (e?.message ?? '').slice(0, 160)}`);
   }
 
+  // Relocate to a real PATH directory via upstream's install-cli
+  // subcommand. Pre-fix the binary lived only at ~/.cargo/bin/nvpn,
+  // which isn't on PATH on a fresh Ubuntu (no Rust toolchain seeds
+  // the cargo env), so the user could see "✓ installed" in the
+  // dashboard but `which nvpn` returned nothing in their shell. Run
+  // with `sudo -n` so it fails fast on an empty cred cache; on
+  // failure we fall back to keeping the cargo-bin copy and warn —
+  // the binary still works via absolute path.
+  step('sudo nvpn install-cli');
+  try {
+    await execa('sudo', ['-n', nvpnBin, 'install-cli'], { stdio: 'pipe', timeout: 10_000 });
+    append('install-cli ok — binary placed on PATH');
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    append(`install-cli skipped: ${stderr.slice(0, 160) || (e?.message || '').slice(0, 120)}`);
+  }
+
   // nvpn init — best-effort. Upstream subcommand spelling has shifted
   // between releases; try --yes first, fall back to a stdin-newline.
   step('nvpn init');
