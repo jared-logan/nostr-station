@@ -38,13 +38,11 @@ const toast = (() => {
   };
 })();
 
-// Toast helper for relay-config / whitelist saves. In container mode the
-// station has no docker socket so it can't restart the sibling relay
-// container — the API returns a `restartHint` (a copy-pasteable host
-// command) and we surface that as a 'warn' toast instead of the cheerful
-// "Relay restarted". On host the field is absent and we keep the original
-// success message.
-function relayApplyToast(title, response, hostFallbackBody = 'Relay restarted') {
+// Toast helper for relay-config / whitelist saves. The in-process relay
+// applies changes immediately so the success copy is unconditional;
+// `restartHint` is legacy and kept here only so older response shapes
+// don't crash the toast rendering.
+function relayApplyToast(title, response, hostFallbackBody = 'Relay updated') {
   if (response && response.restartHint) {
     toast(title, `Saved · run on host: ${response.restartHint}`, 'warn');
   } else {
@@ -5749,7 +5747,7 @@ AuthScreen = (() => {
       // Either a session was restored (server has our token) or localhost
       // exemption is in effect. Tear down the auth screen and hand off.
       hide();
-      bootDashboard(status.localhostExempt, status.containerMode);
+      bootDashboard(status.localhostExempt);
       return;
     }
 
@@ -6129,23 +6127,12 @@ AuthScreen = (() => {
 
 const SetupWizard = (() => {
   const root = $('setup-root');
-  // STAGES is mutable so show() can drop the relay + vpn stages when:
-  //   - container mode: sibling Docker relay is already up; nvpn needs
-  //     kernel-module access we don't grant in the container
-  //   - in-process relay: the relay starts inside the dashboard process
-  //     before the wizard renders, so the install stage is a no-op
-  // Decided at show() time after we fetch /api/auth/status (which now
-  // carries both `containerMode` and `inprocRelay` flags).
-  const STAGES_HOST      = ['welcome', 'identity', 'relay', 'ai', 'ngit', 'vpn', 'done'];
-  const STAGES_CONTAINER = ['welcome', 'identity', 'ai', 'ngit', 'done'];
-  // Pure-Node host deployment: relay already up, nvpn skipped (same
-  // reasoning as container — no Wireguard kernel module here either).
-  // First-run pairing is the Amber QR (no paste fallback) followed by a
-  // live signing-pipeline verification — together those replace the
-  // legacy "paste an npub" identity stage with the spec's "scan, tap,
-  // proven" flow.
-  const STAGES_INPROC    = ['welcome', 'amber', 'verify', 'ai', 'ngit', 'vpn', 'done'];
-  let STAGES = STAGES_HOST;
+  // The in-process relay starts inside the dashboard process before the
+  // wizard renders. First-run pairing is the Amber QR followed by a live
+  // signing-pipeline verification — together those replace the legacy
+  // "paste an npub" identity stage with "scan, tap, proven." nvpn is the
+  // last optional step; users can skip it and still complete onboarding.
+  const STAGES = ['welcome', 'amber', 'verify', 'ai', 'ngit', 'vpn', 'done'];
   let stageIdx = 0;
   const state = { npub: '', profile: null };
 
@@ -6179,16 +6166,7 @@ const SetupWizard = (() => {
         location.href = '/';
         return;
       }
-      // Pick the stage list based on deployment mode:
-      //   - container: sibling Docker relay is up, nvpn unsupportable
-      //   - in-process relay: the dashboard's own Node process is the relay
-      //   - host-install (legacy): full HOST stage list, install relay + nvpn
-      // The relay-install / nvpn-install APIs return 410 in the first two
-      // modes; walking users through those stages would be a dead end.
-      STAGES = st.containerMode ? STAGES_CONTAINER
-             : st.inprocRelay   ? STAGES_INPROC
-             : STAGES_HOST;
-    } catch { /* fall through — render wizard anyway with default STAGES */ }
+    } catch { /* fall through — render wizard anyway */ }
 
     stageIdx = 0;
     root.hidden = false;
@@ -6657,11 +6635,6 @@ const SetupWizard = (() => {
       let relay = null;
       let errTitle = null;
       let errMsg   = null;
-      let containerMode = false;
-      try {
-        const auth = await fetch('/api/auth/status').then(r => r.ok ? r.json() : {});
-        containerMode = !!auth.containerMode;
-      } catch {}
       try {
         const res = await fetch('/api/status');
         if (res.status === 401) {
@@ -6689,24 +6662,6 @@ const SetupWizard = (() => {
           <div>
             <div class="title">${escapeHtml(errTitle)}</div>
             <div class="muted">${escapeHtml(errMsg)}</div>
-          </div>
-        </div>`;
-        nextBtn.disabled = false;
-        return;
-      }
-
-      // Container mode: the relay isn't a host service the wizard can install —
-      // it's a sibling container managed by docker compose. The wizard step
-      // becomes informational; Continue is always enabled.
-      if (containerMode) {
-        const ok = relay.state === 'ok';
-        bodyEl.innerHTML = `<div class="setup-relay-row ${ok ? 'ok' : 'warn'}">
-          <span class="dot ${ok ? 'ok' : 'warn'}"></span>
-          <div>
-            <div class="title">${ok ? 'Relay running' : 'Relay managed by docker compose'}</div>
-            <div class="muted">${ok
-              ? escapeHtml(relay.value || '')
-              : 'Bring the <code>relay</code> service up via <code>docker compose up relay</code> when ready. This step is informational.'}</div>
           </div>
         </div>`;
         nextBtn.disabled = false;
@@ -7330,28 +7285,9 @@ const Panels = {
 // exemption is active). Idempotent: re-invoking just re-kicks the panel
 // loaders, which each already de-dupe their fetches.
 let __bootStarted = false;
-function bootDashboard(localhostExempt, containerMode) {
+function bootDashboard(localhostExempt) {
   if (!__bootStarted) {
     __bootStarted = true;
-    // Container mode: nostr-vpn isn't supportable inside an unprivileged
-    // container (matches the Status panel's "not applicable in container
-    // mode" row). Hide the Logs panel's vpn tab so users don't click into
-    // a forever-empty stream. Default tab stays 'relay' (set in the
-    // LogsPanel IIFE) so this is a one-line DOM tweak — no state plumbing.
-    //
-    // Same reasoning applies to the Relay panel's start/stop/restart
-    // buttons — the relay's lifecycle is owned by docker compose on the
-    // host, not the dashboard. The /api/relay/* endpoints already return
-    // 501 with a `hostCmd` field in container mode (see web-server.ts);
-    // hiding the buttons keeps the UI honest.
-    if (containerMode) {
-      const vpnTab = document.querySelector('#logs-tabs [data-log="vpn"]');
-      if (vpnTab) vpnTab.hidden = true;
-      for (const id of ['relay-start', 'relay-stop', 'relay-restart']) {
-        const btn = document.getElementById(id);
-        if (btn) btn.hidden = true;
-      }
-    }
     refreshHeader();
     refreshHealth();
     activatePanel(currentPanel());
@@ -7393,22 +7329,20 @@ function bootDashboard(localhostExempt, containerMode) {
       }
     });
   }
-  toggleLocalhostBanner(localhostExempt, containerMode);
+  toggleLocalhostBanner(localhostExempt);
 }
 
 // Toast helper exposed so terminal.js (loaded before app.js) can surface
 // errors through the same UI as the rest of the dashboard.
 window.toast = toast;
 
-function toggleLocalhostBanner(on, containerMode) {
+function toggleLocalhostBanner(on) {
   let el = document.getElementById('auth-localhost-banner');
   if (on && !el) {
     el = document.createElement('div');
     el.id = 'auth-localhost-banner';
     el.className = 'auth-localhost-banner';
-    el.textContent = containerMode
-      ? 'Auth disabled — running in Docker (host port 127.0.0.1:3000)'
-      : 'Auth disabled for localhost — enable in Config';
+    el.textContent = 'Auth disabled for localhost — enable in Config';
     document.body.appendChild(el);
   } else if (!on && el) {
     el.remove();
@@ -7431,7 +7365,7 @@ function toggleLocalhostBanner(on, containerMode) {
     return;
   }
   if (status.authenticated) {
-    bootDashboard(status.localhostExempt, status.containerMode);
+    bootDashboard(status.localhostExempt);
   } else {
     AuthScreen.show();
   }

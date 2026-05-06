@@ -102,14 +102,6 @@ class LinuxKeyring implements KeychainBackend {
 // ── Linux headless fallback — AES-256-GCM encrypted file ──────────────────────
 // Machine-derived key: not as strong as a proper keychain, but far better
 // than plaintext. User is told which backend is active during onboard.
-//
-// Container mode (STATION_MODE=container) overrides the storage path via
-// KEYCHAIN_DIR and persists a 32-byte KEK alongside the secrets file. Without
-// a persisted KEK, /etc/machine-id can regenerate on image rebuild and
-// invalidate every stored secret — fine for `docker compose down -v` (a
-// deliberate fresh start) but a footgun for `docker compose down && up`.
-// The KEK lives in the named volume, so it persists with the secrets it
-// protects.
 
 class EncryptedFileBackend implements KeychainBackend {
   private readonly storageDir: string;
@@ -216,18 +208,6 @@ let _instance: KeychainBackend | null = null;
 
 export function getKeychain(): KeychainBackend {
   if (_instance) return _instance;
-  // Container mode: pin the encrypted-file backend with a path that points
-  // at the keychain named volume (KEYCHAIN_DIR). Don't auto-detect — even
-  // if a future image variant happens to ship secret-tool, we want the
-  // backend to be the deterministic compose-managed one, not whatever
-  // happens to be on PATH.
-  if (process.env.STATION_MODE === 'container') {
-    _instance = new EncryptedFileBackend(
-      process.env.KEYCHAIN_DIR ?? '/var/lib/nostr-station/keys',
-      /* persistKek */ true,
-    );
-    return _instance;
-  }
   if (process.platform === 'darwin') {
     _instance = new MacOSKeychain();
   } else if (isGnomeKeyringAvailable()) {

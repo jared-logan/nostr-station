@@ -124,33 +124,6 @@ function cmd(c: string, timeoutMs = 2000): string | null {
   } catch { return null; }
 }
 
-// Container-mode probes the host OS doesn't apply to. The relay lives in a
-// sibling container reachable via Docker DNS (RELAY_HOST).
-//
-// Pure + exported so tests can drive the row shape without spawning anything.
-export interface ContainerStatusInputs {
-  relayUp:        boolean;
-  relayHost:      string;
-  relayPort:      number;
-  // Per-tool `--version` output (or null when the binary isn't on PATH /
-  // the probe failed). Injected so tests can pin both the present and
-  // absent cases without spawning real binaries. Populated in gatherStatus()
-  // by shelling `<tool> --version` against the runtime image's PATH.
-  binaries?: {
-    ngit:   string | null;
-    claude: string | null;
-    nak:    string | null;
-    stacks: string | null;
-  };
-}
-
-// Compress a multi-line `--version` blob into a single readable line for
-// the status row. Most tools print "<name> <semver> [extra]" on the first
-// line; the rest is build-info noise users don't need in the panel.
-function firstLine(s: string): string {
-  return s.split('\n')[0]?.trim() ?? '';
-}
-
 // Watchdog probe — reads the heartbeat file the in-Node Watchdog writes
 // on every fire. Pure + exported so tests can pin every branch without
 // touching the real ~/.nostr-station path.
@@ -194,77 +167,10 @@ export function nvpnStateFor(p: NvpnProbe): { value: string; state: ServiceState
   return { value: 'not connected', state: 'warn', ok: false };
 }
 
-function binaryRow(
-  id: 'ngit' | 'claude' | 'nak' | 'stacks',
-  label: string,
-  versionOutput: string | null,
-  extras: Partial<ServiceStatus> = {},
-): ServiceStatus {
-  if (versionOutput && versionOutput.trim()) {
-    return {
-      id, label, kind: 'binary',
-      value: firstLine(versionOutput),
-      ok: true, state: 'ok',
-      ...extras,
-    };
-  }
-  return {
-    id, label, kind: 'binary',
-    value: 'not installed in image — rebuild Dockerfile.station',
-    ok: false, state: 'warn',
-    ...extras,
-  };
-}
-
-export function gatherStatusContainer(p: ContainerStatusInputs): ServiceStatus[] {
-  const relayUrl = `ws://${p.relayHost}:${p.relayPort}`;
-  const relayState: ServiceState = p.relayUp ? 'ok' : 'warn';
-  const relayValue = p.relayUp
-    ? `${relayUrl} ✓`
-    : `managed by docker compose — bring up via \`docker compose up relay\``;
-
-  const bins = p.binaries ?? { ngit: null, claude: null, nak: null, stacks: null };
-
-  const vpnRow = nvpnStateFor({ binPresent: false, meshIp: null });
-  const wdRow  = watchdogStateFor({ exists: false, ageMs: null });
-
-  return [
-    { id: 'relay',     label: 'Relay',       value: relayValue,                            ok: p.relayUp,            state: relayState,    kind: 'service' },
-    { id: 'vpn',       label: 'nostr-vpn',   value: vpnRow.value,                          ok: vpnRow.ok,            state: vpnRow.state,  kind: 'service' },
-    { id: 'watchdog',  label: 'watchdog',    value: wdRow.value,                           ok: wdRow.ok,             state: wdRow.state,   kind: 'service' },
-    binaryRow('ngit',   'ngit',        bins.ngit),
-    binaryRow('claude', 'claude-code', bins.claude, { plugins: gatherClaudePlugins() }),
-    binaryRow('nak',    'nak',         bins.nak),
-    binaryRow('stacks', 'Stacks',      bins.stacks),
-  ];
-}
-
 // Exported so cli.tsx can call it directly for --json mode, bypassing Ink.
 // Ink would otherwise write UI frames to stdout alongside the JSON payload,
 // corrupting any programmatic consumer piping stdout into a parser.
 export function gatherStatus(): ServiceStatus[] {
-  // Container mode: skip host-OS probes entirely (systemctl/launchctl can't
-  // tell us anything useful here) and report on the docker-compose-managed
-  // services via env-driven probes.
-  if (process.env.STATION_MODE === 'container') {
-    const relayHost = process.env.RELAY_HOST || 'localhost';
-    const relayPort = Number(process.env.RELAY_PORT || '8080');
-    const relayUp   = cmd(`nc -z -w 1 ${relayHost} ${relayPort}`, 1500) !== null;
-    // Probe each baked-in dev tool. Dockerfile.station puts them at
-    // /usr/local/bin (cargo binary, sha256-verified prebuilt, npm globals);
-    // null here means the build skipped a stage or someone bind-mounted
-    // over the install — actionable signal for the dashboard, not silence.
-    const binaries = {
-      ngit:   cmd('ngit --version',   1500),
-      claude: cmd('claude --version', 1500),
-      nak:    cmd('nak --version',    1500),
-      stacks: cmd('stacks --version', 1500),
-    };
-    return gatherStatusContainer({
-      relayUp, relayHost, relayPort, binaries,
-    });
-  }
-
   // `-w 1` is a second belt-and-suspenders timeout — both BSD and GNU nc
   // respect it. Protects against nc variants that ignore our execSync
   // timeout (rare, but cheap insurance).
