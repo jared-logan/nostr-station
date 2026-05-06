@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import { readIdentity } from '../lib/identity.js';
 import { findBin, hasBin } from '../lib/detect.js';
+import { HEARTBEAT_FILE } from '../lib/watchdog.js';
 
 interface StatusProps { json: boolean; }
 
@@ -150,6 +151,49 @@ function firstLine(s: string): string {
   return s.split('\n')[0]?.trim() ?? '';
 }
 
+// Watchdog probe — reads the heartbeat file the in-Node Watchdog writes
+// on every fire. Pure + exported so tests can pin every branch without
+// touching the real ~/.nostr-station path.
+//   missing      → err  · "not running"
+//   fresh (≤7m)  → ok   · "heartbeat Nm ago"  (5m interval + 2m slack)
+//   stale (>7m)  → warn · "heartbeat Nm ago — stale"
+export interface WatchdogProbe {
+  exists: boolean;
+  ageMs:  number | null;
+}
+export function watchdogStateFor(p: WatchdogProbe): { value: string; state: ServiceState; ok: boolean } {
+  if (!p.exists || p.ageMs === null) {
+    return { value: 'not running', state: 'err', ok: false };
+  }
+  const ageMin = Math.floor(p.ageMs / 60_000);
+  if (p.ageMs <= 7 * 60_000) {
+    return {
+      value: `heartbeat ${ageMin === 0 ? 'just now' : `${ageMin}m ago`}`,
+      state: 'ok',
+      ok:    true,
+    };
+  }
+  return { value: `heartbeat ${ageMin}m ago — stale`, state: 'warn', ok: false };
+}
+
+// nvpn probe — separate from watchdog so each can fail cleanly. Three
+// sub-states stack underneath the binary-present split:
+//   binary missing     → err  · "not installed"
+//   binary present, no daemon response within 1s → warn · "not connected"
+//   binary present + daemon up + tunnel_ip set    → ok   · tunnel IP
+// `nvpn status --json` may hang indefinitely on a daemon socket that's
+// listening but wedged; we cap it tight (1s) and treat any failure as
+// "not connected" rather than blocking the whole /api/status call.
+export interface NvpnProbe {
+  binPresent: boolean;
+  meshIp:     string | null;
+}
+export function nvpnStateFor(p: NvpnProbe): { value: string; state: ServiceState; ok: boolean } {
+  if (!p.binPresent) return { value: 'not installed', state: 'err', ok: false };
+  if (p.meshIp)      return { value: p.meshIp, state: 'ok', ok: true };
+  return { value: 'not connected', state: 'warn', ok: false };
+}
+
 function binaryRow(
   id: 'ngit' | 'claude' | 'nak' | 'stacks',
   label: string,
@@ -181,14 +225,13 @@ export function gatherStatusContainer(p: ContainerStatusInputs): ServiceStatus[]
 
   const bins = p.binaries ?? { ngit: null, claude: null, nak: null, stacks: null };
 
+  const vpnRow = nvpnStateFor({ binPresent: false, meshIp: null });
+  const wdRow  = watchdogStateFor({ exists: false, ageMs: null });
+
   return [
-    { id: 'relay',     label: 'Relay',       value: relayValue,                            ok: p.relayUp,           state: relayState,    kind: 'service' },
-    // vpn / watchdog: long-term first-class services. Install + management
-    // backends are mid-migration after the architectural-simplification merge,
-    // so the rows surface as 'pending' rather than err — the user sees that
-    // they're tracked and on the roadmap, not broken.
-    { id: 'vpn',       label: 'nostr-vpn',   value: 'installer wiring pending',            ok: false,               state: 'warn',        kind: 'service' },
-    { id: 'watchdog',  label: 'watchdog',    value: 'installer wiring pending',            ok: false,               state: 'warn',        kind: 'service' },
+    { id: 'relay',     label: 'Relay',       value: relayValue,                            ok: p.relayUp,            state: relayState,    kind: 'service' },
+    { id: 'vpn',       label: 'nostr-vpn',   value: vpnRow.value,                          ok: vpnRow.ok,            state: vpnRow.state,  kind: 'service' },
+    { id: 'watchdog',  label: 'watchdog',    value: wdRow.value,                           ok: wdRow.ok,             state: wdRow.state,   kind: 'service' },
     binaryRow('ngit',   'ngit',        bins.ngit),
     binaryRow('claude', 'claude-code', bins.claude, { plugins: gatherClaudePlugins() }),
     binaryRow('nak',    'nak',         bins.nak),
@@ -234,6 +277,32 @@ export function gatherStatus(): ServiceStatus[] {
   const probePort = Number(process.env.RELAY_PORT || '7777');
   const relayUp   = cmd(`nc -z -w 1 ${probeHost} ${probePort}`, 1500) !== null;
 
+  // nvpn probe — binary on PATH, then a tight 1s `nvpn status --json` to
+  // pull the tunnel IP. We cap aggressively because the daemon socket can
+  // hang indefinitely when nvpn is installed but the mesh peer is down.
+  const nvpnPath = findBin('nvpn');
+  const meshIp = (() => {
+    if (!nvpnPath) return null;
+    try {
+      const out = cmd(`${nvpnPath} status --json`, 1000);
+      return out ? JSON.parse(out)?.tunnel_ip ?? null : null;
+    } catch { return null; }
+  })();
+  const vpnRow = nvpnStateFor({ binPresent: !!nvpnPath, meshIp });
+
+  // Watchdog probe — file mtime tells us whether the in-Node loop has
+  // fired recently. ageMs:null when missing entirely (never started),
+  // numeric otherwise.
+  const wdProbe = (() => {
+    try {
+      const mtime = fs.statSync(HEARTBEAT_FILE).mtimeMs;
+      return { exists: true, ageMs: Math.max(0, Date.now() - mtime) };
+    } catch {
+      return { exists: false, ageMs: null };
+    }
+  })();
+  const wdRow = watchdogStateFor(wdProbe);
+
   const ngitBin   = hasBin('ngit');
   // Station-level "configured" signal is the default nostr relay the user
   // saved in identity.json — set via Config → NGIT in the dashboard. This
@@ -274,12 +343,8 @@ export function gatherStatus(): ServiceStatus[] {
   return [
     // Services — daemons or scheduled jobs with a runtime state.
     { id: 'relay',     label: 'Relay',       value: relayUp ? `ws://${probeHost}:${probePort} ✓` : 'not running',                       ok: relayUp,      state: relayState,    kind: 'service' },
-    // vpn / watchdog: long-term first-class services. Install + management
-    // backends are mid-migration after the architectural-simplification merge,
-    // so the rows surface as 'pending' rather than err — the user sees that
-    // they're tracked and on the roadmap, not broken.
-    { id: 'vpn',       label: 'nostr-vpn',   value: 'installer wiring pending',                                                          ok: false,        state: 'warn',        kind: 'service' },
-    { id: 'watchdog',  label: 'watchdog',    value: 'installer wiring pending',                                                          ok: false,        state: 'warn',        kind: 'service' },
+    { id: 'vpn',       label: 'nostr-vpn',   value: vpnRow.value,                                                                        ok: vpnRow.ok,    state: vpnRow.state,  kind: 'service' },
+    { id: 'watchdog',  label: 'watchdog',    value: wdRow.value,                                                                         ok: wdRow.ok,     state: wdRow.state,   kind: 'service' },
     // Binaries — CLI tools; installed or not. `ngit` is the lone binary with
     // a warn state (installed but no default relay set — configure in Config).
     { id: 'ngit',      label: 'ngit',        value: ngitBin && ngitRelay ? `relay: ${ngitRelay.replace(/^wss?:\/\//, '')}` : ngitBin ? 'not configured' : 'not installed', ok: ngitBin && !!ngitRelay, state: ngitState,    kind: 'binary' },

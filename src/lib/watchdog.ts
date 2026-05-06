@@ -14,6 +14,9 @@
 
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure';
 import { nip19 } from 'nostr-tools';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { getKeychain } from './keychain.js';
 import type { Relay } from '../relay/index.js';
 import type { NostrEvent } from '../relay/types.js';
@@ -21,6 +24,13 @@ import type { NostrEvent } from '../relay/types.js';
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 const HEARTBEAT_KIND      = 1;
 const HEARTBEAT_TAG       = ['client', 'nostr-station-watchdog'];
+
+// Heartbeat file location. Lives next to relay.db so a clean
+// `rm -rf ~/.nostr-station/data` resets relay AND watchdog state in one
+// shot. Used by `nostr-station status` (CLI, separate process) to report
+// real watchdog liveness without needing access to the in-Node Watchdog
+// instance.
+export const HEARTBEAT_FILE = path.join(os.homedir(), '.nostr-station', 'data', 'watchdog.heartbeat');
 
 export interface WatchdogOptions {
   relay:        Relay;
@@ -144,6 +154,22 @@ export class Watchdog {
     // minutes just to talk to ourselves.
     this.relay.publishLocal(ev);
     this.lastHeartbeatAt = Date.now();
+
+    // Write the heartbeat file so the status CLI (separate process) can
+    // probe watchdog liveness without needing access to this instance.
+    // mtime is what we read on the other side; content is informational
+    // for humans inspecting the file.
+    try {
+      fs.mkdirSync(path.dirname(HEARTBEAT_FILE), { recursive: true });
+      fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify({
+        ts:    this.lastHeartbeatAt,
+        npub:  this.npub,
+        eid:   ev.id,
+      }));
+    } catch (e: any) {
+      this.log('warn', `heartbeat file write failed: ${e?.message || e}`);
+    }
+
     this.log('info', `heartbeat published — id ${ev.id.slice(0, 8)}…`);
     return ev;
   }
