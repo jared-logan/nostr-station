@@ -109,6 +109,19 @@ function readReadmeExcerpt(projectPath: string): string | null {
 }
 
 function stationContext(): AiContext {
+  // Prefer the seeded file at ~/nostr-station/projects/NOSTR_STATION.md
+  // when present. The seed (slim Nori persona — identity, role, NIP
+  // reference, command table, user-region) is written once on first
+  // server start and is the same file that terminal-native AI tools
+  // read via the CLAUDE.md / AGENTS.md / etc. symlink, so the
+  // dashboard Chat pane and `claude` in a terminal share one source
+  // of truth the developer can edit.
+  const seedPath = path.join(os.homedir(), 'nostr-station', 'projects', 'NOSTR_STATION.md');
+  try {
+    const raw = fs.readFileSync(seedPath, 'utf8').trimEnd();
+    if (raw) return { text: raw, source: 'station' };
+  } catch { /* file missing — fall through to generated block */ }
+
   // Lazy-require so a broken package.json doesn't crash the whole module.
   let version = '?';
   try {

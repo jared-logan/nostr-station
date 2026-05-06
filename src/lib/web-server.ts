@@ -71,6 +71,8 @@ import {
   setAutoSyncRef,
   type CmdSpec,
 } from './routes/_shared.js';
+import { buildAiContext } from './ai-context.js';
+import { seedStationContext } from './editor.js';
 import { handleProjects } from './routes/projects.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleNgit } from './routes/ngit.js';
@@ -279,8 +281,36 @@ function getContextContent(homeDir: string): string {
   catch { return 'You are a helpful assistant for Nostr protocol development.'; }
 }
 
+// Whether the legacy on-disk seed file is present. The Chat CLI uses this
+// to print a one-time hint; the dashboard panel reports the richer status
+// from getContextStatus() below since the new /api/ai/chat path uses
+// buildAiContext()'s in-memory station fallback regardless of this file.
 export function contextExists(): boolean {
   return fs.existsSync(path.join(os.homedir(), 'nostr-station', 'projects', 'NOSTR_STATION.md'));
+}
+
+export interface ContextStatus {
+  // True whenever a context block will be injected into /api/ai/chat. With
+  // the station fallback in ai-context.ts this is effectively always true,
+  // but we still compute it from buildAiContext() so any future change to
+  // the resolver (e.g. an explicit "no context" mode) flows through.
+  hasContext:   boolean;
+  source:       'project' | 'station';
+  projectName?: string;
+  // Diagnostic: legacy seed file at ~/nostr-station/projects/NOSTR_STATION.md.
+  // The panel uses this to distinguish "file-backed" from "built-in" station
+  // context in its label.
+  hasContextFile: boolean;
+}
+
+export function getContextStatus(): ContextStatus {
+  const ctx = buildAiContext(getActiveChatProjectId());
+  return {
+    hasContext:     ctx.text.length > 0,
+    source:         ctx.source,
+    projectName:    ctx.projectName,
+    hasContextFile: contextExists(),
+  };
 }
 
 // ── Chat proxy (streaming SSE) ────────────────────────────────────────────────
@@ -608,6 +638,10 @@ export async function startWebServer(port: number): Promise<void> {
   const warmUp = () => {
     loadProviderConfig().catch(() => {});
     loadPty().catch(() => {});
+    // Idempotent: writes the slim Nori-persona seed when missing,
+    // leaves any existing file (and its user-region edits) alone.
+    try { seedStationContext(); }
+    catch (e: any) { process.stderr.write(`[context] seed skipped: ${e?.message || e}\n`); }
     migrateIfNeeded()
       .then(r => {
         if (r.migrated) {
@@ -893,14 +927,18 @@ export async function startWebServer(port: number): Promise<void> {
       // API routes first — they take precedence over static.
       if (url === '/api/config' && method === 'GET') {
         const { meta } = await loadProviderConfig();
+        const ctx = getContextStatus();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
-          provider:   meta.provider,
-          model:      meta.model,
-          baseUrl:    meta.baseUrl,
-          configured: meta.configured,
-          reason:     meta.reason,
-          hasContext: contextExists(),
+          provider:       meta.provider,
+          model:          meta.model,
+          baseUrl:        meta.baseUrl,
+          configured:     meta.configured,
+          reason:         meta.reason,
+          hasContext:     ctx.hasContext,
+          contextSource:  ctx.source,
+          contextProject: ctx.projectName ?? null,
+          hasContextFile: ctx.hasContextFile,
         }));
         return;
       }
