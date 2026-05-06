@@ -37,6 +37,7 @@ import { LogBuffer, type LogLine } from './log-buffer.js';
 import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
 import { installNostrVpn } from './nvpn-installer.js';
+import { probeNvpnStatus, startNvpnLogTail } from './nvpn.js';
 import { installNak } from './nak-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 import {
@@ -76,6 +77,7 @@ import {
   type Msg, type ProviderConfig,
 } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
+import { handleNvpn } from './routes/nvpn.js';
 
 // ── Static assets ─────────────────────────────────────────────────────────────
 //
@@ -380,6 +382,13 @@ const logBuffers = {
 // for whitelist registration + publishLocal). STATION_DISABLE_WATCHDOG=1
 // opts out for tests / minimal deployments.
 let watchdog: Watchdog | null = null;
+
+// nvpn daemon log tailer. Started best-effort once at server boot; pumps
+// the daemon's own log file into logBuffers.vpn so /api/logs/vpn streams
+// real lines instead of the static "tail it manually" hint that used to
+// land in the Logs panel. Cleaned up on server.close so the polling
+// timer doesn't keep the event loop alive across hot-restarts.
+let nvpnLogTailer: { stop: () => void } | null = null;
 
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
@@ -1343,19 +1352,26 @@ export async function startWebServer(port: number): Promise<void> {
           const vpnRow = gatherStatus().find(r => r.id === 'vpn');
           const installed = vpnRow ? vpnRow.state !== 'err' : false;
           const running   = vpnRow ? vpnRow.state === 'ok'  : false;
+          // The vpn LogBuffer is fed by startNvpnLogTail at boot — once
+          // the daemon is up and writing to its log file, the panel
+          // streams real lines. Until then a banner explains the gap.
           return {
             service:    channel,
             installed,
             running,
             logExists:  installed,
             logPath:    installed
-              ? '(nvpn writes its own log; tail with `nvpn logs` until the wizard surfaces it here)'
+              ? 'nvpn daemon log (auto-tailed)'
               : '(not installed)',
             stale:      false,
             logMtimeMs: Date.now(),
             note:       installed
               ? (running ? `tunnel: ${vpnRow?.value ?? ''}` : (vpnRow?.value ?? 'not connected'))
               : 'install via the setup wizard\'s vpn step',
+            // Hint for the Logs panel renderMeta — shown as a copy-able
+            // identity strip alongside the buffer. Mirrors the watchdog
+            // tab's npub field.
+            tunnelIp:   running ? (vpnRow?.value ?? null) : null,
           };
         })();
         res.write(`data: ${JSON.stringify({ status })}\n\n`);
@@ -1573,6 +1589,12 @@ export async function startWebServer(port: number): Promise<void> {
       // /api/ngit/account[/login|/logout].
       if (await handleNgit(req, res, url, method)) return;
 
+      // ── nvpn runtime control (extracted to routes/nvpn.ts) ────────────
+      // Covers /api/nvpn/status, /api/nvpn/{start,stop,restart},
+      // /api/nvpn/install-service. Drives the Status panel's start/stop
+      // buttons and the Logs panel's nostr-vpn meta strip.
+      if (await handleNvpn(req, res, url, method)) return;
+
       // ── AI provider system + local model probes (extracted to routes/ai.ts)
       // Covers /api/ollama/models, /api/lmstudio/models, /api/ai/providers,
       // /api/ai/config, /api/ai/providers/:id/key (POST/DELETE),
@@ -1648,6 +1670,10 @@ export async function startWebServer(port: number): Promise<void> {
       // worse than a dropped log line.
       void inprocRelay?.stop().catch(() => {});
       inprocRelay = null;
+      // nvpn log tailer is independent of the daemon — it just polls a
+      // file. Stop it so the polling timer doesn't keep Node alive.
+      nvpnLogTailer?.stop();
+      nvpnLogTailer = null;
       dropPid();
     });
 
@@ -1701,6 +1727,17 @@ export async function startWebServer(port: number): Promise<void> {
       void maybeStartInprocRelay().catch(e => {
         process.stderr.write(`[relay] failed to start: ${(e as Error).message}\n`);
       });
+      // nvpn daemon log tailer — best-effort. Sits idle until the daemon
+      // log file appears, then pumps lines into logBuffers.vpn so the
+      // Logs panel's nostr-vpn tab streams real output. Single instance
+      // per server lifetime; the tailer's own poll loop is cheap and
+      // cancels on `stop()` from the close handler below.
+      if (process.env.STATION_DISABLE_NVPN_TAIL !== '1') {
+        try { nvpnLogTailer = startNvpnLogTail(logBuffers.vpn); }
+        catch (e: any) {
+          process.stderr.write(`[nvpn] log tailer failed to start: ${e?.message || e}\n`);
+        }
+      }
       resolve();
     });
   });

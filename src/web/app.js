@@ -1038,7 +1038,10 @@ setInterval(refreshHealth, 5000);
 // shows just the row's error text and any panel link.
 const SERVICE_CTAS = {
   'relay':     { installSlug: null,    configHint: 'use the Relay panel start/restart buttons' },
-  'vpn':       { installSlug: null,    configHint: 'install via the setup wizard, or `sudo nvpn service install` after a manual binary install' },
+  // vpn has dedicated start/stop buttons (rendered inline below) — no
+  // generic configHint, since every common case is one click away in
+  // the dashboard now.
+  'vpn':       { installSlug: null,    configHint: null },
   'watchdog':  { installSlug: null,    configHint: 'POST /api/watchdog/start to restart the heartbeat loop' },
   'ngit':      { installSlug: 'ngit',  configHint: null /* inline-form handled below */ },
   'claude':    { installSlug: null,    configHint: 'install Claude Code from claude.com/code' },
@@ -1059,9 +1062,9 @@ const SERVICE_DETAILS = {
     panel: { hash: '#relay', label: 'Open Relay panel' },
   },
   'vpn': {
-    summaryOk:   s => `Connected to the nostr-mesh. Your tunnel IP is <code class="cmd-inline">${escapeHtml(s.value)}</code>.`,
-    summaryWarn: _ => 'nvpn binary is installed but the mesh tunnel isn\'t up. Start it with <code class="cmd-inline">nvpn start --daemon</code>, or check the Logs panel.',
-    summaryErr:  _ => 'nostr-vpn isn\'t installed. Use the wizard\'s nvpn step or click Install on this row to add it.',
+    summaryOk:   s => `Connected to the nostr-mesh. Your tunnel IP is <code class="cmd-inline">${escapeHtml(s.value)}</code>. Use Stop / Restart on this row.`,
+    summaryWarn: _ => 'nvpn binary is installed but the mesh tunnel isn\'t up. Click Start on this row, or open the Logs panel for the daemon\'s output.',
+    summaryErr:  _ => 'nostr-vpn isn\'t installed. Click Install nvpn on this row to download + register the daemon.',
     panel: { hash: '#logs', label: 'Open Logs → nostr-vpn' },
   },
   'ngit': {
@@ -1091,6 +1094,170 @@ const SERVICE_DETAILS = {
     panel: { hash: '#projects', label: 'Open Projects' },
   },
 };
+
+// ── nvpn controls (shared by Status row + Logs panel) ──────────────────
+//
+// Buttons that POST /api/nvpn/{start,stop,restart}. Disabled while the
+// request is in flight so a double-click doesn't queue redundant
+// systemctl/launchctl calls. Refreshes the dashboard health snapshot on
+// success so the row colour + tunnel IP land right away.
+
+async function callNvpnAction(action, label) {
+  try {
+    const r = await api(`/api/nvpn/${action}`, { method: 'POST' });
+    toast(`nvpn ${label}`, r?.detail || '', 'ok');
+    refreshHealth();
+    // Status takes a moment to settle (daemon socket binds, peer
+    // discovery starts) — re-poll once shortly after so the user
+    // sees the green tunnel-ip row without clicking refresh.
+    setTimeout(refreshHealth, 1500);
+    setTimeout(refreshHealth, 5000);
+    return r;
+  } catch (e) {
+    toast(`nvpn ${label} failed`, e?.message || '', 'err');
+    return null;
+  }
+}
+
+function appendNvpnControls(ctaRow, s) {
+  // Running (state==='ok'): Stop + Restart. Rendered in green-side
+  // ordering — Stop is the dangerous one so it goes last.
+  // Stopped-but-installed (state==='warn'): Start.
+  if (s.state === 'ok') {
+    const restartBtn = document.createElement('button');
+    restartBtn.textContent = 'Restart';
+    restartBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      restartBtn.disabled = true;
+      await callNvpnAction('restart', 'restarting');
+      restartBtn.disabled = false;
+    });
+    ctaRow.appendChild(restartBtn);
+
+    const stopBtn = document.createElement('button');
+    stopBtn.className = 'danger';
+    stopBtn.textContent = 'Stop';
+    stopBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      stopBtn.disabled = true;
+      await callNvpnAction('stop', 'stopped');
+      stopBtn.disabled = false;
+    });
+    ctaRow.appendChild(stopBtn);
+  } else if (s.state === 'warn') {
+    const startBtn = document.createElement('button');
+    startBtn.className = 'primary';
+    startBtn.textContent = 'Start';
+    startBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      startBtn.disabled = true;
+      await callNvpnAction('start', 'started');
+      startBtn.disabled = false;
+    });
+    ctaRow.appendChild(startBtn);
+  }
+}
+
+// nvpn install streams NDJSON from /api/setup/nvpn/install (the same
+// endpoint the setup wizard's vpn step drives). We pipe lines into the
+// shared exec modal so the user gets the same UI as a cargo-install
+// run, even though the wire format differs.
+async function runNvpnInstall() {
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'exec-body';
+  bodyEl.innerHTML = `
+    <div class="exec-bar">
+      <div class="note">Streaming from <code>/api/setup/nvpn/install</code></div>
+      <label class="autoscroll-toggle">
+        <input type="checkbox" class="autoscroll" checked>
+        auto-scroll
+      </label>
+    </div>
+    <div class="term exec-term"><span class="line sys">starting…</span><span class="cursor"></span></div>
+  `;
+  const statusPill = document.createElement('span');
+  statusPill.className = 'status-pill running';
+  statusPill.innerHTML = '<span class="spinner"></span>running';
+  const foot = document.createElement('div');
+  foot.style.display = 'flex'; foot.style.alignItems = 'center'; foot.style.width = '100%';
+  const statusWrap = document.createElement('div'); statusWrap.style.flex = '1';
+  statusWrap.appendChild(statusPill);
+  const closeBtn = document.createElement('button'); closeBtn.textContent = 'close'; closeBtn.disabled = true;
+  foot.appendChild(statusWrap); foot.appendChild(closeBtn);
+  const modal = openModal({ title: 'Install nostr-vpn', subtitle: 'Downloading + installing nvpn…', body: bodyEl, footer: foot });
+  modal.root.classList.add('exec-modal');
+  closeBtn.addEventListener('click', () => modal.close());
+
+  const term   = bodyEl.querySelector('.exec-term');
+  const cursor = term.querySelector('.cursor');
+  const auto   = bodyEl.querySelector('.autoscroll');
+  const addLine = (text, cls = '') => {
+    const span = document.createElement('span');
+    span.className = 'line ' + cls;
+    span.textContent = text + '\n';
+    if (cursor.parentNode === term) term.insertBefore(span, cursor);
+    else term.appendChild(span);
+    if (auto.checked) term.scrollTop = term.scrollHeight;
+  };
+
+  try {
+    const res = await fetch('/api/setup/nvpn/install', {
+      method:  'POST',
+      headers: { 'Authorization': `Bearer ${getSessionToken() || ''}`, 'content-type': 'application/json' },
+      body:    '{}',
+    });
+    if (!res.ok) {
+      addLine(`HTTP ${res.status} — ${await res.text().catch(() => '')}`, 'err');
+      statusPill.className = 'status-pill error'; statusPill.textContent = 'error';
+      closeBtn.disabled = false;
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    let finalDetail = '';
+    let finalOk = false;
+    let finalWarn = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n'); buf = lines.pop();
+      for (const line of lines) {
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.type === 'progress' && msg.step) addLine(msg.step);
+          if (msg.type === 'done') {
+            finalOk     = !!msg.ok;
+            finalWarn   = !!msg.warn;
+            finalDetail = msg.detail || '';
+          }
+        } catch { addLine(line); }
+      }
+    }
+    if (finalOk) {
+      addLine(finalDetail || 'install complete', 'ok');
+      statusPill.className = 'status-pill success'; statusPill.textContent = 'done';
+      toast('nvpn installed', finalDetail, 'ok');
+    } else if (finalWarn) {
+      addLine(finalDetail || 'partial install', 'warn');
+      statusPill.className = 'status-pill warn'; statusPill.textContent = 'warn';
+      toast('nvpn partial install', finalDetail, 'warn');
+    } else {
+      addLine(finalDetail || 'install failed', 'err');
+      statusPill.className = 'status-pill error'; statusPill.textContent = 'error';
+      toast('nvpn install failed', finalDetail, 'err');
+    }
+  } catch (e) {
+    addLine('error: ' + (e?.message || e), 'err');
+    statusPill.className = 'status-pill error'; statusPill.textContent = 'error';
+  } finally {
+    closeBtn.disabled = false;
+    refreshHealth();
+    [3_000, 10_000, 30_000].forEach(ms => setTimeout(refreshHealth, ms));
+  }
+}
 
 const StatusPanel = {
   // Signature of the last payload we rendered. refreshHealth() ticks every
@@ -1218,7 +1385,26 @@ function buildStatusRow(s) {
   const ctaRow = document.createElement('div');
   ctaRow.className = 'status-cta';
 
-  if (s.state === 'err' && cta.installSlug) {
+  // nvpn row gets its own action block — Start / Stop / Restart wired
+  // directly to /api/nvpn/* so the user never has to drop into a
+  // terminal for normal lifecycle ops. Install on err state is handled
+  // below in the general err branch (the nvpn installer streams via
+  // /api/setup/nvpn/install — different shape than the cargo-install
+  // SSE flow used for ngit/nak/stacks).
+  if (s.id === 'vpn' && s.state !== 'err') {
+    appendNvpnControls(ctaRow, s);
+  }
+
+  if (s.state === 'err' && s.id === 'vpn') {
+    const btn = document.createElement('button');
+    btn.className = 'primary';
+    btn.textContent = 'Install nvpn';
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      runNvpnInstall();
+    });
+    ctaRow.appendChild(btn);
+  } else if (s.state === 'err' && cta.installSlug) {
     const btn = document.createElement('button');
     btn.className = 'primary';
     btn.textContent = 'Install';
@@ -4754,7 +4940,7 @@ const LogsPanel = (() => {
     const svcLabel = s.service === 'vpn' ? 'nostr-vpn' : s.service;
     if (!s.installed) {
       const hint = s.service === 'vpn'
-        ? 'Install via the setup wizard\'s vpn step, or `sudo nvpn service install` after a manual binary install.'
+        ? 'Click <strong>Install nvpn</strong> in the strip above to download + register the daemon. The whole flow runs in the dashboard — no terminal needed.'
         : s.service === 'watchdog'
         ? 'The watchdog runs in-process with the dashboard. POST /api/watchdog/start to bring it back if it was stopped.'
         : 'The relay starts with the dashboard. Use the Relay panel\'s start button if it stopped.';
@@ -4765,13 +4951,18 @@ const LogsPanel = (() => {
       };
     }
     if (!s.running) {
+      // Each row's "running:false" hint should point the user at the
+      // closest one-click fix. vpn now has Start / Restart on the Status
+      // row + the Logs panel meta strip, so we point there instead of a
+      // shell command.
       const fix = s.service === 'relay'    ? 'use the Relay panel\'s start/restart buttons'
                 : s.service === 'watchdog' ? 'POST /api/watchdog/start'
+                : s.service === 'vpn'      ? 'click <strong>Start</strong> in the strip above (or on the Status row)'
                 :                            'nvpn start --daemon';
       return {
         level: 'warn',
         title: `${svcLabel} is installed but not running.`,
-        hint:  `Start it: <code>${fix}</code>.`,
+        hint:  `Start it: ${fix}.`,
       };
     }
     if (!s.logExists) {
@@ -4789,29 +4980,18 @@ const LogsPanel = (() => {
         hint:  `The service may be wedged. Restart via the Relay panel (relay) or POST /api/watchdog/{stop,start} (watchdog).`,
       };
     }
-    // Healthy-but-no-streaming case for vpn. nvpn writes its own daemon
-    // log; the dashboard doesn't tail it yet (Phase 2.2 wired the
-    // installer + status probe but log streaming is a separate item).
-    // Without this branch the pane goes blank when nvpn is healthy —
-    // fall-through returns null, hiding the banner, and no log lines
-    // are streaming, so the user sees nothing.
-    if (s.service === 'vpn') {
-      return {
-        level: 'ok',
-        title: `nostr-vpn is running. ${s.note || ''}`.trim(),
-        hint:  `Live nvpn log streaming isn't wired into the dashboard yet. Tail the daemon log directly: <code>tail -f ~/.config/nvpn/daemon.log</code> (or wherever nvpn is configured to log on your machine).`,
-      };
-    }
+    // The vpn tab renders its rich meta block separately (renderMeta
+    // below). Suppress the banner when healthy + streaming — the meta
+    // strip already shows tunnel IP, controls, and the daemon log path.
     return null;
   }
 
   function renderMeta(status) {
     if (!meta) return;
-    // Watchdog tab: surface the watchdog npub so the user can follow it on
-    // their phone / preferred Nostr client and actually receive the
-    // relay-down DMs the watchdog is there to send. No other service has
-    // meta worth showing yet; this slot is ready for them when they do.
     if (status.service === 'watchdog' && status.watchdogNpub) {
+      // Watchdog tab: surface the watchdog npub so the user can follow it
+      // on their phone / preferred Nostr client and actually receive the
+      // relay-down DMs the watchdog is there to send.
       meta.hidden = false;
       meta.innerHTML = `
         <span class="logs-meta-label">watchdog identity</span>
@@ -4826,10 +5006,248 @@ const LogsPanel = (() => {
           setTimeout(() => { btn.textContent = prev; }, 1200);
         }).catch(() => {});
       });
-    } else {
-      meta.hidden = true;
-      meta.innerHTML = '';
+      return;
     }
+
+    if (status.service === 'vpn') {
+      renderVpnMeta(status);
+      return;
+    }
+
+    meta.hidden = true;
+    meta.innerHTML = '';
+  }
+
+  // The nvpn tab is the dashboard's single-screen control surface for
+  // nostr-vpn — replaces the old "tail the log yourself" hint. Renders:
+  //   - state pill + tunnel IP / install state
+  //   - Start / Stop / Restart buttons (mirror the Status row, redundant
+  //     by design — both surfaces are the user's likely entry point)
+  //   - Install nvpn / Install service buttons when relevant
+  //   - daemon log path + a copy button so a power user can `tail -f`
+  //     elsewhere if they want to
+  //   - identity (npub) + peers list, populated from /api/nvpn/status
+  //
+  // Status here comes from the SSE banner-frame (running/installed bits)
+  // plus a one-shot fetch to /api/nvpn/status for the richer fields.
+  // Re-renders on every SSE status frame and once on tab open.
+  function renderVpnMeta(banner) {
+    meta.hidden = false;
+    meta.classList.add('vpn-meta');
+    const stateText = !banner.installed ? 'not installed'
+                    : !banner.running   ? 'stopped'
+                    :                     'running';
+    const stateClass = !banner.installed ? 'err'
+                     : !banner.running   ? 'warn'
+                     :                     'ok';
+
+    meta.innerHTML = `
+      <div class="vpn-meta-row">
+        <div class="vpn-meta-state">
+          <span class="dot ${stateClass}"></span>
+          <span class="vpn-meta-label">nostr-vpn</span>
+          <span class="vpn-meta-value">${escapeHtml(stateText)}</span>
+          ${banner.tunnelIp
+            ? `<span class="vpn-meta-tunnel">tunnel <code class="cmd-inline">${escapeHtml(banner.tunnelIp)}</code></span>`
+            : ''}
+        </div>
+        <div class="vpn-meta-actions"></div>
+      </div>
+      <div class="vpn-meta-detail" id="vpn-meta-detail">
+        ${banner.logPath ? `
+          <div class="vpn-meta-row vpn-meta-subrow">
+            <span class="vpn-meta-label">log</span>
+            <code class="cmd-inline vpn-meta-logpath">${escapeHtml(banner.logPath)}</code>
+            <span class="vpn-meta-copy-slot"></span>
+          </div>` : ''}
+        <div id="vpn-meta-extra"></div>
+      </div>
+    `;
+
+    const actions = meta.querySelector('.vpn-meta-actions');
+    if (!banner.installed) {
+      const installBtn = document.createElement('button');
+      installBtn.className = 'primary';
+      installBtn.textContent = 'Install nvpn';
+      installBtn.addEventListener('click', (e) => { e.preventDefault(); runNvpnInstall(); });
+      actions.appendChild(installBtn);
+    } else if (!banner.running) {
+      const startBtn = document.createElement('button');
+      startBtn.className = 'primary';
+      startBtn.textContent = 'Start';
+      startBtn.addEventListener('click', async (e) => {
+        e.preventDefault(); startBtn.disabled = true;
+        await callNvpnAction('start', 'started'); startBtn.disabled = false;
+      });
+      actions.appendChild(startBtn);
+    } else {
+      const restartBtn = document.createElement('button');
+      restartBtn.textContent = 'Restart';
+      restartBtn.addEventListener('click', async (e) => {
+        e.preventDefault(); restartBtn.disabled = true;
+        await callNvpnAction('restart', 'restarted'); restartBtn.disabled = false;
+      });
+      actions.appendChild(restartBtn);
+      const stopBtn = document.createElement('button');
+      stopBtn.className = 'danger';
+      stopBtn.textContent = 'Stop';
+      stopBtn.addEventListener('click', async (e) => {
+        e.preventDefault(); stopBtn.disabled = true;
+        await callNvpnAction('stop', 'stopped'); stopBtn.disabled = false;
+      });
+      actions.appendChild(stopBtn);
+    }
+
+    // Refresh button — re-poll /api/nvpn/status without bouncing the SSE
+    // connection. Cheap operation; user might be debugging mesh peer
+    // discovery and want immediate feedback after toggling something
+    // upstream.
+    const refreshBtn = document.createElement('button');
+    refreshBtn.textContent = 'Refresh';
+    refreshBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      refreshBtn.disabled = true;
+      try { await loadVpnDetail(); } finally { refreshBtn.disabled = false; }
+    });
+    actions.appendChild(refreshBtn);
+
+    // Copy button for the log path, if we have one.
+    if (banner.logPath) {
+      const slot = meta.querySelector('.vpn-meta-copy-slot');
+      if (slot && banner.logPath !== '(not installed)') {
+        slot.appendChild(copyBtn(banner.logPath));
+      }
+    }
+
+    // Async-load the rich detail (peers, npub, raw status). The banner
+    // frame keeps the meta strip rendered immediately; this fills in the
+    // expensive fields after.
+    loadVpnDetail();
+  }
+
+  async function loadVpnDetail() {
+    const slot = document.getElementById('vpn-meta-extra');
+    if (!slot) return;
+    slot.innerHTML = '<div class="muted vpn-meta-loading">loading details…</div>';
+    let data;
+    try { data = await api('/api/nvpn/status'); }
+    catch { slot.innerHTML = ''; return; }
+
+    if (!data?.installed) { slot.innerHTML = ''; return; }
+
+    const raw = data.raw || {};
+    const npub = (typeof raw.npub === 'string' && raw.npub) || null;
+    const pubkey = (typeof raw.pubkey === 'string' && raw.pubkey) || null;
+    const peers = normalizeNvpnPeers(raw.peers);
+    const daemonPid = raw?.daemon?.pid ?? null;
+    const startedAt = raw?.daemon?.started_at ?? null;
+    const error = data.error;
+
+    let html = '';
+    if (error) {
+      html += `<div class="vpn-meta-row vpn-meta-subrow vpn-meta-err">
+        <span class="vpn-meta-label">last probe</span>
+        <span>${escapeHtml(error)}</span>
+      </div>`;
+    }
+    if (npub || pubkey) {
+      const id = npub || pubkey;
+      html += `<div class="vpn-meta-row vpn-meta-subrow">
+        <span class="vpn-meta-label">${npub ? 'npub' : 'pubkey'}</span>
+        <code class="cmd-inline vpn-meta-id">${escapeHtml(id)}</code>
+        <span class="vpn-meta-copy-id"></span>
+      </div>`;
+    }
+    if (daemonPid !== null || startedAt) {
+      const bits = [];
+      if (daemonPid !== null) bits.push(`pid ${daemonPid}`);
+      if (startedAt)          bits.push(`started ${escapeHtml(String(startedAt))}`);
+      html += `<div class="vpn-meta-row vpn-meta-subrow muted">
+        <span class="vpn-meta-label">daemon</span>
+        <span>${bits.join(' · ')}</span>
+      </div>`;
+    }
+    if (peers.length > 0) {
+      html += `<div class="vpn-meta-peers">
+        <div class="vpn-meta-label">peers (${peers.length})</div>
+        <div class="vpn-meta-peers-list">
+          ${peers.map(p => {
+            const status = p.connected ? 'ok' : 'warn';
+            const label  = p.npub || p.pubkey || p.ip || 'peer';
+            const sub    = [p.ip, p.latencyMs != null ? `${p.latencyMs}ms` : null, p.lastSeen]
+              .filter(Boolean).join(' · ');
+            return `
+              <div class="vpn-meta-peer">
+                <span class="dot ${status}"></span>
+                <code class="cmd-inline">${escapeHtml(label)}</code>
+                ${sub ? `<span class="muted">${escapeHtml(sub)}</span>` : ''}
+              </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    } else if (data.running) {
+      html += `<div class="vpn-meta-row vpn-meta-subrow muted">
+        <span class="vpn-meta-label">peers</span>
+        <span>none discovered yet</span>
+      </div>`;
+    }
+    // Install-service fix-it path. If running but no service unit, give
+    // the user a one-click retry — the wizard's last step often lands a
+    // warn here (sudo cred cache empty during install).
+    if (data.running && raw?.daemon?.service_loaded === false) {
+      html += `<div class="vpn-meta-row vpn-meta-subrow vpn-meta-fixit">
+        <span class="vpn-meta-label">auto-start</span>
+        <span class="muted">system service not registered — auto-start at boot won\'t work</span>
+        <button id="vpn-install-service">Install service</button>
+      </div>`;
+    }
+    slot.innerHTML = html;
+
+    // Wire up copy + install-service buttons after innerHTML.
+    const idSlot = slot.querySelector('.vpn-meta-copy-id');
+    if (idSlot && (npub || pubkey)) idSlot.appendChild(copyBtn(npub || pubkey));
+    const svc = slot.querySelector('#vpn-install-service');
+    if (svc) {
+      svc.addEventListener('click', async (e) => {
+        e.preventDefault(); svc.disabled = true;
+        try {
+          const r = await api('/api/nvpn/install-service', { method: 'POST' });
+          toast(r?.ok ? 'service installed' : 'install-service failed', r?.detail || '', r?.ok ? 'ok' : 'err');
+          loadVpnDetail();
+        } catch { /* api() already toasted */ }
+        svc.disabled = false;
+      });
+    }
+  }
+
+  // Normalize peer-list shape across upstream nvpn revisions. We've seen:
+  //   array of {pubkey,ip,connected,latency_ms,last_seen}
+  //   array of {npub,address,online,rtt_ms,seen}
+  //   object map keyed by pubkey
+  // We project to a single shape the renderer can rely on.
+  function normalizeNvpnPeers(peers) {
+    if (!peers) return [];
+    const arr = Array.isArray(peers) ? peers : Object.values(peers);
+    const out = [];
+    for (const p of arr) {
+      if (!p || typeof p !== 'object') continue;
+      out.push({
+        npub:      typeof p.npub === 'string' ? p.npub : null,
+        pubkey:    typeof p.pubkey === 'string' ? p.pubkey : null,
+        ip:        typeof p.ip === 'string' ? p.ip
+                 : typeof p.address === 'string' ? p.address
+                 : typeof p.tunnel_ip === 'string' ? p.tunnel_ip
+                 : null,
+        connected: !!(p.connected ?? p.online ?? p.up),
+        latencyMs: typeof p.latency_ms === 'number' ? p.latency_ms
+                 : typeof p.rtt_ms === 'number'     ? p.rtt_ms
+                 : null,
+        lastSeen:  typeof p.last_seen === 'string' ? p.last_seen
+                 : typeof p.seen === 'string'      ? p.seen
+                 : null,
+      });
+    }
+    return out;
   }
 
   function renderBanner(status) {

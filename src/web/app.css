@@ -948,6 +948,109 @@ input:focus, textarea:focus, select:focus {
 .logs-status.warn { border-color: var(--warn);  background: color-mix(in srgb, var(--warn)  10%, transparent); color: var(--warn); }
 .logs-status.ok   { border-color: var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); color: var(--success); }
 
+/* nvpn-tab meta strip: rich control surface (state + Start/Stop +
+   tunnel ip + log path + identity + peers). Replaces the static
+   "tail it manually" hint that used to land on this row. */
+.logs-meta.vpn-meta {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px 14px;
+}
+.logs-meta.vpn-meta .vpn-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.logs-meta.vpn-meta .vpn-meta-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.logs-meta.vpn-meta .vpn-meta-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  flex: 0 0 auto;
+}
+.logs-meta.vpn-meta .vpn-meta-value {
+  color: var(--text);
+  font-weight: 500;
+  text-transform: capitalize;
+}
+.logs-meta.vpn-meta .vpn-meta-tunnel { color: var(--text-dim); margin-left: 6px; }
+.logs-meta.vpn-meta .vpn-meta-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.logs-meta.vpn-meta .vpn-meta-actions button {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--text);
+  cursor: pointer;
+}
+.logs-meta.vpn-meta .vpn-meta-actions button:hover:not(:disabled) {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.3);
+}
+.logs-meta.vpn-meta .vpn-meta-actions button:disabled { opacity: 0.5; cursor: progress; }
+.logs-meta.vpn-meta .vpn-meta-actions button.primary {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  color: var(--text);
+}
+.logs-meta.vpn-meta .vpn-meta-actions button.danger {
+  border-color: color-mix(in srgb, var(--error) 50%, transparent);
+  color: color-mix(in srgb, var(--error) 90%, var(--text));
+}
+.logs-meta.vpn-meta .vpn-meta-detail { display: flex; flex-direction: column; gap: 4px; }
+.logs-meta.vpn-meta .vpn-meta-subrow {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.logs-meta.vpn-meta .vpn-meta-subrow code {
+  background: rgba(255,255,255,0.04);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.logs-meta.vpn-meta .vpn-meta-id { word-break: break-all; flex: 1; min-width: 0; }
+.logs-meta.vpn-meta .vpn-meta-logpath { word-break: break-all; flex: 1; min-width: 0; }
+.logs-meta.vpn-meta .vpn-meta-loading { padding: 4px 0; font-size: 11px; }
+.logs-meta.vpn-meta .vpn-meta-err { color: var(--warn); }
+.logs-meta.vpn-meta .vpn-meta-fixit { background: color-mix(in srgb, var(--warn) 8%, transparent); padding: 4px 8px; border-radius: 3px; }
+.logs-meta.vpn-meta .vpn-meta-peers { display: flex; flex-direction: column; gap: 4px; }
+.logs-meta.vpn-meta .vpn-meta-peers-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 3px;
+  padding-left: 4px;
+}
+.logs-meta.vpn-meta .vpn-meta-peer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.logs-meta.vpn-meta .vpn-meta-peer code { font-size: 11px; }
+.logs-meta.vpn-meta .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.logs-meta.vpn-meta .dot.ok   { background: var(--success); }
+.logs-meta.vpn-meta .dot.warn { background: var(--warn); }
+.logs-meta.vpn-meta .dot.err  { background: var(--error); }
+
 /* ── config panel ─────────────────────────────────────────────────────── */
 
 .config-sections {
