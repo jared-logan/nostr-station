@@ -537,6 +537,246 @@ export async function whoisPeer(query: string): Promise<WhoisResult> {
   }
 }
 
+// ── Lifecycle: pause / resume / reload (Feature 3) ───────────────────────
+//
+// Less destructive than stop. `pause` flips the data plane off without
+// killing the daemon (faster resume; daemon stays in the relay's
+// presence list). `reload` re-reads config + roster after an out-of-band
+// edit. All three are unprivileged.
+
+export async function pauseNvpn(): Promise<ControlResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  try {
+    await execa(binPath, ['pause'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
+    return { ok: true, detail: 'nvpn paused' };
+  } catch (e: any) { return { ok: false, detail: summarizeError(e) }; }
+}
+
+export async function resumeNvpn(): Promise<ControlResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  try {
+    await execa(binPath, ['resume'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
+    return { ok: true, detail: 'nvpn resumed' };
+  } catch (e: any) { return { ok: false, detail: summarizeError(e) }; }
+}
+
+export async function reloadNvpn(): Promise<ControlResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  try {
+    await execa(binPath, ['reload'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
+    return { ok: true, detail: 'nvpn config reloaded' };
+  } catch (e: any) { return { ok: false, detail: summarizeError(e) }; }
+}
+
+export async function repairNvpnNetwork(): Promise<ControlResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  try {
+    await execa(binPath, ['repair-network'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
+    return { ok: true, detail: 'network state repaired' };
+  } catch (e: any) { return { ok: false, detail: summarizeError(e) }; }
+}
+
+// ── Diagnostics: ping / netcheck / doctor / nat-discover ─────────────────
+
+export interface PingOptions {
+  count?:       number;
+  timeoutSecs?: number;
+}
+export interface PingResult extends ControlResult {
+  output?: string;
+}
+export async function pingNvpnPeer(target: string, opts: PingOptions = {}): Promise<PingResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  const trimmed = String(target || '').trim();
+  if (!trimmed) return { ok: false, detail: 'empty ping target' };
+  // ping is plain text output (not JSON) — mirror the binary's wire
+  // format and return it verbatim. Caller renders inline.
+  const count       = clampInt(opts.count, 1, 10, 3);
+  const timeoutSecs = clampInt(opts.timeoutSecs, 1, 30, 2);
+  // Total cap = (count * timeoutSecs) + 2s slack. nvpn's ping respects
+  // its --timeout-secs per-attempt; we add a hard ceiling so a wedged
+  // socket doesn't block the dashboard click.
+  const totalCap = (count * timeoutSecs * 1000) + 2_000;
+  try {
+    const { stdout, stderr } = await execa(
+      binPath,
+      ['ping', trimmed, '--count', String(count), '--timeout-secs', String(timeoutSecs)],
+      { timeout: totalCap, stdio: 'pipe' },
+    );
+    return { ok: true, detail: 'ping ok', output: (stdout || stderr || '').slice(0, 4000) };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e), output: (e?.stdout || '').slice(0, 4000) };
+  }
+}
+
+export interface DiagResult extends ControlResult {
+  raw?: Record<string, unknown> | null;
+}
+
+const NETCHECK_TIMEOUT_MS = 8_000;
+const DOCTOR_TIMEOUT_MS   = 30_000;
+
+export async function netcheckNvpn(): Promise<DiagResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  try {
+    const { stdout } = await execa(binPath, ['netcheck', '--json'], {
+      timeout: NETCHECK_TIMEOUT_MS, stdio: 'pipe',
+    });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
+    return { ok: true, detail: 'netcheck ok', raw };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+export interface DoctorOptions {
+  writeBundle?: boolean;
+}
+export interface DoctorResult extends DiagResult {
+  bundlePath?: string;
+}
+export async function doctorNvpn(opts: DoctorOptions = {}): Promise<DoctorResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  const args = ['doctor', '--json'];
+  let bundlePath: string | undefined;
+  if (opts.writeBundle) {
+    // Drop the bundle alongside the install log so post-mortems have
+    // one place to look. Stamp + extension match nvpn's expected output.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    bundlePath = path.join(os.homedir(), 'logs', `nvpn-doctor-${stamp}.tgz`);
+    try { fs.mkdirSync(path.dirname(bundlePath), { recursive: true }); } catch { /* fine */ }
+    args.push('--write-bundle', bundlePath);
+  }
+  try {
+    const { stdout } = await execa(binPath, args, {
+      timeout: DOCTOR_TIMEOUT_MS, stdio: 'pipe',
+    });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
+    return { ok: true, detail: 'doctor ok', raw, bundlePath };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e), bundlePath };
+  }
+}
+
+export async function natDiscoverNvpn(reflector: string, listenPort?: number): Promise<DiagResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  const trimmed = String(reflector || '').trim();
+  // host:port — port range 1–65535. We don't try to validate the host
+  // beyond non-empty; nvpn will surface a clearer error than ours.
+  if (!/^[A-Za-z0-9.\-:[\]]+:\d{1,5}$/.test(trimmed)) {
+    return { ok: false, detail: 'reflector must be host:port' };
+  }
+  const args = ['nat-discover', '--reflector', trimmed, '--json'];
+  if (typeof listenPort === 'number' && listenPort > 0 && listenPort < 65536) {
+    args.push('--listen-port', String(listenPort));
+  }
+  try {
+    const { stdout } = await execa(binPath, args, {
+      timeout: 8_000, stdio: 'pipe',
+    });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
+    return { ok: true, detail: 'nat-discover ok', raw };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+// ── Settings (`nvpn set`) ────────────────────────────────────────────────
+//
+// `nvpn set` accepts a wide range of `--<key> <value>` pairs. The
+// dashboard exposes a curated subset matching what users routinely tune
+// (node name, listen port, autoconnect, advertise-exit-node, advertised
+// routes). Unknown keys pass through unchanged so an upstream addition
+// doesn't require a code change here.
+
+const SETTABLE_KEYS = new Set([
+  'node-name',
+  'listen-port',
+  'tunnel-ip',
+  'endpoint',
+  'magic-dns-suffix',
+  'exit-node',
+  'advertise-exit-node',
+  'advertise-routes',
+  'autoconnect',
+  'relay-for-others',
+  'provide-nat-assist',
+  'network-id',
+]);
+
+export interface SetResult extends ControlResult {
+  raw?: Record<string, unknown> | null;
+}
+export async function setNvpnSettings(input: Record<string, unknown>): Promise<SetResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  const args: string[] = ['set'];
+  let added = 0;
+  for (const [key, value] of Object.entries(input || {})) {
+    if (!SETTABLE_KEYS.has(key)) continue;
+    if (value === undefined || value === null || value === '') continue;
+    args.push(`--${key}`, String(value));
+    added++;
+  }
+  if (added === 0) return { ok: false, detail: 'no settable fields in payload' };
+  args.push('--json');
+  try {
+    const { stdout } = await execa(binPath, args, { timeout: 10_000, stdio: 'pipe' });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
+    return { ok: true, detail: `${added} field${added === 1 ? '' : 's'} updated`, raw };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+// ── Stats (`nvpn stats`) ─────────────────────────────────────────────────
+// Surfaces relay-operator counters from the local state file. Useful
+// for users who flip on `relay-for-others` and want to see traffic
+// they're forwarding.
+export async function statsNvpn(): Promise<DiagResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  try {
+    const { stdout } = await execa(binPath, ['stats', '--json'], { timeout: 4_000, stdio: 'pipe' });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
+    return { ok: true, detail: 'stats ok', raw };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+// ── Pure helpers (testable) ─────────────────────────────────────────────
+
+export function clampInt(v: unknown, lo: number, hi: number, fallback: number): number {
+  // null + undefined coerce to 0 / NaN respectively under `Number()`, but
+  // semantically they're "no value" — treat as fallback so callers don't
+  // accidentally write a clamped 0/lo when the input was missing entirely.
+  if (v === null || v === undefined) return fallback;
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(lo, Math.min(hi, Math.floor(n)));
+}
+
+// True iff `key` is on the curated `nvpn set` allowlist. Exported for
+// route-handler validation: callers sanitize their request body before
+// calling setNvpnSettings so the rejection happens at the API boundary.
+export function isSettableNvpnKey(key: string): boolean {
+  return SETTABLE_KEYS.has(key);
+}
+
 // ── Log tail ─────────────────────────────────────────────────────────────
 //
 // The log file path comes from `nvpn status --json` (`daemon.log_file`).

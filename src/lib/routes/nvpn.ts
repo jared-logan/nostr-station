@@ -36,6 +36,9 @@ import {
   nvpnRowStateFor,
   addParticipants, removeParticipants, addAdmins, removeAdmins,
   publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster,
+  pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork,
+  pingNvpnPeer, netcheckNvpn, doctorNvpn, natDiscoverNvpn,
+  setNvpnSettings, statsNvpn,
 } from '../nvpn.js';
 import { readBody } from './_shared.js';
 
@@ -207,6 +210,85 @@ export async function handleNvpn(
     if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
     const query = typeof body.query === 'string' ? body.query : '';
     const r = await whoisPeer(query);
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // ── Pause / resume / reload / repair (Feature 3) ──────────────────
+  // Less destructive than stop. pause flips the data plane off without
+  // killing the daemon; resume turns it back on. reload re-reads
+  // config + roster. repair-network fixes orphaned routes/iface state
+  // left behind by a crash.
+  if (url === '/api/nvpn/pause' && method === 'POST') {
+    const r = await pauseNvpn();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/resume' && method === 'POST') {
+    const r = await resumeNvpn();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/reload' && method === 'POST') {
+    const r = await reloadNvpn();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/repair-network' && method === 'POST') {
+    const r = await repairNvpnNetwork();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // ── Diagnostics ───────────────────────────────────────────────────
+  if (url === '/api/nvpn/ping' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const target = typeof body.target === 'string' ? body.target : '';
+    const r = await pingNvpnPeer(target, {
+      count:       typeof body.count === 'number' ? body.count : undefined,
+      timeoutSecs: typeof body.timeoutSecs === 'number' ? body.timeoutSecs : undefined,
+    });
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/netcheck' && method === 'GET') {
+    const r = await netcheckNvpn();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/doctor' && method === 'POST') {
+    const body = await parseJsonBody(req) || {};
+    const r = await doctorNvpn({ writeBundle: !!body.bundle });
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/nat-discover' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const reflector  = typeof body.reflector === 'string' ? body.reflector : '';
+    const listenPort = typeof body.listenPort === 'number' ? body.listenPort : undefined;
+    const r = await natDiscoverNvpn(reflector, listenPort);
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/stats' && method === 'GET') {
+    const r = await statsNvpn();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // ── `nvpn set` ────────────────────────────────────────────────────
+  // Curated allowlist applied inside setNvpnSettings — unknown keys
+  // are silently dropped. Settings that affect the data plane (e.g.
+  // listen-port) require a `reload` or restart to take effect; the UI
+  // surfaces the hint after a successful save.
+  if (url === '/api/nvpn/set' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body || typeof body !== 'object') {
+      await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true;
+    }
+    const r = await setNvpnSettings(body);
     await writeJson(res, r.ok ? 200 : 500, r);
     return true;
   }

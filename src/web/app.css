@@ -1350,6 +1350,146 @@ input:focus, textarea:focus, select:focus {
 }
 .logs-meta.vpn-meta .vpn-meta-danger-body button:disabled { opacity: 0.5; cursor: progress; }
 
+/* Per-peer ping output. Toggled visible by the click handler; otherwise
+   hidden so the row stays compact. */
+.logs-meta.vpn-meta .vpn-meta-peer-pingout {
+  flex-basis: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  background: rgba(0,0,0,0.2);
+  border-radius: 3px;
+  color: var(--text-dim);
+  max-height: 160px;
+  overflow: auto;
+}
+.logs-meta.vpn-meta .vpn-meta-peer-pingout-err {
+  color: color-mix(in srgb, var(--error) 80%, var(--text-dim));
+}
+
+/* Diagnostics block — same details/summary shell as Danger zone, with
+   action buttons + a scrollable output pane below. */
+.logs-meta.vpn-meta .vpn-meta-diag,
+.logs-meta.vpn-meta .vpn-meta-set {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+.logs-meta.vpn-meta .vpn-meta-diag summary,
+.logs-meta.vpn-meta .vpn-meta-set summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.logs-meta.vpn-meta .vpn-meta-diag summary::-webkit-details-marker,
+.logs-meta.vpn-meta .vpn-meta-set summary::-webkit-details-marker { display: none; }
+.logs-meta.vpn-meta .vpn-meta-diag summary::before,
+.logs-meta.vpn-meta .vpn-meta-set summary::before {
+  content: '▸ ';
+  display: inline-block;
+  transition: transform 120ms;
+}
+.logs-meta.vpn-meta .vpn-meta-diag details[open] summary::before,
+.logs-meta.vpn-meta .vpn-meta-set details[open] summary::before {
+  transform: rotate(90deg);
+}
+.logs-meta.vpn-meta .vpn-meta-diag-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+}
+.logs-meta.vpn-meta .vpn-meta-diag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.logs-meta.vpn-meta .vpn-meta-diag-actions button {
+  padding: 3px 9px;
+  font-size: 11px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--text);
+  cursor: pointer;
+}
+.logs-meta.vpn-meta .vpn-meta-diag-actions button:hover:not(:disabled) {
+  background: rgba(255,255,255,0.08);
+}
+.logs-meta.vpn-meta .vpn-meta-diag-actions button:disabled { opacity: 0.5; cursor: progress; }
+.logs-meta.vpn-meta .vpn-meta-diag-out {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 8px;
+  background: rgba(0,0,0,0.2);
+  border-radius: 3px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+.logs-meta.vpn-meta .vpn-meta-diag-out-ok  { color: var(--text); }
+.logs-meta.vpn-meta .vpn-meta-diag-out-err { color: color-mix(in srgb, var(--error) 80%, var(--text-dim)); }
+
+/* Settings block — grid of label / input pairs. */
+.logs-meta.vpn-meta .vpn-meta-set-body {
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.logs-meta.vpn-meta .vpn-meta-set-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+.logs-meta.vpn-meta .vpn-meta-set-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}
+.logs-meta.vpn-meta .vpn-meta-set-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.logs-meta.vpn-meta .vpn-meta-set-grid input,
+.logs-meta.vpn-meta .vpn-meta-set-grid select {
+  padding: 4px 8px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  background: rgba(0,0,0,0.2);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  color: var(--text);
+}
+.logs-meta.vpn-meta .vpn-meta-set-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.logs-meta.vpn-meta .vpn-meta-set-actions button {
+  padding: 4px 12px;
+  font-size: 11px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  color: var(--text);
+  cursor: pointer;
+}
+.logs-meta.vpn-meta .vpn-meta-set-actions button:disabled { opacity: 0.5; cursor: progress; }
+.logs-meta.vpn-meta .vpn-meta-set-hint { font-size: 10px; }
+
 /* ── config panel ─────────────────────────────────────────────────────── */
 
 .config-sections {

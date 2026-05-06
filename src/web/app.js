@@ -5088,6 +5088,27 @@ const LogsPanel = (() => {
         await callNvpnAction('restart', 'restarted'); restartBtn.disabled = false;
       });
       actions.appendChild(restartBtn);
+      // Pause / resume — soft toggle of the data plane while keeping
+      // the daemon up (Feature 3). Cheaper than Stop+Start; presence
+      // signal stays published so peers don't see you fall off the
+      // mesh. Pause flips to "Resume" once we're paused (we infer
+      // pause state from `status` being running but the meta saying
+      // paused — there's no dedicated pause flag yet, so the button
+      // posts whichever; nvpn idempotently accepts both).
+      const pauseBtn = document.createElement('button');
+      pauseBtn.textContent = 'Pause';
+      pauseBtn.addEventListener('click', async (e) => {
+        e.preventDefault(); pauseBtn.disabled = true;
+        await callNvpnAction('pause', 'paused'); pauseBtn.disabled = false;
+      });
+      actions.appendChild(pauseBtn);
+      const resumeBtn = document.createElement('button');
+      resumeBtn.textContent = 'Resume';
+      resumeBtn.addEventListener('click', async (e) => {
+        e.preventDefault(); resumeBtn.disabled = true;
+        await callNvpnAction('resume', 'resumed'); resumeBtn.disabled = false;
+      });
+      actions.appendChild(resumeBtn);
       const stopBtn = document.createElement('button');
       stopBtn.className = 'danger';
       stopBtn.textContent = 'Stop';
@@ -5222,6 +5243,13 @@ const LogsPanel = (() => {
       </div>`;
     }
 
+    // Diagnostics + Settings (Feature 3). Rendered as collapsed
+    // <details> blocks so they don't clutter the panel for the common
+    // case (user just wants to see peers + lifecycle). Run-on-click
+    // for everything that talks to the network — never auto-polled.
+    html += renderDiagnosticsBlock();
+    html += renderSettingsBlock(raw);
+
     // Service sub-block (Feature 2) — four pills + state-aware actions.
     // Always shown when nvpn is installed, even if the service unit is
     // missing (the user has to install it from somewhere). When the
@@ -5277,6 +5305,117 @@ const LogsPanel = (() => {
     wireSvcBtn('vpn-svc-disable',   '/api/nvpn/service/disable',   'auto-start disabled');
     wireSvcBtn('vpn-svc-reinstall', '/api/nvpn/service/install',   'service reinstalled');
     wireSvcBtn('vpn-svc-uninstall', '/api/nvpn/service/uninstall', 'service unit removed');
+
+    // ── Diagnostics buttons ─────────────────────────────────────────
+    const diagOut = slot.querySelector('#vpn-diag-out');
+    const setDiagOut = (text, level = 'info') => {
+      if (!diagOut) return;
+      diagOut.textContent = text;
+      diagOut.className = `vpn-meta-diag-out ${level === 'err' ? 'vpn-meta-diag-out-err'
+                                              : level === 'ok'  ? 'vpn-meta-diag-out-ok'
+                                              : 'muted'}`;
+    };
+    const runDiag = async (label, fetcher) => {
+      setDiagOut(`${label}…`);
+      try {
+        const r = await fetcher();
+        if (r?.ok === false) {
+          setDiagOut(`${label} failed: ${r?.detail || 'unknown error'}`, 'err');
+        } else {
+          // Render JSON or text output. We pretty-print raw if present;
+          // otherwise show the success detail line.
+          const body = r?.raw
+            ? JSON.stringify(r.raw, null, 2)
+            : (r?.output || r?.detail || 'ok');
+          setDiagOut(body, 'ok');
+        }
+      } catch { setDiagOut(`${label} failed (network error)`, 'err'); }
+    };
+    const ncBtn = slot.querySelector('#vpn-diag-netcheck');
+    if (ncBtn) ncBtn.addEventListener('click', (e) => { e.preventDefault(); runDiag('netcheck', () => api('/api/nvpn/netcheck')); });
+    const docBtn = slot.querySelector('#vpn-diag-doctor');
+    if (docBtn) docBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      runDiag('doctor', () => api('/api/nvpn/doctor', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }));
+    });
+    const bundleBtn = slot.querySelector('#vpn-diag-doctor-bundle');
+    if (bundleBtn) bundleBtn.addEventListener('click', async (e) => {
+      e.preventDefault(); bundleBtn.disabled = true;
+      setDiagOut('writing support bundle…');
+      try {
+        const r = await api('/api/nvpn/doctor', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ bundle: true }),
+        });
+        if (r?.ok && r?.bundlePath) {
+          setDiagOut(`bundle written to ${r.bundlePath}`, 'ok');
+          toast('support bundle saved', r.bundlePath, 'ok');
+        } else {
+          setDiagOut(`bundle failed: ${r?.detail || 'unknown'}`, 'err');
+        }
+      } catch { setDiagOut('bundle failed (network error)', 'err'); }
+      bundleBtn.disabled = false;
+    });
+    const statsBtn = slot.querySelector('#vpn-diag-stats');
+    if (statsBtn) statsBtn.addEventListener('click', (e) => { e.preventDefault(); runDiag('stats', () => api('/api/nvpn/stats')); });
+    const reloadBtn = slot.querySelector('#vpn-diag-reload');
+    if (reloadBtn) reloadBtn.addEventListener('click', async (e) => {
+      e.preventDefault(); reloadBtn.disabled = true;
+      try {
+        const r = await api('/api/nvpn/reload', { method: 'POST' });
+        toast('config reloaded', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+      } catch { /* api() already toasted */ }
+      reloadBtn.disabled = false;
+    });
+    const repairBtn = slot.querySelector('#vpn-diag-repair');
+    if (repairBtn) repairBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const ok = await confirmDestructive({
+        title: 'Repair network?',
+        description: 'Resets routes/iface state left behind by a stopped or crashed session. Safe on an idle daemon; brief connectivity blip if running.',
+        confirmLabel: 'Repair',
+      });
+      if (!ok) return;
+      repairBtn.disabled = true;
+      try {
+        const r = await api('/api/nvpn/repair-network', { method: 'POST' });
+        toast('repair network', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+      } catch { /* api() already toasted */ }
+      repairBtn.disabled = false;
+    });
+
+    // ── Settings save ───────────────────────────────────────────────
+    const saveBtn = slot.querySelector('#vpn-set-save');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const inputs = slot.querySelectorAll('.vpn-meta-set-grid [data-key]');
+        const payload = {};
+        for (const inp of inputs) {
+          const key = inp.dataset.key;
+          const val = String(inp.value || '').trim();
+          // Skip blanks so we don't clobber existing settings with
+          // empty strings. Saves the user from having to remember
+          // every current value.
+          if (!val) continue;
+          payload[key] = val;
+        }
+        if (Object.keys(payload).length === 0) {
+          toast('No changes', 'fill at least one field to save', 'warn');
+          return;
+        }
+        saveBtn.disabled = true;
+        try {
+          const r = await api('/api/nvpn/set', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          toast('settings saved', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+          loadVpnDetail();
+        } catch { /* api() already toasted */ }
+        saveBtn.disabled = false;
+      });
+    }
 
     // Danger-zone full uninstall. Type-to-confirm so a stray click can't
     // wipe a working install. Sequence: stop daemon → uninstall service
@@ -5356,7 +5495,9 @@ const LogsPanel = (() => {
     }
 
     // Per-row buttons. Wired by data-action so the merged renderer can
-    // drop them in without a bespoke event listener per row.
+    // drop them in without a bespoke event listener per row. Ping is
+    // a special case — it doesn't mutate state, so we render the
+    // result inline and skip the loadVpnDetail re-render.
     slot.querySelectorAll('.vpn-meta-peer button[data-action]').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
@@ -5365,8 +5506,25 @@ const LogsPanel = (() => {
         if (!id) return;
         btn.disabled = true;
         try {
-          await peerAction(btn.dataset.action, id);
-          await loadVpnDetail();
+          if (btn.dataset.action === 'ping') {
+            const target = btn.dataset.target || id;
+            const out = peerEl.querySelector('.vpn-meta-peer-pingout');
+            if (out) {
+              out.hidden = false;
+              out.textContent = `pinging ${target}…`;
+              try {
+                const r = await api('/api/nvpn/ping', {
+                  method: 'POST', headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ target, count: 3, timeoutSecs: 2 }),
+                });
+                out.textContent = (r?.output || r?.detail || 'no output').slice(0, 800);
+                out.classList.toggle('vpn-meta-peer-pingout-err', r?.ok === false);
+              } catch (e) { out.textContent = 'ping error'; }
+            }
+          } else {
+            await peerAction(btn.dataset.action, id);
+            await loadVpnDetail();
+          }
         } catch { /* api() already toasted */ }
         btn.disabled = false;
       });
@@ -5469,6 +5627,13 @@ const LogsPanel = (() => {
       !p.roster ? 'discovered (not in roster)' : (p.connected ? null : 'offline'),
     ].filter(Boolean).join(' · ');
     const adminBadge = p.admin ? '<span class="vpn-meta-peer-badge">admin</span>' : '';
+    // Ping target — we prefer the live tunnel IP (works when the peer
+    // is online) and fall back to the npub/pubkey/id (which nvpn
+    // resolves via roster). nvpn ping accepts either.
+    const pingTarget = live?.ip || id;
+    const pingBtn = pingTarget
+      ? `<button data-action="ping" data-target="${escapeHtml(pingTarget)}" title="Ping ${escapeHtml(pingTarget)}">ping</button>`
+      : '';
     const promoteBtn = p.roster && !p.admin
       ? '<button data-action="promote" title="Promote to admin">↑ admin</button>' : '';
     const demoteBtn = p.roster && p.admin
@@ -5481,7 +5646,8 @@ const LogsPanel = (() => {
         <code class="cmd-inline vpn-meta-peer-id">${escapeHtml(id)}</code>
         ${adminBadge}
         ${sub ? `<span class="muted vpn-meta-peer-sub">${escapeHtml(sub)}</span>` : ''}
-        <span class="vpn-meta-peer-actions">${promoteBtn}${demoteBtn}${removeBtn}</span>
+        <span class="vpn-meta-peer-actions">${pingBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
+        <div class="vpn-meta-peer-pingout" hidden></div>
       </div>`;
   }
 
@@ -5553,6 +5719,86 @@ const LogsPanel = (() => {
       } catch { /* api() already toasted */ }
       submit.disabled = false;
     });
+  }
+
+  // Diagnostics block — netcheck / doctor / nat-discover / repair
+  // -network. Collapsed by default. Run-on-click only — these calls
+  // make network round-trips against public relays / STUN servers
+  // and we don't want to fire them on every refresh.
+  function renderDiagnosticsBlock() {
+    return `<div class="vpn-meta-diag">
+      <details>
+        <summary><span class="vpn-meta-label">diagnostics</span></summary>
+        <div class="vpn-meta-diag-body">
+          <div class="vpn-meta-diag-actions">
+            <button id="vpn-diag-netcheck">Run netcheck</button>
+            <button id="vpn-diag-doctor">Run doctor</button>
+            <button id="vpn-diag-doctor-bundle">Save support bundle</button>
+            <button id="vpn-diag-stats">Show stats</button>
+            <button id="vpn-diag-reload">Reload config</button>
+            <button id="vpn-diag-repair">Repair network</button>
+          </div>
+          <div id="vpn-diag-out" class="vpn-meta-diag-out muted">click an action to run it</div>
+        </div>
+      </details>
+    </div>`;
+  }
+
+  // Settings block — node-name, listen-port, autoconnect, advertise-
+  // exit-node, advertised routes. Maps onto `nvpn set --<key> <value>`.
+  // Pre-fills from the raw status JSON so the user sees the current
+  // state, not a blank form.
+  function renderSettingsBlock(raw) {
+    const cur = {
+      'node-name':           '',  // not exposed in status JSON; user sets fresh
+      'listen-port':         raw?.listen_port ?? raw?.configured_listen_port ?? '',
+      'magic-dns-suffix':    raw?.magic_dns_suffix ?? '',
+      'autoconnect':         raw?.autoconnect ? 'true' : 'false',
+      'advertise-exit-node': raw?.advertise_exit_node ? 'true' : 'false',
+      'advertise-routes':    Array.isArray(raw?.advertised_routes)
+                                ? raw.advertised_routes.join(',') : '',
+      'relay-for-others':    raw?.relay_for_others ? 'true' : 'false',
+    };
+    const fld = (key, label, type = 'text') => {
+      const val = String(cur[key] ?? '');
+      if (type === 'bool') {
+        return `<label class="vpn-meta-set-field">
+          <span class="vpn-meta-set-label">${escapeHtml(label)}</span>
+          <select data-key="${escapeHtml(key)}">
+            <option value="">(no change)</option>
+            <option value="true"${val === 'true' ? ' selected' : ''}>true</option>
+            <option value="false"${val === 'false' ? ' selected' : ''}>false</option>
+          </select>
+        </label>`;
+      }
+      return `<label class="vpn-meta-set-field">
+        <span class="vpn-meta-set-label">${escapeHtml(label)}</span>
+        <input type="${type}" data-key="${escapeHtml(key)}" value="${escapeHtml(val)}" placeholder="${escapeHtml(val)}" spellcheck="false">
+      </label>`;
+    };
+
+    return `<div class="vpn-meta-set">
+      <details>
+        <summary><span class="vpn-meta-label">settings</span></summary>
+        <div class="vpn-meta-set-body">
+          <div class="vpn-meta-set-grid">
+            ${fld('node-name', 'node name')}
+            ${fld('listen-port', 'listen port', 'number')}
+            ${fld('magic-dns-suffix', 'magic DNS suffix')}
+            ${fld('advertise-routes', 'advertise routes (a,b,c)')}
+            ${fld('autoconnect', 'autoconnect', 'bool')}
+            ${fld('advertise-exit-node', 'advertise exit node', 'bool')}
+            ${fld('relay-for-others', 'relay for others', 'bool')}
+          </div>
+          <div class="vpn-meta-set-actions">
+            <button id="vpn-set-save" class="primary">Save</button>
+            <span class="muted vpn-meta-set-hint">
+              Some changes take effect after a Reload or Restart.
+            </span>
+          </div>
+        </div>
+      </details>
+    </div>`;
   }
 
   // Service sub-block (Feature 2). Four pills (installed / enabled at
