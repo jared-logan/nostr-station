@@ -675,7 +675,7 @@ const IdentityDrawer = (() => {
       <h4>Signing</h4>
       <div class="body">Bunker URL: <span class="muted" id="signing-bunker">managed by ngit</span></div>
       <div class="muted" style="margin-top:6px">
-        Amber is configured through <code>nostr-station onboard</code> → ngit. The bunker URL is stored inside ngit; nostr-station does not read or modify it.
+        Amber pairing happens in the setup wizard; ngit stores the bunker URL after that. nostr-station does not read or modify it.
       </div>
     `;
     body.appendChild(signing);
@@ -738,7 +738,7 @@ const IdentityDrawer = (() => {
           </div>
         </div>
         <div class="muted" style="margin-top:10px">
-          Or run <code>nostr-station onboard</code> to configure everything (ngit, Amber, relays).
+          Prefer the full first-run flow? Visit <code>/setup</code> for the Amber QR pairing wizard.
         </div>
       </div>
     `;
@@ -1029,19 +1029,21 @@ setInterval(refreshHealth, 5000);
 // INSTALL_TARGETS on the server. If `installSlug` is present, clicking
 // Install streams `/api/exec/install/<slug>` into the terminal modal.
 
+// installSlug points at a /api/exec/install/<slug> handler that runs
+// installTool() from src/lib/tools.ts. Only the optional CLI tools
+// have one (ngit / nak / stacks). Built-in services (relay / watchdog),
+// the nvpn installer (lives at /api/setup/nvpn/install, wizard-only),
+// and externally-installed tools (claude) get a configHint instead —
+// surfaced as a "run: …" line in warn state. err state with no slug
+// shows just the row's error text and any panel link.
 const SERVICE_CTAS = {
-  'relay':     { installSlug: 'relay',   configHint: 'nostr-station relay start' },
-  'vpn':       { installSlug: 'nvpn',    configHint: 'sudo nvpn service install' },
-  // Watchdog is installed as part of onboard, not via a standalone
-  // doctor --fix target — if it's missing, the right fix is re-running
-  // onboard so the plist/timer gets written and loaded with matching
-  // keypair + whitelist state. No install slug; the Status row falls
-  // through to the configHint path which surfaces the exact command.
-  'watchdog':  { installSlug: null,      configHint: 'nostr-station onboard' },
-  'ngit':      { installSlug: 'ngit',    configHint: null /* inline-form handled below */ },
-  'claude':    { installSlug: 'claude',  configHint: null },
-  'nak':       { installSlug: 'nak',     configHint: null },
-  'stacks':    { installSlug: 'stacks',  configHint: null },
+  'relay':     { installSlug: null,    configHint: 'use the Relay panel start/restart buttons' },
+  'vpn':       { installSlug: null,    configHint: 'install via the setup wizard, or `sudo nvpn service install` after a manual binary install' },
+  'watchdog':  { installSlug: null,    configHint: 'POST /api/watchdog/start to restart the heartbeat loop' },
+  'ngit':      { installSlug: 'ngit',  configHint: null /* inline-form handled below */ },
+  'claude':    { installSlug: null,    configHint: 'install Claude Code from claude.com/code' },
+  'nak':       { installSlug: 'nak',   configHint: null },
+  'stacks':    { installSlug: 'stacks', configHint: null },
 };
 
 // Human-friendly summary + deep-link target for each service. The summary
@@ -1222,35 +1224,21 @@ function buildStatusRow(s) {
     btn.textContent = 'Install';
     btn.addEventListener('click', (e) => {
       e.preventDefault();
-      // A5: prefer the terminal panel for installs.
-      //
-      // Cargo compiles take 60s–10min depending on the crate (nostr-rs-relay
-      // is the worst). The old SSE modal showed a single spinner with no
-      // visible output for the entire window — users either gave up,
-      // assumed it was hung, or resorted to running `doctor --fix` in a
-      // shell. Routing through the terminal panel surfaces live cargo
-      // stderr (compiling deps + linker) the same way `doctor` / `seed` /
-      // `publish` already do.
-      //
-      // Health refresh schedule is tuned for the long-tail compile (5min
-      // upper bound). The user can also click Refresh manually once the
-      // terminal output shows ✓.
-      if (window.NSTerminal?.isAvailable?.()) {
-        window.NSTerminal.open('doctor-fix');
-        [30_000, 120_000, 300_000].forEach(ms => setTimeout(refreshHealth, ms));
-        return;
-      }
-      // Fallback: SSE modal — same legacy path that's been there since
-      // 0.0.5. Kept intact so a node-pty-less install still has a way
-      // to drive doctor --fix from the dashboard.
+      // SSE modal is the only path: the backend's /api/exec/install/<slug>
+      // streams progress lines from installTool() (cargo install / npm
+      // install -g / manual installer URL — see src/lib/tools.ts).
+      // Health refresh schedule is tuned for the long-tail cargo compile
+      // (5min upper bound); user can also click Refresh manually once
+      // the modal closes.
       openExecModal({
-        title: `Install ${s.label}`,
-        subtitle: 'Running doctor --fix to repair missing tools',
+        title:    `Install ${s.label}`,
+        subtitle: `Installing ${cta.installSlug}…`,
         endpoint: `/api/exec/install/${cta.installSlug}`,
       }).then(r => {
         if (r.ok) toast(`${s.label} install finished`, '', 'ok');
         else      toast(`${s.label} install exited ${r.code}`, '', 'err');
         refreshHealth();
+        [30_000, 120_000, 300_000].forEach(ms => setTimeout(refreshHealth, ms));
       });
     });
     ctaRow.appendChild(btn);
@@ -2078,23 +2066,11 @@ const RelayPanel = (() => {
       window.NSTerminal.open('seed');
     } else {
       toast('Terminal unavailable',
-        window.NSTerminal?.getUnavailableReason?.() || 'Run `nostr-station doctor --fix`',
+        window.NSTerminal?.getUnavailableReason?.() || 'Run `nostr-station seed` from your shell.',
         'err');
     }
   });
 
-  // Relay logs in the terminal panel — alternative to the Logs panel's
-  // EventSource tail. Runs `nostr-station relay logs -f` which renders a
-  // coloured Ink TUI and keeps following until the tab closes.
-  $('relay-logs-term')?.addEventListener('click', () => {
-    if (window.NSTerminal?.isAvailable?.()) {
-      window.NSTerminal.open('relay-logs');
-    } else {
-      toast('Terminal unavailable',
-        window.NSTerminal?.getUnavailableReason?.() || 'Logs panel still works',
-        'warn');
-    }
-  });
 
   // Copy buttons on help card <pre data-cmd="..."> elements
   $$('.help-card pre[data-cmd]').forEach(pre => pre.appendChild(copyBtn(pre.dataset.cmd)));
@@ -4752,31 +4728,32 @@ const LogsPanel = (() => {
   function statusToBanner(s) {
     const svcLabel = s.service === 'vpn' ? 'nostr-vpn' : s.service;
     if (!s.installed) {
-      const cmd = s.service === 'vpn' ? 'nostr-station onboard' : 'nostr-station onboard';
+      const hint = s.service === 'vpn'
+        ? 'Install via the setup wizard\'s vpn step, or `sudo nvpn service install` after a manual binary install.'
+        : s.service === 'watchdog'
+        ? 'The watchdog runs in-process with the dashboard. POST /api/watchdog/start to bring it back if it was stopped.'
+        : 'The relay starts with the dashboard. Use the Relay panel\'s start button if it stopped.';
       return {
         level: 'err',
         title: `${svcLabel} is not installed on this machine.`,
-        hint:  `Run <code>${cmd}</code> in a terminal to set it up. The log file will light up here once the service starts.`,
+        hint,
       };
     }
     if (!s.running) {
-      const fix = s.service === 'relay' ? 'nostr-station relay start'
-                : s.service === 'watchdog' ? 'launchctl start com.nostr-station.watchdog'
-                : 'nvpn start --daemon';
-      const tail = s.service === 'vpn'
-        ? ' — or <code>nvpn service install</code> for a supervised system service.'
-        : ' — or use the Relay panel\'s start button.';
+      const fix = s.service === 'relay'    ? 'use the Relay panel\'s start/restart buttons'
+                : s.service === 'watchdog' ? 'POST /api/watchdog/start'
+                :                            'nvpn start --daemon';
       return {
         level: 'warn',
         title: `${svcLabel} is installed but not running.`,
-        hint:  `Start it: <code>${fix}</code>${tail}`,
+        hint:  `Start it: <code>${fix}</code>.`,
       };
     }
     if (!s.logExists) {
       return {
         level: 'warn',
-        title: `${svcLabel} is running but hasn't written a log yet.`,
-        hint:  `Expected at <code>${s.logPath}</code>. New lines will appear here as soon as the service logs something.`,
+        title: `${svcLabel} is running but hasn't logged anything yet.`,
+        hint:  `Buffer source: <code>${s.logPath}</code>. New lines appear here as soon as the service logs something.`,
       };
     }
     if (s.stale) {
@@ -4784,7 +4761,7 @@ const LogsPanel = (() => {
       return {
         level: 'warn',
         title: `${svcLabel} log is stale — last write ${age} ago.`,
-        hint:  `The service is loaded but may be wedged. Check <code>nostr-station doctor</code>, or restart via the Relay panel.`,
+        hint:  `The service may be wedged. Restart via the Relay panel (relay) or POST /api/watchdog/{stop,start} (watchdog).`,
       };
     }
     return null;
@@ -5106,8 +5083,8 @@ const ConfigPanel = (() => {
         <h3>Identity (Amber / ngit)</h3>
         ${renderIdentityBody(ident, session, profile)}
         <div class="callout" style="margin-top:10px">
-          Bunker URL is managed inside ngit. Configure via <code>nostr-station onboard</code>
-          or <code>ngit init</code>. Test signing from your mobile signer (Amber) on first push.
+          Bunker URL is managed inside ngit. Configure via the setup wizard or <code>ngit init</code>.
+          Test signing from your mobile signer (Amber) on first push.
         </div>
       </div>
 
@@ -5132,38 +5109,12 @@ const ConfigPanel = (() => {
         </div>
       </div>
 
-      <div class="config-section">
-        <h3>System</h3>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Fetch newer versions of all components (relay, ngit, nak, Claude Code, Stacks). The
-          wizard opens in a terminal tab with per-component diffs before applying.
-        </div>
-        <div class="keyrow">
-          <button id="cfg-update-wizard">Update components</button>
-          <span style="font-size:11px;color:var(--muted);align-self:center">
-            runs <code>nostr-station update --wizard</code>
-          </span>
-        </div>
-      </div>
 
     `;
 
     // Wire toggles
     $('cfg-auth').addEventListener('change', (e) => saveRelayFlag('auth', e.target.checked));
     $('cfg-dm-auth').addEventListener('change', (e) => saveRelayFlag('dmAuth', e.target.checked));
-
-    // System → Update components — runs `nostr-station update --wizard` in a
-    // terminal tab. Wizard is interactive (shows diff, prompts to apply)
-    // which requires a real TTY, so it's terminal-only with a toast fallback.
-    $('cfg-update-wizard')?.addEventListener('click', () => {
-      if (window.NSTerminal?.isAvailable?.()) {
-        window.NSTerminal.open('update-wizard');
-      } else {
-        toast('Terminal unavailable',
-          window.NSTerminal?.getUnavailableReason?.() || 'Run update from your own shell: `nostr-station update --wizard`',
-          'err');
-      }
-    });
 
     // Stacks AI → Configure — runs `stacks configure` in a terminal tab.
     // Stacks's configure flow is interactive (provider picker + key entry
@@ -5520,8 +5471,8 @@ const ConfigPanel = (() => {
         // `initialized`-guarded so plain panel re-entry doesn't refresh.
         // setAiDefault below also dispatches this, but only fires when
         // there's no existing chat default (fresh install). A returning
-        // user adding a second key (or fixing a keyless entry from onboard
-        // that already set defaults.chat) needs the dispatch here too.
+        // user adding a second key (or fixing a keyless entry the wizard
+        // left behind with defaults.chat already set) needs the dispatch here too.
         document.dispatchEvent(new CustomEvent('api-config-changed'));
         // If no chat default yet, this one becomes it so users with a
         // fresh install get working chat immediately after adding their
@@ -5794,8 +5745,8 @@ AuthScreen = (() => {
           </div>
         </div>
         <div class="auth-footnote">
-          Or run <code>nostr-station onboard</code> to configure everything
-          (ngit, Amber, relays).
+          Or visit <code>/setup</code> for the Amber QR pairing wizard
+          (ngit, Amber, relays in one flow).
         </div>
       </div>
     `;
@@ -6688,75 +6639,24 @@ const SetupWizard = (() => {
         return;
       }
 
-      const installed = relay.state === 'warn';
+      // Anything other than 'ok' means the in-process relay didn't start.
+      // There's no installer to run from the wizard — the relay starts
+      // with the dashboard. Surface the failure + a Continue so the
+      // wizard isn't a hard stop.
       bodyEl.innerHTML = `
         <div class="setup-relay-row ${relay.state}">
           <span class="dot ${stateClass(relay.state)}"></span>
           <div>
-            <div class="title">${installed ? 'Relay not yet running' : 'Relay not installed'}</div>
+            <div class="title">Relay didn't start with the dashboard</div>
             <div class="muted">${escapeHtml(relay.value || '')}</div>
           </div>
         </div>
-        ${installed ? `
-          <div class="setup-actions" style="margin-top:12px;margin-bottom:0;justify-content:flex-start">
-            <button class="primary" id="setup-relay-install">Install &amp; start relay</button>
-          </div>
-          <div id="setup-relay-steps" class="setup-relay-steps"></div>
-        ` : `
-          <div class="setup-hint muted" style="margin-top:12px">
-            Finish <code>nostr-station onboard</code> first — that compiles the relay binary
-            (10+ min on a cold machine), then revisit this page.
-          </div>
-        `}
+        <div class="setup-hint muted" style="margin-top:12px">
+          Check the Logs panel after onboarding for the underlying error.
+          You can continue setup — most steps don't require the relay to be live.
+        </div>
       `;
-      nextBtn.disabled = !installed;
-
-      const installBtn = $('setup-relay-install');
-      if (!installBtn) return;
-
-      installBtn.addEventListener('click', async () => {
-        installBtn.disabled = true;
-        installBtn.innerHTML = '<span class="spinner"></span> Installing service…';
-        const stepsEl = $('setup-relay-steps');
-        stepsEl.innerHTML = '';
-        try {
-          const r = await fetch('/api/setup/relay/install', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({}),
-          }).then(r => r.json().catch(() => ({ ok: false, error: 'server returned non-JSON' })));
-
-          // Render each sub-step (dirs, keypair, config, units, enable) —
-          // the bootstrap endpoint returns a structured list so a user
-          // whose systemctl --user instance is unreachable (common on SSH
-          // sessions without linger) can see *which* step warned.
-          if (Array.isArray(r.steps)) {
-            stepsEl.innerHTML = r.steps.map(s => `
-              <div class="setup-step-row ${s.ok ? 'ok' : 'err'}">
-                <span class="dot ${s.ok ? 'ok' : 'err'}"></span>
-                <span class="label">${escapeHtml(s.name)}</span>
-                ${s.detail ? `<span class="muted">${escapeHtml(s.detail)}</span>` : ''}
-              </div>
-            `).join('');
-          }
-
-          if (!r.ok) {
-            installBtn.disabled = false;
-            installBtn.textContent = 'Retry install';
-            toast('Relay install had errors', r.error || 'see step details', 'warn');
-            return;
-          }
-
-          toast('Relay installed', r.up ? 'service started' : 'enable succeeded', 'ok');
-        } catch (e) {
-          toast('Install failed', e.message || String(e), 'err');
-          installBtn.disabled = false;
-          installBtn.textContent = 'Retry install';
-          return;
-        }
-        // Give systemd/launchd a beat to transition; re-check status.
-        setTimeout(paint, 1200);
-      });
+      nextBtn.disabled = false;
     };
     paint();
   }
@@ -7096,8 +6996,8 @@ const SetupWizard = (() => {
         <p class="setup-copy">
           nostr-vpn creates an encrypted mesh between machines using Nostr as
           the signalling layer. Useful if you run projects across laptop +
-          server; skip it if you only develop locally. You can always add it
-          later with <code>nostr-station doctor --fix</code>.
+          server; skip it if you only develop locally. You can always run
+          this step again later by revisiting <code>/setup</code>.
         </p>
         <div class="setup-vpn-steps" id="setup-vpn-steps"></div>
         <div class="setup-actions">
