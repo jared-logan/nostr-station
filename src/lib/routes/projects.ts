@@ -26,6 +26,7 @@
  *   POST   /api/projects/:id/ngit/init         — SSE
  *   POST   /api/projects/:id/ngit/download     — SSE: ngit pr checkout <id>
  *   POST   /api/projects/:id/ngit/send         — SSE: ngit send (current branch)
+ *   POST   /api/projects/:id/ngit/sync         — SSE: ngit fetch + ff-merge + ngit push
  *   POST   /api/projects/:id/exec              — SSE
  *   POST   /api/projects/:id/nsite/deploy      — SSE
  *   GET    /api/projects/:id/git-state         — sync.getProjectGitState
@@ -41,7 +42,7 @@ import http from 'http';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import {
   readProjects, getProject, createProject, updateProject, deleteProject,
   detectPath, projectGitStatus, projectGitLog, resolveProjectContext,
@@ -387,6 +388,66 @@ export async function handleProjects(
       return true;
     }
 
+    if (tail === 'ngit/sync' && method === 'POST') {
+      // Bidirectional sync à la Shakespeare's clean ngit popover:
+      // pull (ngit fetch) then push (ngit push), in one SSE stream.
+      // Two separate child processes share one response so the user
+      // sees both phases scrolling in the same modal — and so a
+      // failure in phase 1 cleanly skips phase 2 with a clear marker.
+      //
+      // Kept distinct from /api/projects/:id/sync (the card-grid
+      // icon) which is intentionally pull-only + ff-merge + proposals
+      // query. That endpoint stays as-is; this one is the verb users
+      // reach for when they want "pull + push, just do the thing".
+      if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+      res.writeHead(200, {
+        'Content-Type':  'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection':    'keep-alive',
+      });
+      const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+      const env = { ...process.env, NO_COLOR: '1', TERM: 'dumb' };
+      const cwd = project.path;
+      let killed = false;
+      const onClientClose = () => { killed = true; };
+      req.on('close', onClientClose);
+
+      const runPhase = (label: string, args: string[]): Promise<number> =>
+        new Promise((resolve) => {
+          if (killed) return resolve(-1);
+          emit({ line: `▸ ${label}`, stream: 'stdout' });
+          const child = spawn('ngit', args, { stdio: ['ignore', 'pipe', 'pipe'], env, cwd });
+          const pipe = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+            for (const line of chunk.toString().split('\n')) {
+              if (line.length) emit({ line, stream });
+            }
+          };
+          child.stdout.on('data', pipe('stdout'));
+          child.stderr.on('data', pipe('stderr'));
+          child.on('error', (e) => {
+            emit({ line: String(e.message || e), stream: 'stderr' });
+            resolve(-1);
+          });
+          child.on('close', (code) => resolve(code ?? -1));
+          // Honour client-disconnect during the phase, not just between phases.
+          req.on('close', () => { try { child.kill(); } catch {} });
+        });
+
+      try {
+        const fetchCode = await runPhase('ngit fetch', ['fetch']);
+        if (fetchCode !== 0) {
+          emit({ line: `pull failed (exit ${fetchCode}) — skipping push`, stream: 'stderr' });
+          emit({ done: true, code: fetchCode });
+          try { res.end(); } catch {}
+          return true;
+        }
+        const pushCode = await runPhase('ngit push', ['push']);
+        emit({ done: true, code: pushCode });
+      } finally {
+        try { res.end(); } catch {}
+      }
+      return true;
+    }
     if (tail === 'ngit/send' && method === 'POST') {
       // Opens a proposal (kind-1617 + patch events) from the current
       // branch by spawning `ngit send`. ngit pulls the branch state
