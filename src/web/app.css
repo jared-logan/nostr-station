@@ -4405,3 +4405,39 @@ body.term-expanded .term-bar-toggle .term-chevron {
 .tmpl-add-form .np-field {
   margin-bottom: 0;
 }
+
+/* ── Per-project AI configuration (Settings tab > AI configuration) ──── */
+
+.pcfg-row {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.pcfg-row:first-child { border-top: 0; }
+.pcfg-label {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.pcfg-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pcfg-system-prompt,
+.pcfg-project-context {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 8px 10px;
+  resize: vertical;
+}

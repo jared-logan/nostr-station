@@ -27,6 +27,8 @@ import path from 'path';
 import { spawn, execSync } from 'child_process';
 import type http from 'http';
 import { createProject } from './projects.js';
+import { getTemplate } from './templates.js';
+import { seedProjectConfig } from './project-config.js';
 
 export type ScaffoldSource =
   | { type: 'local-only' }
@@ -233,6 +235,7 @@ export async function scaffoldProject(
   source: ScaffoldSource,
   res: http.ServerResponse,
   identity: ScaffoldIdentity = DEFAULT_IDENTITY,
+  templateId: string | null = null,
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type':  'text/event-stream',
@@ -341,6 +344,20 @@ export async function scaffoldProject(
   if (!created.ok) {
     writeLine(res, 'stderr', `scaffold succeeded but registration failed: ${created.error}`);
     return writeDone(res, 5);
+  }
+
+  // Seed the project's .nostr-station/ dir — gitignore, template
+  // record, and any defaults the template ships (project-context.md,
+  // permissions.json). Best-effort; failures here don't fail the
+  // scaffold since the project itself is already on disk and registered.
+  try {
+    const template = templateId ? getTemplate(templateId) : null;
+    seedProjectConfig(created.project, template);
+    if (template) {
+      writeLine(res, 'sys', `Seeded .nostr-station/ from template "${template.id}".`);
+    }
+  } catch (e: any) {
+    writeLine(res, 'stderr', `(scaffold) project-config seed failed: ${e?.message ?? 'unknown'}`);
   }
 
   writeLine(res, 'sys', `Registered as project "${created.project.name}".`);

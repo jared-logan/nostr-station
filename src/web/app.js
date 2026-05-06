@@ -4185,6 +4185,16 @@ const ProjectsPanel = (() => {
         </div>
       </div>
 
+      <div class="tab-section" id="pcfg-section">
+        <h3>AI configuration</h3>
+        <div class="muted">
+          Per-project overrides for the Chat pane. Empty fields inherit
+          the station defaults from <a href="#config">Config</a>.
+          Stored at <code>${escapeHtml(p.path || '<no path>')}/.nostr-station/</code>.
+        </div>
+        <div class="pcfg-body">loading…</div>
+      </div>
+
       <div class="danger-zone">
         <h4>Danger zone</h4>
         <div class="row">
@@ -4209,6 +4219,16 @@ const ProjectsPanel = (() => {
         ` : ''}
       </div>
     `;
+
+    // Lazy-load the AI config bundle. We don't block the rest of the
+    // Settings tab on it — the panel renders immediately and the AI
+    // section fills in as soon as /api/projects/:id/ai-config returns.
+    if (p.path) {
+      paintProjectAiConfig(container.querySelector('#pcfg-section .pcfg-body'), p);
+    } else {
+      const sec = container.querySelector('#pcfg-section .pcfg-body');
+      if (sec) sec.innerHTML = '<div class="muted">Project has no local path — AI config requires a path.</div>';
+    }
 
     container.querySelector('.save-name').addEventListener('click', async () => {
       const v = container.querySelector('.s-name').value.trim();
@@ -4339,6 +4359,105 @@ const ProjectsPanel = (() => {
         }
       });
     }
+  }
+
+  async function paintProjectAiConfig(root, p) {
+    if (!root) return;
+    let bundle, providers;
+    try {
+      [bundle, providers] = await Promise.all([
+        api(`/api/projects/${p.id}/ai-config`),
+        api('/api/ai/providers').catch(() => null),
+      ]);
+    } catch (e) {
+      root.innerHTML = `<div style="color:var(--warn)">Failed to load AI config: ${escapeHtml(e.message)}</div>`;
+      return;
+    }
+    const apiProviders = (providers?.providers || []).filter(x => x.type === 'api');
+    const provOpts = apiProviders.map(p =>
+      `<option value="${escapeHtml(p.id)}" ${bundle.chat?.provider === p.id ? 'selected' : ''}>${escapeHtml(p.displayName)}</option>`
+    ).join('');
+
+    const tmplChip = bundle.template
+      ? `<span class="chip" style="background:var(--accent-soft);color:var(--accent)">${escapeHtml(bundle.template.templateName)}</span>
+         <span style="color:var(--text-dim);font-size:11px;margin-left:6px">scaffolded ${escapeHtml(fmtAgoIso(bundle.template.scaffoldedAt))}${bundle.template.sourceUrl ? ` from <code>${escapeHtml(bundle.template.sourceUrl)}</code>` : ''}</span>`
+      : '<span style="color:var(--text-dim)">No template recorded — project predates the registry or was created from a raw URL.</span>';
+
+    const legacyBanner = bundle.legacyContext
+      ? `<div class="callout" style="margin-bottom:10px">
+           <strong>Legacy file detected.</strong> A <code>project-context.md</code> exists at the project root.
+           Save below to migrate it under <code>.nostr-station/</code> (the legacy file stays — delete it manually when ready).
+         </div>` : '';
+
+    root.innerHTML = `
+      ${legacyBanner}
+      <div class="pcfg-row">
+        <div class="pcfg-label">Template</div>
+        <div class="pcfg-value">${tmplChip}</div>
+      </div>
+
+      <div class="pcfg-row">
+        <div class="pcfg-label">Provider override</div>
+        <div class="pcfg-value">
+          <select class="pcfg-provider">
+            <option value="">— Inherit station default —</option>
+            ${provOpts}
+          </select>
+          <input class="pcfg-model" type="text" placeholder="model id (optional)" value="${escapeHtml(bundle.chat?.model || '')}" style="margin-left:8px;min-width:220px">
+        </div>
+      </div>
+
+      <div class="pcfg-row">
+        <div class="pcfg-label">Permissions</div>
+        <div class="pcfg-value">
+          <select class="pcfg-permissions">
+            <option value="">— Inherit station default —</option>
+            <option value="read-only" ${bundle.permissions?.mode === 'read-only' ? 'selected' : ''}>Read-only (writes need approval)</option>
+            <option value="auto-edit" ${bundle.permissions?.mode === 'auto-edit' ? 'selected' : ''}>Auto-edit (file writes auto-approved)</option>
+            <option value="yolo"      ${bundle.permissions?.mode === 'yolo'      ? 'selected' : ''}>YOLO (everything auto-approved)</option>
+          </select>
+        </div>
+      </div>
+
+      <label class="field-label" style="margin-top:14px">System prompt override</label>
+      <textarea class="pcfg-system-prompt" rows="6" placeholder="Empty = inherit station default. Supports {{ variable }} interpolation.">${escapeHtml(bundle.systemPrompt || '')}</textarea>
+
+      <label class="field-label" style="margin-top:14px">Project context overlay</label>
+      <textarea class="pcfg-project-context" rows="6" placeholder="Markdown — spliced verbatim into the system prompt at chat time.">${escapeHtml(bundle.projectContext || '')}</textarea>
+
+      <div class="step-actions" style="margin-top:14px">
+        <button class="primary pcfg-save">Save AI config</button>
+      </div>
+    `;
+
+    root.querySelector('.pcfg-save').addEventListener('click', async () => {
+      const provider = root.querySelector('.pcfg-provider').value;
+      const model    = root.querySelector('.pcfg-model').value.trim();
+      const perm     = root.querySelector('.pcfg-permissions').value;
+      const sys      = root.querySelector('.pcfg-system-prompt').value;
+      const ctx      = root.querySelector('.pcfg-project-context').value;
+
+      const body = {
+        // null clears the override file; empty string is treated as
+        // "still empty content," which read-helpers treat as null
+        // anyway. Keep them distinct so the user can clear cleanly.
+        systemPrompt:   sys.trim() === '' ? null : sys,
+        projectContext: ctx.trim() === '' ? null : ctx,
+        permissions:    perm ? { mode: perm } : null,
+        chat:           (provider || model) ? { provider: provider || undefined, model: model || undefined } : null,
+      };
+      try {
+        await api(`/api/projects/${p.id}/ai-config`, {
+          method:  'PUT',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify(body),
+        });
+        toast('AI config saved', '', 'ok');
+        paintProjectAiConfig(root, p);
+      } catch (e) {
+        toast('Save failed', e.message, 'err');
+      }
+    });
   }
 
   async function patchAndReload(id, patch) {
