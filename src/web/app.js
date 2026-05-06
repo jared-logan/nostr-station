@@ -4789,6 +4789,19 @@ const LogsPanel = (() => {
         hint:  `The service may be wedged. Restart via the Relay panel (relay) or POST /api/watchdog/{stop,start} (watchdog).`,
       };
     }
+    // Healthy-but-no-streaming case for vpn. nvpn writes its own daemon
+    // log; the dashboard doesn't tail it yet (Phase 2.2 wired the
+    // installer + status probe but log streaming is a separate item).
+    // Without this branch the pane goes blank when nvpn is healthy —
+    // fall-through returns null, hiding the banner, and no log lines
+    // are streaming, so the user sees nothing.
+    if (s.service === 'vpn') {
+      return {
+        level: 'ok',
+        title: `nostr-vpn is running. ${s.note || ''}`.trim(),
+        hint:  `Live nvpn log streaming isn't wired into the dashboard yet. Tail the daemon log directly: <code>tail -f ~/.config/nvpn/daemon.log</code> (or wherever nvpn is configured to log on your machine).`,
+      };
+    }
     return null;
   }
 

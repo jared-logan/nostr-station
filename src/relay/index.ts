@@ -175,14 +175,23 @@ export class Relay {
   private handleConnection(ws: WebSocket): void {
     const connSubs = new Set<string>();
 
-    // Per NIP-42: send AUTH challenge immediately on connect. 32 bytes hex
-    // is more than enough entropy and matches the entropy we use elsewhere
-    // for session tokens. Challenge is per-connection, so a replay against
-    // a different connection is rejected by mismatched challenge tag.
+    // Per-connection AUTH state. Initialized eagerly with a fresh challenge
+    // even though we don't send the challenge upfront — `sendAuthChallenge`
+    // below uses this challenge if/when a gated operation triggers an
+    // on-demand challenge.
+    //
+    // We deliberately don't send `["AUTH", challenge]` on connect:
+    // NIP-42-aware clients (notably fiatjaf/nak) treat an unsolicited
+    // AUTH challenge as "AUTH is required first" and try to auto-respond.
+    // Without a configured signer they send malformed AUTH frames and
+    // never get to publishing their actual EVENT — the user sees a
+    // deadline-exceeded timeout where they expected an `auth-required:`
+    // rejection. Connection AUTH state isn't part of our gating policy
+    // anyway (gating is by event signature), so the upfront challenge
+    // confused well-behaved clients without buying us anything.
     const auth: ConnAuth = { challenge: crypto.randomBytes(32).toString('hex') };
     (ws as any).__nsAuth = auth;
-    sendJson(ws, ['AUTH', auth.challenge]);
-    this.log('info', 'client connected — AUTH challenge sent');
+    this.log('info', 'client connected');
 
     ws.on('message', (data) => {
       let msg: unknown;
@@ -296,7 +305,16 @@ export class Relay {
     const isWhitelisted = this.whitelist.has(evPubkey);
     if (!isOwner && !isWhitelisted) {
       this.log('warn', `EVENT rejected — pubkey ${evPubkey.slice(0, 8)}… not authorized (kind ${raw.kind})`);
-      return ok(ws, raw.id, false, 'auth-required: pubkey not authorized to publish to this relay');
+      ok(ws, raw.id, false, 'auth-required: pubkey not authorized to publish to this relay');
+      // Send a NIP-42 AUTH challenge alongside the rejection so
+      // spec-aware clients have a challenge to sign. AUTH state isn't
+      // part of our gating policy (we always check event signature),
+      // so the AUTH won't actually unlock writes for this pubkey — but
+      // it gives clients the protocol element they expect to see when
+      // they receive an `auth-required:` reply.
+      const auth = (ws as any).__nsAuth as ConnAuth | undefined;
+      if (auth) sendJson(ws, ['AUTH', auth.challenge]);
+      return;
     }
 
     const result = this.store.add(raw);

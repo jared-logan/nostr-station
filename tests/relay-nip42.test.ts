@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocket } from 'ws';
-import { generateSecretKey, finalizeEvent } from 'nostr-tools/pure';
+import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure';
 import { Relay } from '../src/relay/index.ts';
 import type { NostrEvent } from '../src/relay/types.ts';
 
@@ -60,22 +60,47 @@ function signAuth(challenge: string, relayUrl: string, sk: Uint8Array, opts: { s
   }, sk) as unknown as NostrEvent;
 }
 
-test('nip42: server sends AUTH challenge on connect', async () => {
+function signNote(sk: Uint8Array): NostrEvent {
+  return finalizeEvent({
+    kind: 1, created_at: Math.floor(Date.now() / 1000),
+    tags: [], content: 'hello',
+  }, sk) as unknown as NostrEvent;
+}
+
+// Trigger an on-demand AUTH challenge by publishing as a non-whitelisted
+// pubkey. Server replies with ["OK", id, false, "auth-required: ..."]
+// followed by ["AUTH", challenge]. Returns the challenge string.
+async function triggerAuthChallenge(c: TestClient, sk: Uint8Array): Promise<string> {
+  const ev = signNote(sk);
+  c.send(['EVENT', ev]);
+  await c.next(m => m[0] === 'OK' && m[1] === ev.id);
+  const auth = await c.next(m => m[0] === 'AUTH');
+  return auth[1] as string;
+}
+
+test('nip42: no AUTH challenge is sent unprompted on connect', async () => {
+  // Pre-fix the relay sent ["AUTH", challenge] immediately on every
+  // connect. NIP-42-aware clients (notably fiatjaf/nak) interpreted
+  // the unsolicited challenge as "AUTH is required first," tried to
+  // auto-respond without a configured signer, and never got around to
+  // publishing their EVENT. We send the challenge on demand instead.
   const port = TEST_PORT_BASE;
   const relay = new Relay({ port, dbPath: tmpFile('relay.db'), whitelistPath: tmpFile('wl.json') });
   await relay.start();
 
   const c = new TestClient(`ws://127.0.0.1:${port}`);
   await c.ready;
-  const auth = await c.next(m => m[0] === 'AUTH');
-  assert.equal(typeof auth[1], 'string');
-  assert.match(auth[1], /^[0-9a-f]{64}$/, 'challenge should be 32-byte hex');
+  await assert.rejects(
+    c.next(m => m[0] === 'AUTH', 200),
+    /timeout/,
+    'expected NO AUTH frame within 200ms of connect',
+  );
 
   await c.close();
   await relay.stop();
 });
 
-test('nip42: accepts a valid AUTH response', async () => {
+test('nip42: AUTH challenge is sent alongside an auth-required EVENT rejection', async () => {
   const port = TEST_PORT_BASE + 1;
   const relay = new Relay({ port, dbPath: tmpFile('relay.db'), whitelistPath: tmpFile('wl.json') });
   await relay.start();
@@ -83,19 +108,21 @@ test('nip42: accepts a valid AUTH response', async () => {
   const sk = generateSecretKey();
   const c = new TestClient(`ws://127.0.0.1:${port}`);
   await c.ready;
-  const challengeFrame = await c.next(m => m[0] === 'AUTH');
-  const challenge = challengeFrame[1] as string;
-
-  const ev = signAuth(challenge, `ws://127.0.0.1:${port}`, sk);
-  c.send(['AUTH', ev]);
+  const ev = signNote(sk);
+  c.send(['EVENT', ev]);
+  // OK with auth-required: prefix.
   const okFrame = await c.next(m => m[0] === 'OK' && m[1] === ev.id);
-  assert.equal(okFrame[2], true, 'AUTH should succeed for matching challenge + relay');
+  assert.equal(okFrame[2], false);
+  assert.match(String(okFrame[3]), /^auth-required:/);
+  // AUTH challenge follows so the client has something to sign with.
+  const auth = await c.next(m => m[0] === 'AUTH');
+  assert.match(String(auth[1]), /^[0-9a-f]{64}$/);
 
   await c.close();
   await relay.stop();
 });
 
-test('nip42: rejects AUTH with mismatched challenge', async () => {
+test('nip42: accepts a valid AUTH response', async () => {
   const port = TEST_PORT_BASE + 2;
   const relay = new Relay({ port, dbPath: tmpFile('relay.db'), whitelistPath: tmpFile('wl.json') });
   await relay.start();
@@ -103,11 +130,30 @@ test('nip42: rejects AUTH with mismatched challenge', async () => {
   const sk = generateSecretKey();
   const c = new TestClient(`ws://127.0.0.1:${port}`);
   await c.ready;
-  await c.next(m => m[0] === 'AUTH');
+  const challenge = await triggerAuthChallenge(c, sk);
 
-  const ev = signAuth('f'.repeat(64), `ws://127.0.0.1:${port}`, sk);
-  c.send(['AUTH', ev]);
-  const okFrame = await c.next(m => m[0] === 'OK' && m[1] === ev.id);
+  const authEv = signAuth(challenge, `ws://127.0.0.1:${port}`, sk);
+  c.send(['AUTH', authEv]);
+  const okFrame = await c.next(m => m[0] === 'OK' && m[1] === authEv.id);
+  assert.equal(okFrame[2], true, 'AUTH should succeed for matching challenge + relay');
+
+  await c.close();
+  await relay.stop();
+});
+
+test('nip42: rejects AUTH with mismatched challenge', async () => {
+  const port = TEST_PORT_BASE + 3;
+  const relay = new Relay({ port, dbPath: tmpFile('relay.db'), whitelistPath: tmpFile('wl.json') });
+  await relay.start();
+
+  const sk = generateSecretKey();
+  const c = new TestClient(`ws://127.0.0.1:${port}`);
+  await c.ready;
+  await triggerAuthChallenge(c, sk);
+
+  const authEv = signAuth('f'.repeat(64), `ws://127.0.0.1:${port}`, sk);
+  c.send(['AUTH', authEv]);
+  const okFrame = await c.next(m => m[0] === 'OK' && m[1] === authEv.id);
   assert.equal(okFrame[2], false);
   assert.match(String(okFrame[3]), /challenge/);
 
@@ -116,19 +162,18 @@ test('nip42: rejects AUTH with mismatched challenge', async () => {
 });
 
 test('nip42: rejects AUTH with wrong relay tag', async () => {
-  const port = TEST_PORT_BASE + 3;
+  const port = TEST_PORT_BASE + 4;
   const relay = new Relay({ port, dbPath: tmpFile('relay.db'), whitelistPath: tmpFile('wl.json') });
   await relay.start();
 
   const sk = generateSecretKey();
   const c = new TestClient(`ws://127.0.0.1:${port}`);
   await c.ready;
-  const challengeFrame = await c.next(m => m[0] === 'AUTH');
-  const challenge = challengeFrame[1] as string;
+  const challenge = await triggerAuthChallenge(c, sk);
 
-  const ev = signAuth(challenge, `ws://wrong.example:7777`, sk);
-  c.send(['AUTH', ev]);
-  const okFrame = await c.next(m => m[0] === 'OK' && m[1] === ev.id);
+  const authEv = signAuth(challenge, `ws://wrong.example:7777`, sk);
+  c.send(['AUTH', authEv]);
+  const okFrame = await c.next(m => m[0] === 'OK' && m[1] === authEv.id);
   assert.equal(okFrame[2], false);
   assert.match(String(okFrame[3]), /relay tag/);
 
@@ -137,19 +182,18 @@ test('nip42: rejects AUTH with wrong relay tag', async () => {
 });
 
 test('nip42: rejects AUTH with stale created_at (>10min skew)', async () => {
-  const port = TEST_PORT_BASE + 4;
+  const port = TEST_PORT_BASE + 5;
   const relay = new Relay({ port, dbPath: tmpFile('relay.db'), whitelistPath: tmpFile('wl.json') });
   await relay.start();
 
   const sk = generateSecretKey();
   const c = new TestClient(`ws://127.0.0.1:${port}`);
   await c.ready;
-  const challengeFrame = await c.next(m => m[0] === 'AUTH');
-  const challenge = challengeFrame[1] as string;
+  const challenge = await triggerAuthChallenge(c, sk);
 
-  const ev = signAuth(challenge, `ws://127.0.0.1:${port}`, sk, { skewSec: -3600 });
-  c.send(['AUTH', ev]);
-  const okFrame = await c.next(m => m[0] === 'OK' && m[1] === ev.id);
+  const authEv = signAuth(challenge, `ws://127.0.0.1:${port}`, sk, { skewSec: -3600 });
+  c.send(['AUTH', authEv]);
+  const okFrame = await c.next(m => m[0] === 'OK' && m[1] === authEv.id);
   assert.equal(okFrame[2], false);
   assert.match(String(okFrame[3]), /created_at/);
 
@@ -158,24 +202,23 @@ test('nip42: rejects AUTH with stale created_at (>10min skew)', async () => {
 });
 
 test('nip42: rejects AUTH with wrong kind', async () => {
-  const port = TEST_PORT_BASE + 5;
+  const port = TEST_PORT_BASE + 6;
   const relay = new Relay({ port, dbPath: tmpFile('relay.db'), whitelistPath: tmpFile('wl.json') });
   await relay.start();
 
   const sk = generateSecretKey();
   const c = new TestClient(`ws://127.0.0.1:${port}`);
   await c.ready;
-  const challengeFrame = await c.next(m => m[0] === 'AUTH');
-  const challenge = challengeFrame[1] as string;
+  const challenge = await triggerAuthChallenge(c, sk);
 
   // kind 1 instead of 22242
-  const ev = finalizeEvent({
+  const authEv = finalizeEvent({
     kind: 1, created_at: Math.floor(Date.now() / 1000),
     tags: [['challenge', challenge], ['relay', `ws://127.0.0.1:${port}`]],
     content: '',
   }, sk) as unknown as NostrEvent;
-  c.send(['AUTH', ev]);
-  const okFrame = await c.next(m => m[0] === 'OK' && m[1] === ev.id);
+  c.send(['AUTH', authEv]);
+  const okFrame = await c.next(m => m[0] === 'OK' && m[1] === authEv.id);
   assert.equal(okFrame[2], false);
   assert.match(String(okFrame[3]), /kind/);
 
@@ -184,7 +227,7 @@ test('nip42: rejects AUTH with wrong kind', async () => {
 });
 
 test('nip42: NIP-11 advertises supported_nips:[1,11,42] and restricted_writes', async () => {
-  const port = TEST_PORT_BASE + 6;
+  const port = TEST_PORT_BASE + 7;
   const relay = new Relay({ port, dbPath: tmpFile('relay.db'), whitelistPath: tmpFile('wl.json') });
   await relay.start();
 
