@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import { readIdentity } from '../lib/identity.js';
 import { findBin, hasBin } from '../lib/detect.js';
+import { HEARTBEAT_FILE } from '../lib/watchdog.js';
 
 interface StatusProps { json: boolean; }
 
@@ -32,8 +33,8 @@ export interface ServiceStatus {
   // Claude Code plugins are nested under the `claude` row in the dashboard
   // Status panel — they're not real binaries on PATH so they don't warrant
   // sidebar Service Health rows of their own, but users still need to see
-  // whether the ones we pitch in onboard (llm-wiki today) are actually
-  // installed. Populated only on the 'claude' entry.
+  // whether the recommended ones (llm-wiki today) are actually installed.
+  // Populated only on the 'claude' entry.
   plugins?: ClaudePlugin[];
 }
 
@@ -109,51 +110,8 @@ function gatherClaudePlugins(): ClaudePlugin[] {
   return rows;
 }
 
-// Pure state mapping for the nostr-vpn row (A4). Three sub-states stack
-// underneath the binary-present/absent split:
-//
-//   binary missing              → err  · "not installed"
-//   binary present, no service  → warn · actionable: rerun sudo service install
-//   binary present, service ok, no mesh
-//                               → warn · "not connected" (peer / firewall)
-//   binary present, mesh up     → ok   · tunnel IP
-//
-// Pre-A4, the cascade collapsed the first two warn shapes into one "not
-// connected" line, so a fresh-Linux user who skipped the sudo step at
-// onboard saw the same message as someone whose mesh peer was down — and
-// neither was actionable. The new middle state surfaces the exact command
-// the user needs to run to land the launchd / systemd unit.
-//
-// Pure + exported so tests can pin every branch without driving shellouts.
-export interface NvpnProbe {
-  binPresent:    boolean;
-  serviceLoaded: boolean;
-  meshIp:        string | null;
-}
-export function nvpnStateFor(p: NvpnProbe): {
-  value: string;
-  state: ServiceState;
-  ok:    boolean;
-} {
-  if (!p.binPresent) {
-    return { value: 'not installed', state: 'err', ok: false };
-  }
-  if (!p.serviceLoaded) {
-    return {
-      value: 'installed but service not running — run: sudo nvpn service install',
-      state: 'warn',
-      ok:    false,
-    };
-  }
-  if (p.meshIp) {
-    return { value: p.meshIp, state: 'ok', ok: true };
-  }
-  return { value: 'not connected', state: 'warn', ok: false };
-}
-
 // Every shellout here is on the hot path for /api/status. A single blocking
-// call (notably `nvpn status --json` when its daemon socket is wedged)
-// stalls the whole Node event loop and the dashboard sees a 10s+ hang.
+// call stalls the whole Node event loop and the dashboard sees a 10s+ hang.
 // Default 2s ceiling, SIGKILL on expiry — we'd rather report "not running"
 // than make the user wait.
 function cmd(c: string, timeoutMs = 2000): string | null {
@@ -166,130 +124,53 @@ function cmd(c: string, timeoutMs = 2000): string | null {
   } catch { return null; }
 }
 
-// Container-mode probes the host OS doesn't apply to. The relay lives in a
-// sibling container reachable via Docker DNS (RELAY_HOST), the watchdog is
-// a long-lived process writing a heartbeat file (no systemd/launchd), and
-// nostr-vpn isn't supportable inside an unprivileged container at all.
-//
-// Pure + exported so tests can drive the row shape without spawning anything.
-export interface ContainerStatusInputs {
-  relayUp:        boolean;
-  heartbeatPath:  string;
-  heartbeatMtime: number | null;  // ms epoch, null if missing
-  now:            number;          // ms epoch — injected for testability
-  relayHost:      string;
-  relayPort:      number;
-  // Per-tool `--version` output (or null when the binary isn't on PATH /
-  // the probe failed). Injected so tests can pin both the present and
-  // absent cases without spawning real binaries. Populated in gatherStatus()
-  // by shelling `<tool> --version` against the runtime image's PATH.
-  binaries?: {
-    ngit:   string | null;
-    claude: string | null;
-    nak:    string | null;
-    stacks: string | null;
-  };
+// Watchdog probe — reads the heartbeat file the in-Node Watchdog writes
+// on every fire. Pure + exported so tests can pin every branch without
+// touching the real ~/.nostr-station path.
+//   missing      → err  · "not running"
+//   fresh (≤7m)  → ok   · "heartbeat Nm ago"  (5m interval + 2m slack)
+//   stale (>7m)  → warn · "heartbeat Nm ago — stale"
+export interface WatchdogProbe {
+  exists: boolean;
+  ageMs:  number | null;
 }
-const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;
-
-// Compress a multi-line `--version` blob into a single readable line for
-// the status row. Most tools print "<name> <semver> [extra]" on the first
-// line; the rest is build-info noise users don't need in the panel.
-function firstLine(s: string): string {
-  return s.split('\n')[0]?.trim() ?? '';
-}
-
-function binaryRow(
-  id: 'ngit' | 'claude' | 'nak' | 'stacks',
-  label: string,
-  versionOutput: string | null,
-  extras: Partial<ServiceStatus> = {},
-): ServiceStatus {
-  if (versionOutput && versionOutput.trim()) {
+export function watchdogStateFor(p: WatchdogProbe): { value: string; state: ServiceState; ok: boolean } {
+  if (!p.exists || p.ageMs === null) {
+    return { value: 'not running', state: 'err', ok: false };
+  }
+  const ageMin = Math.floor(p.ageMs / 60_000);
+  if (p.ageMs <= 7 * 60_000) {
     return {
-      id, label, kind: 'binary',
-      value: firstLine(versionOutput),
-      ok: true, state: 'ok',
-      ...extras,
+      value: `heartbeat ${ageMin === 0 ? 'just now' : `${ageMin}m ago`}`,
+      state: 'ok',
+      ok:    true,
     };
   }
-  return {
-    id, label, kind: 'binary',
-    value: 'not installed in image — rebuild Dockerfile.station',
-    ok: false, state: 'warn',
-    ...extras,
-  };
+  return { value: `heartbeat ${ageMin}m ago — stale`, state: 'warn', ok: false };
 }
 
-export function gatherStatusContainer(p: ContainerStatusInputs): ServiceStatus[] {
-  const relayUrl = `ws://${p.relayHost}:${p.relayPort}`;
-  const relayState: ServiceState = p.relayUp ? 'ok' : 'warn';
-  const relayValue = p.relayUp
-    ? `${relayUrl} ✓`
-    : `managed by docker compose — bring up via \`docker compose up relay\``;
-
-  let watchdogState: ServiceState;
-  let watchdogValue: string;
-  if (p.heartbeatMtime === null) {
-    watchdogState = 'err';
-    watchdogValue = `no heartbeat at ${p.heartbeatPath} — is the watchdog container up?`;
-  } else {
-    const ageMs = Math.max(0, p.now - p.heartbeatMtime);
-    const ageMin = Math.floor(ageMs / 60000);
-    if (ageMs <= HEARTBEAT_FRESH_MS) {
-      watchdogState = 'ok';
-      watchdogValue = `heartbeat ${ageMin === 0 ? 'just now' : `${ageMin}m ago`}`;
-    } else {
-      watchdogState = 'warn';
-      watchdogValue = `heartbeat stale (${ageMin}m ago)`;
-    }
-  }
-
-  const bins = p.binaries ?? { ngit: null, claude: null, nak: null, stacks: null };
-
-  return [
-    { id: 'relay',     label: 'Relay',       value: relayValue,                            ok: p.relayUp,           state: relayState,    kind: 'service' },
-    { id: 'vpn',       label: 'nostr-vpn',   value: 'not applicable in container mode',   ok: false,               state: 'warn',        kind: 'service' },
-    { id: 'watchdog',  label: 'watchdog',    value: watchdogValue,                         ok: watchdogState === 'ok', state: watchdogState, kind: 'service' },
-    binaryRow('ngit',   'ngit',        bins.ngit),
-    binaryRow('claude', 'claude-code', bins.claude, { plugins: gatherClaudePlugins() }),
-    binaryRow('nak',    'nak',         bins.nak),
-    { id: 'relay-bin', label: 'relay bin',   value: 'lives in relay container',            ok: p.relayUp,           state: relayState,    kind: 'binary' },
-    binaryRow('stacks', 'Stacks',      bins.stacks),
-  ];
+// nvpn probe — separate from watchdog so each can fail cleanly. Three
+// sub-states stack underneath the binary-present split:
+//   binary missing     → err  · "not installed"
+//   binary present, no daemon response within 1s → warn · "not connected"
+//   binary present + daemon up + tunnel_ip set    → ok   · tunnel IP
+// `nvpn status --json` may hang indefinitely on a daemon socket that's
+// listening but wedged; we cap it tight (1s) and treat any failure as
+// "not connected" rather than blocking the whole /api/status call.
+export interface NvpnProbe {
+  binPresent: boolean;
+  meshIp:     string | null;
+}
+export function nvpnStateFor(p: NvpnProbe): { value: string; state: ServiceState; ok: boolean } {
+  if (!p.binPresent) return { value: 'not installed', state: 'err', ok: false };
+  if (p.meshIp)      return { value: p.meshIp, state: 'ok', ok: true };
+  return { value: 'not connected', state: 'warn', ok: false };
 }
 
 // Exported so cli.tsx can call it directly for --json mode, bypassing Ink.
 // Ink would otherwise write UI frames to stdout alongside the JSON payload,
 // corrupting any programmatic consumer piping stdout into a parser.
 export function gatherStatus(): ServiceStatus[] {
-  // Container mode: skip host-OS probes entirely (systemctl/launchctl can't
-  // tell us anything useful here) and report on the docker-compose-managed
-  // services via env-driven probes.
-  if (process.env.STATION_MODE === 'container') {
-    const relayHost = process.env.RELAY_HOST || 'localhost';
-    const relayPort = Number(process.env.RELAY_PORT || '8080');
-    const relayUp   = cmd(`nc -z -w 1 ${relayHost} ${relayPort}`, 1500) !== null;
-    const heartbeatPath = process.env.WATCHDOG_HEARTBEAT
-      || '/var/run/nostr-station/watchdog.heartbeat';
-    let heartbeatMtime: number | null = null;
-    try { heartbeatMtime = fs.statSync(heartbeatPath).mtimeMs; } catch {}
-    // Probe each baked-in dev tool. Dockerfile.station puts them at
-    // /usr/local/bin (cargo binary, sha256-verified prebuilt, npm globals);
-    // null here means the build skipped a stage or someone bind-mounted
-    // over the install — actionable signal for the dashboard, not silence.
-    const binaries = {
-      ngit:   cmd('ngit --version',   1500),
-      claude: cmd('claude --version', 1500),
-      nak:    cmd('nak --version',    1500),
-      stacks: cmd('stacks --version', 1500),
-    };
-    return gatherStatusContainer({
-      relayUp, heartbeatPath, heartbeatMtime,
-      now: Date.now(), relayHost, relayPort, binaries,
-    });
-  }
-
   // `-w 1` is a second belt-and-suspenders timeout — both BSD and GNU nc
   // respect it. Protects against nc variants that ignore our execSync
   // timeout (rare, but cheap insurance).
@@ -301,43 +182,32 @@ export function gatherStatus(): ServiceStatus[] {
   const probeHost = process.env.RELAY_HOST || '127.0.0.1';
   const probePort = Number(process.env.RELAY_PORT || '7777');
   const relayUp   = cmd(`nc -z -w 1 ${probeHost} ${probePort}`, 1500) !== null;
-  // Binary presence goes through findBin (absolute-path walk) so a fresh
-  // Linux install where ~/.cargo/bin isn't on the Node PATH still shows
-  // ✓ for installed tools. Version probes spawn the resolved absolute
-  // path directly rather than relying on shell PATH lookup.
-  const relayPath = findBin('nostr-rs-relay');
-  const relayV    = relayPath ? cmd(`${relayPath} --version 2>/dev/null`) : null;
 
-  const nvpnPath  = findBin('nvpn');
-  const meshIp    = (() => {
+  // nvpn probe — binary on PATH, then a tight 1s `nvpn status --json` to
+  // pull the tunnel IP. We cap aggressively because the daemon socket can
+  // hang indefinitely when nvpn is installed but the mesh peer is down.
+  const nvpnPath = findBin('nvpn');
+  const meshIp = (() => {
     if (!nvpnPath) return null;
     try {
-      // Tighter 1s cap: `nvpn status --json` talks to the nvpn daemon over
-      // IPC. On a fresh install the service may be installed but not yet
-      // running, which blocks the socket connect indefinitely.
       const out = cmd(`${nvpnPath} status --json`, 1000);
       return out ? JSON.parse(out)?.tunnel_ip ?? null : null;
     } catch { return null; }
   })();
+  const vpnRow = nvpnStateFor({ binPresent: !!nvpnPath, meshIp });
 
-  // A4: distinct "binary present, sudo service install never ran" probe.
-  // Different from `meshIp` (mesh tunnel up) and from `nvpn status --json`
-  // (daemon socket — answers when the daemon is running, even without a
-  // supervised unit). We want the system-supervisor signal: did the
-  // launchd/systemd unit actually land? `launchctl list <label>` and
-  // `systemctl cat <unit>` both fail fast with non-zero on missing, so
-  // either gives us the binary check we need without sudo.
-  //
-  // nvpn is installed as a SYSTEM service (not --user) on both platforms —
-  // `sudo nvpn service install` writes /Library/LaunchDaemons/* on darwin
-  // and /etc/systemd/system/* on linux. The probe still works for the
-  // current user because `launchctl list` and `systemctl cat` both read
-  // public unit metadata.
-  const nvpnServiceLoaded = nvpnPath !== null && (
-    process.platform === 'darwin'
-      ? cmd('launchctl list com.nostr-vpn.nvpn', 1500) !== null
-      : cmd('systemctl cat nvpn',                1500) !== null
-  );
+  // Watchdog probe — file mtime tells us whether the in-Node loop has
+  // fired recently. ageMs:null when missing entirely (never started),
+  // numeric otherwise.
+  const wdProbe = (() => {
+    try {
+      const mtime = fs.statSync(HEARTBEAT_FILE).mtimeMs;
+      return { exists: true, ageMs: Math.max(0, Date.now() - mtime) };
+    } catch {
+      return { exists: false, ageMs: null };
+    }
+  })();
+  const wdRow = watchdogStateFor(wdProbe);
 
   const ngitBin   = hasBin('ngit');
   // Station-level "configured" signal is the default nostr relay the user
@@ -349,6 +219,10 @@ export function gatherStatus(): ServiceStatus[] {
     catch { return ''; }
   })();
 
+  // Binary presence goes through findBin (absolute-path walk) so a fresh
+  // Linux install where ~/.cargo/bin isn't on the Node PATH still shows
+  // ✓ for installed tools. Version probes spawn the resolved absolute
+  // path directly rather than relying on shell PATH lookup.
   const claudePath = findBin('claude');
   const claudeV    = claudePath ? cmd(`${claudePath} --version 2>/dev/null`) : null;
 
@@ -359,20 +233,6 @@ export function gatherStatus(): ServiceStatus[] {
   const stacksBin  = stacksPath !== null;
   const stacksV    = stacksPath ? cmd(`${stacksPath} --version 2>/dev/null`) : null;
 
-  // Watchdog is a launchd interval job on macOS / systemd .timer on linux.
-  // No listening socket, no PID between fires — "loaded" is the only signal
-  // the OS offers us. On darwin, `launchctl list <label>` exits 0 when the
-  // plist is loaded (the interval will fire whenever its schedule hits).
-  // On linux, `systemctl --user is-enabled --quiet` confirms the timer is
-  // scheduled. Missing / unloaded → err; loaded → ok. No warn state: the
-  // "didn't fire recently" case belongs in the Logs panel's stale-log
-  // banner, not the sidebar health dot.
-  const watchdogLoaded = process.platform === 'darwin'
-    ? cmd('launchctl list com.nostr-station.watchdog', 1500) !== null
-    : cmd('systemctl --user is-enabled --quiet nostr-watchdog.timer', 1500) !== null;
-
-  const relayBin  = relayPath !== null;
-  const nvpnBin   = nvpnPath !== null;
   const claudeBin = claudePath !== null;
   const nakBin    = nakPath !== null;
 
@@ -380,32 +240,22 @@ export function gatherStatus(): ServiceStatus[] {
   //   ok   — running + configured
   //   warn — installed but not running/configured
   //   err  — not installed
-  const relayState:    ServiceState = relayUp ? 'ok' : relayBin ? 'warn' : 'err';
-  const watchdogState: ServiceState = watchdogLoaded ? 'ok' : 'err';
+  const relayState:    ServiceState = relayUp ? 'ok' : 'warn';
   const ngitState:     ServiceState = ngitBin && ngitRelay ? 'ok' : ngitBin ? 'warn' : 'err';
-  const relayBinState: ServiceState = relayBin ? 'ok' : 'err';
   const claudeState:   ServiceState = claudeBin ? 'ok' : 'err';
   const nakState:      ServiceState = nakBin ? 'ok' : 'err';
   const stacksState:   ServiceState = stacksBin ? 'ok' : 'err';
 
-  // nvpn: see nvpnStateFor above for the four-branch decision table.
-  const nvpnRow = nvpnStateFor({
-    binPresent:    nvpnBin,
-    serviceLoaded: nvpnServiceLoaded,
-    meshIp,
-  });
-
   return [
     // Services — daemons or scheduled jobs with a runtime state.
-    { id: 'relay',     label: 'Relay',       value: relayUp ? `ws://${probeHost}:${probePort} ✓` : relayBin ? 'installed (down)' : 'not installed', ok: relayUp,      state: relayState,    kind: 'service' },
-    { id: 'vpn',       label: 'nostr-vpn',   value: nvpnRow.value,                                                                       ok: nvpnRow.ok,   state: nvpnRow.state, kind: 'service' },
-    { id: 'watchdog',  label: 'watchdog',    value: watchdogLoaded ? 'scheduled · fires every 5m' : 'not installed',                     ok: watchdogLoaded, state: watchdogState, kind: 'service' },
+    { id: 'relay',     label: 'Relay',       value: relayUp ? `ws://${probeHost}:${probePort} ✓` : 'not running',                       ok: relayUp,      state: relayState,    kind: 'service' },
+    { id: 'vpn',       label: 'nostr-vpn',   value: vpnRow.value,                                                                        ok: vpnRow.ok,    state: vpnRow.state,  kind: 'service' },
+    { id: 'watchdog',  label: 'watchdog',    value: wdRow.value,                                                                         ok: wdRow.ok,     state: wdRow.state,   kind: 'service' },
     // Binaries — CLI tools; installed or not. `ngit` is the lone binary with
     // a warn state (installed but no default relay set — configure in Config).
     { id: 'ngit',      label: 'ngit',        value: ngitBin && ngitRelay ? `relay: ${ngitRelay.replace(/^wss?:\/\//, '')}` : ngitBin ? 'not configured' : 'not installed', ok: ngitBin && !!ngitRelay, state: ngitState,    kind: 'binary' },
     { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed',                                                           ok: !!claudeV,    state: claudeState,   kind: 'binary', plugins: gatherClaudePlugins() },
     { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState,      kind: 'binary' },
-    { id: 'relay-bin', label: 'relay bin',   value: relayV   ?? 'not installed',                                                           ok: !!relayV,     state: relayBinState, kind: 'binary' },
     { id: 'stacks',    label: 'Stacks',      value: stacksV  ?? (stacksBin ? 'installed' : 'not installed'),                               ok: stacksBin,    state: stacksState,   kind: 'binary' },
   ];
 }
@@ -444,8 +294,8 @@ export const Status: React.FC<StatusProps> = ({ json }) => {
       ))}
       <Text color={P.accentDim}>{'─────────────────────────────'}</Text>
       <Box marginTop={1}>
-        <Text color={P.muted}>relay logs: </Text>
-        <Text>~/logs/nostr-rs-relay.log</Text>
+        <Text color={P.muted}>logs: </Text>
+        <Text>open the dashboard Logs panel</Text>
       </Box>
     </Box>
   );

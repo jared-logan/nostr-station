@@ -88,7 +88,7 @@ jobs:
           # regardless of whether the underlying service is installed/running.
           # In CI nothing is installed, so ok=False is expected and acceptable.
           # This test ONLY validates structure, not values.
-          required = {'Relay', 'nostr-vpn', 'ngit', 'claude-code', 'nak', 'relay bin'}
+          required = {'Relay', 'nostr-vpn', 'watchdog', 'ngit', 'claude-code', 'nak', 'Stacks'}
           missing = required - set(d.keys())
           if missing:
               print(f'FAIL: missing keys: {missing}')
@@ -113,8 +113,12 @@ jobs:
 
       - name: Version pinning constants present
         run: |
-          grep -q "nostr-rs-relay" src/lib/versions.ts
-          grep -q "ngit" src/lib/versions.ts
+          # nvpn is the only binary we install directly (download + sha256
+          # verify). Other tools (ngit, nak, stacks, nsyte) install via
+          # cargo / npm / manual installer URLs, where the toolchain pins
+          # the version — versions.ts has no role for them anymore.
+          grep -q "'nvpn'" src/lib/versions.ts
+          grep -q "BINARY_SHA256" src/lib/versions.ts
           echo "✓ pinned versions declared"
 
   shellcheck:

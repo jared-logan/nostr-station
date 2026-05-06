@@ -583,7 +583,7 @@ const HELP_LINES = [
   '',
   'TROUBLESHOOTING',
   '  nsyte not found',
-  '    → Run: nostr-station onboard  (installs nsyte)',
+  '    → Run: nostr-station add nsyte',
   '    → Or manually: curl -fsSL https://nsyte.run/get/install.sh | bash',
   '    → Ensure ~/.deno/bin is in your PATH',
   '',

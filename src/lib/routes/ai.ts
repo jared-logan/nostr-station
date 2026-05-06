@@ -527,11 +527,12 @@ export async function handleAi(
       try {
         apiKey = (await getKeychain().retrieve(keychainAccountFor(providerId))) ?? '';
       } catch { apiKey = ''; }
-      // Anthropic env-var fallback: onboard for aiProvider='anthropic'
-      // intentionally does not store a key (the user owns ANTHROPIC_API_KEY
-      // in their shell env via ~/.claude_env). Read it at request time so
-      // a fresh install doesn't hit "No API key" on the first chat turn.
-      // Mirrors the legacy /api/chat path in loadProviderConfig().
+      // Anthropic env-var fallback: when aiProvider='anthropic' is
+      // configured without a stored key, we let the user own
+      // ANTHROPIC_API_KEY in their shell env (via ~/.claude_env or
+      // similar). Read it at request time so a fresh install doesn't
+      // hit "No API key" on the first chat turn. Mirrors the legacy
+      // /api/chat path in loadProviderConfig().
       if (!apiKey && providerId === 'anthropic') {
         apiKey = process.env.ANTHROPIC_API_KEY ?? '';
       }

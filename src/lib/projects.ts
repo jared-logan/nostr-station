@@ -102,11 +102,9 @@ export function resolveSafeAbsolute(p: string): string {
 
 /**
  * Resolves the directory project paths must live under. By default this is
- * the user's home directory (host-install shape). When `STATION_PROJECTS_ROOT`
- * is set, that path is used instead — the container deployment mounts a named
- * `projects` volume at `/root/projects` and sets this env var so the dashboard
- * scaffolds projects into the volume rather than the container's ephemeral
- * overlayfs. Resolved through realpath so symlinks (common on macOS, e.g.
+ * the user's home directory; STATION_PROJECTS_ROOT overrides for tests +
+ * any future deployment that wants project state under a custom root.
+ * Resolved through realpath so symlinks (common on macOS, e.g.
  * `/var/folders/.../tmp` → `/private/var/folders/...`) compare correctly.
  */
 function projectsRoot(): string {

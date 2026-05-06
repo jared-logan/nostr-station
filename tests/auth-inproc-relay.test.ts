@@ -30,33 +30,21 @@ function withEnv(entries: Record<string, string | undefined>, fn: () => void): v
   }
 }
 
-test('authStatus: inprocRelay = true by default (host-Node deployment)', () => {
-  withEnv({ STATION_MODE: undefined, STATION_INPROC_RELAY: undefined }, () => {
+test('authStatus: inprocRelay = true by default', () => {
+  withEnv({ STATION_INPROC_RELAY: undefined }, () => {
     const s = auth.authStatus(fakeReq());
     assert.equal(s.inprocRelay, true);
-    assert.equal(s.containerMode, false);
   });
 });
 
 test('authStatus: inprocRelay = false when STATION_INPROC_RELAY=0 (explicit opt-out)', () => {
-  withEnv({ STATION_MODE: undefined, STATION_INPROC_RELAY: '0' }, () => {
+  withEnv({ STATION_INPROC_RELAY: '0' }, () => {
     const s = auth.authStatus(fakeReq());
     assert.equal(s.inprocRelay, false);
   });
 });
 
-test('authStatus: inprocRelay = false in container mode (sibling Docker relay handles it)', () => {
-  withEnv({ STATION_MODE: 'container', STATION_INPROC_RELAY: undefined }, () => {
-    const s = auth.authStatus(fakeReq());
-    assert.equal(s.inprocRelay, false);
-    assert.equal(s.containerMode, true);
-  });
-});
-
-test('authStatus: container mode wins over STATION_INPROC_RELAY=1 (container relay always preferred)', () => {
-  withEnv({ STATION_MODE: 'container', STATION_INPROC_RELAY: '1' }, () => {
-    const s = auth.authStatus(fakeReq());
-    assert.equal(s.inprocRelay, false);
-    assert.equal(s.containerMode, true);
-  });
+test('authStatus: AuthStatus no longer carries containerMode (container mode dropped)', () => {
+  const s = auth.authStatus(fakeReq());
+  assert.equal((s as any).containerMode, undefined);
 });

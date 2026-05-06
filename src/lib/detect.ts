@@ -2,78 +2,6 @@ import os from 'os';
 import fs from 'fs';
 import path from 'path';
 
-export type OS = 'macos' | 'linux';
-export type Arch = 'aarch64' | 'x86_64';
-export type ServiceBackend = 'launchd' | 'systemd';
-export type PkgMgr = 'brew' | 'apt' | 'dnf' | 'pacman';
-
-export interface Platform {
-  os: OS;
-  arch: Arch;
-  pkgMgr: PkgMgr;
-  serviceBackend: ServiceBackend;
-  nvpnTarget: string;
-  homeDir: string;
-  cargoBin: string;
-  logDir: string;
-  scriptsDir: string;
-  projectsDir: string;
-  configDir: string;
-  relayDataDir: string;
-  launchAgentsDir?: string;
-}
-
-export type Editor = 'claude-code' | 'cursor' | 'windsurf' | 'copilot' | 'aider' | 'codex' | 'other';
-export type VersionControl = 'ngit' | 'github' | 'both';
-
-export interface Config {
-  npub: string;
-  hexPubkey: string;
-  bunker: string;
-  relayName: string;
-  fallbackRelays: string;
-  aiProvider: 'anthropic' | 'openrouter' | 'routstr' | 'ppq' | 'ollama' | 'lmstudio' | 'opencode-zen' | 'maple' | 'custom';
-  openrouterKey?: string;
-  openrouterModel?: string;
-  routstrCashuToken?: string;
-  routstrServer?: string;
-  ppqApiKey?: string;
-  ollamaModel?: string;
-  ollamaBase?: string;
-  lmstudioModel?: string;
-  lmstudioBase?: string;
-  opencodeZenKey?: string;
-  opencodeZenModel?: string;
-  mapleApiKey?: string;
-  mapleBase?: string;
-  customApiBase?: string;
-  customApiKey?: string;
-  customModel?: string;
-  editor: Editor;
-  versionControl: VersionControl;
-  installStacks: boolean;
-  installBlossom: boolean;
-  installLlmWiki: boolean;
-  installNsyte: boolean;
-  whitelistExtra?: string;   // space-separated extra npubs to whitelist (onboard)
-  watchdogNpub?: string;
-}
-
-export interface Installed {
-  rust: boolean;
-  node: boolean;
-  git: boolean;
-  nak: boolean;
-  relay: boolean;
-  ngit: boolean;
-  nvpn: boolean;
-  claude: boolean;
-  gh: boolean;
-  stacks: boolean;
-  blossom: boolean;
-  nsyte: boolean;
-}
-
 // Known install targets checked ahead of process.env.PATH. On fresh Linux
 // installs, the Node process inherits a restricted PATH that doesn't yet
 // include ~/.cargo/bin — so every cargo-installed or prebuilt-downloaded
@@ -109,79 +37,31 @@ export function hasBin(name: string): boolean {
   return findBin(name) !== null;
 }
 
-// Local alias — keeps detectPlatform / detectInstalled call sites terse.
-const has = hasBin;
-
-export function detectPlatform(): Platform {
-  const rawOs = process.platform;
-  const rawArch = process.arch;
-
-  const osName: OS = rawOs === 'darwin' ? 'macos' : 'linux';
-  const arch: Arch = rawArch === 'arm64' ? 'aarch64' : 'x86_64';
-
-  let pkgMgr: PkgMgr = 'brew';
-  if (osName === 'linux') {
-    if (has('apt-get'))  pkgMgr = 'apt';
-    else if (has('dnf')) pkgMgr = 'dnf';
-    else pkgMgr = 'pacman';
+// Resolve the Rust-target triple upstream (mmalmi/nostr-vpn) publishes
+// per (os, arch). Linux builds are statically linked against musl so they
+// run on any distro without glibc-version pins — there is NO `-gnu` asset.
+// macOS x86_64 is unsupported upstream — installer surfaces a clear error
+// rather than 404'ing on the download URL.
+export function getNvpnTarget(): string | null {
+  const arch = process.arch;
+  if (process.platform === 'darwin') {
+    if (arch === 'arm64') return 'aarch64-apple-darwin';
+    return null;  // x86_64-apple-darwin: upstream does not publish this asset
   }
-
-  const serviceBackend: ServiceBackend = osName === 'macos' ? 'launchd' : 'systemd';
-  const homeDir = os.homedir();
-
-  // Upstream (mmalmi/nostr-vpn) publishes Rust-toolchain-style target triples.
-  // Linux builds are statically linked against musl so they run on any distro
-  // without glibc-version pins — there is NO `-gnu` asset, only `-musl`. An
-  // earlier version of this map used `-gnu` and silently 404'd on every Linux
-  // install. macOS x86_64 is unsupported upstream (no published asset); the
-  // x86_64-apple-darwin entry is kept as a placeholder so the URL fails with
-  // a clear message instead of an earlier undefined-template error.
-  const nvpnTargetMap: Record<string, Record<string, string>> = {
-    macos:  { aarch64: 'aarch64-apple-darwin',         x86_64: 'x86_64-apple-darwin' },
-    linux:  { aarch64: 'aarch64-unknown-linux-musl',   x86_64: 'x86_64-unknown-linux-musl' },
-  };
-  const nvpnTarget = nvpnTargetMap[osName][arch];
-
-  const platform: Platform = {
-    os: osName,
-    arch,
-    pkgMgr,
-    serviceBackend,
-    nvpnTarget,
-    homeDir,
-    cargoBin: `${homeDir}/.cargo/bin`,
-    logDir:     `${homeDir}/logs`,
-    scriptsDir: `${homeDir}/scripts`,
-    projectsDir:`${homeDir}/projects`,
-    configDir:  `${homeDir}/.config/nostr-rs-relay`,
-    relayDataDir: osName === 'macos'
-      ? `${homeDir}/Library/Application Support/nostr-rs-relay`
-      : `${homeDir}/.local/share/nostr-rs-relay`,
-  };
-
-  if (osName === 'macos') {
-    platform.launchAgentsDir = `${homeDir}/Library/LaunchAgents`;
+  if (process.platform === 'linux') {
+    if (arch === 'arm64') return 'aarch64-unknown-linux-musl';
+    if (arch === 'x64')   return 'x86_64-unknown-linux-musl';
   }
-
-  return platform;
+  return null;
 }
 
-export function detectInstalled(): Installed {
-  return {
-    rust:    has('rustc'),
-    node:    has('node'),
-    git:     has('git'),
-    nak:     has('nak'),
-    relay:   has('nostr-rs-relay'),
-    ngit:    has('ngit'),
-    nvpn:    has('nvpn'),
-    claude:  has('claude'),
-    gh:      has('gh'),
-    stacks:  has('stacks'),
-    blossom: fs.existsSync(`${os.homedir()}/blossom-server`),
-    nsyte:   has('nsyte'),
-  };
+// User-writable install dir for binaries we drop in by hand (nvpn). Same
+// path cargo uses, so anything that already had cargo-installed tools on
+// PATH gets the new binary on PATH too.
+export function getCargoBin(): string {
+  return path.join(os.homedir(), '.cargo', 'bin');
 }
+
 
 // Probe local AI servers — called during config phase
 // Returns available models or null if the server isn't running

@@ -13,7 +13,6 @@ import http from 'http';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { spawn, execSync } from 'child_process';
 import { nip19 } from 'nostr-tools';
 import { getPublicKey } from 'nostr-tools/pure';
 import { fileURLToPath } from 'url';
@@ -32,11 +31,14 @@ import {
 // surface goes away when the Chat pane fully switches to /api/ai/chat.
 import { migrateIfNeeded } from './ai-config.js';
 import { gatherStatus } from '../commands/Status.js';
-import { hexToNpub } from './identity.js';
-// relay-config / services / install were the host-install era's
-// LaunchAgent/systemd/cargo plumbing; all gone now that the relay
-// runs in-process. Remaining route handlers below were trimmed
-// alongside the imports.
+import { DEFAULT_DB_PATH } from '../relay/store.js';
+import type { Relay } from '../relay/index.js';
+import { LogBuffer, type LogLine } from './log-buffer.js';
+import { getTool, installTool, TOOLS } from './tools.js';
+import { Watchdog } from './watchdog.js';
+import { installNostrVpn } from './nvpn-installer.js';
+import { installNak } from './nak-installer.js';
+import { hexToNpub, npubToHex } from './identity.js';
 import {
   readIdentity, setSetupComplete, isNsec,
 } from './identity.js';
@@ -321,29 +323,63 @@ async function proxyChat(
   res.end();
 }
 
-// ── Relay liveness probe ──────────────────────────────────────────────────────
+// ── Relay-adjacent helpers ────────────────────────────────────────────────────
 
-function isRelayUp(): boolean {
-  const host = process.env.RELAY_HOST || '127.0.0.1';
-  const port = Number(process.env.RELAY_PORT || '7777');
+// Derive the npub for a keychain-stored nsec, best-effort. Used by
+// /api/relay-config to label whitelist entries by role (the station
+// owner's own npub comes straight from identity.json; watchdog and seed
+// are recoverable only by reading + decoding the keychain entry). Returns
+// null on any failure — the consumer treats null as "role not configured
+// on this station", not "keychain backend broken".
+async function deriveKeychainNpub(slot: 'watchdog-nsec' | 'seed-nsec'): Promise<string | null> {
   try {
-    execSync(`nc -z -w 1 ${host} ${port}`, {
-      stdio: 'pipe', timeout: 1500, killSignal: 'SIGKILL',
-    });
-    return true;
-  }
-  catch { return false; }
+    const nsec = await getKeychain().retrieve(slot);
+    if (!nsec) return null;
+    const decoded = nip19.decode(nsec);
+    if (decoded.type !== 'nsec') return null;
+    const pubHex = getPublicKey(decoded.data as Uint8Array);
+    return nip19.npubEncode(pubHex);
+  } catch { return null; }
 }
 
+// Format a LogLine for the Logs panel SSE wire. Pre-deletion the panel
+// consumed plain `tail -f` strings, so the client just appends as text;
+// we prefix with [LEVEL] iso-time to keep the warn/err classification
+// (app.js:4727 'classify') working.
+function formatLogLine(line: LogLine): string {
+  const iso = new Date(line.ts).toISOString();
+  const prefix = line.level === 'error' ? '[ERROR]'
+              : line.level === 'warn'  ? '[WARN]'
+              : '[INFO]';
+  return `${iso} ${prefix} ${line.text}`;
+}
 
 // ── Server ────────────────────────────────────────────────────────────────────
 
 // In-process Nostr relay handle. Started by maybeStartInprocRelay() unless
 // the user explicitly opts out with STATION_INPROC_RELAY=0. Kept here so
-// the dashboard's shutdown path can stop it cleanly. Loosely typed (any) to
-// avoid pulling the whole relay module into web-server's import graph at
-// type-resolution time when the relay isn't started.
-let inprocRelay: { stop: () => Promise<void> } | null = null;
+// the dashboard's shutdown path can stop it cleanly + the Relay panel's
+// control endpoints can mutate its state. `import type` keeps the relay
+// module out of runtime load until maybeStartInprocRelay's dynamic import
+// actually fires (preserving the STATION_INPROC_RELAY=0 fast path).
+let inprocRelay: Relay | null = null;
+
+// Per-channel log ring buffers for the Logs panel. The relay buffer is
+// fed by Relay.onLog hooks (see maybeStartInprocRelay below). The
+// watchdog buffer is fed by the in-Node Watchdog (Phase 2.1). The vpn
+// buffer stays unfed for now; /api/logs/vpn returns a "pending" frame
+// until Phase 2.2 lands the installer.
+const logBuffers = {
+  relay:    new LogBuffer(),
+  watchdog: new LogBuffer(),
+  vpn:      new LogBuffer(),
+} as const;
+
+// In-Node watchdog — heartbeats every 5 min through the local relay.
+// Started after maybeStartInprocRelay (it depends on the Relay handle
+// for whitelist registration + publishLocal). STATION_DISABLE_WATCHDOG=1
+// opts out for tests / minimal deployments.
+let watchdog: Watchdog | null = null;
 
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
@@ -477,15 +513,50 @@ async function maybeStartInprocRelay(): Promise<void> {
   // relay isn't started.
   const { Relay } = await import('../relay/index.js');
   const port = Number(process.env.STATION_INPROC_RELAY_PORT || '7777');
-  const r = new Relay({ port, host: '127.0.0.1' });
+  // Owner-pubkey resolver for the relay's write-gating. Re-reads
+  // identity.json on every EVENT publish so the user can rotate their
+  // npub (e.g. via `/api/identity/set`) without restarting the relay.
+  // Returns null when no owner is configured yet (fresh install / mid-
+  // wizard) — the relay then accepts only whitelisted publishers, which
+  // is the correct lock-down state.
+  const r = new Relay({
+    port, host: '127.0.0.1',
+    getOwnerHex: () => {
+      try {
+        const ident = readIdentity();
+        return ident.npub ? npubToHex(ident.npub).toLowerCase() : null;
+      } catch { return null; }
+    },
+    // Pipe relay-emitted log lines into the channel buffer that backs
+    // /api/logs/relay (1.8). Connection open/close, EVENT accept/reject/
+    // duplicate, REQ subscriptions, and AUTH outcomes all land here.
+    onLog: (level, text) => logBuffers.relay.push(level, text),
+  });
   await r.start();
   inprocRelay = r;
-  // Publish the relay address via env so gatherStatus + isRelayUp probe
-  // the right port, and any descendant tooling (e.g. nak commands) sees
-  // the same source of truth.
+  // Publish the relay address via env so gatherStatus probes the right
+  // port, and any descendant tooling (e.g. nak commands) sees the same
+  // source of truth.
   process.env.RELAY_HOST = '127.0.0.1';
   process.env.RELAY_PORT = String(port);
   process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);
+  logBuffers.relay.info(`relay listening on ws://127.0.0.1:${port}`);
+  await maybeStartWatchdog();
+}
+
+async function maybeStartWatchdog(): Promise<void> {
+  if (process.env.STATION_DISABLE_WATCHDOG === '1') return;
+  if (watchdog || !inprocRelay) return;
+  const wd = new Watchdog({
+    relay: inprocRelay,
+    onLog: (level, text) => logBuffers.watchdog.push(level, text),
+  });
+  try {
+    await wd.start();
+    watchdog = wd;
+  } catch (e: any) {
+    logBuffers.watchdog.error(`watchdog start failed: ${e?.message || e}`);
+  }
 }
 
 export async function startWebServer(port: number): Promise<void> {
@@ -826,6 +897,500 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
+      // ── Relay config (read-only stub) ─────────────────────────────────
+      // The Config panel does a Promise.all over seven endpoints at boot
+      // (app.js:4910). One 404 collapses the entire panel to "failed to
+      // load", so this stub exists to unblock Config UI rendering even
+      // before the real settings store / NIP-42 / whitelist enforcement
+      // land. Fields:
+      //   name/url/dataDir/configPath — describe the in-process relay
+      //   auth/dmAuth — placeholder false; real toggles wire up in 1.7
+      //   whitelist — empty array; populated by 1.6 once the store exists
+      //   knownRoles — owner npub from identity.json, plus best-effort
+      //     watchdog/seed npubs derived from keychain nsec slots so the
+      //     whitelist editor can label entries by role.
+      // ── Relay whitelist add/remove ────────────────────────────────────
+      // Mutates the in-process relay's whitelist, persisted next to
+      // relay.db. The Relay panel posts npub strings (app.js:1980, 2003);
+      // we decode to hex for storage so the relay's handleEvent gating
+      // path (1.6c) compares apples to apples — sigs verify against hex
+      // pubkeys, not bech32. `already`/`absent` short-circuit responses
+      // mirror the original endpoint shape so the panel's toast copy
+      // ("npub already on whitelist") still works.
+      if (url === '/api/relay/whitelist/add' && method === 'POST') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        let body: { npub?: string };
+        try { body = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+          return;
+        }
+        const input = String(body?.npub || '').trim();
+        let hex: string;
+        try {
+          hex = input.startsWith('npub') ? npubToHex(input) : input;
+          if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('not a valid pubkey');
+        } catch (e: any) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || 'invalid pubkey') }));
+          return;
+        }
+        const added = inprocRelay.whitelist.add(hex);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, hex, already: !added }));
+        return;
+      }
+
+      if (url === '/api/relay/whitelist/remove' && method === 'POST') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        let body: { npub?: string };
+        try { body = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+          return;
+        }
+        const input = String(body?.npub || '').trim();
+        let hex: string;
+        try {
+          hex = input.startsWith('npub') ? npubToHex(input) : input;
+          if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('not a valid pubkey');
+        } catch (e: any) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || 'invalid pubkey') }));
+          return;
+        }
+        const removed = inprocRelay.whitelist.remove(hex);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, hex, absent: !removed }));
+        return;
+      }
+
+      // ── Relay lifecycle ───────────────────────────────────────────────
+      // start/stop/restart the in-process relay from the Relay panel
+      // (app.js:1925). Pre-architectural-simplification this drove
+      // launchctl/systemctl on a separate nostr-rs-relay daemon; now it
+      // operates on the in-process Relay handle directly. STATION_INPROC_RELAY=0
+      // is an opt-out: maybeStartInprocRelay no-ops in that case, so a
+      // user who explicitly disabled the embedded relay sees a successful
+      // {up:false} response rather than a confusing error.
+      const relayActionMatch = url.match(/^\/api\/relay\/(start|stop|restart)$/);
+      if (relayActionMatch && method === 'POST') {
+        const action = relayActionMatch[1];
+        try {
+          if (action === 'stop' || action === 'restart') {
+            if (inprocRelay) {
+              await inprocRelay.stop();
+              inprocRelay = null;
+            }
+          }
+          if (action === 'start' || action === 'restart') {
+            await maybeStartInprocRelay();
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, action, up: inprocRelay !== null }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, action, error: String(e?.message || e) }));
+        }
+        return;
+      }
+
+      // ── Relay sqlite DB export ────────────────────────────────────────
+      // Dumps every event in the store as one JSON object per line into
+      // ~/nostr-exports/relay-events-<stamp>.jsonl. Drives Relay panel's
+      // export button (app.js:2069). Streams via EventStore.iterAll() so
+      // a large store doesn't blow up memory; sync write loop is fine
+      // here because better-sqlite3 is sync anyway and the route blocks
+      // until done. Pre-deletion this shelled to `nak req`; the new path
+      // hits the store directly and removes the nak-on-PATH dependency.
+      if (url === '/api/relay/database/export' && method === 'POST') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        try {
+          const exportDir = path.join(os.homedir(), 'nostr-exports');
+          fs.mkdirSync(exportDir, { recursive: true });
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const filePath = path.join(exportDir, `relay-events-${stamp}.jsonl`);
+          const fd = fs.openSync(filePath, 'w');
+          let count = 0;
+          try {
+            for (const ev of inprocRelay.store.iterAll()) {
+              fs.writeSync(fd, JSON.stringify(ev) + '\n');
+              count++;
+            }
+          } finally {
+            fs.closeSync(fd);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, file: filePath, count }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+        }
+        return;
+      }
+
+      // ── Relay sqlite DB wipe ──────────────────────────────────────────
+      // Empties the relay's event store. Triggered by Relay panel's
+      // danger-zone wipe button (app.js:2038). No service restart needed:
+      // EventStore lives inside the dashboard process, the relay just
+      // keeps serving once the table is empty. VACUUM (in EventStore.wipe)
+      // shrinks the on-disk file so /api/relay/database/stats reports the
+      // expected zero immediately.
+      if (url === '/api/relay/database/wipe' && method === 'POST') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        try {
+          inprocRelay.store.wipe();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+        }
+        return;
+      }
+
+      // ── Relay sqlite DB stats ─────────────────────────────────────────
+      // Used by the Relay panel's database section (app.js:1908). Sums the
+      // sqlite main file plus its WAL/SHM sidecars so a relay under active
+      // write load reports honestly. `exists:false` lets the UI show
+      // "empty" instead of "0 B" when nothing's been stored yet.
+      if (url === '/api/relay/database/stats' && method === 'GET') {
+        const dbPath = DEFAULT_DB_PATH;
+        let sizeBytes = 0;
+        let exists = false;
+        for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+          try {
+            const st = fs.statSync(p);
+            sizeBytes += st.size;
+            if (p === dbPath) exists = true;
+          } catch { /* missing sidecar — fine */ }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sizeBytes, exists, path: dbPath }));
+        return;
+      }
+
+      if (url === '/api/relay-config' && method === 'GET') {
+        const ident = readIdentity();
+        const host = process.env.RELAY_HOST || '127.0.0.1';
+        const port = process.env.RELAY_PORT || '7777';
+        const [watchdogNpub, seedNpub] = await Promise.all([
+          deriveKeychainNpub('watchdog-nsec'),
+          deriveKeychainNpub('seed-nsec'),
+        ]);
+        // Whitelist is presented as npubs because that's what the Relay
+        // panel renders. Storage is hex (matches sig verification); we
+        // bech32-encode on the way out only.
+        const whitelist = inprocRelay
+          ? inprocRelay.whitelist.list().map(hex => hexToNpub(hex))
+          : [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          name:       'nostr-station',
+          url:        `ws://${host}:${port}`,
+          // Write gating is always on in this build: only the station
+          // owner and whitelisted pubkeys can publish. The Config panel's
+          // auth/dmAuth toggles are kept here for back-compat with the
+          // existing render code, but they reflect the real (immutable)
+          // state — not user-mutable settings. dmAuth is reserved for a
+          // future read-gating layer; today reads are open to all.
+          auth:       true,
+          dmAuth:     false,
+          gating:     {
+            policy:        'owner+whitelist',
+            mutable:       false,
+            reason:        'in-process relay: NIP-42 write gating is always on',
+            ownerKnown:    !!ident.npub,
+            whitelistSize: whitelist.length,
+          },
+          whitelist,
+          dataDir:    path.join(os.homedir(), '.nostr-station', 'data'),
+          configPath: 'in-process — no config file',
+          knownRoles: {
+            station:  ident.npub || null,
+            watchdog: watchdogNpub,
+            seed:     seedNpub,
+          },
+        }));
+        return;
+      }
+
+      // Accept POSTs to /api/relay-config but treat the toggles as
+      // immutable: write gating is always on (1.6c) and there's no
+      // dmAuth implementation to enable yet. Returns the same shape as
+      // GET so the Config panel's saveRelayFlag (app.js:5683) gets a
+      // 200 response and re-renders against truth instead of erroring.
+      if (url === '/api/relay-config' && method === 'POST') {
+        // Drain body so the client doesn't see a stalled connection;
+        // we deliberately ignore its contents.
+        try { await readBody(req); } catch { /* fine */ }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:      true,
+          auth:    true,
+          dmAuth:  false,
+          mutable: false,
+          message: 'write gating is always on — manage access via the whitelist',
+        }));
+        return;
+      }
+
+
+      // ── nvpn installer ────────────────────────────────────────────────
+      // Wizard renderVpn (app.js:7141) drives this endpoint. NDJSON wire
+      // format — one JSON line per progress event. The installer itself
+      // is in src/lib/nvpn-installer.ts; this handler just streams its
+      // progress callbacks back to the browser.
+      if (url === '/api/setup/nvpn/install' && method === 'POST') {
+        res.writeHead(200, {
+          'Content-Type':      'application/x-ndjson',
+          'Cache-Control':     'no-cache',
+          'Connection':        'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        try {
+          const result = await installNostrVpn((s) => {
+            try { res.write(JSON.stringify({ type: 'progress', step: s }) + '\n'); } catch {}
+          });
+          res.write(JSON.stringify({
+            type:   'done',
+            ok:     result.ok,
+            warn:   !!result.warn,
+            detail: result.detail ?? '',
+          }) + '\n');
+        } catch (e: any) {
+          res.write(JSON.stringify({
+            type:   'done',
+            ok:     false,
+            detail: String(e?.message ?? e),
+          }) + '\n');
+        }
+        res.end();
+        return;
+      }
+
+      // ── Watchdog lifecycle + status ───────────────────────────────────
+      // The in-Node watchdog publishes a kind-1 heartbeat to the local
+      // relay on a recurring interval. Endpoints let the dashboard /
+      // CLI start, stop, or inspect it explicitly — separate from the
+      // relay's lifecycle (1.3) because some users may want the relay
+      // up without the watchdog (or vice versa).
+      if (url === '/api/watchdog/status' && method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(watchdog ? watchdog.status() : {
+          running: false, lastHeartbeatAt: null, npub: null, intervalMs: 0,
+        }));
+        return;
+      }
+      if (url === '/api/watchdog/start' && method === 'POST') {
+        try {
+          await maybeStartWatchdog();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, status: watchdog?.status() ?? null }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+        }
+        return;
+      }
+      if (url === '/api/watchdog/stop' && method === 'POST') {
+        if (watchdog) {
+          watchdog.stop();
+          watchdog = null;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // ── Status panel install button ───────────────────────────────────
+      // POST /api/exec/install/<slug> — drives the Status row "Install"
+      // CTA (app.js:1255). Most slugs flow through installTool() from
+      // src/lib/tools.ts (cargo/npm/manual installers); `nak` has its
+      // own GitHub-release-binary path (src/lib/nak-installer.ts) since
+      // upstream ships it as a single Go binary, not a Rust crate.
+      // Bigger flows (nvpn) keep their own dedicated setup endpoint
+      // (/api/setup/nvpn/install above).
+      const installMatch = url.match(/^\/api\/exec\/install\/([a-z][a-z0-9-]*)$/);
+      if (installMatch && method === 'POST') {
+        const slug = installMatch[1];
+        res.writeHead(200, {
+          'Content-Type':  'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection':    'keep-alive',
+        });
+        const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+
+        // Custom installer slugs first.
+        if (slug === 'nak') {
+          try {
+            const result = await installNak((line) => emit({ line, stream: 'stdout' }));
+            if (!result.ok && result.detail) {
+              emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
+            }
+            emit({ done: true, code: result.ok ? 0 : (result.warn ? 0 : 1) });
+          } catch (e: any) {
+            emit({ line: String(e?.message || e), stream: 'stderr' });
+            emit({ done: true, code: -1 });
+          }
+          try { res.end(); } catch {}
+          return;
+        }
+
+        const tool = getTool(slug);
+        if (!tool) {
+          const supported = ['nak', ...Object.keys(TOOLS)].sort();
+          emit({
+            line:   `'${slug}' is not a known optional tool. Supported: ${supported.join(', ')}.`,
+            stream: 'stderr',
+          });
+          emit({ done: true, code: 1 });
+          try { res.end(); } catch {}
+          return;
+        }
+        try {
+          const result = await installTool(tool, (line) => emit({ line, stream: 'stdout' }));
+          if (!result.ok && result.detail) {
+            emit({ line: result.detail, stream: 'stderr' });
+          }
+          emit({ done: true, code: result.ok ? 0 : 1 });
+        } catch (e: any) {
+          emit({ line: String(e?.message || e), stream: 'stderr' });
+          emit({ done: true, code: -1 });
+        }
+        try { res.end(); } catch {}
+        return;
+      }
+
+      // ── Logs panel SSE ────────────────────────────────────────────────
+      // Single endpoint for all three channels (relay/watchdog/vpn). The
+      // panel opens an EventSource per active tab and reconnects on tab
+      // change (app.js:4864). Output frames per the original wire shape:
+      //   data: { status: ServiceHealth }   — emitted on connect
+      //   data: { lines: [LogLine, ...] }   — replay of buffered history,
+      //                                       then one frame per new line
+      //   data: { error: <string> }         — replaced by graceful close
+      // EventSource cannot set Authorization, so the auth gate accepts
+      // ?token=<bearer> via the existing extractBearer path; the per-route
+      // guard above has already vetted the token by the time we land here.
+      const logsMatch = url.match(/^\/api\/logs\/(relay|watchdog|vpn)$/);
+      if (logsMatch && method === 'GET') {
+        const channel = logsMatch[1] as 'relay' | 'watchdog' | 'vpn';
+        const buf = logBuffers[channel];
+
+        res.writeHead(200, {
+          'Content-Type':  'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection':    'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+
+        // Status frame matches the shape Logs panel's renderBanner /
+        // renderMeta consume (app.js:4868). Per channel:
+        //   relay     — running + log-buffer-backed
+        //   watchdog  — running iff the in-Node watchdog is alive,
+        //               carries watchdogNpub for the meta strip
+        //   vpn       — pending until Phase 2.2 installer lands
+        const status = (() => {
+          if (channel === 'relay') {
+            return {
+              service:    'relay',
+              installed:  true,
+              running:    !!inprocRelay,
+              logExists:  true,
+              logPath:    '(in-memory ring buffer)',
+              stale:      false,
+              logMtimeMs: Date.now(),
+            };
+          }
+          if (channel === 'watchdog') {
+            const s = watchdog?.status();
+            return {
+              service:        'watchdog',
+              installed:      true,
+              running:        !!s?.running,
+              logExists:      true,
+              logPath:        '(in-memory ring buffer)',
+              stale:          false,
+              logMtimeMs:     s?.lastHeartbeatAt ?? Date.now(),
+              watchdogNpub:   s?.npub ?? null,
+            };
+          }
+          // vpn — pluck the nvpn row from gatherStatus so we report the
+          // same install/running state Status panel sees. Pre-fix the
+          // logs panel had a hardcoded "installer wiring pending" stub
+          // that misrepresented a working install as "not installed".
+          // gatherStatus emits state ok (tunnel up) / warn (binary
+          // present, no tunnel) / err (binary missing).
+          const vpnRow = gatherStatus().find(r => r.id === 'vpn');
+          const installed = vpnRow ? vpnRow.state !== 'err' : false;
+          const running   = vpnRow ? vpnRow.state === 'ok'  : false;
+          return {
+            service:    channel,
+            installed,
+            running,
+            logExists:  installed,
+            logPath:    installed
+              ? '(nvpn writes its own log; tail with `nvpn logs` until the wizard surfaces it here)'
+              : '(not installed)',
+            stale:      false,
+            logMtimeMs: Date.now(),
+            note:       installed
+              ? (running ? `tunnel: ${vpnRow?.value ?? ''}` : (vpnRow?.value ?? 'not connected'))
+              : 'install via the setup wizard\'s vpn step',
+          };
+        })();
+        res.write(`data: ${JSON.stringify({ status })}\n\n`);
+
+        // Replay the ring on connect so the user sees recent history
+        // immediately, not just whatever happens after the panel opened.
+        const initial = buf.drain();
+        if (initial.length > 0) {
+          res.write(`data: ${JSON.stringify({ lines: initial.map(formatLogLine) })}\n\n`);
+        }
+
+        // Live tail — push every new line as a single-line `lines` frame
+        // so client code paths (history vs live) share one branch.
+        const unsubscribe = buf.subscribe((line: LogLine) => {
+          if (res.writableEnded) return;
+          try {
+            res.write(`data: ${JSON.stringify({ lines: [formatLogLine(line)] })}\n\n`);
+          } catch { /* socket gone — close handler unsubs */ }
+        });
+
+        // 15s heartbeat keeps proxies / browsers from idling the
+        // connection out when nothing's happening on the channel.
+        const heartbeat = setInterval(() => {
+          if (res.writableEnded) return;
+          try { res.write(': heartbeat\n\n'); } catch {}
+        }, 15_000);
+
+        const cleanup = () => {
+          clearInterval(heartbeat);
+          unsubscribe();
+        };
+        req.on('close', cleanup);
+        res.on('close', cleanup);
+        return;
+      }
 
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
       if (await handleProjects(req, res, url, method)) return;
@@ -847,16 +1412,6 @@ export async function startWebServer(port: number): Promise<void> {
       //     reach this endpoint in the first place.
       //   - Once setupComplete flips true, this branch rejects further
       //     calls — a second-session upgrade requires real auth.
-      // Setup wizard Relay stage — performs the full first-install bootstrap
-      // for the local relay: dirs, watchdog keypair, relay config.toml,
-      // watchdog script, systemd/launchd unit files, and enable --now.
-      // Idempotent, so safe to re-run mid-wizard or as a repair path.
-      //
-      // Gated by localhostExempt during the wizard (setupComplete !== true)
-      // and by a normal session afterwards, via the standard middleware —
-      // no public-API carveout needed. Assumes the relay BINARY is already
-      // installed; the wizard leaves compile/download to `nostr-station
-      // onboard` because that step can run 10+ minutes and needs a TTY.
       // ── Amber QR pairing (first-run /setup) ──────────────────────────
       //
       // The hero step of the user-journey spec: a single full-screen QR
@@ -1040,6 +1595,15 @@ export async function startWebServer(port: number): Promise<void> {
       // the path from location and renders the wizard/panel accordingly.
       // Listed explicitly (not a catch-all) so typos still 404.
       if (method === 'GET' && url === '/setup') {
+        // Already paired — bounce to the dashboard. Without this guard a
+        // refresh on /setup keeps the wizard SPA mounted, which both
+        // confuses the user and offers no working path forward (the
+        // /api/setup/* endpoints all 409 once setupComplete flips true).
+        if (readIdentity().setupComplete === true) {
+          res.writeHead(302, { Location: '/' });
+          res.end();
+          return;
+        }
         const indexPath = path.join(WEB_DIR, 'index.html');
         if (fs.existsSync(indexPath)) {
           res.writeHead(200, {
@@ -1076,6 +1640,9 @@ export async function startWebServer(port: number): Promise<void> {
 
     server.on('close', () => {
       destroyAllTerminals();
+      // Stop the watchdog before the relay it depends on.
+      watchdog?.stop();
+      watchdog = null;
       // Stop the in-process relay alongside the dashboard. Errors are
       // swallowed because a half-stopped relay during shutdown is no
       // worse than a dropped log line.

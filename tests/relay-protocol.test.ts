@@ -83,10 +83,14 @@ function signNote(text: string, sk: Uint8Array): NostrEvent {
 
 test('relay: accepts a signed event and acks with OK true', async () => {
   const port = TEST_PORT;
-  const relay = new Relay({ port, dbPath: tmpDb() });
+  const sk   = generateSecretKey();
+  // Register the test pubkey as the station owner so the relay's
+  // write-gating policy (handleEvent in src/relay/index.ts) accepts the
+  // EVENT instead of returning `auth-required:`. Production wires this
+  // closure to a re-read of identity.json; tests just close over the sk.
+  const relay = new Relay({ port, dbPath: tmpDb(), getOwnerHex: () => getPublicKey(sk) });
   await relay.start();
 
-  const sk = generateSecretKey();
   const ev = signNote('hello world', sk);
 
   const c = new TestClient(`ws://127.0.0.1:${port}`);
@@ -121,10 +125,10 @@ test('relay: rejects events with bad signatures', async () => {
 
 test('relay: REQ replays stored events and ends with EOSE', async () => {
   const port = TEST_PORT + 2;
-  const relay = new Relay({ port, dbPath: tmpDb() });
+  const sk   = generateSecretKey();
+  const relay = new Relay({ port, dbPath: tmpDb(), getOwnerHex: () => getPublicKey(sk) });
   await relay.start();
 
-  const sk = generateSecretKey();
   const e1 = signNote('first',  sk);
   const e2 = signNote('second', sk);
 
@@ -156,10 +160,9 @@ test('relay: REQ replays stored events and ends with EOSE', async () => {
 
 test('relay: live fan-out delivers new events to active subscribers', async () => {
   const port = TEST_PORT + 3;
-  const relay = new Relay({ port, dbPath: tmpDb() });
+  const sk   = generateSecretKey();
+  const relay = new Relay({ port, dbPath: tmpDb(), getOwnerHex: () => getPublicKey(sk) });
   await relay.start();
-
-  const sk = generateSecretKey();
 
   const sub = new TestClient(`ws://127.0.0.1:${port}`);
   await sub.ready;
@@ -184,10 +187,9 @@ test('relay: live fan-out delivers new events to active subscribers', async () =
 
 test('relay: CLOSE stops fan-out for that subscription', async () => {
   const port = TEST_PORT + 4;
-  const relay = new Relay({ port, dbPath: tmpDb() });
+  const sk   = generateSecretKey();
+  const relay = new Relay({ port, dbPath: tmpDb(), getOwnerHex: () => getPublicKey(sk) });
   await relay.start();
-
-  const sk = generateSecretKey();
 
   const sub = new TestClient(`ws://127.0.0.1:${port}`);
   await sub.ready;

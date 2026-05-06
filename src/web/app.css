@@ -2547,15 +2547,9 @@ input:focus, textarea:focus, select:focus {
 .setup-relay-row .title { font-size: 13px; color: var(--text-bright); }
 .setup-relay-row .muted { font-size: 11px; margin-top: 3px; }
 
-/* Per-step results returned by POST /api/setup/relay/install — rendered
-   below the Install button so the user can see which of dirs / keypair
-   / config / units / enable succeeded or warned. */
-.setup-relay-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 10px;
-}
+/* Per-step rows used by the wizard's vpn install step (renderVpn).
+   Was originally shared with a now-removed relay install step, hence
+   the .setup-step-row name. */
 .setup-step-row {
   display: flex;
   gap: 8px;

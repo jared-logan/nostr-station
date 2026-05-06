@@ -92,7 +92,6 @@
           <div class="subtitle">Service health · click Install or Configure to act</div>
         </div>
         <div class="panel-head-actions">
-          <button id="status-doctor">run doctor</button>
           <button id="status-refresh">refresh</button>
         </div>
       </div>
@@ -146,13 +145,12 @@
       <div class="panel-head">
         <div>
           <div class="title">Relay</div>
-          <div class="subtitle">Live event stream · ws://localhost:8080</div>
+          <div class="subtitle">Live event stream from the in-process relay</div>
         </div>
         <div class="panel-head-actions">
           <button id="relay-start">start</button>
           <button id="relay-restart">restart</button>
           <button id="relay-seed">seed events</button>
-          <button id="relay-logs-term">logs</button>
           <button class="danger" id="relay-stop">stop</button>
         </div>
       </div>
@@ -191,12 +189,11 @@
 
         <div class="help-card">
           <h4>Common nak commands</h4>
-          <pre data-cmd='nak event -k 1 --sec &lt;nsec&gt; "hello" ws://localhost:8080'><span class="code">nak event -k 1 --sec &lt;nsec&gt; "hello" ws://localhost:8080</span></pre>
-          <pre data-cmd='nak req -k 1 -l 20 ws://localhost:8080'><span class="code">nak req -k 1 -l 20 ws://localhost:8080</span></pre>
-          <pre data-cmd='nak req --stream ws://localhost:8080'><span class="code">nak req --stream ws://localhost:8080</span></pre>
+          <pre id="nak-cmd-event"  data-template='nak event -k 1 --sec &lt;nsec&gt; "hello" {url}'><span class="code">…</span></pre>
+          <pre id="nak-cmd-req"    data-template='nak req -k 1 -l 20 {url}'><span class="code">…</span></pre>
+          <pre id="nak-cmd-stream" data-template='nak req --stream {url}'><span class="code">…</span></pre>
           <div style="color:var(--text-dim);font-size:11px;margin-top:8px">
-            NIP-42 auth is enabled — clients must sign an AUTH event with Amber to publish.
-            <a href="https://github.com/scsibug/nostr-rs-relay" target="_blank" rel="noreferrer">nostr-rs-relay docs →</a>
+            NIP-42 write gating is on — only the station owner and whitelisted pubkeys can publish.
           </div>
         </div>
 

@@ -24,7 +24,7 @@ const NOTE_CONTENT = [
   'Testing the local relay — hello nostr!',
   'Building something cool on Nostr. Stay tuned.',
   'The future of social media is protocol, not platform.',
-  'nostr-rs-relay running locally. NIP-42 auth enabled.',
+  'In-process relay running locally. NIP-42 auth enabled.',
   'Just seeding the dev relay for testing. Ignore me.',
   'Decentralized identity is the killer app.',
   'Running my own relay feels good.',

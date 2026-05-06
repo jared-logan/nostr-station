@@ -22,7 +22,7 @@ export interface StoreOptions {
   maxEvents?: number;
 }
 
-const DEFAULT_DB_PATH = path.join(os.homedir(), '.nostr-station', 'data', 'relay.db');
+export const DEFAULT_DB_PATH = path.join(os.homedir(), '.nostr-station', 'data', 'relay.db');
 const DEFAULT_MAX_EVENTS = 100_000;
 
 // Replaceable event ranges per NIP-01. Inserting a newer event of the
@@ -247,6 +247,39 @@ export class EventStore {
 
   count(): number {
     return (this.stCount.get() as { n: number }).n;
+  }
+
+  // Stream every event in created_at ASC order. Yields one at a time via
+  // better-sqlite3's iterator so a relay with hundreds of thousands of
+  // events doesn't have to fit in memory during /api/relay/database/export.
+  *iterAll(): Generator<NostrEvent> {
+    const stmt = this.db.prepare(
+      'SELECT id, pubkey, created_at, kind, content, sig, tags_json FROM events ORDER BY created_at ASC',
+    );
+    for (const r of stmt.iterate() as IterableIterator<{
+      id: string; pubkey: string; created_at: number;
+      kind: number; content: string; sig: string; tags_json: string;
+    }>) {
+      yield {
+        id:         r.id,
+        pubkey:     r.pubkey,
+        created_at: r.created_at,
+        kind:       r.kind,
+        content:    r.content,
+        sig:        r.sig,
+        tags:       JSON.parse(r.tags_json) as string[][],
+      };
+    }
+  }
+
+  // Empty the relay. The tags table cascades, then VACUUM reclaims pages
+  // so the on-disk file shrinks alongside the row count (otherwise sqlite
+  // keeps the file at high-water mark and the Relay panel's "wipe" button
+  // looks like it did nothing). No service restart needed — the EventStore
+  // sits inside the dashboard process, callers just keep using it.
+  wipe(): void {
+    this.db.exec('DELETE FROM events');
+    this.db.exec('VACUUM');
   }
 
   close(): void {

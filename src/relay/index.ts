@@ -1,7 +1,9 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { verifyEvent } from 'nostr-tools/pure';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { EventStore } from './store.js';
+import { WhitelistStore } from './whitelist-store.js';
 import { eventMatchesAny } from './filter.js';
 import type { NostrEvent, NostrFilter } from './types.js';
 
@@ -19,14 +21,24 @@ import type { NostrEvent, NostrFilter } from './types.js';
 //     ["NOTICE", <message>]
 //     ["CLOSED", <subId>, <message>]
 //
-// Auth (NIP-42) is intentionally NOT implemented in this first cut — the
-// relay only listens on loopback by default, so the threat model is "any
-// process on this machine" which already has stronger access. We can add
-// NIP-42 later as a hardening pass once the dashboard is using the relay.
+// NIP-42 authentication is implemented at the wire-protocol level: every
+// new connection receives ["AUTH", <challenge>] immediately and a client
+// can respond with ["AUTH", <kind-22242 event>] to bind a pubkey to the
+// connection. The actual write-access policy ("only the station owner
+// and whitelisted pubkeys may publish") lives in handleEvent and is
+// enforced via the event's own signed pubkey, not the AUTHed pubkey
+// (signature verification already proves authorship — AUTH is
+// informational here, useful for clients that expect the dance and for
+// the spec-mandated `auth-required:` rejection prefix).
 
 interface Subscription {
   ws:      WebSocket;
   filters: NostrFilter[];
+}
+
+interface ConnAuth {
+  challenge:     string;          // hex string, sent on connect
+  authedPubkey?: string;          // hex; set after a valid kind-22242 reply
 }
 
 export interface RelayOptions {
@@ -34,6 +46,21 @@ export interface RelayOptions {
   host?:       string;       // defaults to 127.0.0.1
   dbPath?:     string;       // forwarded to EventStore
   maxEvents?:  number;       // forwarded to EventStore
+  // Override the whitelist store path. Used by tests to keep state out
+  // of the user's real ~/.nostr-station; production code uses the
+  // default (next to relay.db).
+  whitelistPath?: string;
+  // Resolves the station owner's pubkey (hex, lowercase) on each EVENT
+  // publish. Called from handleEvent's gating path. Returning null means
+  // "no owner configured" — relay then accepts ONLY whitelisted pubkeys.
+  // Per-event invocation (not a one-shot at construction) so identity.json
+  // edits propagate without a relay restart.
+  getOwnerHex?: () => string | null;
+  // Optional log sink. The relay never writes a log file; instead it
+  // calls onLog for notable wire-protocol events (connection open/close,
+  // event accepted/rejected, REQ subscription, AUTH success/failure).
+  // The dashboard pipes these into a LogBuffer that backs the Logs panel.
+  onLog?: (level: 'info' | 'warn' | 'error', text: string) => void;
   // Externally-provided HTTP server. When supplied, the relay attaches
   // its WebSocket upgrade handler to it and does NOT listen() on its own
   // port. Used for the in-process mode where dashboard and relay share
@@ -46,7 +73,8 @@ const DEFAULT_PORT = 7777;
 const DEFAULT_HOST = '127.0.0.1';
 
 export class Relay {
-  readonly store: EventStore;
+  readonly store:     EventStore;
+  readonly whitelist: WhitelistStore;
   private wss?:   WebSocketServer;
   private http?:  http.Server;
   // subId is per-connection; we key the Map by ws + ':' + subId so we can
@@ -54,11 +82,20 @@ export class Relay {
   private subs = new Map<string, Subscription>();
   private port: number;
   private host: string;
+  private getOwnerHex?: () => string | null;
+  private onLog?: (level: 'info' | 'warn' | 'error', text: string) => void;
 
   constructor(opts: RelayOptions = {}) {
-    this.port = opts.port ?? DEFAULT_PORT;
-    this.host = opts.host ?? DEFAULT_HOST;
-    this.store = new EventStore({ dbPath: opts.dbPath, maxEvents: opts.maxEvents });
+    this.port        = opts.port ?? DEFAULT_PORT;
+    this.host        = opts.host ?? DEFAULT_HOST;
+    this.store       = new EventStore({ dbPath: opts.dbPath, maxEvents: opts.maxEvents });
+    this.whitelist   = new WhitelistStore(opts.whitelistPath);
+    this.getOwnerHex = opts.getOwnerHex;
+    this.onLog       = opts.onLog;
+  }
+
+  private log(level: 'info' | 'warn' | 'error', text: string): void {
+    try { this.onLog?.(level, text); } catch { /* never let a bad sink break protocol handling */ }
   }
 
   async start(): Promise<{ port: number; host: string }> {
@@ -116,13 +153,18 @@ export class Relay {
         name:        'nostr-station',
         description: 'Local development relay',
         software:    'nostr-station',
-        supported_nips: [1, 11],
+        supported_nips: [1, 11, 42],
         limitation: {
           max_subscriptions: 100,
           max_filters:       10,
           max_limit:         5000,
           payment_required:  false,
+          // Reads are open. Writes are pubkey-gated (owner + whitelist).
+          // auth_required:false reflects "you can connect and subscribe
+          // without AUTH"; the per-EVENT response carries `auth-required:`
+          // for clients that try to publish without permission.
           auth_required:     false,
+          restricted_writes: true,
         },
       }));
       return;
@@ -132,6 +174,24 @@ export class Relay {
 
   private handleConnection(ws: WebSocket): void {
     const connSubs = new Set<string>();
+
+    // Per-connection AUTH state. Initialized eagerly with a fresh challenge
+    // even though we don't send the challenge upfront — `sendAuthChallenge`
+    // below uses this challenge if/when a gated operation triggers an
+    // on-demand challenge.
+    //
+    // We deliberately don't send `["AUTH", challenge]` on connect:
+    // NIP-42-aware clients (notably fiatjaf/nak) treat an unsolicited
+    // AUTH challenge as "AUTH is required first" and try to auto-respond.
+    // Without a configured signer they send malformed AUTH frames and
+    // never get to publishing their actual EVENT — the user sees a
+    // deadline-exceeded timeout where they expected an `auth-required:`
+    // rejection. Connection AUTH state isn't part of our gating policy
+    // anyway (gating is by event signature), so the upfront challenge
+    // confused well-behaved clients without buying us anything.
+    const auth: ConnAuth = { challenge: crypto.randomBytes(32).toString('hex') };
+    (ws as any).__nsAuth = auth;
+    this.log('info', 'client connected');
 
     ws.on('message', (data) => {
       let msg: unknown;
@@ -146,14 +206,83 @@ export class Relay {
       if (type === 'EVENT') return this.handleEvent(ws, rest[0]);
       if (type === 'REQ')   return this.handleReq(ws, rest, connSubs);
       if (type === 'CLOSE') return this.handleClose(ws, rest[0], connSubs);
+      if (type === 'AUTH')  return this.handleAuth(ws, rest[0]);
       notice(ws, `unknown message type: ${type}`);
     });
 
     ws.on('close', () => {
       for (const key of connSubs) this.subs.delete(key);
       connSubs.clear();
+      this.log('info', 'client disconnected');
     });
     ws.on('error', () => { /* swallow — close handler does cleanup */ });
+  }
+
+  // NIP-42 client AUTH response. The event must:
+  //   - be kind 22242
+  //   - carry a `challenge` tag matching the one we sent on connect
+  //   - carry a `relay` tag matching this relay's URL
+  //   - be signed correctly (verifyEvent)
+  //   - be timestamped within ±10 minutes (clock-skew tolerance, matches
+  //     NIP-98's 60s window scaled up to allow for slow Amber round-trips)
+  // On success the connection's authedPubkey is set; the actual write
+  // policy (in handleEvent) reads event.pubkey from each EVENT instead,
+  // so AUTH state is informational here.
+  private handleAuth(ws: WebSocket, raw: unknown): void {
+    if (!isEvent(raw)) return notice(ws, 'AUTH: not an event object');
+    const auth = (ws as any).__nsAuth as ConnAuth | undefined;
+    if (!auth) return notice(ws, 'AUTH: connection has no challenge');
+
+    if (raw.kind !== 22242) return ok(ws, raw.id, false, 'auth-failed: kind must be 22242');
+
+    let valid = false;
+    try { valid = verifyEvent(raw as any); } catch { valid = false; }
+    if (!valid) return ok(ws, raw.id, false, 'auth-failed: bad signature');
+
+    const challengeTag = raw.tags.find(t => t[0] === 'challenge')?.[1];
+    if (challengeTag !== auth.challenge) {
+      return ok(ws, raw.id, false, 'auth-failed: challenge mismatch');
+    }
+    const relayTag = raw.tags.find(t => t[0] === 'relay')?.[1];
+    const expectedRelay = this.getRelayUrl();
+    if (!relayTag || !sameRelayUrl(relayTag, expectedRelay)) {
+      return ok(ws, raw.id, false, `auth-failed: relay tag must be ${expectedRelay}`);
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(now - raw.created_at) > 600) {
+      return ok(ws, raw.id, false, 'auth-failed: created_at outside ±10min');
+    }
+
+    auth.authedPubkey = raw.pubkey;
+    this.log('info', `AUTH success — connection bound to ${raw.pubkey.slice(0, 8)}…`);
+    ok(ws, raw.id, true, '');
+  }
+
+  // Public — used by handleAuth's relay-tag check and exposed so the HTTP
+  // layer can use the same canonical form when constructing /api/relay-config
+  // responses.
+  getRelayUrl(): string {
+    return `ws://${this.host}:${this.port}`;
+  }
+
+  // In-process event injection for trusted callers (the watchdog
+  // heartbeat loop, future server-internal publishers). Skips the
+  // wire-protocol round-trip but still runs signature verification +
+  // EventStore.add and fans out to live subscribers, so REQs see the
+  // event the same as if it had arrived over WebSocket. Throws on
+  // invalid signature so a bug in a caller can't smuggle garbage in.
+  publishLocal(ev: NostrEvent): void {
+    let valid = false;
+    try { valid = verifyEvent(ev as any); } catch { valid = false; }
+    if (!valid) throw new Error('publishLocal: bad signature');
+    const result = this.store.add(ev);
+    if (result.duplicate) return;
+    for (const [key, sub] of this.subs) {
+      if (eventMatchesAny(ev, sub.filters)) {
+        const subId = key.split(':').slice(1).join(':');
+        sendJson(sub.ws, ['EVENT', subId, ev]);
+      }
+    }
   }
 
   private handleEvent(ws: WebSocket, raw: unknown): void {
@@ -163,9 +292,38 @@ export class Relay {
     try { valid = verifyEvent(raw as any); } catch { valid = false; }
     if (!valid) return ok(ws, raw.id, false, 'invalid: bad signature');
 
-    const result = this.store.add(raw);
-    if (result.duplicate) return ok(ws, raw.id, true, 'duplicate: already have this event');
+    // Write gating — pubkey-based, not connection-based. The signature on
+    // `raw` already proves authorship, so we don't need an AUTHed
+    // connection state to know who's writing; we just check the event's
+    // own pubkey against (station owner) ∪ whitelist. Rejections use the
+    // NIP-42 `auth-required:` prefix so spec-aware clients know the
+    // failure is policy-driven (vs the spec-defined `invalid:` /
+    // `duplicate:` / `error:` prefixes for protocol-level failures).
+    const evPubkey = raw.pubkey.toLowerCase();
+    const ownerHex = (this.getOwnerHex?.() ?? '').toLowerCase();
+    const isOwner       = !!ownerHex && ownerHex === evPubkey;
+    const isWhitelisted = this.whitelist.has(evPubkey);
+    if (!isOwner && !isWhitelisted) {
+      this.log('warn', `EVENT rejected — pubkey ${evPubkey.slice(0, 8)}… not authorized (kind ${raw.kind})`);
+      ok(ws, raw.id, false, 'auth-required: pubkey not authorized to publish to this relay');
+      // Send a NIP-42 AUTH challenge alongside the rejection so
+      // spec-aware clients have a challenge to sign. AUTH state isn't
+      // part of our gating policy (we always check event signature),
+      // so the AUTH won't actually unlock writes for this pubkey — but
+      // it gives clients the protocol element they expect to see when
+      // they receive an `auth-required:` reply.
+      const auth = (ws as any).__nsAuth as ConnAuth | undefined;
+      if (auth) sendJson(ws, ['AUTH', auth.challenge]);
+      return;
+    }
 
+    const result = this.store.add(raw);
+    if (result.duplicate) {
+      this.log('info', `EVENT duplicate — id ${raw.id.slice(0, 8)}… already in store`);
+      return ok(ws, raw.id, true, 'duplicate: already have this event');
+    }
+
+    this.log('info', `EVENT accepted — id ${raw.id.slice(0, 8)}… kind ${raw.kind} from ${evPubkey.slice(0, 8)}…${isOwner ? ' (owner)' : ' (whitelisted)'}`);
     ok(ws, raw.id, true, '');
 
     // Fan-out to live subscribers. We iterate the whole subs map; for a
@@ -200,6 +358,7 @@ export class Relay {
     const events = this.store.queryMany(filters);
     for (const ev of events) sendJson(ws, ['EVENT', subId, ev]);
     sendJson(ws, ['EOSE', subId]);
+    this.log('info', `REQ ${subId} — ${filters.length} filter(s), ${events.length} historical event(s) replayed`);
   }
 
   private handleClose(ws: WebSocket, raw: unknown, connSubs: Set<string>): void {
@@ -246,4 +405,14 @@ function notice(ws: WebSocket, text: string): void {
 
 function ok(ws: WebSocket, eventId: string, accepted: boolean, message: string): void {
   sendJson(ws, ['OK', eventId, accepted, message]);
+}
+
+// Compare two relay URLs for equality with mild normalization. NIP-42's
+// `relay` tag is supposed to match the relay URL exactly, but in practice
+// clients normalize trailing slashes / case the host differently. We allow
+// trailing-slash and case-insensitive scheme/host so a well-meaning Amber
+// client doesn't bounce off our spec-strictness.
+function sameRelayUrl(a: string, b: string): boolean {
+  const norm = (s: string) => s.replace(/\/+$/, '').toLowerCase();
+  return norm(a) === norm(b);
 }

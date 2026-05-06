@@ -191,23 +191,7 @@ export function verifyNip98(input: VerifyInput): VerifyResult {
 
 // ── Localhost exemption ─────────────────────────────────────────────────────
 
-// Container deployment: when the dashboard runs inside a Docker container with
-// the host port published as 127.0.0.1:<port>:<port>, every request that
-// reaches the listener has already passed the host kernel's loopback gate.
-// Inside the container the source address is the bridge gateway, not 127.0.0.1
-// — but the trust boundary is the host port binding, not the container's view
-// of the socket. Treat any source IP as localhost-equivalent here.
-//
-// This is opt-in via STATION_MODE=container. The compose stack is responsible
-// for keeping the host port loopback-only; binding 0.0.0.0:<port> on the host
-// would silently widen the trust boundary, which is why this is an env var,
-// not auto-detected.
-export function isContainerMode(): boolean {
-  return process.env.STATION_MODE === 'container';
-}
-
 export function isLocalhost(req: http.IncomingMessage): boolean {
-  if (isContainerMode()) return true;
   const ra = req.socket.remoteAddress || '';
   return ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
 }
@@ -235,11 +219,10 @@ export interface AuthStatus {
   authenticated:   boolean;
   requireAuth:     boolean;
   localhostExempt: boolean;
-  containerMode:   boolean;
-  // True when nostr-station is running an in-process Nostr relay (the
-  // default for the host-Node deployment). The /setup wizard uses this
-  // to skip the legacy "install relay" stage — the relay is already up
-  // and serving on ws://127.0.0.1:7777 by the time the wizard renders.
+  // True when nostr-station is running its in-process Nostr relay
+  // (the default). STATION_INPROC_RELAY=0 opts out, in which case
+  // the dashboard runs without an embedded relay — typically a dev
+  // workflow pointed at an external one.
   inprocRelay:     boolean;
   session?: {
     createdAt: number;
@@ -250,12 +233,9 @@ export interface AuthStatus {
 
 // True when this process is running the in-process relay. Mirrors the
 // shouldStartInprocRelay() decision in web-server.ts (kept here so auth
-// stays free of cross-module imports). Container mode and the explicit
-// STATION_INPROC_RELAY=0 opt-out short-circuit the default.
+// stays free of cross-module imports). STATION_INPROC_RELAY=0 opts out.
 function inprocRelayActive(): boolean {
-  if (isContainerMode()) return false;
-  if (process.env.STATION_INPROC_RELAY === '0') return false;
-  return true;
+  return process.env.STATION_INPROC_RELAY !== '0';
 }
 
 export function authStatus(req: http.IncomingMessage): AuthStatus {
@@ -269,7 +249,6 @@ export function authStatus(req: http.IncomingMessage): AuthStatus {
     npub:            ident.npub || null,
     requireAuth,
     localhostExempt: exempt,
-    containerMode:   isContainerMode(),
     inprocRelay:     inprocRelayActive(),
     authenticated:   !!session || exempt,
     session: session

@@ -3,85 +3,61 @@ import fs from 'fs';
 import path from 'path';
 
 // Shell completion for nostr-station.
-// What this does: after running `nostr-station completion --shell zsh --install`,
-// typing `nostr-station <TAB>` in your terminal shows available commands.
-// It's a standard CLI convention that makes the tool feel native.
+//
+// After `nostr-station completion --shell zsh --install` (or bash),
+// `nostr-station <TAB>` in your terminal shows available commands +
+// per-subcommand flags. Standard CLI convention; makes the tool feel
+// native.
+//
+// The command list and flag set here mirror src/cli.tsx — keep them in
+// sync when adding/removing verbs. The dashboard verbs (start, up,
+// chat, serve) all do the same thing; we expose them all so users can
+// type whichever feels natural.
 
-const COMMANDS = ['onboard', 'doctor', 'status', 'update', 'relay', 'tui', 'seed', 'publish', 'keychain', 'nsite', 'editor', 'uninstall', 'completion', 'version'];
+const NSITE_SUBCOMMANDS    = ['init', 'publish', 'deploy', 'status', 'open', 'help'];
 const KEYCHAIN_SUBCOMMANDS = ['list', 'get', 'set', 'delete', 'rotate', 'migrate'];
-const KEYCHAIN_KEYS = ['ai-api-key', 'watchdog-nsec'];
-const NSITE_SUBCOMMANDS = ['init', 'publish', 'deploy', 'status', 'open', 'help'];
-const PUBLISH_FLAGS = ['--github', '--ngit'];
-const RELAY_SUBCOMMANDS = ['start', 'stop', 'restart', 'status', 'config', 'whitelist', 'logs'];
-const RELAY_CONFIG_FLAGS = ['--auth', '--dm-auth'];
-const RELAY_WHITELIST_FLAGS = ['--add', '--remove'];
-const RELAY_LOGS_FLAGS = ['--follow', '-f', '--service'];
-const RELAY_LOGS_SERVICES = ['relay', 'watchdog', 'all'];
-const ONBOARD_FLAGS = ['--demo'];
-const UPDATE_FLAGS = ['--dry-run', '--yes', '--wizard'];
-const DOCTOR_FLAGS = ['--fix', '--repair', '--deep'];
-const SEED_FLAGS = ['--events', '--full'];
+const KEYCHAIN_KEYS        = ['ai-api-key', 'watchdog-nsec', 'seed-nsec'];
+const AI_SUBCOMMANDS       = ['list', 'add', 'remove', 'default'];
 
 const ZSH_COMPLETION = `#compdef nostr-station
 
 _nostr_station() {
   local -a commands
   commands=(
-    'onboard:Interactive setup wizard (--demo for throwaway keypair)'
-    'doctor:Health checks and quick fixes'
+    'start:Start the dashboard (alias: up, chat, serve)'
+    'up:Start the dashboard'
+    'chat:Start the dashboard'
+    'serve:Start the dashboard'
+    'stop:Stop the running dashboard (alias: down)'
+    'down:Stop the running dashboard'
     'status:Show relay and service status'
-    'update:Update all installed components'
-    'relay:Manage the nostr-rs-relay service (incl. logs)'
-    'tui:Live dashboard'
     'seed:Seed relay with dummy events for testing'
     'keychain:Manage credentials in the OS keychain'
+    'ai:Manage AI provider configuration'
+    'add:Install an optional tool (ngit, nak, stacks, nsyte)'
+    'list:List optional tools (alias of: add)'
     'publish:Publish to all configured remotes (git + ngit)'
     'nsite:Manage nsite publishing (nsyte)'
     'editor:Link NOSTR_STATION.md to your AI coding tool'
-    'uninstall:Remove nostr-station'
     'completion:Generate shell completion'
     'version:Print version'
   )
 
-  local -a relay_cmds keychain_cmds keychain_keys nsite_cmds log_services
-  relay_cmds=('start' 'stop' 'restart' 'status' 'config' 'whitelist' 'logs')
-  keychain_cmds=('list' 'get' 'set' 'delete' 'rotate' 'migrate')
-  keychain_keys=('ai-api-key' 'watchdog-nsec')
-  nsite_cmds=('init' 'publish' 'deploy' 'status' 'open' 'help')
-  log_services=('relay' 'watchdog' 'all')
+  local -a keychain_cmds keychain_keys nsite_cmds ai_cmds
+  keychain_cmds=(${KEYCHAIN_SUBCOMMANDS.map(c => `'${c}'`).join(' ')})
+  keychain_keys=(${KEYCHAIN_KEYS.map(c => `'${c}'`).join(' ')})
+  nsite_cmds=(${NSITE_SUBCOMMANDS.map(c => `'${c}'`).join(' ')})
+  ai_cmds=(${AI_SUBCOMMANDS.map(c => `'${c}'`).join(' ')})
 
   case $words[2] in
-    onboard)
-      _arguments \\
-        '--demo[Use throwaway keypair — skip npub/bunker prompts]'
-      ;;
     seed)
       _arguments \\
         '--events[Number of events to publish]:count:' \\
         '--full[Also publish profile, contact list, and reactions]'
       ;;
-    relay)
-      case $words[3] in
-        config)
-          _arguments \\
-            '--auth[Toggle NIP-42 auth]:value:(on off)' \\
-            '--dm-auth[Toggle DM auth restriction]:value:(on off)'
-          ;;
-        whitelist)
-          _arguments \\
-            '--add[Add an npub to whitelist]:npub:' \\
-            '--remove[Remove an npub from whitelist]:npub:'
-          ;;
-        logs)
-          _arguments \\
-            '--follow[Tail in real time]' \\
-            '-f[Tail in real time]' \\
-            '--service[Log source]:service:(relay watchdog all)'
-          ;;
-        *)
-          _describe 'relay subcommand' relay_cmds
-          ;;
-      esac
+    status)
+      _arguments \\
+        '--json[Emit machine-readable JSON instead of TUI]'
       ;;
     keychain)
       case $words[3] in
@@ -93,6 +69,9 @@ _nostr_station() {
           ;;
       esac
       ;;
+    ai)
+      _describe 'ai subcommand' ai_cmds
+      ;;
     nsite)
       _describe 'nsite subcommand' nsite_cmds
       ;;
@@ -101,17 +80,10 @@ _nostr_station() {
         '--github[Publish to GitHub remote only]' \\
         '--ngit[Publish to ngit remote only]'
       ;;
-    doctor)
+    completion)
       _arguments \\
-        '--fix[Attempt automatic repairs]' \\
-        '--repair[Attempt automatic repairs]' \\
-        '--deep[Extended diagnostics]'
-      ;;
-    update)
-      _arguments \\
-        '--dry-run[Preview without applying]' \\
-        '--yes[Skip confirmation]' \\
-        '--wizard[Interactive update wizard]'
+        '--shell[Shell to target]:shell:(zsh bash)' \\
+        '--install[Write completion script to disk]'
       ;;
     *)
       _describe 'command' commands
@@ -127,35 +99,25 @@ _nostr_station() {
   local cur prev words cword
   _init_completion || return
 
-  local commands="onboard doctor status update relay tui seed publish keychain nsite editor uninstall completion version"
+  local commands="start up chat serve stop down status seed keychain ai add list publish nsite editor completion version"
 
   case $prev in
     nostr-station)
       COMPREPLY=($(compgen -W "$commands" -- "$cur"))
       return ;;
-    relay)
-      COMPREPLY=($(compgen -W "start stop restart status config whitelist logs" -- "$cur"))
-      return ;;
-    config)
-      if [[ \${words[2]} == "relay" ]]; then
-        COMPREPLY=($(compgen -W "--auth --dm-auth" -- "$cur"))
-        return
-      fi ;;
-    whitelist)
-      if [[ \${words[2]} == "relay" ]]; then
-        COMPREPLY=($(compgen -W "--add --remove" -- "$cur"))
-        return
-      fi ;;
     keychain)
-      COMPREPLY=($(compgen -W "list get set delete rotate migrate" -- "$cur"))
+      COMPREPLY=($(compgen -W "${KEYCHAIN_SUBCOMMANDS.join(' ')}" -- "$cur"))
       return ;;
     get|set|delete|rotate)
       if [[ \${words[1]} == "keychain" ]]; then
-        COMPREPLY=($(compgen -W "ai-api-key watchdog-nsec" -- "$cur"))
+        COMPREPLY=($(compgen -W "${KEYCHAIN_KEYS.join(' ')}" -- "$cur"))
         return
       fi ;;
-    onboard)
-      COMPREPLY=($(compgen -W "--demo" -- "$cur"))
+    ai)
+      COMPREPLY=($(compgen -W "${AI_SUBCOMMANDS.join(' ')}" -- "$cur"))
+      return ;;
+    nsite)
+      COMPREPLY=($(compgen -W "${NSITE_SUBCOMMANDS.join(' ')}" -- "$cur"))
       return ;;
     seed)
       COMPREPLY=($(compgen -W "--events --full" -- "$cur"))
@@ -163,29 +125,15 @@ _nostr_station() {
     publish)
       COMPREPLY=($(compgen -W "--github --ngit" -- "$cur"))
       return ;;
-    nsite)
-      COMPREPLY=($(compgen -W "init publish deploy status open help" -- "$cur"))
+    completion)
+      COMPREPLY=($(compgen -W "--shell --install" -- "$cur"))
       return ;;
-    logs)
-      if [[ \${words[1]} == "relay" ]]; then
-        COMPREPLY=($(compgen -W "--follow -f --service" -- "$cur"))
-        return
-      fi ;;
-    --service)
-      COMPREPLY=($(compgen -W "relay watchdog all" -- "$cur"))
-      return ;;
-    --auth|--dm-auth)
-      COMPREPLY=($(compgen -W "on off" -- "$cur"))
+    --shell)
+      COMPREPLY=($(compgen -W "zsh bash" -- "$cur"))
       return ;;
   esac
 
   case \${words[1]} in
-    doctor)
-      COMPREPLY=($(compgen -W "--fix --repair --deep" -- "$cur")) ;;
-    update)
-      COMPREPLY=($(compgen -W "--dry-run --yes --wizard" -- "$cur")) ;;
-    publish)
-      COMPREPLY=($(compgen -W "--github --ngit" -- "$cur")) ;;
     status)
       COMPREPLY=($(compgen -W "--json" -- "$cur")) ;;
   esac
@@ -201,7 +149,6 @@ export function installCompletion(shell: 'zsh' | 'bash'): { ok: boolean; path: s
   const script = generateCompletion(shell);
 
   if (shell === 'zsh') {
-    // Write to a dir that's likely on fpath
     const completionDir = `${os.homedir()}/.zsh/completions`;
     const completionFile = `${completionDir}/_nostr_station`;
     fs.mkdirSync(completionDir, { recursive: true });
