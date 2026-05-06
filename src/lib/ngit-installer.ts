@@ -2,9 +2,11 @@
 //
 // ngit ships a per-target tarball on github.com/DanConwayDev/ngit-cli
 // releases. Asset name: `ngit-v{version}-{rust-target-triple}.tar.gz`,
-// containing the `ngit` binary (and on some releases, a sibling
-// `git-remote-nostr`). Download → sha256 verify the tarball → extract →
-// `sudo -n install` into /usr/local/bin/ngit.
+// containing two binaries: `ngit` (the CLI) and `git-remote-nostr` (the
+// git protocol helper that makes `git clone nostr://…` resolve via
+// Nostr relays). Both must end up on PATH or `/api/ngit/clone` fails
+// at the git-clone step. Download → sha256 verify the tarball →
+// extract → `sudo -n install` both into /usr/local/bin.
 //
 // Pre-fix the tools registry tried `cargo install ngit`, which required
 // Rust on the host; install.sh deliberately skips Rust, so the Status
@@ -45,11 +47,13 @@ function resolveTarget(): string | null {
   return null;
 }
 
-// Walk the extracted tree and locate the ngit binary. Upstream's
-// tarball layout has shifted between releases (sometimes flat, sometimes
-// nested under a versioned directory); a small search with a depth cap
-// keeps us robust without scanning the whole filesystem.
-function findNgitBinary(rootDir: string): string | null {
+// Walk the extracted tree and locate a binary by exact filename.
+// Upstream's tarball layout has shifted between releases (sometimes
+// flat, sometimes nested under a versioned directory); a small search
+// with a depth cap keeps us robust without scanning the whole
+// filesystem. Used to find both `ngit` and `git-remote-nostr` inside
+// the extracted tarball — they live next to each other in the same dir.
+function findBinaryInTree(rootDir: string, name: string): string | null {
   const stack: string[] = [rootDir];
   let visited = 0;
   while (stack.length > 0 && visited < 128) {
@@ -62,7 +66,7 @@ function findNgitBinary(rootDir: string): string | null {
       const full = path.join(dir, ent.name);
       if (ent.isDirectory()) {
         stack.push(full);
-      } else if (ent.isFile() && ent.name === 'ngit') {
+      } else if (ent.isFile() && ent.name === name) {
         return full;
       }
     }
@@ -175,50 +179,91 @@ export async function installNgit(onProgress: ProgressCallback = () => {}): Prom
     return fail('extract', `tar failed: ${stderr.trim().slice(0, 160) || e.message?.slice(0, 160)}`);
   }
 
-  step('locating binary');
-  const binSrc = findNgitBinary(tmp);
-  if (!binSrc) {
+  // Locate both binaries. `ngit` is required; `git-remote-nostr` is
+  // required for `git clone nostr://…` (the protocol helper) — the
+  // /api/ngit/clone path runs stock `git`, which discovers helpers via
+  // PATH lookup of `git-remote-<scheme>`. Refusing to install when
+  // either is missing prevents the half-broken state where the CLI
+  // works but ngit clones fail with `git-remote-nostr: not found`.
+  step('locating binaries');
+  const ngitSrc        = findBinaryInTree(tmp, 'ngit');
+  const remoteHelperSrc = findBinaryInTree(tmp, 'git-remote-nostr');
+  if (!ngitSrc || !remoteHelperSrc) {
     const listing = fs.readdirSync(tmp).join(', ');
     fs.rmSync(tmp, { recursive: true, force: true });
-    return fail('locate', `ngit binary not found in tarball; root: ${listing}`);
+    const missing = [
+      !ngitSrc        ? 'ngit'             : null,
+      !remoteHelperSrc ? 'git-remote-nostr' : null,
+    ].filter(Boolean).join(' + ');
+    return fail('locate', `${missing} not found in tarball; root: ${listing}`);
   }
-  append(`found binary at ${binSrc}`);
+  append(`found ngit=${ngitSrc} helper=${remoteHelperSrc}`);
 
-  // Install with sudo into /usr/local/bin. `install -m 0755` is
+  // Install both with sudo into /usr/local/bin. `install -m 0755` is
   // POSIX-portable (handles both copy and mode in one step) — no chmod
   // race vs. concurrent shells looking up ngit on PATH. `-n` fails fast
   // when sudo cred cache is empty; we surface it as a soft warn so the
   // user can re-run from their shell with a real prompt.
-  step(`sudo install ${binSrc} ${destFile}`);
-  try {
-    await execa('sudo', ['-n', 'install', '-m', '0755', binSrc, destFile], {
-      stdio: 'pipe', timeout: 10_000,
-    });
-    append(`install ok at ${destFile}`);
-  } catch (e: any) {
-    const stderr = (e?.stderr?.toString?.() || '').trim();
-    const needsPassword = /password is required|sudo:.*required/i.test(stderr);
+  const helperDest = '/usr/local/bin/git-remote-nostr';
+  const installPair = async (): Promise<{ ok: true } | { ok: false; needsPassword: boolean; stderr: string }> => {
+    try {
+      // Single sudo invocation for both binaries — one cred-cache hit,
+      // one prompt at most, and we never end up with ngit installed
+      // but the helper missing.
+      await execa(
+        'sudo',
+        ['-n', 'sh', '-c',
+          `install -m 0755 ${ngitSrc} ${destFile} && install -m 0755 ${remoteHelperSrc} ${helperDest}`],
+        { stdio: 'pipe', timeout: 15_000 },
+      );
+      return { ok: true };
+    } catch (e: any) {
+      const stderr = (e?.stderr?.toString?.() || '').trim();
+      const needsPassword = /password is required|sudo:.*required/i.test(stderr);
+      return { ok: false, needsPassword, stderr };
+    }
+  };
+
+  step(`sudo install ngit + git-remote-nostr → /usr/local/bin`);
+  const installRes = await installPair();
+  if (!installRes.ok) {
     fs.rmSync(tmp, { recursive: true, force: true });
-    if (needsPassword) {
+    if (installRes.needsPassword) {
       return {
         ok:   false,
         warn: true,
         detail:
-          `binary downloaded — finish with: sudo install -m 0755 ${binSrc} ${destFile} ` +
-          `(or copy to any PATH dir). Log: ${logPath}`,
+          `binaries downloaded — finish with: ` +
+          `sudo install -m 0755 ${ngitSrc} ${destFile} && ` +
+          `sudo install -m 0755 ${remoteHelperSrc} ${helperDest} ` +
+          `(or copy both to any PATH dir). Log: ${logPath}`,
       };
     }
-    return fail('install', `sudo install failed: ${stderr.slice(0, 160) || (e?.message || '').slice(0, 160)}`);
+    return fail(
+      'install',
+      `sudo install failed: ${installRes.stderr.slice(0, 160) || 'unknown'}`,
+    );
   }
+  append(`install ok: ${destFile}, ${helperDest}`);
   fs.rmSync(tmp, { recursive: true, force: true });
 
-  step('verifying binary on PATH');
+  step('verifying binaries on PATH');
   try {
     await execa('ngit', ['--version'], { stdio: 'pipe', timeout: 5000 });
-    append('verify ok');
+    append('ngit verify ok');
   } catch (e: any) {
     return fail('verify', `ngit --version failed: ${(e?.message || '').slice(0, 160)}`);
   }
+  // `git-remote-nostr` has no --version flag (it's a git protocol
+  // helper invoked by git, not a user-facing CLI). Check it's
+  // executable via fs instead — `which` would shell out and add
+  // nothing over a stat + X_OK check.
+  try {
+    fs.accessSync(helperDest, fs.constants.X_OK);
+    append('helper verify ok');
+  } catch (e: any) {
+    return fail('verify', `git-remote-nostr not executable at ${helperDest}: ${(e?.message || '').slice(0, 160)}`);
+  }
 
-  return { ok: true, detail: `installed at ${destFile}` };
+  return { ok: true, detail: `installed ${destFile} + ${helperDest}` };
 }
