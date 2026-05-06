@@ -6893,11 +6893,14 @@ const SetupWizard = (() => {
   }
 
   // ── ngit signing ─────────────────────────────────────────────────────
-  // Two jobs: stash the default ngit relay (used when initialising new
-  // repos) and hand off to the embedded terminal for `ngit account
-  // login`. The terminal drawer renders the nostrconnect QR — the user
-  // scans with Amber on their phone and the session completes in the
-  // same browser tab, no shell hand-off required.
+  // Three jobs: install the ngit binary (was a separate Status-panel
+  // step pre-fix; promoted here so first-run users hit the install path
+  // before they ever see Status), stash the default ngit relay (used
+  // when initialising new repos), and hand off to the embedded terminal
+  // for `ngit account login`. The terminal drawer renders the
+  // nostrconnect QR — the user scans with Amber on their phone and the
+  // session completes in the same browser tab, no shell hand-off
+  // required.
   async function renderNgit() {
     // Pre-fill the relay field from whatever identity.json already has.
     let existingRelay = '';
@@ -6906,12 +6909,36 @@ const SetupWizard = (() => {
       if (cfg?.ngitRelay) existingRelay = cfg.ngitRelay;
     } catch {}
 
+    // Probe ngit binary presence via /api/status. The 'ngit' row's
+    // state is 'err' when the binary isn't on PATH, 'warn' when it is
+    // but no default relay is set, 'ok' when both. We only need
+    // installed-or-not here — relay config gets its own field below.
+    const probeNgitInstalled = async () => {
+      try {
+        const rows = await api('/api/status');
+        const row  = (rows || []).find(r => r.id === 'ngit');
+        return row && row.state !== 'err';
+      } catch { return false; }
+    };
+    let ngitInstalled = await probeNgitInstalled();
+
     const termAvailable = !!window.NSTerminal?.isAvailable?.();
 
     root.innerHTML = shell(
       'ngit signing via Amber',
       'ngit publishes repo events to Nostr — signed by your phone.',
       `
+        <div class="setup-field" id="setup-ngit-binary-field">
+          <label>ngit binary</label>
+          <div id="setup-ngit-binary-state"></div>
+          <div class="setup-hint muted" style="margin-top:8px">
+            Downloads the verified release binary from
+            <code>github.com/DanConwayDev/ngit-cli</code>
+            (sha256-pinned in versions.ts) and installs to
+            <code>/usr/local/bin/ngit</code>.
+          </div>
+        </div>
+
         <div class="setup-field">
           <label>Default ngit relay</label>
           <div class="setup-row">
@@ -6951,6 +6978,47 @@ const SetupWizard = (() => {
         </div>
       `,
     );
+
+    // Render the binary-state row. Re-runnable so a successful install
+    // flips the row from "Install" to "✓ installed" without re-mounting
+    // the whole stage and losing the relay input the user already typed.
+    const renderBinaryState = () => {
+      const host = $('setup-ngit-binary-state');
+      if (!host) return;
+      if (ngitInstalled) {
+        host.innerHTML = `
+          <div class="setup-row" style="align-items:center;gap:8px">
+            <span class="bin-indicator bin-indicator-ok">✓</span>
+            <span>installed</span>
+          </div>
+        `;
+      } else {
+        host.innerHTML = `
+          <div class="setup-row" style="align-items:center;gap:8px">
+            <span class="bin-indicator bin-indicator-err">✗</span>
+            <span>not installed</span>
+            <button class="primary" id="setup-ngit-install-btn"
+              style="margin-left:auto">Install ngit</button>
+          </div>
+        `;
+        const btn = $('setup-ngit-install-btn');
+        btn.addEventListener('click', async () => {
+          const r = await openExecModal({
+            title:    'Install ngit',
+            subtitle: 'Installing ngit…',
+            endpoint: '/api/exec/install/ngit',
+          });
+          if (r.ok) {
+            toast('ngit install finished', '', 'ok');
+            ngitInstalled = await probeNgitInstalled();
+            renderBinaryState();
+          } else {
+            toast(`ngit install exited ${r.code}`, '', 'err');
+          }
+        });
+      }
+    };
+    renderBinaryState();
 
     root.querySelector('.setup-back').addEventListener('click', back);
     root.querySelector('#setup-ngit-skip').addEventListener('click', next);
