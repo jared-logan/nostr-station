@@ -4,9 +4,7 @@
  * auth, CSRF, and DNS-rebinding checks before any of these handlers see
  * the request.
  *
- * Surface (verbatim from the pre-refactor inline blocks):
- *   GET    /api/ollama/models                — local Ollama probe
- *   GET    /api/lmstudio/models              — local LM Studio probe
+ * Surface:
  *   GET    /api/ai/providers                 — registry + per-provider state
  *   GET    /api/ai/config                    — raw ai-config.json
  *   POST   /api/ai/config                    — partial merge (no keys)
@@ -35,7 +33,6 @@ import {
   type ProviderConfig as AiProviderConfig,
 } from '../ai-config.js';
 import { buildAiContext } from '../ai-context.js';
-import { probeOllama, probeLmStudio } from '../detect.js';
 import { isNsec } from '../identity.js';
 import { getKeychain } from '../keychain.js';
 import { getProject } from '../projects.js';
@@ -171,6 +168,11 @@ export async function streamOpenAICompat(
   const url = completionsUrl(cfg.baseUrl);
 
   const headers: Record<string, string> = { 'content-type': 'application/json' };
+  // Bare-key sentinels skip the Authorization header — useful when a
+  // Custom Provider points at a local daemon (Ollama / LM Studio / etc.)
+  // that rejects bearer tokens. Curated providers all need real keys;
+  // 'none' is the generic skip token, the others remain for users
+  // migrating Custom configs from the previous registry.
   const bareKeys = new Set(['none', 'ollama', 'lm-studio', 'maple-desktop-auto']);
   if (cfg.apiKey && !bareKeys.has(cfg.apiKey)) {
     headers['Authorization'] = `Bearer ${cfg.apiKey}`;
@@ -226,19 +228,6 @@ export async function handleAi(
   url: string,
   method: string,
 ): Promise<boolean> {
-  if (url === '/api/ollama/models' && method === 'GET') {
-    const models = await probeOllama();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ models: models ?? [] }));
-    return true;
-  }
-  if (url === '/api/lmstudio/models' && method === 'GET') {
-    const models = await probeLmStudio();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ models: models ?? [] }));
-    return true;
-  }
-
   // ── AI provider system (Step 4) ───────────────────────────────────
   //
   // Endpoints here talk to ai-config.json + per-provider keychain slots

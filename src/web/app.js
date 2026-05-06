@@ -365,32 +365,23 @@ function activatePanel(name) {
 
 window.addEventListener('hashchange', () => activatePanel(currentPanel()));
 
-// ── Providers (mirrors src/lib/web-server.ts PROVIDERS) ──────────────────
+// ── Providers (mirrors src/lib/ai-providers.ts PROVIDERS) ────────────────
 // Display labels + per-provider default model lists for the chat/config
-// switcher. Ollama models are hydrated live via /api/ollama/models.
-
-// Model lists per provider-id — client-side lookup for the Chat pane's
-// model dropdown. Ollama is dynamic (probes the local daemon's /api/tags
-// via /api/ollama/models); everything else is a hand-curated list of the
-// models we expect users to want, with the first entry matching the
-// registry default in src/lib/ai-providers.ts.
+// switcher. Curated list — Anthropic + Nostr-native paid relays + a
+// Custom escape hatch. Anyone wanting OpenAI / OpenRouter / Groq /
+// Gemini / Ollama / LM Studio / Maple sets up a Custom Provider with
+// the relevant baseUrl + model id.
 //
-// IDs must match the ai-providers.ts registry (not the v0.x PROVIDER_LIST
-// names — 'payperq' not 'ppq').
+// Custom has no curated model list — users type their own model name in
+// the model field; the dropdown collapses to a free-text input.
+//
+// IDs must match the ai-providers.ts registry exactly.
 const PROVIDER_LIST = [
-  { value: 'anthropic',    label: 'Anthropic',    models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
-  { value: 'openai',       label: 'OpenAI',       models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1-preview', 'o1-mini'] },
-  { value: 'openrouter',   label: 'OpenRouter',   models: ['anthropic/claude-sonnet-4', 'openai/gpt-4o', 'google/gemini-2.5-pro', 'deepseek/deepseek-chat'] },
-  { value: 'opencode-zen', label: 'OpenCode Zen', models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'gpt-4o', 'gemini-2.5-pro'] },
-  { value: 'groq',         label: 'Groq',         models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'] },
-  { value: 'gemini',       label: 'Google Gemini', models: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'] },
-  { value: 'mistral',      label: 'Mistral',      models: ['mistral-large-latest', 'mistral-small-latest', 'codestral-latest'] },
-  { value: 'routstr',      label: 'Routstr ⚡',    models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
-  { value: 'payperq',      label: 'PayPerQ ⚡',    models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
-  { value: 'ollama',       label: 'Ollama (local)', models: [], dynamic: true },
-  { value: 'lmstudio',     label: 'LM Studio',    models: ['default'] },
-  { value: 'maple',        label: 'Maple 🔒',      models: ['claude-sonnet-4', 'claude-opus-4-6'] },
-  { value: 'custom',       label: 'Custom',       models: ['default'] },
+  { value: 'anthropic',    label: 'Anthropic',     models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
+  { value: 'opencode-zen', label: 'OpenCode Zen',  models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'gpt-4o', 'gemini-2.5-pro'] },
+  { value: 'payperq',      label: 'PayPerQ ⚡',     models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
+  { value: 'routstr',      label: 'Routstr ⚡',     models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
+  { value: 'custom',       label: 'Custom Provider', models: [] },
 ];
 
 // ai-config cache — read-once per ~3s to avoid refetching when Chat
@@ -418,12 +409,7 @@ async function modelsFor(provider) {
   // 2. Hand-curated fallback from PROVIDER_LIST.
   const p = PROVIDER_LIST.find(x => x.value === provider);
   if (!p) return [];
-  if (!p.dynamic) return p.models;
-  // 3. Ollama: dynamic probe of the local daemon.
-  try {
-    const { models } = await api('/api/ollama/models');
-    return models.length ? models : ['llama3.2'];
-  } catch { return ['llama3.2']; }
+  return p.models;
 }
 
 // ── Header (AI config chips removed — identity chip + relay dot only) ────
@@ -6909,11 +6895,12 @@ const ConfigPanel = (() => {
         // No key. Enable immediately.
         await enableTerminalProvider(id);
         sel.value = '';
-      } else if (isBareKeyProvider(id)) {
-        // Local daemons (ollama / lmstudio / maple) don't need a real
-        // key — adding them just means creating an ai-config entry so
-        // they appear in the Chat dropdown. Server fills in the bareKey
-        // sentinel at request time.
+      } else if (chosen.bareKey) {
+        // bareKey providers don't need a real key — adding them just
+        // means creating an ai-config entry so they appear in the Chat
+        // dropdown. Server fills in the bareKey sentinel at request
+        // time. (No curated provider currently sets bareKey, but the
+        // registry shape supports it.)
         await addBareKeyProvider(id);
         sel.value = '';
       } else {
@@ -6971,10 +6958,15 @@ const ConfigPanel = (() => {
     });
   }
 
-  // Local-daemon provider ids that accept a sentinel / empty key and don't
-  // need a keychain entry. Mirrors the bareKey set in ai-providers.ts.
-  function isBareKeyProvider(id) {
-    return id === 'ollama' || id === 'lmstudio' || id === 'maple';
+  // Provider ids that accept a sentinel / empty key and don't need a
+  // keychain entry. Derived from the live /api/ai/providers payload
+  // (each entry carries `bareKey: true|false`). The curated registry
+  // currently has no bareKey providers — kept as a helper because the
+  // registry shape supports them, and the setup wizard pre-loads its
+  // own provider list earlier than this helper runs.
+  function isBareKeyProvider(id, list) {
+    const p = (list?.providers || []).find(x => x.id === id);
+    return !!(p && p.bareKey);
   }
 
   async function addBareKeyProvider(id) {
@@ -8270,9 +8262,10 @@ const SetupWizard = (() => {
       const saveBtn = $('setup-ai-save');
       const cancelBtn = $('setup-ai-cancel');
 
-      // bareKey providers are local daemons that don't need an API key —
-      // matches the main dashboard's classification (see isBareKeyProvider).
-      const BARE_KEY_IDS = ['ollama', 'lmstudio', 'maple'];
+      // bareKey providers don't need an API key — derived from the
+      // /api/ai/providers payload (`chosen.bareKey`). The curated
+      // registry currently has none, but the branch stays for future
+      // additions.
 
       sel.addEventListener('change', async () => {
         const id = sel.value;
@@ -8288,7 +8281,7 @@ const SetupWizard = (() => {
           paint();
           return;
         }
-        if (BARE_KEY_IDS.includes(id)) {
+        if (chosen.bareKey) {
           try {
             await patchConfig({ providers: { [id]: {} } });
             toast(`Added ${chosen.displayName}`, '', 'ok');

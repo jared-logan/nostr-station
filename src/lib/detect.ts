@@ -63,31 +63,3 @@ export function getCargoBin(): string {
 }
 
 
-// Probe local AI servers — called during config phase
-// Returns available models or null if the server isn't running
-export async function probeOllama(base = 'http://localhost:11434'): Promise<string[] | null> {
-  try {
-    const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(2000) });
-    if (!res.ok) return null;
-    const data = await res.json() as { models?: { name: string }[] };
-    return data.models?.map(m => m.name) ?? [];
-  } catch { return null; }
-}
-
-export async function probeLmStudio(base = 'http://localhost:1234'): Promise<string[] | null> {
-  try {
-    const res = await fetch(`${base}/v1/models`, { signal: AbortSignal.timeout(2000) });
-    if (!res.ok) return null;
-    const data = await res.json() as { data?: { id: string }[] };
-    return data.data?.map(m => m.id) ?? [];
-  } catch { return null; }
-}
-
-// Maple Proxy runs on localhost:8080 by default (same port as our relay!)
-// It supports a /health endpoint — probe that to detect it
-export async function probeMaple(base = 'http://localhost:8081'): Promise<boolean> {
-  try {
-    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) });
-    return res.ok;
-  } catch { return false; }
-}
