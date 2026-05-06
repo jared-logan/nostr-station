@@ -1428,29 +1428,6 @@ async function appendNsiteStatusCard(container) {
 }
 
 $('status-refresh').addEventListener('click', () => refreshHealth());
-$('status-doctor').addEventListener('click', () => {
-  // Prefer the terminal panel — `doctor` is an Ink TUI with coloured
-  // status rows + interactive --fix prompts, and the SSE modal can only
-  // render the --plain line-oriented fallback. When node-pty isn't
-  // available we drop back to the modal path so the feature still works.
-  if (window.NSTerminal?.isAvailable?.()) {
-    window.NSTerminal.open('doctor');
-    // Doctor may take a bit + the user may run --fix interactively. Trigger
-    // a couple of delayed health refreshes so Status reflects any repairs
-    // without the user clicking refresh themselves.
-    [15_000, 60_000].forEach(ms => setTimeout(refreshHealth, ms));
-    return;
-  }
-  openExecModal({
-    title: 'nostr-station doctor',
-    subtitle: 'Checks every component + surfaces quick fixes',
-    endpoint: '/api/exec/doctor',
-  }).then(r => {
-    if (r.ok) toast('Doctor: all checks passed', '', 'ok');
-    else      toast('Doctor: issues found', 'See modal output', 'warn');
-    refreshHealth();
-  });
-});
 
 // ── Panel: Chat (with provider/model switcher) ───────────────────────────
 

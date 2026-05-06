@@ -35,6 +35,7 @@ import { gatherStatus } from '../commands/Status.js';
 import { DEFAULT_DB_PATH } from '../relay/store.js';
 import type { Relay } from '../relay/index.js';
 import { LogBuffer, type LogLine } from './log-buffer.js';
+import { getTool, installTool, TOOLS } from './tools.js';
 import { hexToNpub, npubToHex } from './identity.js';
 // relay-config / services / install were the host-install era's
 // LaunchAgent/systemd/cargo plumbing; all gone now that the relay
@@ -1147,6 +1148,47 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
+
+      // ── Status panel install button ───────────────────────────────────
+      // POST /api/exec/install/<slug> — drives the Status row "Install"
+      // CTA (app.js:1255). Pre-deletion this dispatched to the deleted
+      // Doctor.tsx orchestrator over the deleted install.ts; the new
+      // path runs installTool() from src/lib/tools.ts directly so only
+      // the supported optional tools (ngit, nak, stacks, nsyte) install,
+      // and bigger flows (e.g. nvpn) keep their own dedicated endpoints
+      // (Phase 2 owns /api/setup/nvpn/install).
+      const installMatch = url.match(/^\/api\/exec\/install\/([a-z][a-z0-9-]*)$/);
+      if (installMatch && method === 'POST') {
+        const slug = installMatch[1];
+        const tool = getTool(slug);
+        res.writeHead(200, {
+          'Content-Type':  'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection':    'keep-alive',
+        });
+        const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+        if (!tool) {
+          emit({
+            line:   `'${slug}' is not a known optional tool. Supported: ${Object.keys(TOOLS).join(', ')}.`,
+            stream: 'stderr',
+          });
+          emit({ done: true, code: 1 });
+          try { res.end(); } catch {}
+          return;
+        }
+        try {
+          const result = await installTool(tool, (line) => emit({ line, stream: 'stdout' }));
+          if (!result.ok && result.detail) {
+            emit({ line: result.detail, stream: 'stderr' });
+          }
+          emit({ done: true, code: result.ok ? 0 : 1 });
+        } catch (e: any) {
+          emit({ line: String(e?.message || e), stream: 'stderr' });
+          emit({ done: true, code: -1 });
+        }
+        try { res.end(); } catch {}
+        return;
+      }
 
       // ── Logs panel SSE ────────────────────────────────────────────────
       // Single endpoint for all three channels (relay/watchdog/vpn). The
