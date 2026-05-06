@@ -39,6 +39,7 @@ import {
   pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork,
   pingNvpnPeer, netcheckNvpn, doctorNvpn, natDiscoverNvpn,
   setNvpnSettings, statsNvpn,
+  setNvpnAlias, removeNvpnAlias,
 } from '../nvpn.js';
 import { readBody } from './_shared.js';
 
@@ -204,6 +205,36 @@ export async function handleNvpn(
     return true;
   }
 
+  // ── Aliases (config.toml [peer_aliases] mutation) ─────────────────
+  // nvpn has no CLI flag for aliases; we own the file mutation. Each
+  // route follows up with `nvpn reload` so the daemon picks up the
+  // new label without a restart. Validation is shared with the lib
+  // helpers (isValidParticipant + ALIAS_VALUE_RE).
+  if (url === '/api/nvpn/aliases/set' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const participant = typeof body.participant === 'string' ? body.participant : '';
+    const alias       = typeof body.alias === 'string' ? body.alias : '';
+    const r = setNvpnAlias(participant, alias);
+    if (r.ok) {
+      // Best-effort reload — alias display works either way (we read
+      // config.toml directly), but `nvpn reload` is required if any
+      // tooling consumes aliases through the daemon socket.
+      await reloadNvpn().catch(() => null);
+    }
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  if (url === '/api/nvpn/aliases/remove' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const participant = typeof body.participant === 'string' ? body.participant : '';
+    const r = removeNvpnAlias(participant);
+    if (r.ok) await reloadNvpn().catch(() => null);
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
   // ── Whois ─────────────────────────────────────────────────────────
   if (url === '/api/nvpn/whois' && method === 'POST') {
     const body = await parseJsonBody(req);
@@ -263,6 +294,11 @@ export async function handleNvpn(
     await writeJson(res, r.ok ? 200 : 500, r);
     return true;
   }
+  // nat-discover is intentionally not surfaced as a button in the
+  // dashboard's Diagnostics block — it's a power-user probe (you have
+  // to know what reflector to point at) and nvpn already runs NAT
+  // discovery automatically against the daemon's stun_servers list.
+  // Route stays here so curl + tooling can drive it.
   if (url === '/api/nvpn/nat-discover' && method === 'POST') {
     const body = await parseJsonBody(req);
     if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }

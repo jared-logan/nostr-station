@@ -1090,7 +1090,25 @@ input:focus, textarea:focus, select:focus {
   padding: 4px 0;
   flex-wrap: wrap;
 }
+.logs-meta.vpn-meta .vpn-meta-peer-alias {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
 .logs-meta.vpn-meta .vpn-meta-peer-id { font-size: 11px; flex: 0 1 auto; min-width: 0; }
+.logs-meta.vpn-meta .vpn-alias-hint { font-size: 10px; margin: 6px 0 12px; }
+.logs-meta.vpn-meta + .modal #vpn-alias-input,
+.modal #vpn-alias-input {
+  width: 100%;
+  padding: 6px 8px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  background: rgba(0,0,0,0.2);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  color: var(--text);
+  margin: 8px 0 4px;
+}
 .logs-meta.vpn-meta .vpn-meta-peer-sub { font-size: 10px; }
 .logs-meta.vpn-meta .vpn-meta-peer-empty {
   padding: 8px 0;

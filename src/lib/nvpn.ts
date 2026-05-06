@@ -287,6 +287,11 @@ export interface NvpnRoster {
   networkId:    string | null;
   participants: string[];
   admins:       string[];
+  // Per-node `[peer_aliases]` table — local metadata, not synced over
+  // the mesh. Keys are npubs (or hex), values are user-chosen labels
+  // ("alice", "laptop", "vps-frankfurt"). Each station owner manages
+  // their own; one user's "giraffe" might be another's "alice."
+  aliases:      Record<string, string>;
 }
 
 function nvpnConfigCandidates(): string[] {
@@ -319,6 +324,39 @@ export function extractFirstNetworksSection(toml: string): string {
   return m >= 0 ? after.slice(0, m) : after;
 }
 
+// Extract the `[peer_aliases]` table (key/value pairs of npub → label).
+// Returns the section body (without the header) so the caller can
+// parse keys with `extractAliasMap`. Empty string when the section
+// isn't present.
+//
+// Implemented as two-step search instead of a single regex because the
+// /m flag makes `$` match end-of-LINE, which cuts the body too short
+// for multi-line tables. The single-character search bounds at the
+// next `[` at line start (next section header), or end of file.
+export function extractPeerAliasesSection(toml: string): string {
+  const header = toml.match(/^\s*\[peer_aliases\][^\S\r\n]*\r?\n?/m);
+  if (!header || header.index === undefined) return '';
+  const rest = toml.slice(header.index + header[0].length);
+  const nextHeader = rest.search(/^\s*\[(?:\[)?/m);
+  return nextHeader >= 0 ? rest.slice(0, nextHeader) : rest;
+}
+
+// Parse a `[peer_aliases]` body into a Record. nvpn's TOML uses bare
+// keys (npubs are valid bare-key chars per TOML spec) and quoted
+// string values, so a per-line `<key> = "<value>"` regex is enough.
+// Lines that don't match (comments, blanks, future fields) are
+// skipped silently.
+export function extractAliasMap(sectionBody: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const re = /^\s*([A-Za-z0-9_\-]+)\s*=\s*"((?:[^"\\]|\\.)*)"\s*$/gm;
+  for (const m of sectionBody.matchAll(re)) {
+    const key   = m[1];
+    const value = m[2].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    if (key && value) out[key] = value;
+  }
+  return out;
+}
+
 export function extractTomlList(section: string, key: string): string[] {
   const re = new RegExp(`^\\s*${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'm');
   const m = section.match(re);
@@ -337,21 +375,142 @@ export function extractTomlString(section: string, key: string): string | null {
 export function readNvpnRoster(): NvpnRoster {
   const configPath = findNvpnConfigPath();
   if (!configPath) {
-    return { found: false, configPath: null, networkId: null, participants: [], admins: [] };
+    return { found: false, configPath: null, networkId: null, participants: [], admins: [], aliases: {} };
   }
   let toml = '';
   try { toml = fs.readFileSync(configPath, 'utf8'); }
   catch {
-    return { found: false, configPath, networkId: null, participants: [], admins: [] };
+    return { found: false, configPath, networkId: null, participants: [], admins: [], aliases: {} };
   }
   const section = extractFirstNetworksSection(toml);
+  const aliasBody = extractPeerAliasesSection(toml);
   return {
     found:        true,
     configPath,
     networkId:    extractTomlString(section, 'network_id'),
     participants: extractTomlList(section, 'participants'),
     admins:       extractTomlList(section, 'admins'),
+    aliases:      extractAliasMap(aliasBody),
   };
+}
+
+// ── Alias mutation (config.toml [peer_aliases] table) ──────────────
+//
+// nvpn has no CLI command for aliases — the `[peer_aliases]` table is
+// edited directly. We do the safest thing we can without a TOML lib:
+//   1. Read current contents.
+//   2. Rebuild the [peer_aliases] section line by line from the current
+//      alias map plus the requested mutation. Other sections of the file
+//      are preserved verbatim.
+//   3. Write atomically (temp file + rename) so a crash mid-write can't
+//      truncate the user's config.
+//   4. Caller (route handler) follows up with `nvpn reload` so the
+//      daemon picks up the new label without a restart.
+//
+// Validation contract: alias values are restricted to printable ASCII
+// (letters, digits, dash, underscore, space, dot) up to 64 chars.
+// That covers the realistic naming use cases without opening surface
+// for confusable Unicode or TOML-escape exploits.
+
+const ALIAS_MAX_LEN = 64;
+const ALIAS_VALUE_RE = /^[A-Za-z0-9 _\-.]{1,64}$/;
+
+export function isValidAliasValue(v: string): boolean {
+  return typeof v === 'string' && ALIAS_VALUE_RE.test(v);
+}
+
+// Rebuild a TOML doc with an updated [peer_aliases] table. Pure for
+// testability — caller handles the actual fs read/write. `next` is
+// the desired complete alias map (the route handler computes this
+// by merging the current state with the requested mutation).
+export function rebuildTomlWithAliases(
+  toml: string,
+  next: Record<string, string>,
+): string {
+  // Build the replacement section body. Empty map → keep the header
+  // but write zero entries; we'd rather have an empty `[peer_aliases]`
+  // table than special-case header insertion later.
+  const bodyLines: string[] = [];
+  const keys = Object.keys(next).sort();
+  for (const k of keys) {
+    const v = next[k];
+    // Defensive escape for backslash + quote even though our validator
+    // rules these out — config.toml may have been hand-edited.
+    const escaped = v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    bodyLines.push(`${k} = "${escaped}"`);
+  }
+  const newBody = bodyLines.length > 0 ? bodyLines.join('\n') + '\n' : '';
+  const newSection = `[peer_aliases]\n${newBody}`;
+
+  // Replace existing section if present, otherwise append at end of
+  // file (prefix with a blank line for readability).
+  const sectionRe = /^\s*\[peer_aliases\][\s\S]*?(?=^\s*\[(?:\[)?|$(?![\r\n]))/m;
+  if (sectionRe.test(toml)) {
+    return toml.replace(sectionRe, newSection);
+  }
+  // Ensure trailing newline before appending.
+  const sep = toml.endsWith('\n') ? '\n' : '\n\n';
+  return toml + sep + newSection;
+}
+
+interface AliasWriteResult {
+  ok:       boolean;
+  detail:   string;
+  aliases?: Record<string, string>;
+}
+
+// Apply a mutation (set or remove one alias) to the current config.
+// Returns the new alias map. Atomic write — temp file + rename — so a
+// concurrent reader never sees a half-rewritten file.
+function mutateAliases(
+  mutator: (current: Record<string, string>) => Record<string, string>,
+): AliasWriteResult {
+  const configPath = findNvpnConfigPath();
+  if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first' };
+  let toml = '';
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch (e: any) { return { ok: false, detail: `read failed: ${(e?.message || '').slice(0, 160)}` }; }
+  const current = extractAliasMap(extractPeerAliasesSection(toml));
+  const next    = mutator({ ...current });
+  if (JSON.stringify(next) === JSON.stringify(current)) {
+    return { ok: true, detail: 'no change', aliases: current };
+  }
+  const updated = rebuildTomlWithAliases(toml, next);
+  // Atomic write: tmp file in the same dir → rename. Same dir matters
+  // because rename across filesystems isn't atomic.
+  const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    fs.writeFileSync(tmp, updated, { mode: 0o600 });
+    fs.renameSync(tmp, configPath);
+  } catch (e: any) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}` };
+  }
+  return { ok: true, detail: 'aliases updated', aliases: next };
+}
+
+export function setNvpnAlias(participant: string, alias: string): AliasWriteResult {
+  if (!isValidParticipant(participant)) {
+    return { ok: false, detail: 'invalid participant pubkey' };
+  }
+  if (!isValidAliasValue(alias)) {
+    return {
+      ok: false,
+      detail: `alias must be 1–${ALIAS_MAX_LEN} chars, letters/digits/space/-_./ only`,
+    };
+  }
+  return mutateAliases(map => ({ ...map, [participant]: alias }));
+}
+
+export function removeNvpnAlias(participant: string): AliasWriteResult {
+  if (!isValidParticipant(participant)) {
+    return { ok: false, detail: 'invalid participant pubkey' };
+  }
+  return mutateAliases(map => {
+    const out = { ...map };
+    delete out[participant];
+    return out;
+  });
 }
 
 // ── Roster + invites + whois ─────────────────────────────────────────────

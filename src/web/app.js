@@ -5170,6 +5170,8 @@ const LogsPanel = (() => {
     const error = data.error;
     const rosterParts = roster?.found && Array.isArray(roster.participants) ? roster.participants : [];
     const rosterAdmins = roster?.found && Array.isArray(roster.admins) ? roster.admins : [];
+    const aliases = (roster?.found && roster.aliases && typeof roster.aliases === 'object')
+      ? roster.aliases : {};
     const networkId = roster?.networkId || (typeof raw.network_id === 'string' ? raw.network_id : null);
 
     let html = '';
@@ -5217,7 +5219,7 @@ const LogsPanel = (() => {
     // whether they're currently online (live peer match) or offline.
     // Peers seen live but not in roster are shown after the roster as
     // "discovered" — happens during invite acceptance windows.
-    const merged = mergePeers(rosterParts, rosterAdmins, livePeers);
+    const merged = mergePeers(rosterParts, rosterAdmins, livePeers, aliases);
     if (merged.length > 0 || data.running) {
       html += `<div class="vpn-meta-peers">
         <div class="vpn-meta-peers-head">
@@ -5384,7 +5386,12 @@ const LogsPanel = (() => {
       repairBtn.disabled = false;
     });
 
-    // ── Settings save ───────────────────────────────────────────────
+    // ── Settings save & reload ──────────────────────────────────────
+    // The Save button does both the `nvpn set` and the follow-up
+    // `nvpn reload` in sequence, so the user doesn't have to remember
+    // to reload after a port change. Both outcomes get toast lines so
+    // a successful save with a failed reload doesn't look like a
+    // silent success.
     const saveBtn = slot.querySelector('#vpn-set-save');
     if (saveBtn) {
       saveBtn.addEventListener('click', async (e) => {
@@ -5406,11 +5413,25 @@ const LogsPanel = (() => {
         }
         saveBtn.disabled = true;
         try {
-          const r = await api('/api/nvpn/set', {
+          const setRes = await api('/api/nvpn/set', {
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify(payload),
           });
-          toast('settings saved', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+          if (setRes?.ok === false) {
+            toast('save failed', setRes?.detail || '', 'err');
+          } else {
+            toast('settings saved', setRes?.detail || '', 'ok');
+            // Reload only when the save actually mutated state. If
+            // the daemon isn't running, /api/nvpn/reload returns an
+            // error — surface it as a hint rather than masking the
+            // successful save.
+            try {
+              const reloadRes = await api('/api/nvpn/reload', { method: 'POST' });
+              if (reloadRes?.ok === false) {
+                toast('reload skipped', 'changes saved; restart the daemon to pick them up', 'warn');
+              }
+            } catch { /* api() already toasted; settings save still succeeded */ }
+          }
           loadVpnDetail();
         } catch { /* api() already toasted */ }
         saveBtn.disabled = false;
@@ -5497,7 +5518,8 @@ const LogsPanel = (() => {
     // Per-row buttons. Wired by data-action so the merged renderer can
     // drop them in without a bespoke event listener per row. Ping is
     // a special case — it doesn't mutate state, so we render the
-    // result inline and skip the loadVpnDetail re-render.
+    // result inline and skip the loadVpnDetail re-render. Alias edit
+    // opens a tiny prompt and re-renders on success.
     slot.querySelectorAll('.vpn-meta-peer button[data-action]').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
@@ -5521,12 +5543,82 @@ const LogsPanel = (() => {
                 out.classList.toggle('vpn-meta-peer-pingout-err', r?.ok === false);
               } catch (e) { out.textContent = 'ping error'; }
             }
+          } else if (btn.dataset.action === 'alias') {
+            const current = peerEl.dataset.alias || '';
+            await openAliasPrompt(id, current);
+            await loadVpnDetail();
           } else {
             await peerAction(btn.dataset.action, id);
             await loadVpnDetail();
           }
         } catch { /* api() already toasted */ }
         btn.disabled = false;
+      });
+    });
+  }
+
+  // Alias prompt — set or remove the [peer_aliases] entry for one
+  // peer. Validation mirrors the server-side ALIAS_VALUE_RE so we
+  // catch bad input before the round-trip. Empty save = remove.
+  async function openAliasPrompt(participant, current) {
+    return new Promise((resolve) => {
+      const body = document.createElement('div');
+      body.innerHTML = `
+        <p class="muted">Local label for <code class="cmd-inline">${escapeHtml(participant)}</code>. Visible only on this station.</p>
+        <input type="text" id="vpn-alias-input" maxlength="64" autocomplete="off"
+               placeholder="alice / laptop / vps-frankfurt">
+        <p class="muted vpn-alias-hint">Letters, digits, dash, underscore, dot, space — up to 64 chars. Leave blank and Save to remove.</p>
+        <div class="vpn-invite-modal-actions">
+          <button id="vpn-alias-cancel">Cancel</button>
+          <button id="vpn-alias-remove" class="danger" ${current ? '' : 'hidden'}>Remove</button>
+          <button id="vpn-alias-save" class="primary">Save</button>
+        </div>
+      `;
+      const modal = openModal({ title: current ? 'Rename peer' : 'Set peer alias', body });
+      modal.root.classList.add('vpn-invite-modal');
+      const input = body.querySelector('#vpn-alias-input');
+      input.value = current || '';
+      input.focus();
+      input.select();
+      body.querySelector('#vpn-alias-cancel').addEventListener('click', () => { modal.close(); resolve(); });
+      body.querySelector('#vpn-alias-remove')?.addEventListener('click', async () => {
+        try {
+          const r = await api('/api/nvpn/aliases/remove', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ participant }),
+          });
+          toast('alias removed', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+        } catch { /* api() already toasted */ }
+        modal.close(); resolve();
+      });
+      body.querySelector('#vpn-alias-save').addEventListener('click', async () => {
+        const val = String(input.value || '').trim();
+        if (!val) {
+          // Empty save = remove (only if there was an alias to remove).
+          if (current) {
+            try {
+              await api('/api/nvpn/aliases/remove', {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ participant }),
+              });
+              toast('alias removed', '', 'ok');
+            } catch { /* api() already toasted */ }
+          }
+          modal.close(); resolve(); return;
+        }
+        if (!/^[A-Za-z0-9 _\-.]{1,64}$/.test(val)) {
+          toast('Invalid alias', 'use letters/digits/space/-_./ up to 64 chars', 'warn');
+          input.focus();
+          return;
+        }
+        try {
+          const r = await api('/api/nvpn/aliases/set', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ participant, alias: val }),
+          });
+          toast('alias saved', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+        } catch { /* api() already toasted */ }
+        modal.close(); resolve();
       });
     });
   }
@@ -5577,8 +5669,17 @@ const LogsPanel = (() => {
   // appear in live). Merge keys on hex pubkey or npub equivalence so
   // the row count matches the user's mental model: "the people in my
   // network."
-  function mergePeers(rosterParts, rosterAdmins, livePeers) {
+  function mergePeers(rosterParts, rosterAdmins, livePeers, aliases = {}) {
     const adminSet = new Set(rosterAdmins.map(s => String(s).toLowerCase()));
+    // Aliases are keyed by the exact npub/hex the user wrote in their
+    // config. Build a case-insensitive lookup so we match irrespective
+    // of how the live peer reports its identity.
+    const aliasLookup = new Map();
+    for (const [k, v] of Object.entries(aliases)) {
+      if (typeof k === 'string' && typeof v === 'string') {
+        aliasLookup.set(k.toLowerCase(), { aliasKey: k, alias: v });
+      }
+    }
     const liveByKey = new Map();
     for (const lp of livePeers) {
       const k = (lp.npub || lp.pubkey || lp.ip || '').toLowerCase();
@@ -5590,10 +5691,12 @@ const LogsPanel = (() => {
       const k = String(p).toLowerCase();
       seen.add(k);
       const live = liveByKey.get(k);
+      const aliasEntry = aliasLookup.get(k);
       out.push({
         id:        p,
         rosterKey: p,
         live,
+        alias:     aliasEntry?.alias || null,
         connected: !!live?.connected,
         admin:     adminSet.has(k),
         roster:    true,
@@ -5604,10 +5707,12 @@ const LogsPanel = (() => {
     // "discovered" so they know it's not yet in their config.
     for (const [k, live] of liveByKey) {
       if (seen.has(k)) continue;
+      const aliasEntry = aliasLookup.get(k);
       out.push({
         id:        live.npub || live.pubkey || live.ip || k,
         rosterKey: null,
         live,
+        alias:     aliasEntry?.alias || null,
         connected: !!live.connected,
         admin:     false,
         roster:    false,
@@ -5634,19 +5739,32 @@ const LogsPanel = (() => {
     const pingBtn = pingTarget
       ? `<button data-action="ping" data-target="${escapeHtml(pingTarget)}" title="Ping ${escapeHtml(pingTarget)}">ping</button>`
       : '';
+    // Alias edit button — only meaningful for roster peers (we only
+    // write [peer_aliases] entries for keys we already know). The
+    // dialog seed comes from the current alias if any.
+    const aliasBtn = p.roster
+      ? `<button data-action="alias" title="${p.alias ? 'Rename peer' : 'Set alias'}">${p.alias ? 'rename' : 'alias'}</button>`
+      : '';
     const promoteBtn = p.roster && !p.admin
       ? '<button data-action="promote" title="Promote to admin">↑ admin</button>' : '';
     const demoteBtn = p.roster && p.admin
       ? '<button data-action="demote" title="Demote from admin">↓ admin</button>' : '';
     const removeBtn = p.roster
       ? '<button data-action="remove" class="danger" title="Remove from roster">remove</button>' : '';
+    // Display label: alias first when present, npub as the secondary
+    // (truncated) tag. Without an alias we show the npub itself.
+    const truncId = id.length > 20 ? `${id.slice(0, 12)}…${id.slice(-6)}` : id;
+    const labelHtml = p.alias
+      ? `<span class="vpn-meta-peer-alias">${escapeHtml(p.alias)}</span>
+         <code class="cmd-inline vpn-meta-peer-id muted" title="${escapeHtml(id)}">${escapeHtml(truncId)}</code>`
+      : `<code class="cmd-inline vpn-meta-peer-id" title="${escapeHtml(id)}">${escapeHtml(truncId)}</code>`;
     return `
-      <div class="vpn-meta-peer" data-id="${escapeHtml(id)}">
+      <div class="vpn-meta-peer" data-id="${escapeHtml(id)}" data-alias="${escapeHtml(p.alias || '')}">
         <span class="dot ${dot}"></span>
-        <code class="cmd-inline vpn-meta-peer-id">${escapeHtml(id)}</code>
+        ${labelHtml}
         ${adminBadge}
         ${sub ? `<span class="muted vpn-meta-peer-sub">${escapeHtml(sub)}</span>` : ''}
-        <span class="vpn-meta-peer-actions">${pingBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
+        <span class="vpn-meta-peer-actions">${pingBtn}${aliasBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
         <div class="vpn-meta-peer-pingout" hidden></div>
       </div>`;
   }
@@ -5721,10 +5839,18 @@ const LogsPanel = (() => {
     });
   }
 
-  // Diagnostics block — netcheck / doctor / nat-discover / repair
-  // -network. Collapsed by default. Run-on-click only — these calls
+  // Diagnostics block — netcheck / doctor / repair-network / stats
+  // / reload. Collapsed by default. Run-on-click only — these calls
   // make network round-trips against public relays / STUN servers
   // and we don't want to fire them on every refresh.
+  //
+  // `nvpn nat-discover` deliberately does NOT have a button here. It's
+  // a power-user diagnostic that requires the user to supply a
+  // reflector host:port (e.g. a specific STUN server), and nvpn's
+  // daemon already runs NAT discovery automatically against the
+  // configured stun_servers list. The /api/nvpn/nat-discover route
+  // stays available for advanced callers who want to probe a specific
+  // reflector via curl.
   function renderDiagnosticsBlock() {
     return `<div class="vpn-meta-diag">
       <details>
@@ -5791,9 +5917,9 @@ const LogsPanel = (() => {
             ${fld('relay-for-others', 'relay for others', 'bool')}
           </div>
           <div class="vpn-meta-set-actions">
-            <button id="vpn-set-save" class="primary">Save</button>
+            <button id="vpn-set-save" class="primary">Save &amp; reload</button>
             <span class="muted vpn-meta-set-hint">
-              Some changes take effect after a Reload or Restart.
+              Saves changes via <code>nvpn set</code> and asks the daemon to reload its config.
             </span>
           </div>
         </div>
