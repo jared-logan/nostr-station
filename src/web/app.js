@@ -5129,19 +5129,26 @@ const LogsPanel = (() => {
     const slot = document.getElementById('vpn-meta-extra');
     if (!slot) return;
     slot.innerHTML = '<div class="muted vpn-meta-loading">loading details…</div>';
-    let data;
-    try { data = await api('/api/nvpn/status'); }
-    catch { slot.innerHTML = ''; return; }
+    let data, roster;
+    try {
+      [data, roster] = await Promise.all([
+        api('/api/nvpn/status'),
+        api('/api/nvpn/roster').catch(() => null),
+      ]);
+    } catch { slot.innerHTML = ''; return; }
 
     if (!data?.installed) { slot.innerHTML = ''; return; }
 
     const raw = data.raw || {};
     const npub = (typeof raw.npub === 'string' && raw.npub) || null;
     const pubkey = (typeof raw.pubkey === 'string' && raw.pubkey) || null;
-    const peers = normalizeNvpnPeers(raw.peers);
+    const livePeers = normalizeNvpnPeers(raw.peers);
     const daemonPid = raw?.daemon?.pid ?? null;
     const startedAt = raw?.daemon?.started_at ?? null;
     const error = data.error;
+    const rosterParts = roster?.found && Array.isArray(roster.participants) ? roster.participants : [];
+    const rosterAdmins = roster?.found && Array.isArray(roster.admins) ? roster.admins : [];
+    const networkId = roster?.networkId || (typeof raw.network_id === 'string' ? raw.network_id : null);
 
     let html = '';
     if (error) {
@@ -5167,33 +5174,55 @@ const LogsPanel = (() => {
         <span>${bits.join(' · ')}</span>
       </div>`;
     }
-    if (peers.length > 0) {
-      html += `<div class="vpn-meta-peers">
-        <div class="vpn-meta-label">peers (${peers.length})</div>
-        <div class="vpn-meta-peers-list">
-          ${peers.map(p => {
-            const status = p.connected ? 'ok' : 'warn';
-            const label  = p.npub || p.pubkey || p.ip || 'peer';
-            const sub    = [p.ip, p.latencyMs != null ? `${p.latencyMs}ms` : null, p.lastSeen]
-              .filter(Boolean).join(' · ');
-            return `
-              <div class="vpn-meta-peer">
-                <span class="dot ${status}"></span>
-                <code class="cmd-inline">${escapeHtml(label)}</code>
-                ${sub ? `<span class="muted">${escapeHtml(sub)}</span>` : ''}
-              </div>`;
-          }).join('')}
-        </div>
-      </div>`;
-    } else if (data.running) {
-      html += `<div class="vpn-meta-row vpn-meta-subrow muted">
-        <span class="vpn-meta-label">peers</span>
-        <span>none discovered yet</span>
+    // Network sub-block — share invite + roster ops. Always shown when
+    // a network is configured (roster file present), regardless of
+    // whether the daemon is currently up.
+    if (networkId || roster?.found) {
+      html += `<div class="vpn-meta-row vpn-meta-subrow vpn-meta-network">
+        <span class="vpn-meta-label">network</span>
+        ${networkId ? `<code class="cmd-inline vpn-meta-network-id">${escapeHtml(networkId)}</code>
+          <span class="vpn-meta-copy-network"></span>` : '<span class="muted">unconfigured</span>'}
+        <span class="vpn-meta-network-actions">
+          <button id="vpn-share-invite">Share invite</button>
+          <button id="vpn-import-invite">Import invite</button>
+          <button id="vpn-publish-roster">Publish roster</button>
+        </span>
       </div>`;
     }
-    // Install-service fix-it path. If running but no service unit, give
-    // the user a one-click retry — the wizard's last step often lands a
-    // warn here (sudo cred cache empty during install).
+
+    // Combined Peers view — merges roster (configured) with live peers.
+    // Each row is a roster entry; a colored dot + sub-line indicates
+    // whether they're currently online (live peer match) or offline.
+    // Peers seen live but not in roster are shown after the roster as
+    // "discovered" — happens during invite acceptance windows.
+    const merged = mergePeers(rosterParts, rosterAdmins, livePeers);
+    if (merged.length > 0 || data.running) {
+      html += `<div class="vpn-meta-peers">
+        <div class="vpn-meta-peers-head">
+          <span class="vpn-meta-label">peers (${merged.length})</span>
+          <span class="vpn-meta-peers-counts muted">
+            ${merged.filter(p => p.connected).length} online · ${rosterAdmins.length} admin${rosterAdmins.length === 1 ? '' : 's'}
+          </span>
+        </div>
+        <div class="vpn-meta-peers-list">
+          ${merged.length === 0
+            ? '<div class="muted vpn-meta-peer-empty">no peers configured — add one below or import an invite</div>'
+            : merged.map(renderPeerRow).join('')}
+        </div>
+        <form class="vpn-add-peer" autocomplete="off">
+          <input type="text" id="vpn-add-peer-input"
+                 placeholder="npub1… or 64-char hex" spellcheck="false">
+          <label class="vpn-add-peer-publish">
+            <input type="checkbox" id="vpn-add-peer-publish" checked>
+            publish now
+          </label>
+          <button type="submit" class="primary">Add peer</button>
+        </form>
+      </div>`;
+    }
+
+    // Install-service fix-it path. Daemon up, no system unit registered
+    // → one-click retry of the install step the wizard might have skipped.
     if (data.running && raw?.daemon?.service_loaded === false) {
       html += `<div class="vpn-meta-row vpn-meta-subrow vpn-meta-fixit">
         <span class="vpn-meta-label">auto-start</span>
@@ -5203,9 +5232,12 @@ const LogsPanel = (() => {
     }
     slot.innerHTML = html;
 
-    // Wire up copy + install-service buttons after innerHTML.
+    // ── Wire up handlers after innerHTML ────────────────────────────
     const idSlot = slot.querySelector('.vpn-meta-copy-id');
     if (idSlot && (npub || pubkey)) idSlot.appendChild(copyBtn(npub || pubkey));
+    const netCopy = slot.querySelector('.vpn-meta-copy-network');
+    if (netCopy && networkId) netCopy.appendChild(copyBtn(networkId));
+
     const svc = slot.querySelector('#vpn-install-service');
     if (svc) {
       svc.addEventListener('click', async (e) => {
@@ -5218,6 +5250,250 @@ const LogsPanel = (() => {
         svc.disabled = false;
       });
     }
+
+    const shareBtn = slot.querySelector('#vpn-share-invite');
+    if (shareBtn) shareBtn.addEventListener('click', (e) => { e.preventDefault(); openShareInviteModal(); });
+    const importBtn = slot.querySelector('#vpn-import-invite');
+    if (importBtn) importBtn.addEventListener('click', (e) => { e.preventDefault(); openImportInviteModal(); });
+    const pubBtn = slot.querySelector('#vpn-publish-roster');
+    if (pubBtn) {
+      pubBtn.addEventListener('click', async (e) => {
+        e.preventDefault(); pubBtn.disabled = true;
+        try {
+          const r = await api('/api/nvpn/roster/publish', { method: 'POST' });
+          toast('roster published', r?.detail || '', 'ok');
+        } catch { /* api() already toasted */ }
+        pubBtn.disabled = false;
+      });
+    }
+
+    const addForm = slot.querySelector('.vpn-add-peer');
+    if (addForm) {
+      addForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const input = slot.querySelector('#vpn-add-peer-input');
+        const pubInp = slot.querySelector('#vpn-add-peer-publish');
+        const value = String(input?.value || '').trim();
+        if (!value) return;
+        if (!isValidParticipant(value)) {
+          toast('Invalid pubkey', 'paste an npub1… or 64-char hex', 'warn');
+          input.focus();
+          return;
+        }
+        const submitBtn = addForm.querySelector('button[type="submit"]');
+        if (submitBtn) submitBtn.disabled = true;
+        try {
+          const r = await api('/api/nvpn/peers/add', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ participants: [value], publish: !!(pubInp?.checked) }),
+          });
+          toast('peer added', r?.detail || '', 'ok');
+          input.value = '';
+          await loadVpnDetail();
+        } catch { /* api() already toasted */ }
+        if (submitBtn) submitBtn.disabled = false;
+      });
+    }
+
+    // Per-row buttons. Wired by data-action so the merged renderer can
+    // drop them in without a bespoke event listener per row.
+    slot.querySelectorAll('.vpn-meta-peer button[data-action]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const peerEl = btn.closest('.vpn-meta-peer');
+        const id = peerEl?.dataset?.id;
+        if (!id) return;
+        btn.disabled = true;
+        try {
+          await peerAction(btn.dataset.action, id);
+          await loadVpnDetail();
+        } catch { /* api() already toasted */ }
+        btn.disabled = false;
+      });
+    });
+  }
+
+  // Client-side gate so we don't ship Rust-panic stack traces from the
+  // binary into a toast. Mirrors the server-side validator in nvpn.ts —
+  // fast, cheap, and covers the common paste paths.
+  function isValidParticipant(s) {
+    if (!s || typeof s !== 'string') return false;
+    if (/^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}$/.test(s)) return true;
+    if (/^[0-9a-f]{64}$/i.test(s)) return true;
+    return false;
+  }
+
+  // Per-peer kebab actions. Each shape is small; dispatch on `action`
+  // here rather than three nearly identical handlers in the per-row
+  // wiring above.
+  async function peerAction(action, id) {
+    if (action === 'remove') {
+      const ok = await confirmDestructive({
+        title: 'Remove peer?',
+        description: 'They\'ll lose mesh access until re-added. Roster will be republished.',
+        confirmLabel: 'Remove',
+      });
+      if (!ok) return;
+      const r = await api('/api/nvpn/peers/remove', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ participants: [id], publish: true }),
+      });
+      toast('peer removed', r?.detail || '', 'ok');
+    } else if (action === 'promote') {
+      const r = await api('/api/nvpn/admins/add', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ participants: [id], publish: true }),
+      });
+      toast('promoted to admin', r?.detail || '', 'ok');
+    } else if (action === 'demote') {
+      const r = await api('/api/nvpn/admins/remove', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ participants: [id], publish: true }),
+      });
+      toast('admin removed', r?.detail || '', 'ok');
+    }
+  }
+
+  // Roster + live peers rarely match exactly (live peers may show
+  // before the roster updates locally; offline roster entries never
+  // appear in live). Merge keys on hex pubkey or npub equivalence so
+  // the row count matches the user's mental model: "the people in my
+  // network."
+  function mergePeers(rosterParts, rosterAdmins, livePeers) {
+    const adminSet = new Set(rosterAdmins.map(s => String(s).toLowerCase()));
+    const liveByKey = new Map();
+    for (const lp of livePeers) {
+      const k = (lp.npub || lp.pubkey || lp.ip || '').toLowerCase();
+      if (k) liveByKey.set(k, lp);
+    }
+    const out = [];
+    const seen = new Set();
+    for (const p of rosterParts) {
+      const k = String(p).toLowerCase();
+      seen.add(k);
+      const live = liveByKey.get(k);
+      out.push({
+        id:        p,
+        rosterKey: p,
+        live,
+        connected: !!live?.connected,
+        admin:     adminSet.has(k),
+        roster:    true,
+      });
+    }
+    // Anything live but not in roster (mid-import / mid-publish race) —
+    // surface so the user can see the discovery happen, but mark as
+    // "discovered" so they know it's not yet in their config.
+    for (const [k, live] of liveByKey) {
+      if (seen.has(k)) continue;
+      out.push({
+        id:        live.npub || live.pubkey || live.ip || k,
+        rosterKey: null,
+        live,
+        connected: !!live.connected,
+        admin:     false,
+        roster:    false,
+      });
+    }
+    return out;
+  }
+
+  function renderPeerRow(p) {
+    const dot = p.connected ? 'ok' : (p.roster ? 'warn' : 'err');
+    const id  = p.id;
+    const live = p.live;
+    const sub = [
+      live?.ip,
+      live?.latencyMs != null ? `${live.latencyMs}ms` : null,
+      live?.lastSeen,
+      !p.roster ? 'discovered (not in roster)' : (p.connected ? null : 'offline'),
+    ].filter(Boolean).join(' · ');
+    const adminBadge = p.admin ? '<span class="vpn-meta-peer-badge">admin</span>' : '';
+    const promoteBtn = p.roster && !p.admin
+      ? '<button data-action="promote" title="Promote to admin">↑ admin</button>' : '';
+    const demoteBtn = p.roster && p.admin
+      ? '<button data-action="demote" title="Demote from admin">↓ admin</button>' : '';
+    const removeBtn = p.roster
+      ? '<button data-action="remove" class="danger" title="Remove from roster">remove</button>' : '';
+    return `
+      <div class="vpn-meta-peer" data-id="${escapeHtml(id)}">
+        <span class="dot ${dot}"></span>
+        <code class="cmd-inline vpn-meta-peer-id">${escapeHtml(id)}</code>
+        ${adminBadge}
+        ${sub ? `<span class="muted vpn-meta-peer-sub">${escapeHtml(sub)}</span>` : ''}
+        <span class="vpn-meta-peer-actions">${promoteBtn}${demoteBtn}${removeBtn}</span>
+      </div>`;
+  }
+
+  // ── Invite share / import modals ────────────────────────────────
+  // create-invite returns both the nvpn://invite/<base64> string and a
+  // pre-rendered SVG QR (server-side; same QR styling as the Amber
+  // pairing wizard). Modal is the "Share network" UX — user shows phone,
+  // peer scans, peer pastes into their own dashboard's Import.
+
+  async function openShareInviteModal() {
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div class="vpn-invite-loading muted">creating invite…</div>
+    `;
+    const modal = openModal({ title: 'Share network', subtitle: 'Anyone who imports this invite joins your mesh', body });
+    modal.root.classList.add('vpn-invite-modal');
+    let r;
+    try { r = await api('/api/nvpn/invite/create', { method: 'POST' }); }
+    catch { modal.close(); return; }
+    if (!r?.ok || !r.invite) {
+      body.innerHTML = `<div class="vpn-invite-err">${escapeHtml(r?.detail || 'create-invite failed')}</div>`;
+      return;
+    }
+    body.innerHTML = `
+      <div class="vpn-invite-qr"></div>
+      <div class="vpn-invite-uri">
+        <code class="cmd-inline">${escapeHtml(r.invite)}</code>
+        <span class="vpn-invite-copy"></span>
+      </div>
+      <div class="muted vpn-invite-hint">
+        ${r.networkId ? `Network <code class="cmd-inline">${escapeHtml(r.networkId)}</code> · ` : ''}
+        Peers paste this into <strong>Import invite</strong> on their dashboard, or scan the QR with the nvpn mobile app.
+      </div>
+    `;
+    const qrSlot = body.querySelector('.vpn-invite-qr');
+    if (r.qrSvg) qrSlot.innerHTML = r.qrSvg;
+    body.querySelector('.vpn-invite-copy').appendChild(copyBtn(r.invite));
+  }
+
+  async function openImportInviteModal() {
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <p class="muted">Paste an <code>nvpn://invite/…</code> code from another node to join their network.</p>
+      <textarea id="vpn-import-invite-input" placeholder="nvpn://invite/…" spellcheck="false" rows="3"></textarea>
+      <div class="vpn-invite-modal-actions">
+        <button id="vpn-import-invite-cancel">Cancel</button>
+        <button id="vpn-import-invite-submit" class="primary">Import</button>
+      </div>
+    `;
+    const modal = openModal({ title: 'Import invite', subtitle: 'Joins the network in your local config', body });
+    modal.root.classList.add('vpn-invite-modal');
+    const input = body.querySelector('#vpn-import-invite-input');
+    input?.focus();
+    body.querySelector('#vpn-import-invite-cancel').addEventListener('click', (e) => { e.preventDefault(); modal.close(); });
+    body.querySelector('#vpn-import-invite-submit').addEventListener('click', async (e) => {
+      e.preventDefault();
+      const v = String(input.value || '').trim();
+      if (!v) { input.focus(); return; }
+      const submit = e.currentTarget;
+      submit.disabled = true;
+      try {
+        const r = await api('/api/nvpn/invite/import', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ invite: v }),
+        });
+        toast('invite imported', r?.detail || '', 'ok');
+        modal.close();
+        loadVpnDetail();
+      } catch { /* api() already toasted */ }
+      submit.disabled = false;
+    });
   }
 
   // Normalize peer-list shape across upstream nvpn revisions. We've seen:

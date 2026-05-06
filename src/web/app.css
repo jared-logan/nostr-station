@@ -1051,6 +1051,196 @@ input:focus, textarea:focus, select:focus {
 .logs-meta.vpn-meta .dot.warn { background: var(--warn); }
 .logs-meta.vpn-meta .dot.err  { background: var(--error); }
 
+/* Network sub-block — inline action bar (Share invite / Import / Publish). */
+.logs-meta.vpn-meta .vpn-meta-network { gap: 8px; flex-wrap: wrap; }
+.logs-meta.vpn-meta .vpn-meta-network-id { word-break: break-all; }
+.logs-meta.vpn-meta .vpn-meta-network-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+.logs-meta.vpn-meta .vpn-meta-network-actions button {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--text);
+  cursor: pointer;
+}
+.logs-meta.vpn-meta .vpn-meta-network-actions button:hover:not(:disabled) {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.3);
+}
+.logs-meta.vpn-meta .vpn-meta-network-actions button:disabled { opacity: 0.5; cursor: progress; }
+
+/* Peers sub-block — header (count + admin tally) + list rows + add form. */
+.logs-meta.vpn-meta .vpn-meta-peers-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.logs-meta.vpn-meta .vpn-meta-peers-counts { font-size: 10px; }
+.logs-meta.vpn-meta .vpn-meta-peer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  flex-wrap: wrap;
+}
+.logs-meta.vpn-meta .vpn-meta-peer-id { font-size: 11px; flex: 0 1 auto; min-width: 0; }
+.logs-meta.vpn-meta .vpn-meta-peer-sub { font-size: 10px; }
+.logs-meta.vpn-meta .vpn-meta-peer-empty {
+  padding: 8px 0;
+  font-size: 11px;
+}
+.logs-meta.vpn-meta .vpn-meta-peer-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--text);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.logs-meta.vpn-meta .vpn-meta-peer-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.logs-meta.vpn-meta .vpn-meta-peer-actions button {
+  padding: 2px 8px;
+  font-size: 10px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.logs-meta.vpn-meta .vpn-meta-peer-actions button:hover:not(:disabled) {
+  background: rgba(255,255,255,0.08);
+  color: var(--text);
+}
+.logs-meta.vpn-meta .vpn-meta-peer-actions button:disabled { opacity: 0.5; cursor: progress; }
+.logs-meta.vpn-meta .vpn-meta-peer-actions button.danger {
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
+  color: color-mix(in srgb, var(--error) 90%, var(--text));
+}
+
+/* Add-peer inline form. */
+.logs-meta.vpn-meta .vpn-add-peer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  flex-wrap: wrap;
+}
+.logs-meta.vpn-meta .vpn-add-peer input[type="text"] {
+  flex: 1;
+  min-width: 240px;
+  padding: 4px 8px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  background: rgba(0,0,0,0.2);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  color: var(--text);
+}
+.logs-meta.vpn-meta .vpn-add-peer-publish {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.logs-meta.vpn-meta .vpn-add-peer button {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  color: var(--text);
+  cursor: pointer;
+}
+.logs-meta.vpn-meta .vpn-add-peer button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.logs-meta.vpn-meta .vpn-add-peer button:disabled { opacity: 0.5; cursor: progress; }
+
+/* Invite share / import modal. */
+.modal.vpn-invite-modal .vpn-invite-qr {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+.modal.vpn-invite-modal .vpn-invite-qr svg {
+  width: 256px;
+  height: 256px;
+  border-radius: 6px;
+  background: var(--bg-1, #0b0d10);
+  padding: 8px;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.06);
+}
+.modal.vpn-invite-modal .vpn-invite-uri {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.modal.vpn-invite-modal .vpn-invite-uri code {
+  flex: 1;
+  word-break: break-all;
+  font-size: 11px;
+}
+.modal.vpn-invite-modal .vpn-invite-hint { font-size: 11px; line-height: 1.5; }
+.modal.vpn-invite-modal .vpn-invite-loading,
+.modal.vpn-invite-modal .vpn-invite-err {
+  padding: 32px 0;
+  text-align: center;
+  font-size: 12px;
+}
+.modal.vpn-invite-modal .vpn-invite-err { color: var(--error); }
+.modal.vpn-invite-modal textarea {
+  width: 100%;
+  padding: 8px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  background: rgba(0,0,0,0.2);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  color: var(--text);
+  margin: 8px 0;
+  resize: vertical;
+}
+.modal.vpn-invite-modal .vpn-invite-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.modal.vpn-invite-modal .vpn-invite-modal-actions button {
+  padding: 6px 14px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--text);
+  cursor: pointer;
+}
+.modal.vpn-invite-modal .vpn-invite-modal-actions button.primary {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.modal.vpn-invite-modal .vpn-invite-modal-actions button:hover:not(:disabled) {
+  background: rgba(255,255,255,0.08);
+}
+.modal.vpn-invite-modal .vpn-invite-modal-actions button:disabled { opacity: 0.5; cursor: progress; }
+
 /* ── config panel ─────────────────────────────────────────────────────── */
 
 .config-sections {

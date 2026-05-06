@@ -153,6 +153,276 @@ export async function installNvpnService(): Promise<ControlResult> {
   }
 }
 
+// ── Configured roster (config.toml) ──────────────────────────────────────
+//
+// `nvpn status --json` reports LIVE peer state (connected, latency, etc.)
+// but not the configured roster — the user-managed list of npubs that
+// belong to the network. The roster lives in nvpn's config file as a
+// TOML `[[networks]]` block. We read it directly so the dashboard can
+// render "configured but disconnected" peers (the common case during
+// onboarding) instead of waiting for everyone to come online.
+//
+// We avoid a TOML dep — the keys we care about (`network_id`,
+// `participants`, `admins`) are flat string + array-of-strings entries
+// inside a single section; a tight regex over the first `[[networks]]`
+// section is sufficient and resilient to TOML field reordering.
+
+export interface NvpnRoster {
+  found:        boolean;
+  configPath:   string | null;
+  networkId:    string | null;
+  participants: string[];
+  admins:       string[];
+}
+
+function nvpnConfigCandidates(): string[] {
+  const home = os.homedir();
+  return [
+    path.join(home, '.config', 'nvpn', 'config.toml'),
+    path.join(home, 'Library', 'Application Support', 'nvpn', 'config.toml'),
+  ];
+}
+
+function findNvpnConfigPath(): string | null {
+  for (const p of nvpnConfigCandidates()) {
+    try { fs.accessSync(p, fs.constants.R_OK); return p; }
+    catch { /* try next */ }
+  }
+  return null;
+}
+
+// Extract the first `[[networks]]` block — the active network for our
+// purposes. nvpn supports multi-network configs; we surface the first
+// for the dashboard, which is what `nvpn add-participant` (no flag)
+// also targets.
+export function extractFirstNetworksSection(toml: string): string {
+  const idx = toml.indexOf('[[networks]]');
+  if (idx < 0) return toml;
+  const after = toml.slice(idx + '[[networks]]'.length);
+  // Stop at the next top-level table heading so we don't bleed into
+  // [peer_aliases], [nat], [nostr], etc.
+  const m = after.search(/^\s*\[(?:\[)?/m);
+  return m >= 0 ? after.slice(0, m) : after;
+}
+
+export function extractTomlList(section: string, key: string): string[] {
+  const re = new RegExp(`^\\s*${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'm');
+  const m = section.match(re);
+  if (!m) return [];
+  const out: string[] = [];
+  for (const sm of m[1].matchAll(/"([^"]+)"/g)) out.push(sm[1]);
+  return out;
+}
+
+export function extractTomlString(section: string, key: string): string | null {
+  const re = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, 'm');
+  const m = section.match(re);
+  return m ? m[1] : null;
+}
+
+export function readNvpnRoster(): NvpnRoster {
+  const configPath = findNvpnConfigPath();
+  if (!configPath) {
+    return { found: false, configPath: null, networkId: null, participants: [], admins: [] };
+  }
+  let toml = '';
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch {
+    return { found: false, configPath, networkId: null, participants: [], admins: [] };
+  }
+  const section = extractFirstNetworksSection(toml);
+  return {
+    found:        true,
+    configPath,
+    networkId:    extractTomlString(section, 'network_id'),
+    participants: extractTomlList(section, 'participants'),
+    admins:       extractTomlList(section, 'admins'),
+  };
+}
+
+// ── Roster + invites + whois ─────────────────────────────────────────────
+//
+// nvpn 0.3.x organises peers into a network roster: a set of `participants`
+// (regular peers) plus a subset marked `admins`. Roster mutations are local
+// until you pass `--publish`, which broadcasts the admin-signed roster
+// over Nostr. The dashboard treats `publish` as a per-call flag — the UI
+// defaults to publish-on-add (matches expected mental model: "I added a
+// peer, of course they should now see me") but exposes it as a checkbox
+// for power users staging changes locally.
+
+const ROSTER_TIMEOUT_MS = 20_000;
+const INVITE_TIMEOUT_MS = 10_000;
+// whois may walk Nostr relays for peer metadata when --discover-secs is
+// non-zero. We cap aggressively because the dashboard's a synchronous
+// click; users can re-run if the daemon needs more time.
+const WHOIS_TIMEOUT_MS = 6_000;
+
+// Accepts both bech32 (npub1…) and lowercase hex (64 chars). nvpn itself
+// is more forgiving (accepts mixed-case hex too) but the dashboard
+// validates strictly so we never ship "Invalid public key" stack traces
+// from the binary into the toast UI.
+const NPUB_RE = /^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}$/;
+const HEX_RE  = /^[0-9a-f]{64}$/i;
+export function isValidParticipant(s: string): boolean {
+  if (!s || typeof s !== 'string') return false;
+  return NPUB_RE.test(s) || HEX_RE.test(s);
+}
+
+// Schema-flexible parser for `--json` output. Most roster commands emit
+// `{ network_id, participants[], admins[], changed[], published_recipients,
+// published, relays[] }`. Surface the whole thing back to the UI; only
+// the `published` flag drives our toast wording.
+export interface RosterMutationResult extends ControlResult {
+  raw?:                   Record<string, unknown> | null;
+  published?:             boolean;
+  publishedRecipients?:   number;
+  changed?:               string[];
+}
+
+async function runRosterCommand(
+  cmd: 'add-participant' | 'remove-participant' | 'add-admin' | 'remove-admin',
+  participants: string[],
+  publish: boolean,
+): Promise<RosterMutationResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  const cleaned = participants.map(s => String(s).trim()).filter(Boolean);
+  if (cleaned.length === 0) return { ok: false, detail: 'no participants provided' };
+  const bad = cleaned.filter(p => !isValidParticipant(p));
+  if (bad.length > 0) {
+    return {
+      ok: false,
+      detail: `invalid participant${bad.length > 1 ? 's' : ''}: ${bad.slice(0, 3).join(', ')}` +
+              (bad.length > 3 ? ` (+${bad.length - 3} more)` : ''),
+    };
+  }
+  // Argv shape: nvpn <cmd> --participant <p1> --participant <p2> [--publish] --json
+  const args: string[] = [cmd];
+  for (const p of cleaned) { args.push('--participant', p); }
+  if (publish) args.push('--publish');
+  args.push('--json');
+
+  try {
+    const { stdout } = await execa(binPath, args, {
+      timeout: ROSTER_TIMEOUT_MS, stdio: 'pipe',
+    });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* keep raw=null, surface ok with no metadata */ }
+    const published          = !!(raw?.published);
+    const publishedRecipients = typeof raw?.published_recipients === 'number'
+      ? raw.published_recipients : undefined;
+    const changed = Array.isArray(raw?.changed)
+      ? (raw.changed as unknown[]).filter(x => typeof x === 'string') as string[]
+      : undefined;
+    const detail = published
+      ? `roster updated and published${publishedRecipients ? ` to ${publishedRecipients} recipient${publishedRecipients === 1 ? '' : 's'}` : ''}`
+      : 'roster updated locally (not published)';
+    return { ok: true, detail, raw, published, publishedRecipients, changed };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+export function addParticipants(participants: string[], publish: boolean): Promise<RosterMutationResult> {
+  return runRosterCommand('add-participant', participants, publish);
+}
+export function removeParticipants(participants: string[], publish: boolean): Promise<RosterMutationResult> {
+  return runRosterCommand('remove-participant', participants, publish);
+}
+export function addAdmins(participants: string[], publish: boolean): Promise<RosterMutationResult> {
+  return runRosterCommand('add-admin', participants, publish);
+}
+export function removeAdmins(participants: string[], publish: boolean): Promise<RosterMutationResult> {
+  return runRosterCommand('remove-admin', participants, publish);
+}
+
+export interface PublishRosterResult extends ControlResult {
+  raw?: Record<string, unknown> | null;
+}
+export async function publishRoster(): Promise<PublishRosterResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  try {
+    const { stdout } = await execa(binPath, ['publish-roster', '--json'], {
+      timeout: ROSTER_TIMEOUT_MS, stdio: 'pipe',
+    });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
+    return { ok: true, detail: 'roster published', raw };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+export interface InviteResult extends ControlResult {
+  invite?:    string;
+  networkId?: string;
+  raw?:       Record<string, unknown> | null;
+}
+export async function createInvite(): Promise<InviteResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  try {
+    const { stdout } = await execa(binPath, ['create-invite', '--json'], {
+      timeout: INVITE_TIMEOUT_MS, stdio: 'pipe',
+    });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* nothing */ }
+    const invite    = typeof raw?.invite === 'string' ? (raw.invite as string) : undefined;
+    const networkId = typeof raw?.network_id === 'string' ? (raw.network_id as string) : undefined;
+    if (!invite) return { ok: false, detail: 'create-invite returned no invite string', raw };
+    return { ok: true, detail: 'invite created', invite, networkId, raw };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+export async function importInvite(invite: string): Promise<InviteResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  const trimmed = String(invite || '').trim();
+  // Light client-side validation. nvpn will reject malformed strings, but
+  // we'd rather fail fast with a sensible toast than render a Rust panic
+  // backtrace from the binary.
+  if (!/^nvpn:\/\/invite\//.test(trimmed)) {
+    return { ok: false, detail: 'invite must start with nvpn://invite/' };
+  }
+  try {
+    const { stdout } = await execa(binPath, ['import-invite', trimmed, '--json'], {
+      timeout: INVITE_TIMEOUT_MS, stdio: 'pipe',
+    });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* nothing */ }
+    const networkId = typeof raw?.network_id === 'string' ? (raw.network_id as string) : undefined;
+    return { ok: true, detail: 'invite imported', networkId, raw };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+export interface WhoisResult extends ControlResult {
+  raw?: Record<string, unknown> | null;
+}
+export async function whoisPeer(query: string): Promise<WhoisResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  const trimmed = String(query || '').trim();
+  if (!trimmed) return { ok: false, detail: 'empty query' };
+  // discover-secs 0 keeps the call snappy when run from a click; the
+  // local roster + cached peer state is usually enough to resolve.
+  try {
+    const { stdout } = await execa(
+      binPath, ['whois', trimmed, '--discover-secs', '0', '--json'],
+      { timeout: WHOIS_TIMEOUT_MS, stdio: 'pipe' },
+    );
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* nothing */ }
+    return { ok: true, detail: 'whois ok', raw };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
 // ── Log tail ─────────────────────────────────────────────────────────────
 //
 // The log file path comes from `nvpn status --json` (`daemon.log_file`).
