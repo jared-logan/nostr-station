@@ -433,12 +433,24 @@ async function refreshHeader() {
     const cfg = await api('/api/config');
     const parts = [];
     if (!cfg.configured) parts.push('⚠ AI not configured');
-    parts.push(cfg.hasContext ? 'NOSTR_STATION.md loaded' : '⚠ no NOSTR_STATION.md');
+    parts.push(describeContext(cfg));
     parts.push(`${cfg.provider} · ${cfg.model}`);
     $('chat-subtitle').textContent = parts.join(' · ');
     window.__lastConfig = cfg;
   } catch {}
   refreshIdentityChip();
+}
+
+// Single source of truth for the human-readable context label used by the
+// chat header and the Config panel row. The /api/config response carries
+// a `contextSource` of 'project' | 'station' plus a `hasContextFile`
+// flag for the legacy ~/nostr-station/projects/NOSTR_STATION.md seed.
+function describeContext(cfg) {
+  if (!cfg.hasContext) return '⚠ no context';
+  if (cfg.contextSource === 'project' && cfg.contextProject) {
+    return `project: ${cfg.contextProject}`;
+  }
+  return cfg.hasContextFile ? 'NOSTR_STATION.md loaded' : 'station context (built-in)';
 }
 
 // ── Identity: chip renderer + pixel-art fallback ─────────────────────────
@@ -5109,7 +5121,7 @@ const ConfigPanel = (() => {
         ${renderAiProviders(aiList)}
         <div class="config-row" style="margin-top:10px">
           <div class="k">Context</div>
-          <div class="v ${cfg.hasContext ? 'on' : 'off'}">${cfg.hasContext ? 'NOSTR_STATION.md loaded' : 'not found'}</div>
+          <div class="v ${cfg.hasContext ? 'on' : 'off'}">${describeContext(cfg)}</div>
         </div>
         <div class="callout">
           Per-provider keys live in the OS keychain as <code>ai:&lt;provider&gt;</code>.
