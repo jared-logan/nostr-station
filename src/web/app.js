@@ -3586,10 +3586,49 @@ const ProjectsPanel = (() => {
         ${alsoGit}
       </div>
       <div class="tab-section">
-        <button class="primary ngit-push-btn">Publish to ngit</button>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="primary ngit-push-btn">Publish to ngit</button>
+          <button class="ngit-send-btn" style="display:none">Send as proposal</button>
+          <span class="muted ngit-send-hint" style="display:none;font-size:11px">
+            no commits ahead — switch to a feature branch and commit first
+          </span>
+        </div>
       </div>
     `;
     container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+
+    // Send-as-proposal gate: only meaningful when the local branch has
+    // commits the upstream doesn't. /git-state hands back an `ahead`
+    // count parsed from `git status --porcelain=v2 --branch`. We
+    // render the button hidden by default, reveal it after the async
+    // probe returns. Hint replaces the button when ahead is 0 so the
+    // user knows why nothing's happening, rather than seeing a missing
+    // affordance with no explanation.
+    (async () => {
+      const sendBtn  = container.querySelector('.ngit-send-btn');
+      const sendHint = container.querySelector('.ngit-send-hint');
+      if (!sendBtn || !sendHint) return;
+      let st = null;
+      try { st = await api(`/api/projects/${p.id}/git-state`); } catch {}
+      const ahead = Number(st?.ahead || 0);
+      if (ahead > 0) {
+        sendBtn.style.display  = '';
+        sendBtn.textContent    = `Send as proposal (${ahead} commit${ahead === 1 ? '' : 's'})`;
+        sendBtn.addEventListener('click', () => {
+          openExecModal({
+            title:    `Send proposal · ${p.name}`,
+            subtitle: 'ngit send  (Amber will sign on your phone)',
+            endpoint: `/api/projects/${p.id}/ngit/send`,
+          }).then(r => {
+            if (r.ok) toast('Proposal sent', '', 'ok');
+            else      toast('ngit send failed', `exit ${r.code}`, 'err');
+          });
+        });
+      } else {
+        sendHint.style.display = '';
+      }
+    })();
+
     container.querySelector('.ngit-push-btn').addEventListener('click', () => {
       // ngit push is interactive once Amber gets involved (sign prompts).
       // Prefer the terminal panel; keep the SSE modal as fallback for
