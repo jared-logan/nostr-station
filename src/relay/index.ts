@@ -56,6 +56,11 @@ export interface RelayOptions {
   // Per-event invocation (not a one-shot at construction) so identity.json
   // edits propagate without a relay restart.
   getOwnerHex?: () => string | null;
+  // Optional log sink. The relay never writes a log file; instead it
+  // calls onLog for notable wire-protocol events (connection open/close,
+  // event accepted/rejected, REQ subscription, AUTH success/failure).
+  // The dashboard pipes these into a LogBuffer that backs the Logs panel.
+  onLog?: (level: 'info' | 'warn' | 'error', text: string) => void;
   // Externally-provided HTTP server. When supplied, the relay attaches
   // its WebSocket upgrade handler to it and does NOT listen() on its own
   // port. Used for the in-process mode where dashboard and relay share
@@ -78,6 +83,7 @@ export class Relay {
   private port: number;
   private host: string;
   private getOwnerHex?: () => string | null;
+  private onLog?: (level: 'info' | 'warn' | 'error', text: string) => void;
 
   constructor(opts: RelayOptions = {}) {
     this.port        = opts.port ?? DEFAULT_PORT;
@@ -85,6 +91,11 @@ export class Relay {
     this.store       = new EventStore({ dbPath: opts.dbPath, maxEvents: opts.maxEvents });
     this.whitelist   = new WhitelistStore(opts.whitelistPath);
     this.getOwnerHex = opts.getOwnerHex;
+    this.onLog       = opts.onLog;
+  }
+
+  private log(level: 'info' | 'warn' | 'error', text: string): void {
+    try { this.onLog?.(level, text); } catch { /* never let a bad sink break protocol handling */ }
   }
 
   async start(): Promise<{ port: number; host: string }> {
@@ -171,6 +182,7 @@ export class Relay {
     const auth: ConnAuth = { challenge: crypto.randomBytes(32).toString('hex') };
     (ws as any).__nsAuth = auth;
     sendJson(ws, ['AUTH', auth.challenge]);
+    this.log('info', 'client connected — AUTH challenge sent');
 
     ws.on('message', (data) => {
       let msg: unknown;
@@ -192,6 +204,7 @@ export class Relay {
     ws.on('close', () => {
       for (const key of connSubs) this.subs.delete(key);
       connSubs.clear();
+      this.log('info', 'client disconnected');
     });
     ws.on('error', () => { /* swallow — close handler does cleanup */ });
   }
@@ -232,6 +245,7 @@ export class Relay {
     }
 
     auth.authedPubkey = raw.pubkey;
+    this.log('info', `AUTH success — connection bound to ${raw.pubkey.slice(0, 8)}…`);
     ok(ws, raw.id, true, '');
   }
 
@@ -261,12 +275,17 @@ export class Relay {
     const isOwner       = !!ownerHex && ownerHex === evPubkey;
     const isWhitelisted = this.whitelist.has(evPubkey);
     if (!isOwner && !isWhitelisted) {
+      this.log('warn', `EVENT rejected — pubkey ${evPubkey.slice(0, 8)}… not authorized (kind ${raw.kind})`);
       return ok(ws, raw.id, false, 'auth-required: pubkey not authorized to publish to this relay');
     }
 
     const result = this.store.add(raw);
-    if (result.duplicate) return ok(ws, raw.id, true, 'duplicate: already have this event');
+    if (result.duplicate) {
+      this.log('info', `EVENT duplicate — id ${raw.id.slice(0, 8)}… already in store`);
+      return ok(ws, raw.id, true, 'duplicate: already have this event');
+    }
 
+    this.log('info', `EVENT accepted — id ${raw.id.slice(0, 8)}… kind ${raw.kind} from ${evPubkey.slice(0, 8)}…${isOwner ? ' (owner)' : ' (whitelisted)'}`);
     ok(ws, raw.id, true, '');
 
     // Fan-out to live subscribers. We iterate the whole subs map; for a
@@ -301,6 +320,7 @@ export class Relay {
     const events = this.store.queryMany(filters);
     for (const ev of events) sendJson(ws, ['EVENT', subId, ev]);
     sendJson(ws, ['EOSE', subId]);
+    this.log('info', `REQ ${subId} — ${filters.length} filter(s), ${events.length} historical event(s) replayed`);
   }
 
   private handleClose(ws: WebSocket, raw: unknown, connSubs: Set<string>): void {

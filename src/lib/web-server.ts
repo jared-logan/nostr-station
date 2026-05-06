@@ -34,6 +34,7 @@ import { migrateIfNeeded } from './ai-config.js';
 import { gatherStatus } from '../commands/Status.js';
 import { DEFAULT_DB_PATH } from '../relay/store.js';
 import type { Relay } from '../relay/index.js';
+import { LogBuffer, type LogLine } from './log-buffer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 // relay-config / services / install were the host-install era's
 // LaunchAgent/systemd/cargo plumbing; all gone now that the relay
@@ -342,6 +343,18 @@ async function deriveKeychainNpub(slot: 'watchdog-nsec' | 'seed-nsec'): Promise<
   } catch { return null; }
 }
 
+// Format a LogLine for the Logs panel SSE wire. Pre-deletion the panel
+// consumed plain `tail -f` strings, so the client just appends as text;
+// we prefix with [LEVEL] iso-time to keep the warn/err classification
+// (app.js:4727 'classify') working.
+function formatLogLine(line: LogLine): string {
+  const iso = new Date(line.ts).toISOString();
+  const prefix = line.level === 'error' ? '[ERROR]'
+              : line.level === 'warn'  ? '[WARN]'
+              : '[INFO]';
+  return `${iso} ${prefix} ${line.text}`;
+}
+
 // ── Relay liveness probe ──────────────────────────────────────────────────────
 
 function isRelayUp(): boolean {
@@ -366,6 +379,17 @@ function isRelayUp(): boolean {
 // module out of runtime load until maybeStartInprocRelay's dynamic import
 // actually fires (preserving the STATION_INPROC_RELAY=0 fast path).
 let inprocRelay: Relay | null = null;
+
+// Per-channel log ring buffers for the Logs panel. The relay buffer is
+// fed by Relay.onLog hooks (see maybeStartInprocRelay below). Watchdog
+// and vpn buffers are constructed eagerly so /api/logs/{watchdog,vpn}
+// can return stable "pending" status frames in 1.9; they'll start
+// receiving real lines once Phase 2 wires them up.
+const logBuffers = {
+  relay:    new LogBuffer(),
+  watchdog: new LogBuffer(),
+  vpn:      new LogBuffer(),
+} as const;
 
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
@@ -513,9 +537,14 @@ async function maybeStartInprocRelay(): Promise<void> {
         return ident.npub ? npubToHex(ident.npub).toLowerCase() : null;
       } catch { return null; }
     },
+    // Pipe relay-emitted log lines into the channel buffer that backs
+    // /api/logs/relay (1.8). Connection open/close, EVENT accept/reject/
+    // duplicate, REQ subscriptions, and AUTH outcomes all land here.
+    onLog: (level, text) => logBuffers.relay.push(level, text),
   });
   await r.start();
   inprocRelay = r;
+  logBuffers.relay.info(`relay listening on ws://127.0.0.1:${port}`);
   // Publish the relay address via env so gatherStatus + isRelayUp probe
   // the right port, and any descendant tooling (e.g. nak commands) sees
   // the same source of truth.
@@ -1118,6 +1147,89 @@ export async function startWebServer(port: number): Promise<void> {
         return;
       }
 
+
+      // ── Logs panel SSE ────────────────────────────────────────────────
+      // Single endpoint for all three channels (relay/watchdog/vpn). The
+      // panel opens an EventSource per active tab and reconnects on tab
+      // change (app.js:4864). Output frames per the original wire shape:
+      //   data: { status: ServiceHealth }   — emitted on connect
+      //   data: { lines: [LogLine, ...] }   — replay of buffered history,
+      //                                       then one frame per new line
+      //   data: { error: <string> }         — replaced by graceful close
+      // EventSource cannot set Authorization, so the auth gate accepts
+      // ?token=<bearer> via the existing extractBearer path; the per-route
+      // guard above has already vetted the token by the time we land here.
+      const logsMatch = url.match(/^\/api\/logs\/(relay|watchdog|vpn)$/);
+      if (logsMatch && method === 'GET') {
+        const channel = logsMatch[1] as 'relay' | 'watchdog' | 'vpn';
+        const buf = logBuffers[channel];
+        const isRelay = channel === 'relay';
+
+        res.writeHead(200, {
+          'Content-Type':  'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection':    'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+
+        // Status frame matches the shape Logs panel's renderBanner /
+        // renderMeta consume (app.js:4868). For the relay channel, the
+        // log "exists" iff the relay is up. For watchdog/vpn, surface
+        // pending state so the banner explains the empty stream.
+        const status =
+          isRelay
+            ? {
+                service:     'relay',
+                installed:   true,
+                running:     !!inprocRelay,
+                logExists:   true,
+                logPath:     '(in-memory ring buffer)',
+                stale:       false,
+                logMtimeMs:  Date.now(),
+              }
+            : {
+                service:     channel,
+                installed:   false,
+                running:     false,
+                logExists:   false,
+                logPath:     '(installer wiring pending)',
+                stale:       false,
+                logMtimeMs:  Date.now(),
+                note:        `${channel} installer wiring pending — Phase 2`,
+              };
+        res.write(`data: ${JSON.stringify({ status })}\n\n`);
+
+        // Replay the ring on connect so the user sees recent history
+        // immediately, not just whatever happens after the panel opened.
+        const initial = buf.drain();
+        if (initial.length > 0) {
+          res.write(`data: ${JSON.stringify({ lines: initial.map(formatLogLine) })}\n\n`);
+        }
+
+        // Live tail — push every new line as a single-line `lines` frame
+        // so client code paths (history vs live) share one branch.
+        const unsubscribe = buf.subscribe((line: LogLine) => {
+          if (res.writableEnded) return;
+          try {
+            res.write(`data: ${JSON.stringify({ lines: [formatLogLine(line)] })}\n\n`);
+          } catch { /* socket gone — close handler unsubs */ }
+        });
+
+        // 15s heartbeat keeps proxies / browsers from idling the
+        // connection out when nothing's happening on the channel.
+        const heartbeat = setInterval(() => {
+          if (res.writableEnded) return;
+          try { res.write(': heartbeat\n\n'); } catch {}
+        }, 15_000);
+
+        const cleanup = () => {
+          clearInterval(heartbeat);
+          unsubscribe();
+        };
+        req.on('close', cleanup);
+        res.on('close', cleanup);
+        return;
+      }
 
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
       if (await handleProjects(req, res, url, method)) return;
