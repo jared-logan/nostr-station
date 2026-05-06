@@ -37,6 +37,7 @@ import { LogBuffer, type LogLine } from './log-buffer.js';
 import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
 import { installNostrVpn } from './nvpn-installer.js';
+import { installNak } from './nak-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 import {
   readIdentity, setSetupComplete, isNsec,
@@ -1222,23 +1223,43 @@ export async function startWebServer(port: number): Promise<void> {
 
       // ── Status panel install button ───────────────────────────────────
       // POST /api/exec/install/<slug> — drives the Status row "Install"
-      // CTA (app.js:1255). Runs installTool() from src/lib/tools.ts so
-      // only the supported optional tools (ngit, nak, stacks, nsyte)
-      // install here; bigger flows (nvpn) keep their own dedicated
-      // endpoints (see /api/setup/nvpn/install above).
+      // CTA (app.js:1255). Most slugs flow through installTool() from
+      // src/lib/tools.ts (cargo/npm/manual installers); `nak` has its
+      // own GitHub-release-binary path (src/lib/nak-installer.ts) since
+      // upstream ships it as a single Go binary, not a Rust crate.
+      // Bigger flows (nvpn) keep their own dedicated setup endpoint
+      // (/api/setup/nvpn/install above).
       const installMatch = url.match(/^\/api\/exec\/install\/([a-z][a-z0-9-]*)$/);
       if (installMatch && method === 'POST') {
         const slug = installMatch[1];
-        const tool = getTool(slug);
         res.writeHead(200, {
           'Content-Type':  'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection':    'keep-alive',
         });
         const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+
+        // Custom installer slugs first.
+        if (slug === 'nak') {
+          try {
+            const result = await installNak((line) => emit({ line, stream: 'stdout' }));
+            if (!result.ok && result.detail) {
+              emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
+            }
+            emit({ done: true, code: result.ok ? 0 : (result.warn ? 0 : 1) });
+          } catch (e: any) {
+            emit({ line: String(e?.message || e), stream: 'stderr' });
+            emit({ done: true, code: -1 });
+          }
+          try { res.end(); } catch {}
+          return;
+        }
+
+        const tool = getTool(slug);
         if (!tool) {
+          const supported = ['nak', ...Object.keys(TOOLS)].sort();
           emit({
-            line:   `'${slug}' is not a known optional tool. Supported: ${Object.keys(TOOLS).join(', ')}.`,
+            line:   `'${slug}' is not a known optional tool. Supported: ${supported.join(', ')}.`,
             stream: 'stderr',
           });
           emit({ done: true, code: 1 });
@@ -1313,15 +1334,28 @@ export async function startWebServer(port: number): Promise<void> {
               watchdogNpub:   s?.npub ?? null,
             };
           }
+          // vpn — pluck the nvpn row from gatherStatus so we report the
+          // same install/running state Status panel sees. Pre-fix the
+          // logs panel had a hardcoded "installer wiring pending" stub
+          // that misrepresented a working install as "not installed".
+          // gatherStatus emits state ok (tunnel up) / warn (binary
+          // present, no tunnel) / err (binary missing).
+          const vpnRow = gatherStatus().find(r => r.id === 'vpn');
+          const installed = vpnRow ? vpnRow.state !== 'err' : false;
+          const running   = vpnRow ? vpnRow.state === 'ok'  : false;
           return {
             service:    channel,
-            installed:  false,
-            running:    false,
-            logExists:  false,
-            logPath:    '(installer wiring pending)',
+            installed,
+            running,
+            logExists:  installed,
+            logPath:    installed
+              ? '(nvpn writes its own log; tail with `nvpn logs` until the wizard surfaces it here)'
+              : '(not installed)',
             stale:      false,
             logMtimeMs: Date.now(),
-            note:       `${channel} installer wiring pending — Phase 2.2`,
+            note:       installed
+              ? (running ? `tunnel: ${vpnRow?.value ?? ''}` : (vpnRow?.value ?? 'not connected'))
+              : 'install via the setup wizard\'s vpn step',
           };
         })();
         res.write(`data: ${JSON.stringify({ status })}\n\n`);
