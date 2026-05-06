@@ -3569,8 +3569,14 @@ const ProjectsPanel = (() => {
       ? 'station identity'
       : `${truncNpub(p.identity.npub || '')}${p.identity.bunkerUrl ? ' · bunker configured' : ''}`;
     const alsoGit = p.capabilities.git
-      ? `<div class="muted" style="margin-top:8px"><code>nostr-station publish</code> handles both the GitHub and ngit remotes simultaneously. The "Publish to ngit" button below only pushes ngit.</div>`
+      ? `<div class="muted" style="margin-top:8px"><code>nostr-station publish</code> handles both the GitHub and ngit remotes simultaneously. The buttons here only act on the ngit remote.</div>`
       : '';
+    // Layout follows shakespeare.diy's clean ngit popover: repo URL
+    // header, then the Sync/Pull/Push triad as the primary verbs, then
+    // signing details + value-add (Send as proposal) below. "Sync" is
+    // bidir (pull + push) — the "just do the thing" verb users reach
+    // for first; Pull and Push remain available as discrete primitives
+    // for the rare case where a user wants only one half.
     container.innerHTML = `
       <div class="tab-section">
         <h3>Nostr remote</h3>
@@ -3580,19 +3586,29 @@ const ProjectsPanel = (() => {
         </div>
       </div>
       <div class="tab-section">
-        <h3>Signing</h3>
-        <div class="overview-kv"><div class="k">identity</div><div class="v">${escapeHtml(signing)}</div></div>
-        <div class="muted">Pushes to the ngit remote trigger Amber signing on your phone.</div>
-        ${alsoGit}
-      </div>
-      <div class="tab-section">
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="primary ngit-push-btn">Publish to ngit</button>
-          <button class="ngit-send-btn" style="display:none">Send as proposal</button>
+        <h3>Sync</h3>
+        <div class="ngit-verb-row">
+          <button class="primary ngit-sync-btn">Sync</button>
+          <button class="ngit-pull-btn">Pull</button>
+          <button class="ngit-push-btn">Push</button>
+        </div>
+        <div class="muted" style="margin-top:6px;font-size:11px">
+          <strong>Sync</strong> pulls then pushes in one click.
+          <strong>Pull</strong> = <code>ngit fetch</code> + fast-forward merge.
+          <strong>Push</strong> = <code>ngit push</code> (Amber signs on your phone).
+        </div>
+        <div class="ngit-send-section" style="margin-top:14px">
+          <button class="ngit-send-btn" style="display:none"></button>
           <span class="muted ngit-send-hint" style="display:none;font-size:11px">
             no commits ahead — switch to a feature branch and commit first
           </span>
         </div>
+      </div>
+      <div class="tab-section">
+        <h3>Signing</h3>
+        <div class="overview-kv"><div class="k">identity</div><div class="v">${escapeHtml(signing)}</div></div>
+        <div class="muted">Pushes to the ngit remote trigger Amber signing on your phone.</div>
+        ${alsoGit}
       </div>
     `;
     container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
@@ -3628,6 +3644,35 @@ const ProjectsPanel = (() => {
         sendHint.style.display = '';
       }
     })();
+
+    container.querySelector('.ngit-sync-btn').addEventListener('click', () => {
+      // Bidir — the primary verb. Streams both phases (fetch then push)
+      // in one modal. Server skips push if pull fails.
+      openExecModal({
+        title:    `ngit sync · ${p.name}`,
+        subtitle: 'pull (ngit fetch + ff-merge) then push',
+        endpoint: `/api/projects/${p.id}/ngit/sync`,
+      }).then(r => {
+        if (r.ok) toast('ngit sync complete', '', 'ok');
+        else      toast('ngit sync failed', `exit ${r.code}`, 'err');
+        if (state.view === 'detail' && state.projectId === p.id) render();
+      });
+    });
+
+    container.querySelector('.ngit-pull-btn').addEventListener('click', () => {
+      // Pull-only — reuses the existing /api/projects/:id/sync endpoint
+      // which does ngit fetch + ff-merge + proposals query for ngit
+      // projects. Same code path as the card-grid Sync icon.
+      openExecModal({
+        title:    `ngit pull · ${p.name}`,
+        subtitle: 'ngit fetch + ff-merge',
+        endpoint: `/api/projects/${p.id}/sync`,
+      }).then(r => {
+        if (r.ok) toast('ngit pull complete', '', 'ok');
+        else      toast('ngit pull failed', `exit ${r.code}`, 'err');
+        if (state.view === 'detail' && state.projectId === p.id) render();
+      });
+    });
 
     container.querySelector('.ngit-push-btn').addEventListener('click', () => {
       // ngit push is interactive once Amber gets involved (sign prompts).

@@ -1945,6 +1945,20 @@ input:focus, textarea:focus, select:focus {
 .remote-row .k { color: var(--muted); }
 .remote-row .v { color: var(--text-bright); font-family: var(--font-mono); word-break: break-all; }
 
+/* ── ngit verb triad (Sync / Pull / Push) ─────────────────────────────── */
+.ngit-verb-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.ngit-verb-row .primary {
+  /* Sync is the headline verb — give it more visual weight than the
+     secondary Pull/Push buttons, matching shakespeare.diy's hierarchy. */
+  padding: 8px 18px;
+  font-weight: 500;
+}
+
 /* ── ngit proposals list ──────────────────────────────────────────────── */
 .proposal-row {
   display: flex;
