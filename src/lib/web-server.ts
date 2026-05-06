@@ -36,6 +36,7 @@ import type { Relay } from '../relay/index.js';
 import { LogBuffer, type LogLine } from './log-buffer.js';
 import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
+import { AutoSyncManager } from './auto-sync.js';
 import { installNostrVpn } from './nvpn-installer.js';
 import { installNak } from './nak-installer.js';
 import { installNgit } from './ngit-installer.js';
@@ -66,6 +67,7 @@ import {
   readBody, streamExec, streamExecError,
   CLI_BIN, CLI_SPAWN,
   getActiveChatProjectId,
+  setAutoSyncRef,
   type CmdSpec,
 } from './routes/_shared.js';
 import { handleProjects } from './routes/projects.js';
@@ -382,6 +384,17 @@ const logBuffers = {
 // opts out for tests / minimal deployments.
 let watchdog: Watchdog | null = null;
 
+// Auto-sync scheduler. Module-level singleton so the PATCH /api/projects/:id
+// route handler can reach in and reconcile a single project after the
+// user toggles the persisted autoSync flag — letting the change take
+// effect inside the request/response cycle rather than waiting for the
+// next interval tick. Lazy-init below so tests that don't boot the
+// server never spin up the timer set.
+let autoSync: AutoSyncManager | null = null;
+export function getAutoSyncManager(): AutoSyncManager | null {
+  return autoSync;
+}
+
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
 }
@@ -543,6 +556,13 @@ async function maybeStartInprocRelay(): Promise<void> {
   process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);
   logBuffers.relay.info(`relay listening on ws://127.0.0.1:${port}`);
   await maybeStartWatchdog();
+  if (process.env.STATION_DISABLE_AUTO_SYNC !== '1') {
+    autoSync = new AutoSyncManager();
+    autoSync.start();
+    // Bridge the singleton through routes/_shared.ts so the project
+    // PATCH route can call reconcile(id) without a cyclic import.
+    setAutoSyncRef(autoSync);
+  }
 }
 
 async function maybeStartWatchdog(): Promise<void> {

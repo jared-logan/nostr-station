@@ -3597,6 +3597,11 @@ const ProjectsPanel = (() => {
           <strong>Pull</strong> = <code>ngit fetch</code> + fast-forward merge.
           <strong>Push</strong> = <code>ngit push</code> (Amber signs on your phone).
         </div>
+        <label class="ngit-autosync" style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;cursor:pointer">
+          <input type="checkbox" class="ngit-autosync-input" ${p.autoSync ? 'checked' : ''}>
+          <span>Automatic sync</span>
+          <span class="muted" style="font-size:11px">— pull every 5 minutes</span>
+        </label>
         <div class="ngit-send-section" style="margin-top:14px">
           <button class="ngit-send-btn" style="display:none"></button>
           <span class="muted ngit-send-hint" style="display:none;font-size:11px">
@@ -3644,6 +3649,32 @@ const ProjectsPanel = (() => {
         sendHint.style.display = '';
       }
     })();
+
+    // Auto-sync checkbox — toggles persisted Project.autoSync via PATCH.
+    // The server-side AutoSyncManager.reconcile(id) hook arms/disarms
+    // the interval inside the same response, so a flip takes effect
+    // without the user having to wait for the next tick.
+    const autoSyncInput = container.querySelector('.ngit-autosync-input');
+    if (autoSyncInput) {
+      autoSyncInput.addEventListener('change', async () => {
+        const next = !!autoSyncInput.checked;
+        autoSyncInput.disabled = true;
+        try {
+          await api(`/api/projects/${p.id}`, {
+            method:  'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify({ autoSync: next }),
+          });
+          p.autoSync = next;
+          toast(next ? 'Auto-sync on' : 'Auto-sync off', '', 'ok');
+        } catch (e) {
+          autoSyncInput.checked = !next;
+          toast('Auto-sync update failed', e?.message || '', 'err');
+        } finally {
+          autoSyncInput.disabled = false;
+        }
+      });
+    }
 
     container.querySelector('.ngit-sync-btn').addEventListener('click', () => {
       // Bidir — the primary verb. Streams both phases (fetch then push)
