@@ -24,6 +24,7 @@
  *   GET    /api/projects/:id/ngit/proposals    — kind-1617 list
  *   POST   /api/projects/:id/ngit/push         — SSE
  *   POST   /api/projects/:id/ngit/init         — SSE
+ *   POST   /api/projects/:id/ngit/download     — SSE: ngit pr checkout <id>
  *   POST   /api/projects/:id/exec              — SSE
  *   POST   /api/projects/:id/nsite/deploy      — SSE
  *   GET    /api/projects/:id/git-state         — sync.getProjectGitState
@@ -385,6 +386,30 @@ export async function handleProjects(
       return true;
     }
 
+    if (tail === 'ngit/download' && method === 'POST') {
+      // Wraps `ngit pr checkout <event-id>` for the Proposals tab's
+      // Download button. The event id arrives in a JSON body and is
+      // validated as 64 lowercase hex chars before being handed to
+      // ngit as a fixed argv element — same defense-in-depth pattern
+      // as the relay validation in ngit/init below. spawn is shell-
+      // free, so this is belt-and-suspenders, but it also keeps
+      // garbage out of logs and the SSE stream.
+      if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+      let parsed: any = {};
+      try { parsed = JSON.parse(await readBody(req)); }
+      catch { res.writeHead(400); res.end('bad json'); return true; }
+      const rawId = String(parsed.proposalId || '').trim().toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(rawId)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'proposalId must be a 64-char hex event id' }));
+        return true;
+      }
+      streamExec(
+        { bin: 'ngit', args: ['pr', 'checkout', rawId], env: { NO_COLOR: '1', TERM: 'dumb' } },
+        res, req, project.path,
+      );
+      return true;
+    }
     if (tail === 'ngit/init' && method === 'POST') {
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
       // Relay URL arrives in a JSON body and is validated strictly before
