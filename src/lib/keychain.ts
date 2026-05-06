@@ -108,15 +108,11 @@ class LinuxKeyring implements KeychainBackend {
 class EncryptedFileBackend implements KeychainBackend {
   private readonly storageDir: string;
   private readonly filePath:   string;
-  private readonly kekPath:    string;
-  private readonly persistKek: boolean;
 
-  constructor(storageDir?: string, persistKek = false) {
+  constructor(storageDir?: string) {
     this.storageDir = storageDir
       ?? path.join(os.homedir(), '.config', 'nostr-station');
     this.filePath = path.join(this.storageDir, 'secrets');
-    this.kekPath  = path.join(this.storageDir, '.kek');
-    this.persistKek = persistKek;
   }
 
   backendName() {
@@ -124,20 +120,6 @@ class EncryptedFileBackend implements KeychainBackend {
   }
 
   private deriveKey(): Buffer {
-    if (this.persistKek) {
-      // Container mode: read a persisted 32-byte KEK from the storage dir,
-      // generating it on first call. The KEK shares the lifetime of the
-      // named volume that holds the secrets — survives image rebuilds,
-      // dies with `docker compose down -v`.
-      try {
-        const kek = fs.readFileSync(this.kekPath);
-        if (kek.length === 32) return kek;
-      } catch {}
-      const fresh = crypto.randomBytes(32);
-      fs.mkdirSync(this.storageDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(this.kekPath, fresh, { mode: 0o600 });
-      return fresh;
-    }
     let machineId = '';
     try { machineId = fs.readFileSync('/etc/machine-id', 'utf8').trim(); } catch {}
     return crypto.scryptSync(

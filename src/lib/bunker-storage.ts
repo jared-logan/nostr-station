@@ -45,9 +45,9 @@ export function readSavedBunkerClient(ownerNpub: string): SavedBunkerClient | nu
     const data = JSON.parse(raw) as SavedBunkerClient;
     if (!data || typeof data !== 'object') return null;
     // Guard against a stale cache surviving an npub change (e.g. user
-    // re-ran onboard with a different key). Silent-reconnect attempts
-    // against the wrong bunker would fail anyway, but explicit match
-    // skips the round-trip.
+    // re-paired through the wizard with a different key). Silent-reconnect
+    // attempts against the wrong bunker would fail anyway, but explicit
+    // match skips the round-trip.
     if (data.ownerNpub !== ownerNpub) return null;
     if (typeof data.clientSecretHex !== 'string' || data.clientSecretHex.length !== 64) return null;
     if (!data.bunker || typeof data.bunker.pubkey !== 'string' || !Array.isArray(data.bunker.relays)) return null;

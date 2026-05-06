@@ -191,7 +191,6 @@ export function verifyNip98(input: VerifyInput): VerifyResult {
 
 // ── Localhost exemption ─────────────────────────────────────────────────────
 
-// Container deployment: when the dashboard runs inside a Docker container with
 export function isLocalhost(req: http.IncomingMessage): boolean {
   const ra = req.socket.remoteAddress || '';
   return ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';

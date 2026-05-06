@@ -1,16 +1,11 @@
-// In-Node watchdog. The pre-deletion watchdog was a bash script wrapped
-// in launchd / systemd that polled the relay every 5 minutes and
-// published a heartbeat event. The new architecture is a single Node
-// process, so the watchdog moves inside that process: a setInterval
-// signs and publishes a kind-1 heartbeat to the in-process relay,
-// nothing more.
+// In-Node watchdog: a setInterval that signs + publishes a kind-1
+// heartbeat to the in-process relay every 5 minutes.
 //
-// The watchdog gets its own keypair (kept in the OS keychain under the
-// 'watchdog-nsec' slot — same convention the legacy version used).
-// Generated on first start, reused thereafter so the pubkey identifies
-// the watchdog stably across restarts. Auto-registered into the relay's
-// whitelist on each start so the relay's NIP-42 write gating doesn't
-// reject the heartbeat.
+// The watchdog gets its own keypair (OS keychain slot 'watchdog-nsec'),
+// generated on first start and reused thereafter so the pubkey
+// identifies the watchdog stably across restarts. The pubkey is auto-
+// registered in the relay's whitelist on each start so NIP-42 write
+// gating doesn't reject the heartbeat.
 
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure';
 import { nip19 } from 'nostr-tools';
@@ -73,10 +68,8 @@ export class Watchdog {
   async start(): Promise<void> {
     if (this.timer || this.secretKey) return;
 
-    // Load or generate the watchdog keypair. The legacy launchd/systemd
-    // watchdog seeded this slot via a bash script during onboard; the
-    // new in-Node version handles it here so a fresh install gets a
-    // working watchdog with no extra setup.
+    // Load or generate the watchdog keypair on first start so a fresh
+    // install gets a working watchdog with no extra setup.
     const kc = getKeychain();
     let stored = await kc.retrieve('watchdog-nsec');
     if (!stored) {

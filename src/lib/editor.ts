@@ -2,9 +2,6 @@
  * Editor integration — symlinks NOSTR_STATION.md to the filename your AI
  * coding tool reads, and the user-region preservation primitive used by
  * the (forthcoming) context-file regenerator.
- *
- * Replaces the editor portion of the deleted services.ts; no relay /
- * launchd / systemd / config-toml carry-over.
  */
 
 import fs from 'node:fs';

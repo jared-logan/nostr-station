@@ -73,7 +73,8 @@ export async function installNostrVpn(onProgress: ProgressCallback = () => {}): 
 
   // Short-circuit when already installed. `nvpn status --json` would be
   // wrong here — it talks to the daemon and exits non-zero when
-  // disconnected, forcing a reinstall on every onboard re-run.
+  // disconnected, forcing a reinstall every time the user re-ran the
+  // wizard on a working install.
   step('checking for existing install');
   try {
     await execa(nvpnBin, ['--help'], { stdio: 'pipe', timeout: 5000 });

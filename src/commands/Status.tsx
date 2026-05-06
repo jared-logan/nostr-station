@@ -33,8 +33,8 @@ export interface ServiceStatus {
   // Claude Code plugins are nested under the `claude` row in the dashboard
   // Status panel — they're not real binaries on PATH so they don't warrant
   // sidebar Service Health rows of their own, but users still need to see
-  // whether the ones we pitch in onboard (llm-wiki today) are actually
-  // installed. Populated only on the 'claude' entry.
+  // whether the recommended ones (llm-wiki today) are actually installed.
+  // Populated only on the 'claude' entry.
   plugins?: ClaudePlugin[];
 }
 

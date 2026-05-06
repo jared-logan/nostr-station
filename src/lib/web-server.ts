@@ -39,10 +39,6 @@ import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
 import { installNostrVpn } from './nvpn-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
-// relay-config / services / install were the host-install era's
-// LaunchAgent/systemd/cargo plumbing; all gone now that the relay
-// runs in-process. Remaining route handlers below were trimmed
-// alongside the imports.
 import {
   readIdentity, setSetupComplete, isNsec,
 } from './identity.js';
@@ -1174,11 +1170,10 @@ export async function startWebServer(port: number): Promise<void> {
 
 
       // ── nvpn installer ────────────────────────────────────────────────
-      // Wizard renderVpn (app.js:7141) drives this endpoint. NDJSON
-      // wire format — one JSON line per progress event — matches the
-      // pre-deletion shape the wizard already speaks. The installer
-      // itself is in src/lib/nvpn-installer.ts; this handler just
-      // streams its progress callbacks back to the browser.
+      // Wizard renderVpn (app.js:7141) drives this endpoint. NDJSON wire
+      // format — one JSON line per progress event. The installer itself
+      // is in src/lib/nvpn-installer.ts; this handler just streams its
+      // progress callbacks back to the browser.
       if (url === '/api/setup/nvpn/install' && method === 'POST') {
         res.writeHead(200, {
           'Content-Type':      'application/x-ndjson',
@@ -1243,12 +1238,10 @@ export async function startWebServer(port: number): Promise<void> {
 
       // ── Status panel install button ───────────────────────────────────
       // POST /api/exec/install/<slug> — drives the Status row "Install"
-      // CTA (app.js:1255). Pre-deletion this dispatched to the deleted
-      // Doctor.tsx orchestrator over the deleted install.ts; the new
-      // path runs installTool() from src/lib/tools.ts directly so only
-      // the supported optional tools (ngit, nak, stacks, nsyte) install,
-      // and bigger flows (e.g. nvpn) keep their own dedicated endpoints
-      // (Phase 2 owns /api/setup/nvpn/install).
+      // CTA (app.js:1255). Runs installTool() from src/lib/tools.ts so
+      // only the supported optional tools (ngit, nak, stacks, nsyte)
+      // install here; bigger flows (nvpn) keep their own dedicated
+      // endpoints (see /api/setup/nvpn/install above).
       const installMatch = url.match(/^\/api\/exec\/install\/([a-z][a-z0-9-]*)$/);
       if (installMatch && method === 'POST') {
         const slug = installMatch[1];
@@ -1401,16 +1394,6 @@ export async function startWebServer(port: number): Promise<void> {
       //     reach this endpoint in the first place.
       //   - Once setupComplete flips true, this branch rejects further
       //     calls — a second-session upgrade requires real auth.
-      // Setup wizard Relay stage — performs the full first-install bootstrap
-      // for the local relay: dirs, watchdog keypair, relay config.toml,
-      // watchdog script, systemd/launchd unit files, and enable --now.
-      // Idempotent, so safe to re-run mid-wizard or as a repair path.
-      //
-      // Gated by localhostExempt during the wizard (setupComplete !== true)
-      // and by a normal session afterwards, via the standard middleware —
-      // no public-API carveout needed. Assumes the relay BINARY is already
-      // installed; the wizard leaves compile/download to `nostr-station
-      // onboard` because that step can run 10+ minutes and needs a TTY.
       // ── Amber QR pairing (first-run /setup) ──────────────────────────
       //
       // The hero step of the user-journey spec: a single full-screen QR
