@@ -5,15 +5,17 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 
-// Known static slots (watchdog-nsec, demo-nsec) + the legacy single-provider
-// AI slot (ai-api-key) + the new per-provider slots (ai:anthropic, ai:openai,
-// ai:claude-code, …). The template literal preserves type-safety against
-// typos in call sites — `ai-apikey` still fails to compile — while allowing
-// the dynamic per-provider shape that the AI config system needs.
+// Static slots:
+//   ai-api-key    — legacy single-provider AI key (pre-multi-provider)
+//   watchdog-nsec — secret key for the in-Node watchdog heartbeat loop
+//   seed-nsec     — secret key the seed CLI publishes test events with
+// The dynamic ai:${string} slots are written by the per-provider AI
+// config system (anthropic, openai, claude-code, …). Template literal
+// preserves type-safety against typos — `ai-apikey` still fails to
+// compile — while allowing the dynamic shape.
 export type KeychainKey =
   | 'ai-api-key'
   | 'watchdog-nsec'
-  | 'demo-nsec'
   | 'seed-nsec'
   | `ai:${string}`;
 

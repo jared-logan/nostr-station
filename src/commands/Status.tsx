@@ -294,8 +294,8 @@ export const Status: React.FC<StatusProps> = ({ json }) => {
       ))}
       <Text color={P.accentDim}>{'─────────────────────────────'}</Text>
       <Box marginTop={1}>
-        <Text color={P.muted}>relay logs: </Text>
-        <Text>~/logs/nostr-rs-relay.log</Text>
+        <Text color={P.muted}>logs: </Text>
+        <Text>open the dashboard Logs panel</Text>
       </Box>
     </Box>
   );

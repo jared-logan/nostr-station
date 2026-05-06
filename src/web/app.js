@@ -1041,7 +1041,6 @@ const SERVICE_CTAS = {
   'ngit':      { installSlug: 'ngit',    configHint: null /* inline-form handled below */ },
   'claude':    { installSlug: 'claude',  configHint: null },
   'nak':       { installSlug: 'nak',     configHint: null },
-  'relay-bin': { installSlug: 'relay',   configHint: 'nostr-station relay start' },
   'stacks':    { installSlug: 'stacks',  configHint: null },
 };
 
@@ -1053,14 +1052,14 @@ const SERVICE_CTAS = {
 const SERVICE_DETAILS = {
   'relay': {
     summaryOk:   s => `Running at <code class="cmd-inline">${s.value.replace(/\s*✓\s*$/, '')}</code>. WebSocket publishing is live.`,
-    summaryWarn: _ => 'Binary is installed but the relay isn\'t listening on :8080. Start it from the Relay panel or via CLI.',
-    summaryErr:  _ => 'nostr-rs-relay isn\'t on this machine yet. Install sets up the service, config, and launch agent.',
+    summaryWarn: _ => 'Relay isn\'t listening. Use the Relay panel\'s start/restart buttons.',
+    summaryErr:  _ => 'In-process relay didn\'t start. Check the Logs panel for the underlying error.',
     panel: { hash: '#relay', label: 'Open Relay panel' },
   },
   'vpn': {
     summaryOk:   s => `Connected to the nostr-mesh. Your tunnel IP is <code class="cmd-inline">${escapeHtml(s.value)}</code>.`,
-    summaryWarn: _ => 'nvpn binary is here but the daemon isn\'t routing traffic. Start it with the command below or see the Logs panel.',
-    summaryErr:  _ => 'nostr-vpn isn\'t installed. The mesh VPN lets other stations reach your relay over WireGuard.',
+    summaryWarn: _ => 'nvpn binary is installed but the mesh tunnel isn\'t up. Start it with <code class="cmd-inline">nvpn start --daemon</code>, or check the Logs panel.',
+    summaryErr:  _ => 'nostr-vpn isn\'t installed. Use the wizard\'s nvpn step or click Install on this row to add it.',
     panel: { hash: '#logs', label: 'Open Logs → nostr-vpn' },
   },
   'ngit': {
@@ -1078,13 +1077,10 @@ const SERVICE_DETAILS = {
     summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Used by <em>seed</em>, <em>watchdog</em>, and the whitelist helpers.`,
     summaryErr:  _ => '<code class="cmd-inline">nak</code> is the Go CLI for signing, publishing, and querying Nostr events. The seed and watchdog flows depend on it.',
   },
-  'relay-bin': {
-    summaryOk:   s => `Binary version: <code class="cmd-inline">${escapeHtml(s.value)}</code>. See <em>Relay</em> row above for the running service state.`,
-    summaryErr:  _ => '<code class="cmd-inline">nostr-rs-relay</code> isn\'t on this machine. Install unlocks the Relay row above.',
-  },
   'watchdog': {
-    summaryOk:   _ => 'Scheduled every 5 minutes. Probes the relay\'s listening socket and DMs you if it\'s down (via a throwaway keypair kept in your keychain).',
-    summaryErr:  _ => 'Watchdog isn\'t installed. Normally onboard writes the launchd timer + keychain keypair + whitelist entry; re-run onboard to restore it.',
+    summaryOk:   _ => 'In-Node heartbeat loop is firing every 5 minutes. Each heartbeat publishes a kind-1 event signed by the watchdog keypair to your local relay.',
+    summaryWarn: _ => 'Last heartbeat is older than expected. The dashboard process may have been paused or the watchdog stopped manually — check the Logs panel.',
+    summaryErr:  _ => 'Watchdog isn\'t running. Restart it from <code class="cmd-inline">/api/watchdog/start</code> or the Logs panel banner.',
     panel: { hash: '#logs', label: 'Open Logs → watchdog' },
   },
   'stacks': {
