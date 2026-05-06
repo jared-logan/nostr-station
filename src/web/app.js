@@ -3349,10 +3349,16 @@ const ProjectsPanel = (() => {
     }
 
     // Tabs — only for enabled capabilities; Settings always shown.
+    // The Proposals tab piggybacks on ngit capability + a configured
+    // remote: with no remote there's nothing to query for, and the
+    // existing `ngit` tab already swaps to an Initialize form in that
+    // state. Surfacing a separate Proposals tab keeps the list-y view
+    // distinct from the operations tab (push / settings).
     const tabs = [
       { key: 'overview', label: 'Overview' },
       p.capabilities.git   && { key: 'git',   label: 'Git' },
       p.capabilities.ngit  && { key: 'ngit',  label: 'ngit' },
+      (p.capabilities.ngit && p.remotes.ngit) && { key: 'proposals', label: 'Proposals' },
       p.capabilities.nsite && { key: 'nsite', label: 'nsite' },
       { key: 'settings', label: 'Settings' },
     ].filter(Boolean);
@@ -3416,10 +3422,11 @@ const ProjectsPanel = (() => {
   function renderTab(container, p) {
     container.innerHTML = '';
     if (state.tab === 'overview') renderOverview(container, p);
-    else if (state.tab === 'git')     renderGitTab(container, p);
-    else if (state.tab === 'ngit')    renderNgitTab(container, p);
-    else if (state.tab === 'nsite')   renderNsiteTab(container, p);
-    else if (state.tab === 'settings') renderSettingsTab(container, p);
+    else if (state.tab === 'git')       renderGitTab(container, p);
+    else if (state.tab === 'ngit')      renderNgitTab(container, p);
+    else if (state.tab === 'proposals') renderProposalsTab(container, p);
+    else if (state.tab === 'nsite')     renderNsiteTab(container, p);
+    else if (state.tab === 'settings')  renderSettingsTab(container, p);
   }
 
   async function renderOverview(container, p) {
@@ -3600,6 +3607,90 @@ const ProjectsPanel = (() => {
         else      toast('ngit push failed', `exit ${r.code}`, 'err');
       });
     });
+  }
+
+  // Truncate a 64-hex pubkey for display. Used by the proposals list —
+  // the npub is rebuilt by the server but we only show it short.
+  function shortPubkey(hex) {
+    if (!hex || typeof hex !== 'string') return '';
+    if (hex.length <= 16) return hex;
+    return `${hex.slice(0, 8)}…${hex.slice(-4)}`;
+  }
+
+  // Cache the latest proposals payload per project so re-rendering the
+  // tab (e.g. after a Download finishes) doesn't refetch unless the
+  // user explicitly asks via the Refresh button.
+  const proposalsCache = new Map();
+
+  async function renderProposalsTab(container, p) {
+    container.innerHTML = `
+      <div class="tab-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <h3 style="margin:0">Open proposals</h3>
+          <button class="proposals-refresh">Refresh</button>
+        </div>
+        <div class="muted" style="margin-bottom:12px">
+          NIP-34 kind-1617 proposals tagged against this repo's coordinates.
+          Queried from your read relays via <code>nak</code>.
+        </div>
+        <div class="proposals-list" id="proposals-list">
+          <div class="muted">loading…</div>
+        </div>
+      </div>
+    `;
+
+    const listEl = container.querySelector('#proposals-list');
+
+    const renderRows = (proposals) => {
+      if (!Array.isArray(proposals) || proposals.length === 0) {
+        listEl.innerHTML = `<div class="muted">No open proposals found on configured relays.</div>`;
+        return;
+      }
+      // Freshest first matches the server's sort, but we re-apply on the
+      // client so a stale cache doesn't surprise the user if the server
+      // contract ever drifts.
+      const rows = [...proposals].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      listEl.innerHTML = rows.map(r => `
+        <div class="proposal-row" data-id="${escapeHtml(r.id)}">
+          <div class="proposal-main">
+            <div class="proposal-title">${escapeHtml(r.title || r.id.slice(0, 8))}</div>
+            <div class="proposal-meta muted">
+              <span class="k">author</span>
+              <code class="cmd-inline">${escapeHtml(shortPubkey(r.pubkey))}</code>
+              · <span class="k">${escapeHtml(fmtAgoIso(new Date((r.createdAt || 0) * 1000).toISOString()))}</span>
+              · <span class="k">id</span>
+              <code class="cmd-inline">${escapeHtml(r.id.slice(0, 12))}…</code>
+            </div>
+          </div>
+          <div class="proposal-actions">
+            <span class="copy-slot" data-copy="${escapeHtml(r.id)}"></span>
+          </div>
+        </div>
+      `).join('');
+      listEl.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+    };
+
+    const fetchAndRender = async () => {
+      try {
+        const r = await api(`/api/projects/${p.id}/ngit/proposals`);
+        const proposals = Array.isArray(r?.proposals) ? r.proposals : [];
+        proposalsCache.set(p.id, proposals);
+        renderRows(proposals);
+      } catch (e) {
+        listEl.innerHTML = `<div class="muted">Failed to load proposals: ${escapeHtml(e?.message || String(e))}</div>`;
+      }
+    };
+
+    container.querySelector('.proposals-refresh').addEventListener('click', () => {
+      listEl.innerHTML = `<div class="muted">refreshing…</div>`;
+      fetchAndRender();
+    });
+
+    // Use the cache when it's hot to avoid the 5s relay query on every
+    // tab switch; otherwise fetch fresh.
+    const cached = proposalsCache.get(p.id);
+    if (Array.isArray(cached)) renderRows(cached);
+    else                       fetchAndRender();
   }
 
   async function renderNgitInitForm(container, p) {

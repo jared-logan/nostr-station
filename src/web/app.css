@@ -1945,6 +1945,37 @@ input:focus, textarea:focus, select:focus {
 .remote-row .k { color: var(--muted); }
 .remote-row .v { color: var(--text-bright); font-family: var(--font-mono); word-break: break-all; }
 
+/* ── ngit proposals list ──────────────────────────────────────────────── */
+.proposal-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.proposal-row:last-child { border-bottom: none; }
+.proposal-main { flex: 1; min-width: 0; }
+.proposal-title {
+  color: var(--text-bright);
+  font-weight: 500;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+.proposal-meta {
+  font-size: 11px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.proposal-meta .k { color: var(--muted); }
+.proposal-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 /* ── identity chip (header) ───────────────────────────────────────────── */
 
 .identity-chip {
