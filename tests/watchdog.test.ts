@@ -3,14 +3,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Relay } from '../src/relay/index.ts';
-import { Watchdog } from '../src/lib/watchdog.ts';
 
-// We need a test home so the keychain backend writes the watchdog-nsec
-// somewhere isolated. _home.useTempHome() pins HOME for the rest of the
-// process, so we set it before any keychain code runs.
+// We need a test home BEFORE Watchdog or Relay are loaded — Watchdog's
+// HEARTBEAT_FILE constant resolves os.homedir() at module-load time, and
+// the keychain backend's storage path resolves the same way. Pin HOME
+// first, THEN dynamic-import the modules so they pick up the temp dir.
 import { useTempHome } from './_home.js';
 useTempHome();
+// @ts-expect-error — runtime import of .ts; tsx handles the resolution
+const { Relay } = await import('../src/relay/index.ts');
+// @ts-expect-error — runtime import of .ts; tsx handles the resolution
+const { Watchdog } = await import('../src/lib/watchdog.ts');
 
 const TEST_PORT_BASE = 20_000 + Math.floor(Math.random() * 500);
 
