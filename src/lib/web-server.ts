@@ -38,6 +38,7 @@ import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
 import { installNostrVpn } from './nvpn-installer.js';
 import { installNak } from './nak-installer.js';
+import { installNgit } from './ngit-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 import {
   readIdentity, setSetupComplete, isNsec,
@@ -1224,10 +1225,12 @@ export async function startWebServer(port: number): Promise<void> {
       // ── Status panel install button ───────────────────────────────────
       // POST /api/exec/install/<slug> — drives the Status row "Install"
       // CTA (app.js:1255). Most slugs flow through installTool() from
-      // src/lib/tools.ts (cargo/npm/manual installers); `nak` has its
-      // own GitHub-release-binary path (src/lib/nak-installer.ts) since
-      // upstream ships it as a single Go binary, not a Rust crate.
-      // Bigger flows (nvpn) keep their own dedicated setup endpoint
+      // src/lib/tools.ts (npm-global / manual installers). `nak` and
+      // `ngit` each have their own GitHub-release-binary installer
+      // (src/lib/{nak,ngit}-installer.ts) — both used to be cargo
+      // entries, but install.sh deliberately doesn't ship Rust, so the
+      // prereq check rejected every fresh-install user. Bigger flows
+      // (nvpn) keep their own dedicated setup endpoint
       // (/api/setup/nvpn/install above).
       const installMatch = url.match(/^\/api\/exec\/install\/([a-z][a-z0-9-]*)$/);
       if (installMatch && method === 'POST') {
@@ -1255,9 +1258,24 @@ export async function startWebServer(port: number): Promise<void> {
           return;
         }
 
+        if (slug === 'ngit') {
+          try {
+            const result = await installNgit((line) => emit({ line, stream: 'stdout' }));
+            if (!result.ok && result.detail) {
+              emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
+            }
+            emit({ done: true, code: result.ok ? 0 : (result.warn ? 0 : 1) });
+          } catch (e: any) {
+            emit({ line: String(e?.message || e), stream: 'stderr' });
+            emit({ done: true, code: -1 });
+          }
+          try { res.end(); } catch {}
+          return;
+        }
+
         const tool = getTool(slug);
         if (!tool) {
-          const supported = ['nak', ...Object.keys(TOOLS)].sort();
+          const supported = ['nak', 'ngit', ...Object.keys(TOOLS)].sort();
           emit({
             line:   `'${slug}' is not a known optional tool. Supported: ${supported.join(', ')}.`,
             stream: 'stderr',
