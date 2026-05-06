@@ -68,6 +68,7 @@ import {
   type CmdSpec,
 } from './routes/_shared.js';
 import { buildAiContext } from './ai-context.js';
+import { seedStationContext } from './editor.js';
 import { handleProjects } from './routes/projects.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleNgit } from './routes/ngit.js';
@@ -607,6 +608,10 @@ export async function startWebServer(port: number): Promise<void> {
   const warmUp = () => {
     loadProviderConfig().catch(() => {});
     loadPty().catch(() => {});
+    // Idempotent: writes the slim Nori-persona seed when missing,
+    // leaves any existing file (and its user-region edits) alone.
+    try { seedStationContext(); }
+    catch (e: any) { process.stderr.write(`[context] seed skipped: ${e?.message || e}\n`); }
     migrateIfNeeded()
       .then(r => {
         if (r.migrated) {
