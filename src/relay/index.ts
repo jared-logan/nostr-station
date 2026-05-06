@@ -50,6 +50,12 @@ export interface RelayOptions {
   // of the user's real ~/.nostr-station; production code uses the
   // default (next to relay.db).
   whitelistPath?: string;
+  // Resolves the station owner's pubkey (hex, lowercase) on each EVENT
+  // publish. Called from handleEvent's gating path. Returning null means
+  // "no owner configured" — relay then accepts ONLY whitelisted pubkeys.
+  // Per-event invocation (not a one-shot at construction) so identity.json
+  // edits propagate without a relay restart.
+  getOwnerHex?: () => string | null;
   // Externally-provided HTTP server. When supplied, the relay attaches
   // its WebSocket upgrade handler to it and does NOT listen() on its own
   // port. Used for the in-process mode where dashboard and relay share
@@ -71,12 +77,14 @@ export class Relay {
   private subs = new Map<string, Subscription>();
   private port: number;
   private host: string;
+  private getOwnerHex?: () => string | null;
 
   constructor(opts: RelayOptions = {}) {
-    this.port      = opts.port ?? DEFAULT_PORT;
-    this.host      = opts.host ?? DEFAULT_HOST;
-    this.store     = new EventStore({ dbPath: opts.dbPath, maxEvents: opts.maxEvents });
-    this.whitelist = new WhitelistStore(opts.whitelistPath);
+    this.port        = opts.port ?? DEFAULT_PORT;
+    this.host        = opts.host ?? DEFAULT_HOST;
+    this.store       = new EventStore({ dbPath: opts.dbPath, maxEvents: opts.maxEvents });
+    this.whitelist   = new WhitelistStore(opts.whitelistPath);
+    this.getOwnerHex = opts.getOwnerHex;
   }
 
   async start(): Promise<{ port: number; host: string }> {
@@ -240,6 +248,21 @@ export class Relay {
     let valid = false;
     try { valid = verifyEvent(raw as any); } catch { valid = false; }
     if (!valid) return ok(ws, raw.id, false, 'invalid: bad signature');
+
+    // Write gating — pubkey-based, not connection-based. The signature on
+    // `raw` already proves authorship, so we don't need an AUTHed
+    // connection state to know who's writing; we just check the event's
+    // own pubkey against (station owner) ∪ whitelist. Rejections use the
+    // NIP-42 `auth-required:` prefix so spec-aware clients know the
+    // failure is policy-driven (vs the spec-defined `invalid:` /
+    // `duplicate:` / `error:` prefixes for protocol-level failures).
+    const evPubkey = raw.pubkey.toLowerCase();
+    const ownerHex = (this.getOwnerHex?.() ?? '').toLowerCase();
+    const isOwner       = !!ownerHex && ownerHex === evPubkey;
+    const isWhitelisted = this.whitelist.has(evPubkey);
+    if (!isOwner && !isWhitelisted) {
+      return ok(ws, raw.id, false, 'auth-required: pubkey not authorized to publish to this relay');
+    }
 
     const result = this.store.add(raw);
     if (result.duplicate) return ok(ws, raw.id, true, 'duplicate: already have this event');

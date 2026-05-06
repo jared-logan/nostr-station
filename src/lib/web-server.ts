@@ -499,7 +499,21 @@ async function maybeStartInprocRelay(): Promise<void> {
   // relay isn't started.
   const { Relay } = await import('../relay/index.js');
   const port = Number(process.env.STATION_INPROC_RELAY_PORT || '7777');
-  const r = new Relay({ port, host: '127.0.0.1' });
+  // Owner-pubkey resolver for the relay's write-gating. Re-reads
+  // identity.json on every EVENT publish so the user can rotate their
+  // npub (e.g. via `/api/identity/set`) without restarting the relay.
+  // Returns null when no owner is configured yet (fresh install / mid-
+  // wizard) — the relay then accepts only whitelisted publishers, which
+  // is the correct lock-down state.
+  const r = new Relay({
+    port, host: '127.0.0.1',
+    getOwnerHex: () => {
+      try {
+        const ident = readIdentity();
+        return ident.npub ? npubToHex(ident.npub).toLowerCase() : null;
+      } catch { return null; }
+    },
+  });
   await r.start();
   inprocRelay = r;
   // Publish the relay address via env so gatherStatus + isRelayUp probe
