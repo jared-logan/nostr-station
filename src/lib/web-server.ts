@@ -1071,8 +1071,21 @@ export async function startWebServer(port: number): Promise<void> {
         res.end(JSON.stringify({
           name:       'nostr-station',
           url:        `ws://${host}:${port}`,
-          auth:       false,
+          // Write gating is always on in this build: only the station
+          // owner and whitelisted pubkeys can publish. The Config panel's
+          // auth/dmAuth toggles are kept here for back-compat with the
+          // existing render code, but they reflect the real (immutable)
+          // state — not user-mutable settings. dmAuth is reserved for a
+          // future read-gating layer; today reads are open to all.
+          auth:       true,
           dmAuth:     false,
+          gating:     {
+            policy:        'owner+whitelist',
+            mutable:       false,
+            reason:        'in-process relay: NIP-42 write gating is always on',
+            ownerKnown:    !!ident.npub,
+            whitelistSize: whitelist.length,
+          },
           whitelist,
           dataDir:    path.join(os.homedir(), '.nostr-station', 'data'),
           configPath: 'in-process — no config file',
@@ -1081,6 +1094,26 @@ export async function startWebServer(port: number): Promise<void> {
             watchdog: watchdogNpub,
             seed:     seedNpub,
           },
+        }));
+        return;
+      }
+
+      // Accept POSTs to /api/relay-config but treat the toggles as
+      // immutable: write gating is always on (1.6c) and there's no
+      // dmAuth implementation to enable yet. Returns the same shape as
+      // GET so the Config panel's saveRelayFlag (app.js:5683) gets a
+      // 200 response and re-renders against truth instead of erroring.
+      if (url === '/api/relay-config' && method === 'POST') {
+        // Drain body so the client doesn't see a stalled connection;
+        // we deliberately ignore its contents.
+        try { await readBody(req); } catch { /* fine */ }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:      true,
+          auth:    true,
+          dmAuth:  false,
+          mutable: false,
+          message: 'write gating is always on — manage access via the whitelist',
         }));
         return;
       }

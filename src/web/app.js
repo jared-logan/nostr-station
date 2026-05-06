@@ -5008,17 +5008,17 @@ const ConfigPanel = (() => {
         ${row('Name', rc.name || '—')}
         ${row('URL',  rc.url  || '—')}
         <div class="config-row">
-          <div class="k">NIP-42 auth</div>
+          <div class="k">Write gating</div>
           <div class="v">
-            <label class="toggle"><input type="checkbox" id="cfg-auth" ${rc.auth ? 'checked' : ''}><span class="slider"></span></label>
-            <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">Require signed AUTH to publish</span>
+            <label class="toggle"><input type="checkbox" id="cfg-auth" checked disabled><span class="slider"></span></label>
+            <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">Always on — only the station owner and whitelisted pubkeys can publish. Reads stay open to anyone.</span>
           </div>
         </div>
         <div class="config-row">
-          <div class="k">DM auth</div>
+          <div class="k">DM read gating</div>
           <div class="v">
-            <label class="toggle"><input type="checkbox" id="cfg-dm-auth" ${rc.dmAuth ? 'checked' : ''}><span class="slider"></span></label>
-            <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">Require AUTH for kind 4/44/1059</span>
+            <label class="toggle"><input type="checkbox" id="cfg-dm-auth" disabled><span class="slider"></span></label>
+            <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">Reserved for a future read-gating layer (kind 4/44/1059). Not implemented.</span>
           </div>
         </div>
         <div class="config-row"><div class="k">Whitelist</div><div class="v">${whitelistHtml}</div></div>
