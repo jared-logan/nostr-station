@@ -25,6 +25,7 @@
  *   POST   /api/projects/:id/ngit/push         — SSE
  *   POST   /api/projects/:id/ngit/init         — SSE
  *   POST   /api/projects/:id/ngit/download     — SSE: ngit pr checkout <id>
+ *   POST   /api/projects/:id/ngit/send         — SSE: ngit send (current branch)
  *   POST   /api/projects/:id/exec              — SSE
  *   POST   /api/projects/:id/nsite/deploy      — SSE
  *   GET    /api/projects/:id/git-state         — sync.getProjectGitState
@@ -386,6 +387,23 @@ export async function handleProjects(
       return true;
     }
 
+    if (tail === 'ngit/send' && method === 'POST') {
+      // Opens a proposal (kind-1617 + patch events) from the current
+      // branch by spawning `ngit send`. ngit pulls the branch state
+      // and signing identity from the local repo + Amber session;
+      // there are no user-supplied args to validate. The frontend
+      // gates the button on (ngit cap + non-default branch + ahead
+      // count > 0) so the SSE modal only opens with something to
+      // actually send. Streaming output here is essential — `ngit
+      // send` triggers Amber sign prompts on the user's phone, and
+      // the modal is how the user knows to look at their device.
+      if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+      streamExec(
+        { bin: 'ngit', args: ['send'], env: { NO_COLOR: '1', TERM: 'dumb' } },
+        res, req, project.path,
+      );
+      return true;
+    }
     if (tail === 'ngit/download' && method === 'POST') {
       // Wraps `ngit pr checkout <event-id>` for the Proposals tab's
       // Download button. The event id arrives in a JSON body and is
