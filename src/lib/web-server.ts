@@ -13,7 +13,6 @@ import http from 'http';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { spawn, execSync } from 'child_process';
 import { nip19 } from 'nostr-tools';
 import { getPublicKey } from 'nostr-tools/pure';
 import { fileURLToPath } from 'url';
@@ -354,21 +353,6 @@ function formatLogLine(line: LogLine): string {
   return `${iso} ${prefix} ${line.text}`;
 }
 
-// ── Relay liveness probe ──────────────────────────────────────────────────────
-
-function isRelayUp(): boolean {
-  const host = process.env.RELAY_HOST || '127.0.0.1';
-  const port = Number(process.env.RELAY_PORT || '7777');
-  try {
-    execSync(`nc -z -w 1 ${host} ${port}`, {
-      stdio: 'pipe', timeout: 1500, killSignal: 'SIGKILL',
-    });
-    return true;
-  }
-  catch { return false; }
-}
-
-
 // ── Server ────────────────────────────────────────────────────────────────────
 
 // In-process Nostr relay handle. Started by maybeStartInprocRelay() unless
@@ -549,9 +533,9 @@ async function maybeStartInprocRelay(): Promise<void> {
   });
   await r.start();
   inprocRelay = r;
-  // Publish the relay address via env so gatherStatus + isRelayUp probe
-  // the right port, and any descendant tooling (e.g. nak commands) sees
-  // the same source of truth.
+  // Publish the relay address via env so gatherStatus probes the right
+  // port, and any descendant tooling (e.g. nak commands) sees the same
+  // source of truth.
   process.env.RELAY_HOST = '127.0.0.1';
   process.env.RELAY_PORT = String(port);
   process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);
