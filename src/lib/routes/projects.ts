@@ -441,7 +441,14 @@ export async function handleProjects(
       const cmd = String(parsed.cmd || '');
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
       let spec: CmdSpec | null = null;
-      if (cmd === 'git-status') spec = { bin: 'git', args: ['status'] };
+      if (cmd === 'git-status')     spec = { bin: 'git', args: ['status'] };
+      // Patch view for the Proposals tab — `git log -p -5` shows the
+      // last 5 commits as full diffs. After `ngit pr checkout`, HEAD
+      // sits on the proposal branch so the user sees its commits.
+      // We don't pin against the default branch (no portable way to
+      // detect "main" vs "master" vs project-specific) — a fixed N
+      // is enough for the cheap-review-then-open-in-editor flow.
+      if (cmd === 'git-log-patch') spec = { bin: 'git', args: ['log', '-p', '-5'] };
       if (!spec) { res.writeHead(400); res.end('unknown exec cmd'); return true; }
       streamExec(spec, res, req, project.path);
       return true;

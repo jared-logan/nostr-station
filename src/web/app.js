@@ -3623,15 +3623,23 @@ const ProjectsPanel = (() => {
   const proposalsCache = new Map();
 
   async function renderProposalsTab(container, p) {
+    // The "View latest patch" button at top runs `git log -p -5` via
+    // the project's exec whitelist. Useful right after a Download —
+    // HEAD is on the proposal branch so the user sees its commits as
+    // diffs without leaving the dashboard.
     container.innerHTML = `
       <div class="tab-section">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <h3 style="margin:0">Open proposals</h3>
-          <button class="proposals-refresh">Refresh</button>
+          <div style="display:flex;gap:8px">
+            <button class="proposals-view-patch">View latest patch</button>
+            <button class="proposals-refresh">Refresh</button>
+          </div>
         </div>
         <div class="muted" style="margin-bottom:12px">
           NIP-34 kind-1617 proposals tagged against this repo's coordinates.
           Queried from your read relays via <code>nak</code>.
+          Downloading runs <code>ngit pr checkout &lt;id&gt;</code> in the project directory.
         </div>
         <div class="proposals-list" id="proposals-list">
           <div class="muted">loading…</div>
@@ -3640,6 +3648,21 @@ const ProjectsPanel = (() => {
     `;
 
     const listEl = container.querySelector('#proposals-list');
+
+    const runDownload = async (proposalId, title) => {
+      const r = await openExecModal({
+        title:    `Download proposal · ${p.name}`,
+        subtitle: `ngit pr checkout ${proposalId.slice(0, 12)}…`,
+        endpoint: `/api/projects/${p.id}/ngit/download`,
+        body:     { proposalId },
+      });
+      if (r.ok) {
+        toast(`Checked out: ${title || proposalId.slice(0, 8)}`,
+              'View latest patch to see commits', 'ok');
+      } else {
+        toast('Download failed', `exit ${r.code}`, 'err');
+      }
+    };
 
     const renderRows = (proposals) => {
       if (!Array.isArray(proposals) || proposals.length === 0) {
@@ -3663,11 +3686,16 @@ const ProjectsPanel = (() => {
             </div>
           </div>
           <div class="proposal-actions">
+            <button class="primary proposal-download" data-id="${escapeHtml(r.id)}"
+              data-title="${escapeHtml(r.title || '')}">Download</button>
             <span class="copy-slot" data-copy="${escapeHtml(r.id)}"></span>
           </div>
         </div>
       `).join('');
       listEl.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+      listEl.querySelectorAll('.proposal-download').forEach(btn => {
+        btn.addEventListener('click', () => runDownload(btn.dataset.id, btn.dataset.title));
+      });
     };
 
     const fetchAndRender = async () => {
@@ -3684,6 +3712,15 @@ const ProjectsPanel = (() => {
     container.querySelector('.proposals-refresh').addEventListener('click', () => {
       listEl.innerHTML = `<div class="muted">refreshing…</div>`;
       fetchAndRender();
+    });
+
+    container.querySelector('.proposals-view-patch').addEventListener('click', () => {
+      openExecModal({
+        title:    `Latest patch · ${p.name}`,
+        subtitle: 'git log -p -5  (current branch)',
+        endpoint: `/api/projects/${p.id}/exec`,
+        body:     { cmd: 'git-log-patch' },
+      });
     });
 
     // Use the cache when it's hot to avoid the 5s relay query on every
