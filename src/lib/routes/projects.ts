@@ -21,6 +21,7 @@
  *   POST   /api/projects/:id/git/push          — SSE
  *   POST   /api/projects/:id/stacks/deploy     — SSE
  *   GET    /api/projects/:id/ngit/status
+ *   GET    /api/projects/:id/ngit/proposals    — kind-1617 list
  *   POST   /api/projects/:id/ngit/push         — SSE
  *   POST   /api/projects/:id/ngit/init         — SSE
  *   POST   /api/projects/:id/exec              — SSE
@@ -47,7 +48,7 @@ import {
 import { checkCollision, scaffoldProject } from '../project-scaffold.js';
 import { isValidRelayUrl } from '../identity.js';
 import {
-  getProjectGitState, syncProject, snapshotProject,
+  getProjectGitState, syncProject, snapshotProject, fetchNgitProposals,
 } from '../sync.js';
 import {
   readBody, streamExec, streamExecError, setActiveChatProjectId,
@@ -363,6 +364,19 @@ export async function handleProjects(
         bunkerDomain,
         useDefault: project.identity.useDefault,
       }));
+      return true;
+    }
+    if (tail === 'ngit/proposals' && method === 'GET') {
+      // Same kind-1617 query that the sync flow runs, exposed on its
+      // own URL so the project drawer's Proposals tab can refresh
+      // independently — opening the tab shouldn't trigger a fetch +
+      // fast-forward, just the relay query. Returns an empty array
+      // when the project has no ngit remote (rather than 400) so the
+      // tab can render a friendly empty state without branching on
+      // HTTP status.
+      const proposals = await fetchNgitProposals(project).catch(() => []);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ proposals }));
       return true;
     }
     if (tail === 'ngit/push' && method === 'POST') {
