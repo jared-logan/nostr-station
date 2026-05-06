@@ -6955,6 +6955,10 @@ const SetupWizard = (() => {
           ${termAvailable ? `
             <div class="setup-ngit-amber">
               <button class="primary" id="setup-ngit-amber-btn">Connect Amber →</button>
+              <div class="setup-hint muted" style="margin-top:8px"
+                id="setup-ngit-amber-gate-hint">
+                Install ngit first — Amber pairing runs <code>ngit account login</code>.
+              </div>
               <div class="setup-hint muted" style="margin-top:8px">
                 Opens a terminal and runs <code>ngit account login</code>.
                 Scan the nostrconnect:// QR with Amber, approve on your phone,
@@ -6982,6 +6986,9 @@ const SetupWizard = (() => {
     // Render the binary-state row. Re-runnable so a successful install
     // flips the row from "Install" to "✓ installed" without re-mounting
     // the whole stage and losing the relay input the user already typed.
+    // Also drives the Connect Amber gate below: `ngit account login`
+    // can't run while the binary is missing, so the button stays
+    // disabled with a hint until install completes.
     const renderBinaryState = () => {
       const host = $('setup-ngit-binary-state');
       if (!host) return;
@@ -7012,13 +7019,36 @@ const SetupWizard = (() => {
             toast('ngit install finished', '', 'ok');
             ngitInstalled = await probeNgitInstalled();
             renderBinaryState();
+            syncAmberGate();
           } else {
             toast(`ngit install exited ${r.code}`, '', 'err');
           }
         });
       }
     };
+
+    // Connect Amber depends on `ngit account login` being executable.
+    // Disabling the button (rather than hiding it) keeps the affordance
+    // visible so the user understands the dependency, with a hint
+    // pointing back at the install row above. Re-enabled by
+    // renderBinaryState's post-install handler.
+    const syncAmberGate = () => {
+      const btn  = $('setup-ngit-amber-btn');
+      const hint = $('setup-ngit-amber-gate-hint');
+      if (!btn) return;
+      if (ngitInstalled) {
+        btn.disabled = false;
+        btn.title    = '';
+        if (hint) hint.style.display = 'none';
+      } else {
+        btn.disabled = true;
+        btn.title    = 'Install ngit first (above)';
+        if (hint) hint.style.display = '';
+      }
+    };
+
     renderBinaryState();
+    syncAmberGate();
 
     root.querySelector('.setup-back').addEventListener('click', back);
     root.querySelector('#setup-ngit-skip').addEventListener('click', next);
