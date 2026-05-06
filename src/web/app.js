@@ -401,15 +401,25 @@ function invalidateAiCfg() { _aiCfgCache.data = null; }
 async function modelsFor(provider) {
   // 1. Live-fetched list cached in ai-config wins — that's what the
   //    user's key is actually entitled to, not our stale hardcoded list.
+  let configuredModel = null;
   try {
     const cfg = await getAiCfg();
-    const known = cfg?.providers?.[provider]?.knownModels;
+    const entry = cfg?.providers?.[provider];
+    const known = entry?.knownModels;
     if (Array.isArray(known) && known.length) return known;
+    // Fall through, but stash the user's saved model id so we can
+    // surface it as a single-item list when there's no curated set
+    // (Custom Provider in particular ships with empty PROVIDER_LIST
+    // models — without this, the dropdown stays empty and the user's
+    // configured model can't be picked).
+    if (typeof entry?.model === 'string' && entry.model) configuredModel = entry.model;
   } catch {}
   // 2. Hand-curated fallback from PROVIDER_LIST.
   const p = PROVIDER_LIST.find(x => x.value === provider);
-  if (!p) return [];
-  return p.models;
+  const curated = p ? p.models : [];
+  if (curated.length) return curated;
+  // 3. Last resort — the user's configured model id, if any.
+  return configuredModel ? [configuredModel] : [];
 }
 
 // ── Header (AI config chips removed — identity chip + relay dot only) ────
@@ -7044,6 +7054,18 @@ const ConfigPanel = (() => {
           ${termOpts ? `<optgroup label="Terminal-native">${termOpts}</optgroup>` : ''}
           ${apiOpts  ? `<optgroup label="API">${apiOpts}</optgroup>` : ''}
         </select>
+        <div id="ai-add-customrow" class="ai-add-custom" style="display:none;margin-top:8px;display:none">
+          <div class="np-hint" style="margin-bottom:8px">
+            Custom Provider — point at any OpenAI-compatible endpoint.
+            Examples: <code>https://api.openai.com/v1</code>,
+            <code>https://api.groq.com/openai/v1</code>,
+            <code>http://localhost:11434/v1</code> (Ollama).
+          </div>
+          <label class="field-label">Base URL</label>
+          <input id="ai-add-baseurl" type="text" autocomplete="off" placeholder="https://api.example.com/v1">
+          <label class="field-label">Default model id</label>
+          <input id="ai-add-model" type="text" autocomplete="off" placeholder="gpt-4o-mini, llama3.2, etc.">
+        </div>
         <div id="ai-add-keyrow" class="keyrow" style="margin-top:8px;display:none">
           <div class="keyfield">
             <input id="ai-add-key" type="password" autocomplete="off" placeholder="paste provider key (sk-…)">
@@ -7053,6 +7075,9 @@ const ConfigPanel = (() => {
           </div>
           <button class="primary" id="ai-add-save" type="button">add</button>
           <button id="ai-add-cancel" type="button">cancel</button>
+        </div>
+        <div class="np-hint" id="ai-add-keyhint" style="margin-top:6px;display:none">
+          For local daemons that don't need a key, type <code>none</code>.
         </div>
       </div>
     ` : '';
@@ -7158,19 +7183,30 @@ const ConfigPanel = (() => {
     // inline key input.
     const sel = $('ai-add-select');
     if (!sel) return;
-    const keyRow    = $('ai-add-keyrow');
-    const keyInput  = $('ai-add-key');
-    const keyEye    = $('ai-add-eye');
-    const saveBtn   = $('ai-add-save');
-    const cancelBtn = $('ai-add-cancel');
+    const keyRow      = $('ai-add-keyrow');
+    const keyInput    = $('ai-add-key');
+    const keyEye      = $('ai-add-eye');
+    const keyHint     = $('ai-add-keyhint');
+    const customRow   = $('ai-add-customrow');
+    const baseUrlInp  = $('ai-add-baseurl');
+    const modelInp    = $('ai-add-model');
+    const saveBtn     = $('ai-add-save');
+    const cancelBtn   = $('ai-add-cancel');
+
+    function hideAdd() {
+      keyRow.style.display = 'none';
+      if (customRow) customRow.style.display = 'none';
+      if (keyHint)   keyHint.style.display   = 'none';
+    }
+    hideAdd();
 
     sel.addEventListener('change', async () => {
       const id = sel.value;
-      if (!id) { keyRow.style.display = 'none'; return; }
+      if (!id) { hideAdd(); return; }
       // Find the chosen provider's type by matching against the current
       // aiList closure — cheap linear search is fine, <20 entries.
       const chosen = (aiList?.providers || []).find(x => x.id === id);
-      if (!chosen) { keyRow.style.display = 'none'; return; }
+      if (!chosen) { hideAdd(); return; }
 
       if (chosen.type === 'terminal-native') {
         // No key. Enable immediately.
@@ -7189,7 +7225,19 @@ const ConfigPanel = (() => {
         keyRow.style.display = '';
         keyInput.value = '';
         keyInput.type  = 'password';
-        keyInput.focus();
+        if (id === 'custom') {
+          // Custom Provider needs baseUrl + model id alongside the key.
+          // Pre-fill from the registry default if any (empty for custom).
+          customRow.style.display = '';
+          baseUrlInp.value = chosen.baseUrl || '';
+          modelInp.value   = chosen.model   || '';
+          if (keyHint) keyHint.style.display = '';
+          baseUrlInp.focus();
+        } else {
+          customRow.style.display = 'none';
+          if (keyHint) keyHint.style.display = 'none';
+          keyInput.focus();
+        }
       }
     });
 
@@ -7201,8 +7249,39 @@ const ConfigPanel = (() => {
       const id  = sel.value;
       const key = keyInput.value;
       if (!id || !key) return;
+
+      // Custom Provider: baseUrl is required (registry has no default).
+      // Model is strongly recommended; if the user leaves it blank we
+      // still save — they can set it later via Fetch Models.
+      if (id === 'custom') {
+        const baseUrl = (baseUrlInp.value || '').trim();
+        if (!baseUrl) {
+          toast('Base URL required', 'Custom Provider needs an OpenAI-compat endpoint URL.', 'warn');
+          return;
+        }
+        if (!/^https?:\/\//i.test(baseUrl)) {
+          toast('Bad base URL', 'Must start with http:// or https://', 'warn');
+          return;
+        }
+      }
+
       saveBtn.disabled = true;
       try {
+        // For Custom Provider, persist baseUrl + model FIRST so the
+        // entry exists when the key-save below references it. POST
+        // /api/ai/config is keyRef-safe (rejects keys), so this is
+        // a clean two-step.
+        if (id === 'custom') {
+          const baseUrl = baseUrlInp.value.trim();
+          const model   = modelInp.value.trim();
+          await api('/api/ai/config', {
+            method:  'POST',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify({
+              providers: { [id]: { baseUrl, ...(model ? { model } : {}) } },
+            }),
+          });
+        }
         const r = await api(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -7233,9 +7312,11 @@ const ConfigPanel = (() => {
     });
 
     cancelBtn?.addEventListener('click', () => {
-      keyRow.style.display = 'none';
+      hideAdd();
       sel.value = '';
       keyInput.value = '';
+      if (baseUrlInp) baseUrlInp.value = '';
+      if (modelInp)   modelInp.value   = '';
     });
   }
 

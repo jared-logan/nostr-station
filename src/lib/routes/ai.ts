@@ -582,13 +582,30 @@ export async function handleAi(
     // Approval session for the duration of this chat turn. The first
     // SSE frame the loop emits is { session: sessionId } so the
     // client knows the id to use for /api/ai/chat/approve.
+    //
+    // If the client disconnects mid-stream (browser closes, tab
+    // refreshes) we destroySession() on the close event — that
+    // resolves any pending awaitApproval() Promises with 'reject'
+    // so the tool-loop can unwind instead of hanging forever on a
+    // dangling Promise. Without this, an abandoned approval would
+    // leak both an in-memory session entry AND keep the upstream
+    // provider request alive indefinitely.
     const sessionId = createSession();
+    let disconnected = false;
+    const onClose = () => {
+      disconnected = true;
+      destroySession(sessionId);
+    };
+    req.on('close', onClose);
     try {
       if (isAnth) await streamAnthropicWithTools(messages, system, runtimeCfg, res, toolCtx, sessionId);
       else        await streamOpenAICompatWithTools(messages, system, runtimeCfg, res, toolCtx, sessionId);
     } catch (e: any) {
-      res.write(`data: ${JSON.stringify({ error: String(e.message ?? e) })}\n\n`);
+      if (!disconnected) {
+        try { res.write(`data: ${JSON.stringify({ error: String(e.message ?? e) })}\n\n`); } catch {}
+      }
     } finally {
+      req.off('close', onClose);
       destroySession(sessionId);
     }
     res.write('data: [DONE]\n\n');

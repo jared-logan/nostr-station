@@ -68,3 +68,18 @@ test('session count tracks lifecycle', () => {
   destroySession(sid);
   assert.equal(_activeSessionCount(), before);
 });
+
+test('destroySession unblocks an awaiter even with no resolve call', async () => {
+  // Simulates a client disconnect: the chat handler destroys the
+  // session in its req.on('close') handler; the tool-loop's awaiter
+  // resolves with 'reject' so the loop unwinds cleanly instead of
+  // hanging forever on a dangling Promise.
+  const sid = createSession();
+  const { promise } = awaitApproval(sid);
+  // Simulate disconnect — no /api/ai/chat/approve call.
+  destroySession(sid);
+  const decision = await promise;
+  assert.equal(decision, 'reject');
+  // Session is gone — subsequent resolveApproval is a no-op.
+  assert.equal(_pendingApprovalCount(sid), 0);
+});

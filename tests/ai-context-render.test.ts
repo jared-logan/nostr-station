@@ -117,6 +117,29 @@ test('emits the templates registry under "# Project Templates"', () => {
   assert.match(ctx.text, /- MKStack: Build Nostr clients with React/);
 });
 
+// ── Tools section (only when project active) ─────────────────────────────
+
+test('tools section is omitted when no project is active', () => {
+  const ctx = buildAiContext(null);
+  assert.doesNotMatch(ctx.text, /# Your Tools/);
+});
+
+test('tools section renders when project is active and lists each tool', () => {
+  const repo = path.join(HOME, 'projects', 'tools-section-test');
+  fs.mkdirSync(repo, { recursive: true });
+  registerProject(makeProject({
+    id: 'tools-test', name: 'tools-test', path: repo,
+    capabilities: { git: false, ngit: false, nsite: false },
+  }));
+  const ctx = buildAiContext('tools-test');
+  assert.match(ctx.text, /# Your Tools/);
+  for (const tool of ['list_dir', 'read_file', 'write_file', 'apply_patch',
+                      'delete_file', 'git_status', 'git_log', 'git_diff',
+                      'git_commit', 'run_command']) {
+    assert.match(ctx.text, new RegExp(`\`${tool}\``), `expected ${tool} to be mentioned`);
+  }
+});
+
 // ── User block ───────────────────────────────────────────────────────────
 
 test('user.npub renders when identity.json has one', () => {
