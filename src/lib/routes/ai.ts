@@ -545,7 +545,7 @@ export async function handleAi(
     // Build the context block + merge with any caller-supplied system
     // prompt already in messages. We prepend rather than overwrite so
     // future per-prompt system messages still apply.
-    const ctx = buildAiContext(projectId);
+    const ctx = buildAiContext(projectId, { provider: providerId, fullId: model });
     const system = ctx.text;
 
     const runtimeCfg: ProviderConfig = {
