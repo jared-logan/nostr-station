@@ -1465,6 +1465,43 @@ input:focus, textarea:focus, select:focus {
   border-color: rgba(255,255,255,0.10);
   color: var(--text-dim);
 }
+.logs-meta.vpn-meta .vpn-svc-standalone {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+/* Relay-error hint surfaced inline above the log tail when the vpn
+   channel sees repeated 504s. Warn-coloured but understated (left
+   border accent, not a full banner) so it doesn't fight with the
+   page-level status banner. */
+.logs-relay-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-elev));
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-sm);
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.logs-relay-hint-icon {
+  color: var(--warn);
+  font-weight: bold;
+  font-size: 14px;
+}
+.logs-relay-hint-text {
+  flex: 1;
+  color: var(--text-bright);
+  line-height: 1.4;
+}
+.logs-relay-hint button {
+  padding: 3px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
 .logs-meta.vpn-meta .vpn-meta-svc-actions {
   display: flex;
   gap: 4px;

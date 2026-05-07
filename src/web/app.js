@@ -6186,12 +6186,97 @@ const LogsPanel = (() => {
   let es = null;
   let paused = false;
 
+  // Relay-error detection (vpn channel only). When nvpn's
+  // nostr_relay_pool spams "Impossible to connect" 504s, the log tail
+  // drowns in identical errors and the user has no obvious next step.
+  // Once we've seen ≥3 within a 5-minute rolling window we surface a
+  // one-line hint above the log with a "Use recommended relays"
+  // shortcut — same action as Config's button but reachable without
+  // leaving the Logs tab.
+  const RELAY_ERR_RE         = /Impossible to connect to 'wss:/;
+  const RELAY_ERR_THRESHOLD  = 3;
+  const RELAY_ERR_WINDOW_MS  = 5 * 60_000;
+  let relayErrTimestamps = [];
+  let relayHintEl = null;
+
   const ANSI_RE = /\x1b\[[0-9;]*m/g;
   function classify(line) {
     if (/error|ERR|fail|panic/i.test(line)) return 'err';
     if (/WARN|warn/.test(line)) return 'warn';
     if (/OK|started|listening|ready/i.test(line)) return 'ok';
     return '';
+  }
+  // Strip a leading ISO timestamp so successive emissions of an
+  // otherwise-identical message collapse together — nvpn re-emits the
+  // same "tunnel: failed to flush ..." trio every ~1s on a VM lacking
+  // the route-flush capability, and three new rows per second drowns
+  // out everything else in the panel.
+  const TS_PREFIX_RE = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+/;
+  function makeDedupeKey(line) {
+    return line.replace(TS_PREFIX_RE, '');
+  }
+  // Look back this far when matching duplicates. Captures nvpn's typical
+  // 3-line repeating cycle (tunnel: ... / stdout: / stderr: ...) without
+  // pulling in unrelated context. Lines that aren't part of the recent
+  // window get a fresh row, keeping the dedupe local and predictable.
+  const DEDUPE_LOOKBACK = 8;
+
+  function noteRelayError() {
+    const now = Date.now();
+    relayErrTimestamps.push(now);
+    while (relayErrTimestamps.length > 0
+           && now - relayErrTimestamps[0] > RELAY_ERR_WINDOW_MS) {
+      relayErrTimestamps.shift();
+    }
+    if (relayErrTimestamps.length >= RELAY_ERR_THRESHOLD) showRelayHint();
+  }
+
+  function hideRelayHint() {
+    if (relayHintEl) relayHintEl.hidden = true;
+  }
+
+  function showRelayHint() {
+    if (!relayHintEl) {
+      relayHintEl = document.createElement('div');
+      relayHintEl.className = 'logs-relay-hint';
+      relayHintEl.id = 'logs-relay-hint';
+      relayHintEl.innerHTML = `
+        <span class="logs-relay-hint-icon">⚠</span>
+        <span class="logs-relay-hint-text">
+          Repeated relay <code>504</code> errors — your nostr-vpn discovery
+          relays may be down.
+        </span>
+        <button class="primary" id="logs-relay-hint-fix">Use recommended</button>
+        <button id="logs-relay-hint-dismiss">Dismiss</button>`;
+      // Insert above the log scroll view so it floats with the meta strip
+      // rather than scrolling away with old entries.
+      view.parentNode.insertBefore(relayHintEl, view);
+      relayHintEl.querySelector('#logs-relay-hint-fix').addEventListener('click', async () => {
+        const btn = relayHintEl.querySelector('#logs-relay-hint-fix');
+        btn.disabled = true;
+        try {
+          const r = await api('/api/nvpn/relays/recommended');
+          const list = Array.isArray(r?.relays) ? r.relays : [];
+          if (list.length === 0) throw new Error('no recommended set defined');
+          const setRes = await api('/api/nvpn/relays/set', {
+            method:  'POST',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify({ relays: list }),
+          });
+          if (!setRes.ok) throw new Error(setRes.detail || 'set failed');
+          toast('Relays updated', `${list.length} recommended relay${list.length === 1 ? '' : 's'}`, 'ok');
+          relayErrTimestamps = [];
+          hideRelayHint();
+        } catch (e) {
+          toast('Update failed', e.message, 'err');
+          btn.disabled = false;
+        }
+      });
+      relayHintEl.querySelector('#logs-relay-hint-dismiss').addEventListener('click', () => {
+        hideRelayHint();
+      });
+    }
+    relayHintEl.hidden = false;
   }
   function append(lines) {
     if (paused) return;
@@ -6200,10 +6285,33 @@ const LogsPanel = (() => {
       const line = (rawLine || '').replace(ANSI_RE, '');
       if (!line) continue;
       const cls = classify(line);
+      // Bump the badge for every error occurrence even if the line
+      // collapses visually — the count semantics ("how many errors
+      // since I last looked") shouldn't lie just because we deduped.
       if (cls === 'err') bumpLogsBadge();
+      // vpn-only relay-error tracker. Threshold + window keep the hint
+      // off for a single transient blip but trigger it for the kind of
+      // sustained 504 storm that motivated this UX.
+      if (currentSvc === 'vpn' && RELAY_ERR_RE.test(line)) noteRelayError();
+      const key = makeDedupeKey(line);
+      let dup = null;
+      const children = view.children;
+      const start = Math.max(0, children.length - DEDUPE_LOOKBACK);
+      for (let i = children.length - 1; i >= start; i--) {
+        if (children[i].dataset.dedupeKey === key) { dup = children[i]; break; }
+      }
+      if (dup) {
+        const n = (parseInt(dup.dataset.dedupeCount, 10) || 1) + 1;
+        dup.dataset.dedupeCount = String(n);
+        dup.textContent = `${dup.dataset.dedupeFirstLine} (×${n})`;
+        continue;
+      }
       const el = document.createElement('div');
       el.className = 'log-line ' + cls;
       el.textContent = line;
+      el.dataset.dedupeKey = key;
+      el.dataset.dedupeFirstLine = line;
+      el.dataset.dedupeCount = '1';
       view.appendChild(el);
     }
     while (view.childElementCount > 1000) view.removeChild(view.firstChild);
@@ -7228,6 +7336,31 @@ const LogsPanel = (() => {
         }</span>
       </div>`;
     }
+    // Special case: systemd unit isn't registered. Surfacing the four
+    // boot/loaded/running pills here is misleading — the user reads
+    // "✗ installed" as "the binary is broken" when really the daemon is
+    // running fine in standalone mode and just isn't wired into systemd.
+    // Collapse to one calm muted line with the action that resolves it.
+    if (!svc.installed) {
+      const meta = [];
+      if (svc.binaryPath)    meta.push(`bin: <code class="cmd-inline">${escapeHtml(svc.binaryPath)}</code>`);
+      if (svc.binaryVersion) meta.push(`v${escapeHtml(svc.binaryVersion)}`);
+      return `<div class="vpn-meta-svc">
+        <div class="vpn-meta-row vpn-meta-subrow vpn-meta-svc-head">
+          <span class="vpn-meta-label">service</span>
+          <span class="vpn-svc-standalone">
+            Not registered with systemd — daemon is running in standalone mode.
+            Install to auto-start at boot.
+          </span>
+          <span class="vpn-meta-svc-actions">
+            <button id="vpn-svc-install" class="primary">Install service</button>
+          </span>
+        </div>
+        ${meta.length > 0
+          ? `<div class="vpn-meta-row vpn-meta-subrow muted vpn-meta-svc-meta">${meta.join(' · ')}</div>`
+          : ''}
+      </div>`;
+    }
     const pill = (label, on, dim = false) => {
       const cls = on ? 'ok' : (dim ? 'muted' : 'warn');
       const glyph = on ? '✓' : '✗';
@@ -7242,17 +7375,13 @@ const LogsPanel = (() => {
     ].join('');
 
     const actions = [];
-    if (!svc.installed) {
-      actions.push('<button id="vpn-svc-install" class="primary">Install service</button>');
+    if (svc.disabled) {
+      actions.push('<button id="vpn-svc-enable" class="primary">Enable boot</button>');
     } else {
-      if (svc.disabled) {
-        actions.push('<button id="vpn-svc-enable" class="primary">Enable boot</button>');
-      } else {
-        actions.push('<button id="vpn-svc-disable">Disable boot</button>');
-      }
-      actions.push('<button id="vpn-svc-reinstall">Reinstall</button>');
-      actions.push('<button id="vpn-svc-uninstall" class="danger">Remove service</button>');
+      actions.push('<button id="vpn-svc-disable">Disable boot</button>');
     }
+    actions.push('<button id="vpn-svc-reinstall">Reinstall</button>');
+    actions.push('<button id="vpn-svc-uninstall" class="danger">Remove service</button>');
 
     const meta = [];
     if (svc.binaryPath) meta.push(`bin: <code class="cmd-inline">${escapeHtml(svc.binaryPath)}</code>`);
@@ -7357,6 +7486,11 @@ const LogsPanel = (() => {
       $$('#logs-tabs .tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
       currentSvc = tab.dataset.log;
+      // Relay-error hint is vpn-specific. Hide on non-vpn tabs but keep
+      // the timestamp window so flipping back to vpn doesn't lose
+      // recently-observed errors.
+      if (currentSvc !== 'vpn') hideRelayHint();
+      else if (relayErrTimestamps.length >= RELAY_ERR_THRESHOLD) showRelayHint();
       connect(currentSvc);
     });
   });
