@@ -62,9 +62,13 @@ test('falls back to "unknown" model when none passed', () => {
   assert.match(ctx.text, /AI Model: unknown/);
 });
 
-test('emits "Permissions Mode: read-only" by default', () => {
+test('emits "Permissions Mode: auto-edit" by default', () => {
+  // Default flipped from 'read-only' → 'auto-edit' so chat feels closer
+  // to shakespeare.diy's bias-toward-action UX. Users can still flip
+  // back via the chat-header permissions toggle (separate commit on
+  // this branch).
   const ctx = buildAiContext(null);
-  assert.match(ctx.text, /Permissions Mode: read-only/);
+  assert.match(ctx.text, /Permissions Mode: auto-edit/);
 });
 
 test('emits "not deployed" when project has no nsite', () => {

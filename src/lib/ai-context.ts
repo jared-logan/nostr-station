@@ -309,7 +309,11 @@ function formatCapabilities(p: Project): string {
 function buildVars(project: Project | null, model?: ModelInfo): Vars {
   const tplRecord  = project ? readProjectTemplate(project) : null;
   const permLocal  = project ? readProjectPermissions(project) : null;
-  const permission = permLocal?.mode ?? 'read-only';
+  // Default mirrors the dispatcher's default in routes/ai.ts: 'auto-edit'
+  // for new projects (writes auto-approve; run_command stays gated).
+  // Surfaced into the system prompt so the model knows which class of
+  // tool calls will run silently vs. require approval.
+  const permission = permLocal?.mode ?? 'auto-edit';
   const mode       = inferMode(project, tplRecord);
 
   const README          = project?.path ? readReadmeExcerpt(project.path) : null;
