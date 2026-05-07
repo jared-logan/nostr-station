@@ -106,6 +106,15 @@ function applyDittoStyleBlock(theme) {
   const bgMode     = (theme.bgMode === 'contain' || theme.bgMode === 'tile') ? theme.bgMode : 'cover';
 
   const rootDecls = [];
+  // Text ramp — matches Ditto's neutral-grey foreground scheme
+  // (foreground 100% / muted-foreground 70%). Applies in both Ditto
+  // sub-modes; the slightly purple-tinted defaults from :root were
+  // dropping below readable contrast over either a user-chosen --bg
+  // color or the dimmed image overlay.
+  rootDecls.push(`--text-bright: #ffffff;`);
+  rootDecls.push(`--text:        #e8e8e8;`);
+  rootDecls.push(`--text-dim:    #b3b3b3;`);
+  rootDecls.push(`--muted:       #7a7a7a;`);
   if (primary) {
     rootDecls.push(`--accent: ${primary};`);
     rootDecls.push(`--accent-bright: color-mix(in srgb, ${primary} 65%, #ffffff);`);

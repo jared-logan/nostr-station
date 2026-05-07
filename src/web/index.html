@@ -40,6 +40,13 @@
       if (!primary && !background && !bgImage) return;
 
       var rootDecls = [];
+      // Neutral-grey text ramp for Ditto modes (matches Ditto's own
+      // foreground/muted-foreground scheme). See applyDittoStyleBlock
+      // in app.js for the rationale.
+      rootDecls.push('--text-bright: #ffffff');
+      rootDecls.push('--text:        #e8e8e8');
+      rootDecls.push('--text-dim:    #b3b3b3');
+      rootDecls.push('--muted:       #7a7a7a');
       if (primary) {
         rootDecls.push('--accent: ' + primary);
         rootDecls.push('--accent-bright: color-mix(in srgb, ' + primary + ' 65%, #ffffff)');
