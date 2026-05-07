@@ -214,17 +214,46 @@
         </div>
       </div>
 
-      <div class="chat">
-        <div class="chat-feed" id="chat-feed">
-          <div class="msg asst">
-            <div class="lbl">assistant</div>
-            <div class="body">Ready. NOSTR_STATION.md loaded as system context. What are you building?</div>
+      <!-- Side-by-side: chat on the left, optional live preview on the right.
+           Preview pane is shown only when an active project is set in chat
+           AND the project is stacks/MKStack (has stack.json + npm dev script).
+           Driven by data-preview="hidden|open|collapsed" — see PreviewPane in app.js. -->
+      <div class="chat-split" id="chat-split" data-preview="hidden">
+        <div class="chat">
+          <div class="chat-feed" id="chat-feed">
+            <div class="msg asst">
+              <div class="lbl">assistant</div>
+              <div class="body">Ready. NOSTR_STATION.md loaded as system context. What are you building?</div>
+            </div>
+          </div>
+          <div class="chat-bar">
+            <textarea id="chat-input" placeholder="Ask about Nostr development… (⏎ send · ⇧⏎ newline)"></textarea>
+            <button class="primary" id="chat-send">send</button>
           </div>
         </div>
-        <div class="chat-bar">
-          <textarea id="chat-input" placeholder="Ask about Nostr development… (⏎ send · ⇧⏎ newline)"></textarea>
-          <button class="primary" id="chat-send">send</button>
-        </div>
+
+        <aside class="chat-preview" id="chat-preview" aria-label="Live preview">
+          <div class="chat-preview-head">
+            <span class="cp-label">Preview</span>
+            <code class="cp-url" id="cp-url" title="Dev server URL">http://localhost:5173</code>
+            <div class="cp-actions">
+              <button id="cp-reload" title="Reload preview" aria-label="Reload preview">↻</button>
+              <button id="cp-collapse" title="Collapse preview" aria-label="Collapse preview">→</button>
+            </div>
+          </div>
+          <div class="chat-preview-body">
+            <div class="cp-empty" id="cp-empty">
+              <div class="cp-empty-title">Dev server not detected</div>
+              <div class="cp-empty-hint muted">
+                Spawns <code>npm run dev -- --port 5173</code> in the terminal panel.
+              </div>
+              <button class="primary" id="cp-start">Start dev server</button>
+            </div>
+            <iframe id="cp-iframe" class="cp-iframe" title="Project preview" hidden></iframe>
+          </div>
+        </aside>
+
+        <button class="chat-preview-show" id="cp-show" hidden title="Show preview" aria-label="Show preview">←</button>
       </div>
     </section>
 

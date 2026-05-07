@@ -2028,7 +2028,107 @@ const ChatPanel = (() => {
     renderBadge();
     renderHistory();
     syncPermissionsControl();
+    PreviewPane.sync(activeProject);
   }
+
+  // ── Live-preview pane ────────────────────────────────────────────────
+  // Shakespeare.diy-style side-by-side: chat on the left, an iframe of the
+  // project's running dev server on the right. v1 limitations:
+  //   - Port 5173 is hardcoded (matches the existing `stacks-dev` PTY
+  //     recipe in src/lib/terminal.ts). Two stacks projects can't preview
+  //     simultaneously.
+  //   - Dev server lives in the terminal panel; closing the terminal tab
+  //     kills it. Reopen via the "Start dev server" button.
+  //   - Visibility is gated on activeProject + stacksProject. Generalising
+  //     to "any project with a `dev` npm script" is a future relax.
+  const PreviewPane = (() => {
+    const PREVIEW_URL  = 'http://localhost:5173';
+    const COLLAPSE_KEY = 'ns:chat-preview:collapsed';
+    let split, frame, empty, urlEl, startBtn, reloadBtn, collapseBtn, showBtn;
+    let initialized = false;
+
+    function init() {
+      if (initialized) return;
+      split       = document.getElementById('chat-split');
+      frame       = document.getElementById('cp-iframe');
+      empty       = document.getElementById('cp-empty');
+      urlEl       = document.getElementById('cp-url');
+      startBtn    = document.getElementById('cp-start');
+      reloadBtn   = document.getElementById('cp-reload');
+      collapseBtn = document.getElementById('cp-collapse');
+      showBtn     = document.getElementById('cp-show');
+      if (!split) return;
+      initialized = true;
+
+      urlEl.textContent = PREVIEW_URL;
+
+      reloadBtn.addEventListener('click', () => {
+        // Cache-bust by re-assigning src; iframe reloads from the dev server.
+        // If the server isn't up, the load fails silently (browser shows its
+        // own error page inside the iframe).
+        frame.hidden = false;
+        empty.style.display = 'none';
+        frame.src = PREVIEW_URL + '?_t=' + Date.now();
+      });
+
+      collapseBtn.addEventListener('click', () => setCollapsed(true));
+      showBtn.addEventListener('click',     () => setCollapsed(false));
+
+      startBtn.addEventListener('click', () => {
+        const p = activeProject;
+        if (!p) return;
+        if (!window.NSTerminal?.isAvailable?.()) {
+          alert('Terminal panel is not available — cannot spawn dev server.');
+          return;
+        }
+        window.NSTerminal.open('stacks-dev', { projectId: p.id });
+        // Kick the iframe ~2.5s later — Vite's first paint typically lands
+        // within 1–3s after `npm run dev`. The reload button is the manual
+        // fallback if it's still warming up.
+        frame.hidden = false;
+        empty.style.display = 'none';
+        setTimeout(() => { frame.src = PREVIEW_URL + '?_t=' + Date.now(); }, 2500);
+      });
+    }
+
+    function setCollapsed(collapsed) {
+      init();
+      if (!split) return;
+      // Only toggle if the pane is actually applicable for this project.
+      const state = split.dataset.preview;
+      if (state === 'hidden') return;
+      split.dataset.preview = collapsed ? 'collapsed' : 'open';
+      showBtn.hidden = !collapsed;
+      try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch {}
+    }
+
+    function isCollapsedPref() {
+      try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch { return false; }
+    }
+
+    function sync(project) {
+      init();
+      if (!split) return;
+      const applicable = !!(project && project.stacksProject);
+      if (!applicable) {
+        split.dataset.preview = 'hidden';
+        showBtn.hidden = true;
+        // Park the iframe so we don't keep loading the previous URL.
+        if (frame && frame.src && frame.src !== 'about:blank') frame.src = 'about:blank';
+        if (frame) frame.hidden = true;
+        if (empty) empty.style.display = '';
+        return;
+      }
+      const collapsed = isCollapsedPref();
+      split.dataset.preview = collapsed ? 'collapsed' : 'open';
+      showBtn.hidden = !collapsed;
+      // Don't auto-load the iframe — the dev server probably isn't running
+      // yet, and a failed iframe load doesn't auto-recover. Empty state +
+      // explicit "Start dev server" button is clearer than a blank frame.
+    }
+
+    return { sync, setCollapsed };
+  })();
 
   // Permissions toggle (chat-header dropdown). Hidden when no
   // project is active (global chat has no project to scope perms
@@ -5336,7 +5436,10 @@ const ProjectsPanel = (() => {
         body: JSON.stringify({ projectId: p.id }),
       });
     } catch {}
-    ChatPanel.setActiveProject({ id: p.id, name: p.name });
+    // Pass stacksProject through so the chat side knows whether to surface
+    // the live-preview pane (the iframe + dev-server button only makes
+    // sense for projects with `stack.json` + an `npm run dev` script).
+    ChatPanel.setActiveProject({ id: p.id, name: p.name, stacksProject: !!p.stacksProject });
     location.hash = '#chat';
   }
 
