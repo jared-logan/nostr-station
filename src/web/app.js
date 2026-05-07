@@ -106,6 +106,15 @@ function applyDittoStyleBlock(theme) {
   const bgMode     = (theme.bgMode === 'contain' || theme.bgMode === 'tile') ? theme.bgMode : 'cover';
 
   const rootDecls = [];
+  // Text ramp — matches Ditto's neutral-grey foreground scheme
+  // (foreground 100% / muted-foreground 70%). Applies in both Ditto
+  // sub-modes; the slightly purple-tinted defaults from :root were
+  // dropping below readable contrast over either a user-chosen --bg
+  // color or the dimmed image overlay.
+  rootDecls.push(`--text-bright: #ffffff;`);
+  rootDecls.push(`--text:        #e8e8e8;`);
+  rootDecls.push(`--text-dim:    #b3b3b3;`);
+  rootDecls.push(`--muted:       #7a7a7a;`);
   if (primary) {
     rootDecls.push(`--accent: ${primary};`);
     rootDecls.push(`--accent-bright: color-mix(in srgb, ${primary} 65%, #ffffff);`);
@@ -117,24 +126,32 @@ function applyDittoStyleBlock(theme) {
   if (bgImage) {
     // Image mode: the user's image becomes the body background, and the
     // card surfaces switch to translucent dark overlays so text stays
-    // legible (mirrors what Ditto does in their own client).
+    // legible (mirrors what Ditto does in their own client). A
+    // linear-gradient is layered above the image to dim high-contrast
+    // photos uniformly — without it, bright spots (clouds, sky, etc.)
+    // bleed through cards and chat text.
     const size   = bgMode === 'tile' ? 'auto' : bgMode;        // cover | contain | auto
     const repeat = bgMode === 'tile' ? 'repeat' : 'no-repeat';
     const fallback = background || '#0a0a0a';
     rootDecls.push(`--bg: ${fallback};`);
-    rootDecls.push(`--bg-elev:       rgba(0, 0, 0, 0.55);`);
-    rootDecls.push(`--bg-card:       rgba(0, 0, 0, 0.50);`);
-    rootDecls.push(`--bg-hover:      rgba(255, 255, 255, 0.06);`);
-    rootDecls.push(`--border:        rgba(255, 255, 255, 0.12);`);
-    rootDecls.push(`--border-strong: rgba(255, 255, 255, 0.20);`);
+    rootDecls.push(`--bg-elev:       rgba(0, 0, 0, 0.85);`);
+    rootDecls.push(`--bg-card:       rgba(0, 0, 0, 0.78);`);
+    rootDecls.push(`--bg-hover:      rgba(255, 255, 255, 0.08);`);
+    rootDecls.push(`--border:        rgba(255, 255, 255, 0.16);`);
+    rootDecls.push(`--border-strong: rgba(255, 255, 255, 0.28);`);
     const bodyCss =
       `:root[data-theme="ditto"] body {` +
-      `  background-image: url("${escCssUrl(bgImage)}");` +
+      // First layer: a flat 72% black tint that sits *above* the image
+      // and dims it uniformly. Second layer: the user's image. Tuned
+      // to match Ditto's own "image as faint backdrop" feel — without
+      // a strong overlay, high-contrast photos make chat text (which
+      // renders directly on body, no card) illegible.
+      `  background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("${escCssUrl(bgImage)}");` +
       `  background-color: ${fallback};` +
-      `  background-size: ${size};` +
-      `  background-position: center center;` +
-      `  background-repeat: ${repeat};` +
-      `  background-attachment: fixed;` +
+      `  background-size: 100% 100%, ${size};` +
+      `  background-position: center center, center center;` +
+      `  background-repeat: no-repeat, ${repeat};` +
+      `  background-attachment: fixed, fixed;` +
       `}`;
     // The header has a hardcoded dark gradient in app.css that would
     // hide the image strip under it. Replace with a translucent gradient
