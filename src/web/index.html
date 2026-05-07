@@ -9,9 +9,10 @@
 <script>
   // Apply persisted accent theme before paint to avoid a flash of purple
   // when the user has picked a different color in the Config panel.
-  // Ditto themes carry user-published colors so they're injected via a
-  // dynamic <style> block — kept inline here so the colors land before
-  // first paint just like the static presets.
+  // Ditto themes carry user-published colors + an optional background
+  // image so they're injected via a dynamic <style> block — kept inline
+  // here so everything lands before first paint just like the static
+  // presets. Mirrors applyDittoStyleBlock() in app.js.
   (function () {
     try {
       var t = localStorage.getItem('nostr-station:theme');
@@ -20,35 +21,72 @@
         document.documentElement.setAttribute('data-theme', t);
         return;
       }
-      if (t === 'ditto') {
-        var raw = localStorage.getItem('nostr-station:ditto-theme');
-        if (!raw) return;
-        var d = JSON.parse(raw);
-        var hex = /^#[0-9a-fA-F]{3,8}$/;
-        var primary    = d && hex.test(d.primary || '')    ? d.primary    : '';
-        var background = d && hex.test(d.background || '') ? d.background : '';
-        if (!primary && !background) return;
-        var decls = [];
-        if (primary) {
-          decls.push('--accent: ' + primary);
-          decls.push('--accent-bright: color-mix(in srgb, ' + primary + ' 65%, #ffffff)');
-          decls.push('--accent-dim:    color-mix(in srgb, ' + primary + ' 65%, #000000)');
-          decls.push('--info:          color-mix(in srgb, ' + primary + ' 70%, #ffffff)');
+      if (t !== 'ditto') return;
+      var raw = localStorage.getItem('nostr-station:ditto-theme');
+      if (!raw) return;
+      var d = JSON.parse(raw);
+      if (!d) return;
+      var hexRe = /^#[0-9a-fA-F]{3,8}$/;
+      var primary    = hexRe.test(d.primary || '')    ? d.primary    : '';
+      var background = hexRe.test(d.background || '') ? d.background : '';
+      var bgImage = '';
+      try {
+        if (d.bgImage) {
+          var u = new URL(d.bgImage);
+          if (u.protocol === 'http:' || u.protocol === 'https:') bgImage = d.bgImage;
         }
-        if (background) {
-          decls.push('--bg: ' + background);
-          decls.push('--bg-elev:       color-mix(in srgb, ' + background + ' 95%, #ffffff)');
-          decls.push('--bg-card:       color-mix(in srgb, ' + background + ' 92%, #ffffff)');
-          decls.push('--bg-hover:      color-mix(in srgb, ' + background + ' 88%, #ffffff)');
-          decls.push('--border:        color-mix(in srgb, ' + background + ' 88%, #ffffff)');
-          decls.push('--border-strong: color-mix(in srgb, ' + background + ' 80%, #ffffff)');
-        }
-        var style = document.createElement('style');
-        style.id = 'ditto-theme-style';
-        style.textContent = ':root[data-theme="ditto"] { ' + decls.join('; ') + '; }';
-        document.head.appendChild(style);
-        document.documentElement.setAttribute('data-theme', 'ditto');
+      } catch (_) {}
+      var bgMode = (d.bgMode === 'contain' || d.bgMode === 'tile') ? d.bgMode : 'cover';
+      if (!primary && !background && !bgImage) return;
+
+      var rootDecls = [];
+      if (primary) {
+        rootDecls.push('--accent: ' + primary);
+        rootDecls.push('--accent-bright: color-mix(in srgb, ' + primary + ' 65%, #ffffff)');
+        rootDecls.push('--accent-dim:    color-mix(in srgb, ' + primary + ' 65%, #000000)');
+        rootDecls.push('--info:          color-mix(in srgb, ' + primary + ' 70%, #ffffff)');
       }
+
+      var css;
+      if (bgImage) {
+        var size   = bgMode === 'tile' ? 'auto' : bgMode;
+        var repeat = bgMode === 'tile' ? 'repeat' : 'no-repeat';
+        var fallback = background || '#0a0a0a';
+        rootDecls.push('--bg: ' + fallback);
+        rootDecls.push('--bg-elev:       rgba(0, 0, 0, 0.55)');
+        rootDecls.push('--bg-card:       rgba(0, 0, 0, 0.50)');
+        rootDecls.push('--bg-hover:      rgba(255, 255, 255, 0.06)');
+        rootDecls.push('--border:        rgba(255, 255, 255, 0.12)');
+        rootDecls.push('--border-strong: rgba(255, 255, 255, 0.20)');
+        var safeUrl = bgImage.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        var bodyCss = ':root[data-theme="ditto"] body {' +
+          ' background-image: url("' + safeUrl + '");' +
+          ' background-color: ' + fallback + ';' +
+          ' background-size: ' + size + ';' +
+          ' background-position: center center;' +
+          ' background-repeat: ' + repeat + ';' +
+          ' background-attachment: fixed;' +
+          ' }';
+        var headerCss = ':root[data-theme="ditto"] .header {' +
+          ' background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.45) 100%);' +
+          ' }';
+        css = ':root[data-theme="ditto"] { ' + rootDecls.join('; ') + '; } ' + bodyCss + ' ' + headerCss;
+      } else if (background) {
+        rootDecls.push('--bg: ' + background);
+        rootDecls.push('--bg-elev:       color-mix(in srgb, ' + background + ' 95%, #ffffff)');
+        rootDecls.push('--bg-card:       color-mix(in srgb, ' + background + ' 92%, #ffffff)');
+        rootDecls.push('--bg-hover:      color-mix(in srgb, ' + background + ' 88%, #ffffff)');
+        rootDecls.push('--border:        color-mix(in srgb, ' + background + ' 88%, #ffffff)');
+        rootDecls.push('--border-strong: color-mix(in srgb, ' + background + ' 80%, #ffffff)');
+        css = ':root[data-theme="ditto"] { ' + rootDecls.join('; ') + '; }';
+      } else {
+        css = ':root[data-theme="ditto"] { ' + rootDecls.join('; ') + '; }';
+      }
+      var style = document.createElement('style');
+      style.id = 'ditto-theme-style';
+      style.textContent = css;
+      document.head.appendChild(style);
+      document.documentElement.setAttribute('data-theme', 'ditto');
     } catch (_) { /* localStorage may be blocked; default purple is fine */ }
   })();
 </script>

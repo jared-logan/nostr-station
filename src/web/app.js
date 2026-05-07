@@ -82,8 +82,18 @@ function clearDittoTheme() {
 // CSS hex color literal — `#` + 3/4/6/8 hex digits. Mirrors the server-side
 // regex so we don't trust whatever survived the API boundary.
 const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
+// `url("…")` is the only place the user's string lands inside CSS, and
+// safeHttpUrl already enforced an http(s) URL — we just need to escape
+// the two characters that can break out of a double-quoted CSS string.
+function escCssUrl(u) { return String(u).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
+function isSafeImageUrl(u) {
+  try {
+    const p = new URL(u);
+    return p.protocol === 'http:' || p.protocol === 'https:';
+  } catch { return false; }
+}
 function applyDittoStyleBlock(theme) {
-  if (!theme || (!theme.primary && !theme.background)) {
+  if (!theme || (!theme.primary && !theme.background && !theme.bgImage)) {
     clearDittoStyleBlock();
     return;
   }
@@ -92,25 +102,62 @@ function applyDittoStyleBlock(theme) {
   // shove user-provided strings into a <style> tag.
   const primary    = HEX_RE.test(theme.primary || '')    ? theme.primary    : '';
   const background = HEX_RE.test(theme.background || '') ? theme.background : '';
-  const decls = [];
+  const bgImage    = theme.bgImage && isSafeImageUrl(theme.bgImage) ? theme.bgImage : '';
+  const bgMode     = (theme.bgMode === 'contain' || theme.bgMode === 'tile') ? theme.bgMode : 'cover';
+
+  const rootDecls = [];
   if (primary) {
-    decls.push(`--accent: ${primary};`);
-    decls.push(`--accent-bright: color-mix(in srgb, ${primary} 65%, #ffffff);`);
-    decls.push(`--accent-dim:    color-mix(in srgb, ${primary} 65%, #000000);`);
-    decls.push(`--info:          color-mix(in srgb, ${primary} 70%, #ffffff);`);
+    rootDecls.push(`--accent: ${primary};`);
+    rootDecls.push(`--accent-bright: color-mix(in srgb, ${primary} 65%, #ffffff);`);
+    rootDecls.push(`--accent-dim:    color-mix(in srgb, ${primary} 65%, #000000);`);
+    rootDecls.push(`--info:          color-mix(in srgb, ${primary} 70%, #ffffff);`);
   }
-  if (background) {
-    // Derive the elevation ramp so cards stay lighter than the page —
-    // otherwise --bg-elev / --bg-card (which are static in :root) look
-    // darker than a non-default --bg and the layering breaks.
-    decls.push(`--bg: ${background};`);
-    decls.push(`--bg-elev:   color-mix(in srgb, ${background} 95%, #ffffff);`);
-    decls.push(`--bg-card:   color-mix(in srgb, ${background} 92%, #ffffff);`);
-    decls.push(`--bg-hover:  color-mix(in srgb, ${background} 88%, #ffffff);`);
-    decls.push(`--border:    color-mix(in srgb, ${background} 88%, #ffffff);`);
-    decls.push(`--border-strong: color-mix(in srgb, ${background} 80%, #ffffff);`);
+
+  let css = '';
+  if (bgImage) {
+    // Image mode: the user's image becomes the body background, and the
+    // card surfaces switch to translucent dark overlays so text stays
+    // legible (mirrors what Ditto does in their own client).
+    const size   = bgMode === 'tile' ? 'auto' : bgMode;        // cover | contain | auto
+    const repeat = bgMode === 'tile' ? 'repeat' : 'no-repeat';
+    const fallback = background || '#0a0a0a';
+    rootDecls.push(`--bg: ${fallback};`);
+    rootDecls.push(`--bg-elev:       rgba(0, 0, 0, 0.55);`);
+    rootDecls.push(`--bg-card:       rgba(0, 0, 0, 0.50);`);
+    rootDecls.push(`--bg-hover:      rgba(255, 255, 255, 0.06);`);
+    rootDecls.push(`--border:        rgba(255, 255, 255, 0.12);`);
+    rootDecls.push(`--border-strong: rgba(255, 255, 255, 0.20);`);
+    const bodyCss =
+      `:root[data-theme="ditto"] body {` +
+      `  background-image: url("${escCssUrl(bgImage)}");` +
+      `  background-color: ${fallback};` +
+      `  background-size: ${size};` +
+      `  background-position: center center;` +
+      `  background-repeat: ${repeat};` +
+      `  background-attachment: fixed;` +
+      `}`;
+    // The header has a hardcoded dark gradient in app.css that would
+    // hide the image strip under it. Replace with a translucent gradient
+    // in image mode so the photo bleeds through (matches the card recipe).
+    const headerCss =
+      `:root[data-theme="ditto"] .header {` +
+      `  background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.45) 100%);` +
+      `}`;
+    css = `:root[data-theme="ditto"] { ${rootDecls.join(' ')} } ${bodyCss} ${headerCss}`;
+  } else if (background) {
+    // Color-only mode: derive the elevation ramp lighter than --bg so
+    // cards still stand out (standard dark-UI layering).
+    rootDecls.push(`--bg: ${background};`);
+    rootDecls.push(`--bg-elev:       color-mix(in srgb, ${background} 95%, #ffffff);`);
+    rootDecls.push(`--bg-card:       color-mix(in srgb, ${background} 92%, #ffffff);`);
+    rootDecls.push(`--bg-hover:      color-mix(in srgb, ${background} 88%, #ffffff);`);
+    rootDecls.push(`--border:        color-mix(in srgb, ${background} 88%, #ffffff);`);
+    rootDecls.push(`--border-strong: color-mix(in srgb, ${background} 80%, #ffffff);`);
+    css = `:root[data-theme="ditto"] { ${rootDecls.join(' ')} }`;
+  } else {
+    css = `:root[data-theme="ditto"] { ${rootDecls.join(' ')} }`;
   }
-  const css = `:root[data-theme="ditto"] { ${decls.join(' ')} }`;
+
   let el = document.getElementById('ditto-theme-style');
   if (!el) {
     el = document.createElement('style');
@@ -190,6 +237,16 @@ function renderDittoCard() {
   const swatches = [];
   if (theme.primary)    swatches.push({ role: 'primary',    hex: theme.primary });
   if (theme.background) swatches.push({ role: 'background', hex: theme.background });
+  const safeBgImage = theme.bgImage && isSafeImageUrl(theme.bgImage) ? theme.bgImage : '';
+  const imagePreview = safeBgImage
+    ? `<div class="ditto-theme-image">
+         <img src="${escapeHtml(safeBgImage)}" alt="" loading="lazy">
+         <div class="ditto-theme-image-meta">
+           <span style="color:var(--muted)">bg image</span>
+           <span>${escapeHtml(theme.bgMode || 'cover')}</span>
+         </div>
+       </div>`
+    : '';
   return `
     <div class="ditto-theme ${active ? 'active' : ''}" id="cfg-ditto-card">
       <div class="ditto-theme-head">
@@ -198,6 +255,7 @@ function renderDittoCard() {
           ${active ? '● applied' : 'synced ' + escapeHtml(fmtAgo(theme.syncedAt))}
         </div>
       </div>
+      ${imagePreview}
       <div class="ditto-theme-preview">
         ${swatches.map(s => `
           <span class="swatch">
@@ -243,6 +301,8 @@ async function syncDittoTheme() {
       title:      r.title || 'Ditto theme',
       primary:    r.primary    || '',
       background: r.background || '',
+      bgImage:    r.bgImage    || '',
+      bgMode:     r.bgMode     || '',
       syncedAt:   Date.now(),
     };
     saveDittoTheme(theme);

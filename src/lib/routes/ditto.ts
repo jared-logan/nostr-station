@@ -17,6 +17,7 @@
 import http from 'http';
 import { WebSocket } from 'ws';
 import { readIdentity, npubToHex } from '../identity.js';
+import { safeHttpUrl } from '../url-safety.js';
 
 const DITTO_THEME_KIND = 16767;
 const RELAY_TIMEOUT_MS = 5000;
@@ -74,6 +75,8 @@ interface ParsedTheme {
   primary?: string;
   background?: string;
   text?: string;
+  bgImage?: string;
+  bgMode?: 'cover' | 'contain' | 'tile';
   publishedAt?: number;
 }
 
@@ -82,6 +85,24 @@ interface ParsedTheme {
 // alpha doesn't get rejected; the renderer will use the same value
 // inside color-mix so alpha just compounds.
 const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
+
+// `bg` tag elements are space-delimited "key value" pairs:
+//   ["bg", "url https://…", "mode cover", "m image/jpeg", "dim 2560x1440"]
+// Split on the first space; ignore anything we don't recognize.
+function parseBgTag(tag: unknown[]): { url?: string; mode?: string } {
+  const out: { url?: string; mode?: string } = {};
+  for (let i = 1; i < tag.length; i++) {
+    const part = tag[i];
+    if (typeof part !== 'string') continue;
+    const sp = part.indexOf(' ');
+    if (sp < 0) continue;
+    const key = part.slice(0, sp).trim().toLowerCase();
+    const val = part.slice(sp + 1).trim();
+    if (key === 'url')  out.url  = val;
+    if (key === 'mode') out.mode = val.toLowerCase();
+  }
+  return out;
+}
 
 function parseDittoTheme(ev: { tags?: unknown[][] } | null): ParsedTheme | null {
   if (!ev || !Array.isArray(ev.tags)) return null;
@@ -95,6 +116,15 @@ function parseDittoTheme(ev: { tags?: unknown[][] } | null): ParsedTheme | null 
       if      (role === 'primary')    out.primary    = value;
       else if (role === 'background') out.background = value;
       else if (role === 'text')       out.text       = value;
+    } else if (t[0] === 'bg') {
+      const bg = parseBgTag(t);
+      // Scheme-gate the URL — same defense as the kind-0 `picture` field.
+      // Anything non-http(s) (data:, javascript:, file:, …) is dropped.
+      const safe = safeHttpUrl(bg.url);
+      if (safe) out.bgImage = safe;
+      if (bg.mode === 'cover' || bg.mode === 'contain' || bg.mode === 'tile') {
+        out.bgMode = bg.mode;
+      }
     } else if (t[0] === 'title' && typeof t[1] === 'string') {
       out.title = t[1].slice(0, 80);
     } else if (t[0] === 'published_at' && typeof t[1] === 'string') {
@@ -102,7 +132,7 @@ function parseDittoTheme(ev: { tags?: unknown[][] } | null): ParsedTheme | null 
       if (Number.isFinite(n)) out.publishedAt = n;
     }
   }
-  if (!out.primary && !out.background && !out.text) return null;
+  if (!out.primary && !out.background && !out.text && !out.bgImage) return null;
   return out;
 }
 
@@ -161,6 +191,8 @@ export async function handleDitto(
         primary:    parsed.primary,
         background: parsed.background,
         text:       parsed.text,
+        bgImage:    parsed.bgImage,
+        bgMode:     parsed.bgMode,
         publishedAt: parsed.publishedAt,
       }));
     } catch (e) {

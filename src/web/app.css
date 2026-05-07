@@ -1645,6 +1645,34 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-dim);
 }
 .ditto-theme-status.ok { color: var(--success); }
+.ditto-theme-image {
+  position: relative;
+  display: block;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  max-height: 140px;
+}
+.ditto-theme-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: 140px;
+  object-fit: cover;
+}
+.ditto-theme-image-meta {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 8px;
+  font-size: 10px;
+  padding: 3px 7px;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text-bright);
+  border-radius: 3px;
+  letter-spacing: 0.4px;
+}
 .ditto-theme-preview {
   display: flex;
   gap: 12px;
