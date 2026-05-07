@@ -53,14 +53,14 @@
         var repeat = bgMode === 'tile' ? 'repeat' : 'no-repeat';
         var fallback = background || '#0a0a0a';
         rootDecls.push('--bg: ' + fallback);
-        rootDecls.push('--bg-elev:       rgba(0, 0, 0, 0.72)');
-        rootDecls.push('--bg-card:       rgba(0, 0, 0, 0.65)');
+        rootDecls.push('--bg-elev:       rgba(0, 0, 0, 0.85)');
+        rootDecls.push('--bg-card:       rgba(0, 0, 0, 0.78)');
         rootDecls.push('--bg-hover:      rgba(255, 255, 255, 0.08)');
         rootDecls.push('--border:        rgba(255, 255, 255, 0.16)');
         rootDecls.push('--border-strong: rgba(255, 255, 255, 0.28)');
         var safeUrl = bgImage.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         var bodyCss = ':root[data-theme="ditto"] body {' +
-          ' background-image: linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.6)), url("' + safeUrl + '");' +
+          ' background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("' + safeUrl + '");' +
           ' background-color: ' + fallback + ';' +
           ' background-size: 100% 100%, ' + size + ';' +
           ' background-position: center center, center center;' +

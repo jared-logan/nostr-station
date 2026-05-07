@@ -125,16 +125,19 @@ function applyDittoStyleBlock(theme) {
     const repeat = bgMode === 'tile' ? 'repeat' : 'no-repeat';
     const fallback = background || '#0a0a0a';
     rootDecls.push(`--bg: ${fallback};`);
-    rootDecls.push(`--bg-elev:       rgba(0, 0, 0, 0.72);`);
-    rootDecls.push(`--bg-card:       rgba(0, 0, 0, 0.65);`);
+    rootDecls.push(`--bg-elev:       rgba(0, 0, 0, 0.85);`);
+    rootDecls.push(`--bg-card:       rgba(0, 0, 0, 0.78);`);
     rootDecls.push(`--bg-hover:      rgba(255, 255, 255, 0.08);`);
     rootDecls.push(`--border:        rgba(255, 255, 255, 0.16);`);
     rootDecls.push(`--border-strong: rgba(255, 255, 255, 0.28);`);
     const bodyCss =
       `:root[data-theme="ditto"] body {` +
-      // First layer: a flat 60% black tint that sits *above* the image
-      // and dims it uniformly. Second layer: the user's image.
-      `  background-image: linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.6)), url("${escCssUrl(bgImage)}");` +
+      // First layer: a flat 72% black tint that sits *above* the image
+      // and dims it uniformly. Second layer: the user's image. Tuned
+      // to match Ditto's own "image as faint backdrop" feel — without
+      // a strong overlay, high-contrast photos make chat text (which
+      // renders directly on body, no card) illegible.
+      `  background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("${escCssUrl(bgImage)}");` +
       `  background-color: ${fallback};` +
       `  background-size: 100% 100%, ${size};` +
       `  background-position: center center, center center;` +
