@@ -296,10 +296,18 @@ const apply_patch: Tool = {
   name: 'apply_patch',
   description:
     'Replace `search` with `replace` in the file at `path`. The `search` '
-    + 'string must occur exactly once in the file — ambiguous matches '
-    + 'are an error so the model must disambiguate by including more '
+    + 'string must occur exactly once and match literally — including '
+    + 'whitespace, indentation, and quote style. Ambiguous matches are '
+    + 'an error so the model must disambiguate by including more '
     + 'context. Useful for surgical edits without round-tripping the '
-    + 'whole file through write_file.',
+    + 'whole file through write_file. '
+    + 'On failure (search not found OR not unique), the error response '
+    + 'includes a `content` field with the current file text and a '
+    + 'numbered display so you can reconstruct an exact-match search '
+    + 'without an additional read_file call. After any successful '
+    + 'apply_patch, your in-memory snapshot of the file is stale — '
+    + 'the file content has changed, so subsequent searches must come '
+    + 'from a fresh read_file or the post-edit content (when added).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -324,11 +332,56 @@ const apply_patch: Tool = {
     catch (e: any) { return { ok: false, error: `read failed: ${e?.message ?? 'unknown'}` }; }
 
     const occurrences = countOccurrences(original, args.search);
-    if (occurrences === 0) {
-      return { ok: false, error: `search string not found in ${args.path}` };
-    }
-    if (occurrences > 1) {
-      return { ok: false, error: `search string is not unique in ${args.path} (${occurrences} matches) — include more context to disambiguate` };
+    if (occurrences === 0 || occurrences > 1) {
+      // Recovery context on failure. apply_patch is a literal-string
+      // match — whitespace, quote style, and indentation must match
+      // exactly. Two failure shapes the model commonly hits:
+      //
+      //   1. STALE SNAPSHOT: model just edited the file in a prior
+      //      apply_patch call, then constructs a new search from its
+      //      pre-edit memory. The file changed; its search no longer
+      //      matches.
+      //   2. RECONSTRUCTION DRIFT: model just read the file but its
+      //      reconstructed search has minor whitespace / quote-style
+      //      differences from the actual file bytes.
+      //
+      // Either way, the cheapest fix is "let the model see the
+      // ground truth without a re-read round-trip." We attach the
+      // current file content (capped) on the error envelope —
+      // models that look for it recover in one turn instead of
+      // three. Cap at 32 KB so the error stays well under the
+      // tool-loop's per-call budget; for files past that the model
+      // gets a `truncated: true` flag and a hint to use read_file
+      // with a range.
+      const FAIL_CONTENT_CAP = 32 * 1024;
+      const truncated = original.length > FAIL_CONTENT_CAP;
+      const currentText = truncated ? original.slice(0, FAIL_CONTENT_CAP) : original;
+      const lines = currentText.split('\n');
+      const numberWidth = Math.max(4, String(lines.length).length);
+      const numbered = lines.map((line, idx) =>
+        `${String(idx + 1).padStart(numberWidth, ' ')}| ${line}`,
+      ).join('\n');
+      const baseError = occurrences === 0
+        ? `search string not found in ${args.path}`
+        : `search string is not unique in ${args.path} (${occurrences} matches)`;
+      const hint = occurrences === 0
+        ? 'apply_patch matches literally — whitespace, quote style, and indentation must match exactly. ' +
+          'Compare your search against the current file content (in this error envelope) and retry with the exact bytes. ' +
+          'If you previously edited this file, your search may be stale — the file content here reflects the latest on disk.'
+        : 'Include more surrounding context in `search` to disambiguate. Each candidate match must occur exactly once.';
+      return {
+        ok: false,
+        error: `${baseError} — ${hint}`,
+        content: {
+          path:         args.path,
+          searchTried:  args.search,
+          occurrences,
+          currentText,
+          currentDisplay: `<file path="${args.path}">\n${numbered}\n</file>`,
+          truncated,
+          totalBytes:   Buffer.byteLength(original, 'utf8'),
+        },
+      };
     }
     const updated = original.replace(args.search, args.replace);
     try { fs.writeFileSync(safe.abs!, updated, 'utf8'); }
