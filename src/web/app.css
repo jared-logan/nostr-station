@@ -1021,6 +1021,204 @@ input:focus, textarea:focus, select:focus {
   font-size: 11px;
 }
 
+/* ── nostr-vpn panel ──────────────────────────────────────────────────── */
+/* Standalone control surface — see VpnPanel in app.js. The status strip
+   sits between the panel head and the sub-tab bar; sub-tabs render into
+   #vpn-panel-body which is just the standard .panel-body wrapper. */
+
+.vpn-status-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.vpn-strip-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.vpn-strip-state .vpn-strip-label {
+  color: var(--text-bright);
+  font-weight: 500;
+}
+.vpn-strip-state .vpn-strip-value {
+  color: var(--text-dim);
+}
+.vpn-strip-state .vpn-strip-tunnel {
+  font-size: 11px;
+}
+.vpn-strip-actions {
+  display: flex;
+  gap: 6px;
+}
+.vpn-strip-actions button {
+  padding: 4px 12px;
+  font-size: 11px;
+}
+.vpn-strip-loading {
+  font-style: italic;
+  font-size: 11px;
+}
+
+.vpn-section {
+  padding: 16px 24px;
+}
+.vpn-section-help {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin: 0 0 12px 0;
+  max-width: 640px;
+}
+.vpn-empty {
+  padding: 24px;
+  text-align: center;
+}
+.vpn-empty-title {
+  font-size: 13px;
+  color: var(--text-bright);
+  margin-bottom: 6px;
+}
+.vpn-empty-detail {
+  font-size: 11px;
+  line-height: 1.5;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.vpn-kv {
+  display: grid;
+  gap: 6px;
+}
+.vpn-kv-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 12px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.vpn-kv-key {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.vpn-kv-val {
+  color: var(--text-bright);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.vpn-section-footer {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.vpn-section-footer a {
+  color: var(--accent-bright);
+}
+
+.vpn-peers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.vpn-peer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elev);
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+}
+.vpn-peer-id {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.vpn-peer-alias {
+  color: var(--text-bright);
+  font-size: 11px;
+  font-weight: 500;
+}
+.vpn-peer-meta {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.vpn-peer-admin {
+  color: var(--accent-bright);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.vpn-diag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.vpn-diag-result {
+  margin-top: 8px;
+}
+.vpn-diag-pre {
+  background: var(--bg-elev);
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  overflow: auto;
+  max-height: 320px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.vpn-diag-err {
+  color: var(--warn);
+  font-size: 12px;
+  padding: 8px;
+}
+
+/* Reuse the Logs-meta service-pill styles in the new panel too. */
+.vpn-svc-pills {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.vpn-svc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  border: 1px solid;
+  background: rgba(255,255,255,0.03);
+}
+.vpn-svc-pill-ok {
+  border-color: color-mix(in srgb, var(--success) 50%, transparent);
+  color: var(--success);
+}
+.vpn-svc-pill-warn {
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+  color: var(--warn);
+}
+.vpn-svc-pill-muted {
+  border-color: rgba(255,255,255,0.10);
+  color: var(--text-dim);
+}
+
 /* ── logs ─────────────────────────────────────────────────────────────── */
 
 .tabs {
@@ -1464,6 +1662,43 @@ input:focus, textarea:focus, select:focus {
 .logs-meta.vpn-meta .vpn-svc-pill-muted {
   border-color: rgba(255,255,255,0.10);
   color: var(--text-dim);
+}
+.logs-meta.vpn-meta .vpn-svc-standalone {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+/* Relay-error hint surfaced inline above the log tail when the vpn
+   channel sees repeated 504s. Warn-coloured but understated (left
+   border accent, not a full banner) so it doesn't fight with the
+   page-level status banner. */
+.logs-relay-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-elev));
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-sm);
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.logs-relay-hint-icon {
+  color: var(--warn);
+  font-weight: bold;
+  font-size: 14px;
+}
+.logs-relay-hint-text {
+  flex: 1;
+  color: var(--text-bright);
+  line-height: 1.4;
+}
+.logs-relay-hint button {
+  padding: 3px 10px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 .logs-meta.vpn-meta .vpn-meta-svc-actions {
   display: flex;

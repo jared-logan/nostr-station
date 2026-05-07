@@ -1629,20 +1629,32 @@ export async function startWebServer(port: number): Promise<void> {
         // open — the client doesn't need to reconnect or re-render the
         // history. Other channels (relay, watchdog) don't have an
         // equivalent emitter today; they fall through with no change.
+        //
+        // Trailing 200ms debounce: a Restart click fires state-changed
+        // twice (once after the inner stop, once after the inner start)
+        // within ~50–150ms. Pre-debounce, that produced two SSE frames
+        // and the meta strip flickered "running → stopped → running".
+        // Coalesce so the user sees one frame reflecting the post-restart
+        // state. State actually durable for >200ms still fires normally.
         let onVpnStateChanged: (() => void) | null = null;
+        let vpnStatePushTimer: NodeJS.Timeout | null = null;
         if (channel === 'vpn') {
+          const SSE_COALESCE_MS = 200;
+          const pushFreshFrame = async () => {
+            if (res.writableEnded) return;
+            try {
+              const fresh = await computeVpnStatus();
+              if (res.writableEnded) return;
+              res.write(`data: ${JSON.stringify({ status: fresh })}\n\n`);
+            } catch { /* probe failed — keep the stream alive, drop frame */ }
+          };
           onVpnStateChanged = () => {
             if (res.writableEnded) return;
-            // Schedule the probe in a microtask so a synchronous emit from
-            // inside an action handler returns immediately to the request
-            // path; the SSE push happens after the action's HTTP response.
-            void (async () => {
-              try {
-                const fresh = await computeVpnStatus();
-                if (res.writableEnded) return;
-                res.write(`data: ${JSON.stringify({ status: fresh })}\n\n`);
-              } catch { /* probe failed — keep the stream alive, drop frame */ }
-            })();
+            if (vpnStatePushTimer) clearTimeout(vpnStatePushTimer);
+            vpnStatePushTimer = setTimeout(() => {
+              vpnStatePushTimer = null;
+              void pushFreshFrame();
+            }, SSE_COALESCE_MS);
           };
           nvpnEvents.on('state-changed', onVpnStateChanged);
         }
@@ -1673,6 +1685,7 @@ export async function startWebServer(port: number): Promise<void> {
         const cleanup = () => {
           clearInterval(heartbeat);
           unsubscribe();
+          if (vpnStatePushTimer) { clearTimeout(vpnStatePushTimer); vpnStatePushTimer = null; }
           if (onVpnStateChanged) nvpnEvents.off('state-changed', onVpnStateChanged);
         };
         req.on('close', cleanup);
