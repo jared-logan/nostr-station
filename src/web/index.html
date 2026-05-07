@@ -9,11 +9,45 @@
 <script>
   // Apply persisted accent theme before paint to avoid a flash of purple
   // when the user has picked a different color in the Config panel.
+  // Ditto themes carry user-published colors so they're injected via a
+  // dynamic <style> block — kept inline here so the colors land before
+  // first paint just like the static presets.
   (function () {
     try {
       var t = localStorage.getItem('nostr-station:theme');
-      if (t && t !== 'purple' && /^(green|red|blue|white)$/.test(t)) {
+      if (!t || t === 'purple') return;
+      if (/^(green|red|blue|white)$/.test(t)) {
         document.documentElement.setAttribute('data-theme', t);
+        return;
+      }
+      if (t === 'ditto') {
+        var raw = localStorage.getItem('nostr-station:ditto-theme');
+        if (!raw) return;
+        var d = JSON.parse(raw);
+        var hex = /^#[0-9a-fA-F]{3,8}$/;
+        var primary    = d && hex.test(d.primary || '')    ? d.primary    : '';
+        var background = d && hex.test(d.background || '') ? d.background : '';
+        if (!primary && !background) return;
+        var decls = [];
+        if (primary) {
+          decls.push('--accent: ' + primary);
+          decls.push('--accent-bright: color-mix(in srgb, ' + primary + ' 65%, #ffffff)');
+          decls.push('--accent-dim:    color-mix(in srgb, ' + primary + ' 65%, #000000)');
+          decls.push('--info:          color-mix(in srgb, ' + primary + ' 70%, #ffffff)');
+        }
+        if (background) {
+          decls.push('--bg: ' + background);
+          decls.push('--bg-elev:       color-mix(in srgb, ' + background + ' 95%, #ffffff)');
+          decls.push('--bg-card:       color-mix(in srgb, ' + background + ' 92%, #ffffff)');
+          decls.push('--bg-hover:      color-mix(in srgb, ' + background + ' 88%, #ffffff)');
+          decls.push('--border:        color-mix(in srgb, ' + background + ' 88%, #ffffff)');
+          decls.push('--border-strong: color-mix(in srgb, ' + background + ' 80%, #ffffff)');
+        }
+        var style = document.createElement('style');
+        style.id = 'ditto-theme-style';
+        style.textContent = ':root[data-theme="ditto"] { ' + decls.join('; ') + '; }';
+        document.head.appendChild(style);
+        document.documentElement.setAttribute('data-theme', 'ditto');
       }
     } catch (_) { /* localStorage may be blocked; default purple is fine */ }
   })();

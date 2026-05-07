@@ -34,23 +34,94 @@ const THEMES = [
   { id: 'blue',   label: 'Blue',   swatch: '#4A9EFF' },
   { id: 'white',  label: 'White',  swatch: '#FFFFFF' },
 ];
-const THEME_STORAGE_KEY = 'nostr-station:theme';
+const THEME_STORAGE_KEY       = 'nostr-station:theme';
+const DITTO_THEME_STORAGE_KEY = 'nostr-station:ditto-theme';
+// Theme ids that are valid in localStorage. "ditto" is dynamic — its
+// colors come from a separately-stored JSON blob (see DITTO_THEME_*).
+const VALID_THEME_IDS = new Set([...THEMES.map(t => t.id), 'ditto']);
 
 function getTheme() {
   try {
     const t = localStorage.getItem(THEME_STORAGE_KEY);
-    if (t && THEMES.some(x => x.id === t)) return t;
+    if (t && VALID_THEME_IDS.has(t)) return t;
   } catch (_) { /* ignore */ }
   return 'purple';
 }
 function setTheme(id) {
-  if (!THEMES.some(x => x.id === id)) return;
+  if (!VALID_THEME_IDS.has(id)) return;
   if (id === 'purple') {
     document.documentElement.removeAttribute('data-theme');
   } else {
     document.documentElement.setAttribute('data-theme', id);
   }
+  if (id === 'ditto') applyDittoStyleBlock(getDittoTheme());
+  else                clearDittoStyleBlock();
   try { localStorage.setItem(THEME_STORAGE_KEY, id); } catch (_) { /* ignore */ }
+}
+
+// ── Ditto theme storage + dynamic style injection ───────────────────────
+// Ditto themes carry user-published colors (kind 16767), so they can't
+// live as static :root[data-theme="..."] blocks in app.css. Instead we
+// inject a <style id="ditto-theme-style"> at runtime whose contents are
+// derived from the stored { primary, background } pair.
+function getDittoTheme() {
+  try {
+    const raw = localStorage.getItem(DITTO_THEME_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch (_) { /* ignore */ }
+  return null;
+}
+function saveDittoTheme(theme) {
+  try { localStorage.setItem(DITTO_THEME_STORAGE_KEY, JSON.stringify(theme)); } catch (_) {}
+}
+function clearDittoTheme() {
+  try { localStorage.removeItem(DITTO_THEME_STORAGE_KEY); } catch (_) {}
+}
+// CSS hex color literal — `#` + 3/4/6/8 hex digits. Mirrors the server-side
+// regex so we don't trust whatever survived the API boundary.
+const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
+function applyDittoStyleBlock(theme) {
+  if (!theme || (!theme.primary && !theme.background)) {
+    clearDittoStyleBlock();
+    return;
+  }
+  // Sanitize. The server already validated, but localStorage is
+  // attacker-writable from any same-origin XSS, so re-check before we
+  // shove user-provided strings into a <style> tag.
+  const primary    = HEX_RE.test(theme.primary || '')    ? theme.primary    : '';
+  const background = HEX_RE.test(theme.background || '') ? theme.background : '';
+  const decls = [];
+  if (primary) {
+    decls.push(`--accent: ${primary};`);
+    decls.push(`--accent-bright: color-mix(in srgb, ${primary} 65%, #ffffff);`);
+    decls.push(`--accent-dim:    color-mix(in srgb, ${primary} 65%, #000000);`);
+    decls.push(`--info:          color-mix(in srgb, ${primary} 70%, #ffffff);`);
+  }
+  if (background) {
+    // Derive the elevation ramp so cards stay lighter than the page —
+    // otherwise --bg-elev / --bg-card (which are static in :root) look
+    // darker than a non-default --bg and the layering breaks.
+    decls.push(`--bg: ${background};`);
+    decls.push(`--bg-elev:   color-mix(in srgb, ${background} 95%, #ffffff);`);
+    decls.push(`--bg-card:   color-mix(in srgb, ${background} 92%, #ffffff);`);
+    decls.push(`--bg-hover:  color-mix(in srgb, ${background} 88%, #ffffff);`);
+    decls.push(`--border:    color-mix(in srgb, ${background} 88%, #ffffff);`);
+    decls.push(`--border-strong: color-mix(in srgb, ${background} 80%, #ffffff);`);
+  }
+  const css = `:root[data-theme="ditto"] { ${decls.join(' ')} }`;
+  let el = document.getElementById('ditto-theme-style');
+  if (!el) {
+    el = document.createElement('style');
+    el.id = 'ditto-theme-style';
+    document.head.appendChild(el);
+  }
+  el.textContent = css;
+}
+function clearDittoStyleBlock() {
+  const el = document.getElementById('ditto-theme-style');
+  if (el) el.remove();
 }
 function renderThemePicker() {
   const current = getTheme();
@@ -77,9 +148,134 @@ function wireThemePicker() {
     if (!id || id === getTheme()) return;
     setTheme(id);
     // Re-render swatches in place — cheaper than reloading the whole
-    // panel and keeps focus state on the picker.
+    // panel and keeps focus state on the picker. Also re-render the
+    // Ditto card since its "active" badge depends on getTheme().
     root.outerHTML = renderThemePicker();
     wireThemePicker();
+    refreshDittoCard();
+  });
+}
+
+// ── Ditto theme card ─────────────────────────────────────────────────────
+function fmtAgo(tsMs) {
+  if (!tsMs) return '';
+  const s = Math.floor((Date.now() - tsMs) / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+function renderDittoCard() {
+  const theme  = getDittoTheme();
+  const active = getTheme() === 'ditto';
+  if (!theme) {
+    return `
+      <div class="ditto-theme" id="cfg-ditto-card">
+        <div class="ditto-theme-head">
+          <div class="ditto-theme-title">Ditto theme sync</div>
+        </div>
+        <div class="ditto-theme-empty">
+          Pull your published Ditto profile theme (kind 16767) from your read relays
+          and apply its primary color + background. No theme synced yet.
+        </div>
+        <div class="ditto-theme-actions">
+          <button class="primary" id="cfg-ditto-sync">Sync from relays</button>
+        </div>
+      </div>
+    `;
+  }
+  const swatches = [];
+  if (theme.primary)    swatches.push({ role: 'primary',    hex: theme.primary });
+  if (theme.background) swatches.push({ role: 'background', hex: theme.background });
+  return `
+    <div class="ditto-theme ${active ? 'active' : ''}" id="cfg-ditto-card">
+      <div class="ditto-theme-head">
+        <div class="ditto-theme-title">${escapeHtml(theme.title || 'Ditto theme')}</div>
+        <div class="ditto-theme-status ${active ? 'ok' : ''}">
+          ${active ? '● applied' : 'synced ' + escapeHtml(fmtAgo(theme.syncedAt))}
+        </div>
+      </div>
+      <div class="ditto-theme-preview">
+        ${swatches.map(s => `
+          <span class="swatch">
+            <span class="chip" style="background:${escapeHtml(s.hex)}"></span>
+            <code>${escapeHtml(s.hex)}</code>
+            <span style="color:var(--muted)">${escapeHtml(s.role)}</span>
+          </span>
+        `).join('')}
+      </div>
+      <div class="ditto-theme-actions">
+        ${active
+          ? `<button id="cfg-ditto-resync">Re-sync</button>`
+          : `<button class="primary" id="cfg-ditto-apply">Apply</button>
+             <button id="cfg-ditto-resync">Re-sync</button>`
+        }
+        <button class="danger" id="cfg-ditto-clear">Clear</button>
+      </div>
+    </div>
+  `;
+}
+function refreshDittoCard() {
+  const root = $('cfg-ditto-card');
+  if (!root) return;
+  root.outerHTML = renderDittoCard();
+  wireDittoCard();
+}
+async function syncDittoTheme() {
+  const btns = $$('#cfg-ditto-card button');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const r = await api('/api/ditto/theme');
+    if (!r || !r.found) {
+      const reason = r?.reason === 'no-npub'   ? 'No npub configured.'
+                  : r?.reason === 'no-relays'  ? 'Add a read relay first.'
+                  : r?.reason === 'no-event'   ? 'No kind-16767 theme on your relays. Publish one in Ditto first.'
+                  : r?.reason === 'no-colors'  ? 'Found a theme event but it had no usable colors.'
+                  :                              'Could not find a Ditto theme.';
+      toast('No Ditto theme', reason, 'warn');
+      btns.forEach(b => b.disabled = false);
+      return;
+    }
+    const theme = {
+      title:      r.title || 'Ditto theme',
+      primary:    r.primary    || '',
+      background: r.background || '',
+      syncedAt:   Date.now(),
+    };
+    saveDittoTheme(theme);
+    setTheme('ditto');
+    toast('Ditto theme applied', theme.title, 'ok');
+    refreshDittoCard();
+    // Picker swatches need to drop their "active" highlight too.
+    const picker = $('cfg-theme-picker');
+    if (picker) {
+      picker.outerHTML = renderThemePicker();
+      wireThemePicker();
+    }
+  } catch (e) {
+    toast('Sync failed', String(e.message || e), 'err');
+    btns.forEach(b => b.disabled = false);
+  }
+}
+function wireDittoCard() {
+  $('cfg-ditto-sync')?.addEventListener('click', syncDittoTheme);
+  $('cfg-ditto-resync')?.addEventListener('click', syncDittoTheme);
+  $('cfg-ditto-apply')?.addEventListener('click', () => {
+    setTheme('ditto');
+    refreshDittoCard();
+    const picker = $('cfg-theme-picker');
+    if (picker) { picker.outerHTML = renderThemePicker(); wireThemePicker(); }
+  });
+  $('cfg-ditto-clear')?.addEventListener('click', () => {
+    clearDittoTheme();
+    if (getTheme() === 'ditto') setTheme('purple');
+    refreshDittoCard();
+    const picker = $('cfg-theme-picker');
+    if (picker) { picker.outerHTML = renderThemePicker(); wireThemePicker(); }
+    toast('Ditto theme cleared', '', 'ok');
   });
 }
 
@@ -7148,6 +7344,7 @@ const ConfigPanel = (() => {
             </div>
           </div>
         </div>
+        ${renderDittoCard()}
       </div>
 
       <div class="config-section">
@@ -7375,8 +7572,9 @@ const ConfigPanel = (() => {
 
     `;
 
-    // Appearance — accent theme picker (purple/green/red/blue)
+    // Appearance — accent theme picker + Ditto sync card
     wireThemePicker();
+    wireDittoCard();
 
     // Wire toggles
     $('cfg-auth').addEventListener('change', (e) => saveRelayFlag('auth', e.target.checked));

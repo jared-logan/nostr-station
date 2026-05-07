@@ -75,6 +75,7 @@ import { buildAiContext } from './ai-context.js';
 import { seedStationContext } from './editor.js';
 import { handleProjects } from './routes/projects.js';
 import { handleIdentity } from './routes/identity.js';
+import { handleDitto } from './routes/ditto.js';
 import { handleNgit } from './routes/ngit.js';
 import {
   handleAi,
@@ -1494,6 +1495,10 @@ export async function startWebServer(port: number): Promise<void> {
       // Covers /api/identity/config, /api/identity/set, /api/identity/relays/{add,remove},
       // /api/identity/profile/preview, /api/identity/profile, /api/identity/profile/sync.
       if (await handleIdentity(req, res, url, method)) return;
+
+      // ── Ditto theme sync (routes/ditto.ts) ─────────────────────────────
+      // GET /api/ditto/theme — fetch latest kind 16767 from owner's relays.
+      if (await handleDitto(req, res, url, method)) return;
 
       // Setup wizard completion — called once from the Done stage. Flips
       // setupComplete=true (ending the localhost exemption on this box
