@@ -29,7 +29,10 @@ import {
 // `/api/config/set` flow below still uses the in-file PROVIDERS map
 // declared further down and the keychain slot `ai-api-key`; that
 // surface goes away when the Chat pane fully switches to /api/ai/chat.
-import { migrateIfNeeded } from './ai-config.js';
+import { migrateIfNeeded, readAiConfig } from './ai-config.js';
+import {
+  getProvider, keychainAccountFor, type ApiProvider,
+} from './ai-providers.js';
 import { gatherStatus } from '../commands/Status.js';
 import { DEFAULT_DB_PATH } from '../relay/store.js';
 import type { Relay } from '../relay/index.js';
@@ -241,7 +244,79 @@ function inferProviderName(baseUrl: string): string {
 // model, context presence). `configured` is false when an API key is still
 // missing — in that case the Chat panel shows an onboarding callout instead
 // of proxying requests, but Status/Relay/Logs/Config panels are unaffected.
+//
+// Resolution order matches /api/ai/chat (routes/ai.ts):
+//   1. ai-config.json `defaults.chat` provider — the modern multi-provider
+//      layout the setup wizard, Config panel, and Chat dropdown all write
+//      to. Key resolved from keychain slot `ai:<id>`, with an
+//      ANTHROPIC_API_KEY env-var + legacy `ai-api-key` slot fallback for
+//      anthropic so users mid-migration still see "configured".
+//   2. Legacy ~/.claude_env + `ai-api-key` slot — the v0.x single-provider
+//      layout. Only consulted when ai-config.json has no chat default,
+//      which means migrateIfNeeded() decided not to migrate (no key found
+//      at boot) and the user hasn't touched Config / wizard since.
 async function loadProviderConfig(): Promise<{ cfg: ProviderConfig | null; meta: { provider: string; model: string; baseUrl: string | null; configured: boolean; reason?: string } }> {
+  const bareKeys = new Set(['none', 'ollama', 'lm-studio', 'maple-desktop-auto']);
+
+  // ── Phase-2 path: ai-config.json + per-provider keychain ─────────────
+  const aiCfg  = readAiConfig();
+  const chatId = aiCfg.defaults.chat;
+  if (chatId) {
+    const provider = getProvider(chatId);
+    if (provider && provider.type === 'api') {
+      const apiP    = provider as ApiProvider;
+      const entry   = aiCfg.providers[chatId];
+      const baseUrl = entry?.baseUrl ?? apiP.baseUrl;
+      const model   = entry?.model   ?? apiP.defaultModel;
+      const isAnthropic = apiP.flavor === 'anthropic';
+
+      let apiKey = '';
+      if (apiP.bareKey) {
+        apiKey = apiP.bareKey;
+      } else {
+        try {
+          apiKey = (await getKeychain().retrieve(keychainAccountFor(chatId))) ?? '';
+        } catch { apiKey = ''; }
+        // Anthropic env-var + legacy-slot fallback. Mirrors the chat
+        // path so the header reports "configured" for users who set
+        // ANTHROPIC_API_KEY in their shell env or who haven't yet
+        // re-saved their key under the new `ai:anthropic` slot.
+        if (!apiKey && chatId === 'anthropic') {
+          apiKey = process.env.ANTHROPIC_API_KEY ?? '';
+          if (!apiKey) {
+            try { apiKey = (await getKeychain().retrieve('ai-api-key')) ?? ''; }
+            catch { apiKey = ''; }
+          }
+        }
+      }
+
+      const meta = {
+        provider:   provider.displayName,
+        model,
+        baseUrl:    isAnthropic ? null : baseUrl,
+        configured: false as boolean,
+        reason:     undefined as string | undefined,
+      };
+      const isBare = bareKeys.has(apiKey);
+      if (!apiKey && !apiP.bareKey) {
+        meta.reason = `${provider.displayName} API key not set — add one in Config`;
+        return { cfg: null, meta };
+      }
+      meta.configured = true;
+      return {
+        cfg: {
+          isAnthropic,
+          baseUrl,
+          model,
+          apiKey: isBare ? '' : apiKey,
+          providerName: provider.displayName,
+        },
+        meta,
+      };
+    }
+  }
+
+  // ── Legacy v0.x fallback (~/.claude_env + `ai-api-key` slot) ─────────
   const homeDir = os.homedir();
   const { baseUrl, model } = parseClaudeEnv(homeDir);
   const isAnthropic = !baseUrl;
@@ -260,14 +335,9 @@ async function loadProviderConfig(): Promise<{ cfg: ProviderConfig | null; meta:
     }
   } catch {}
 
-  // Anthropic demands a real key; OpenAI-compat Custom Providers
-  // pointing at local daemons (Ollama / LM Studio / etc.) may use a
-  // sentinel — the values below skip the "configured?" check so an
-  // empty key there still passes.
-  const bareKeys = new Set(['none', 'ollama', 'lm-studio', 'maple-desktop-auto']);
   const isBare = bareKeys.has(apiKey);
   if (isAnthropic && !apiKey) {
-    meta.reason = 'Anthropic API key not set — run: nostr-station keychain set ai-api-key';
+    meta.reason = 'Anthropic API key not set — add one in Config';
     return { cfg: null, meta };
   }
 

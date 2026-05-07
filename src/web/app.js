@@ -754,6 +754,13 @@ async function refreshHeader() {
   refreshIdentityChip();
 }
 
+// Header reflects ai-config.json `defaults.chat` + the resolved key/model.
+// Any code path that mutates that state — Config panel provider edits,
+// setup-wizard key entry, Chat-pane provider/model dropdown changes —
+// dispatches `api-config-changed`, so listening here keeps the header
+// in sync without each call site having to remember to call us.
+document.addEventListener('api-config-changed', () => { refreshHeader(); });
+
 // Single source of truth for the human-readable context label used by the
 // chat header and the Config panel row. The /api/config response carries
 // a `contextSource` of 'project' | 'station' plus a `hasContextFile`
@@ -2291,6 +2298,10 @@ const ChatPanel = (() => {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ defaults: { chat: id } }),
       });
+      // Header reads ai-config.json `defaults.chat` via /api/config —
+      // notify so it repaints with the new provider name + model. Skipping
+      // this leaves the header chip stuck on whatever was set at boot.
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
     } catch { /* api() already toasted */ }
   }
 
@@ -2313,6 +2324,7 @@ const ChatPanel = (() => {
         const entry = aiProvidersCache.providers.find(p => p.id === id);
         if (entry) entry.model = mdl;
       }
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
     } catch { /* api() already toasted */ }
   }
 
