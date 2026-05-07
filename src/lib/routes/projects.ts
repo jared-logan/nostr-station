@@ -30,6 +30,9 @@
  *   POST   /api/projects/:id/exec              — SSE
  *   POST   /api/projects/:id/nsite/deploy      — SSE
  *   GET    /api/projects/:id/git-state         — sync.getProjectGitState
+ *   GET    /api/projects/:id/git-identity      — resolved repo-local identity + source
+ *   PUT    /api/projects/:id/git-identity      — set repo-local override
+ *   DELETE /api/projects/:id/git-identity      — clear repo-local override
  *   POST   /api/projects/:id/sync              — sync.syncProject
  *   POST   /api/projects/:id/snapshot          — sync.snapshotProject
  *   POST   /api/chat/context                   — set active project
@@ -59,6 +62,9 @@ import { isValidRelayUrl } from '../identity.js';
 import {
   getProjectGitState, syncProject, snapshotProject, fetchNgitProposals,
 } from '../sync.js';
+import {
+  readProjectGitIdentity, writeProjectGitIdentity, clearProjectGitIdentity,
+} from '../git-identity.js';
 import {
   readBody, streamExec, streamExecError, setActiveChatProjectId,
   getAutoSyncRef,
@@ -692,6 +698,52 @@ export async function handleProjects(
     // The 404 for unknown :id is handled by the project lookup at the
     // top of the projMatch block — control never reaches here without
     // a real Project in scope.
+    // Per-project git identity. Source attribution ('local' / 'global'
+    // / 'unset') lets the Settings UI render "inherited from global"
+    // vs. "set per-project" without an extra round-trip.
+    if (tail === 'git-identity' && method === 'GET') {
+      if (!project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'project has no local path' }));
+        return true;
+      }
+      const resolved = readProjectGitIdentity(project.path);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(resolved));
+      return true;
+    }
+    if (tail === 'git-identity' && method === 'PUT') {
+      if (!project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'project has no local path' }));
+        return true;
+      }
+      let parsed: any = {};
+      try { parsed = JSON.parse(await readBody(req)); }
+      catch { res.writeHead(400); res.end('bad json'); return true; }
+      const r = writeProjectGitIdentity(project.path, {
+        name:  typeof parsed.name  === 'string' ? parsed.name  : '',
+        email: typeof parsed.email === 'string' ? parsed.email : '',
+      });
+      res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(r));
+      return true;
+    }
+    if (tail === 'git-identity' && method === 'DELETE') {
+      // Clears the repo-local override so the project inherits the
+      // global identity (or hits the "Author identity unknown" wall
+      // again if global is also empty — explicit user choice).
+      if (!project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'project has no local path' }));
+        return true;
+      }
+      const r = clearProjectGitIdentity(project.path);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(r));
+      return true;
+    }
+
     if (tail === 'git-state' && method === 'GET') {
       if (!project.path) {
         res.writeHead(400, { 'Content-Type': 'application/json' });

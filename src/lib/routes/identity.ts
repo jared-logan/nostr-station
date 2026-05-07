@@ -12,6 +12,8 @@
  *   POST   /api/identity/relays/remove         — remove a read relay
  *   POST   /api/identity/grasp/add             — append a grasp server
  *   POST   /api/identity/grasp/remove          — remove a grasp server
+ *   GET    /api/git-identity/global            — current global git identity + presets
+ *   PUT    /api/git-identity/global            — set global git identity (name + email)
  *   GET    /api/identity/profile/preview?npub= — wizard-time public lookup
  *   GET    /api/identity/profile               — owner profile
  *   POST   /api/identity/profile/sync          — bust cache + re-fetch
@@ -21,13 +23,16 @@
  */
 import http from 'http';
 import { WebSocket } from 'ws';
-import {
-  readIdentity, addReadRelay, removeReadRelay,
+import { readIdentity, addReadRelay, removeReadRelay,
   setNpub as setIdentityNpub, setNgitRelay as setIdentityNgitRelay,
   setSetupComplete, isNpubOrHex, isNsec,
   DEFAULT_READ_RELAYS, hexToNpub, npubToHex,
   getGraspServers, addGraspServer, removeGraspServer,
 } from '../identity.js';
+import {
+  readGlobalGitIdentity, writeGlobalGitIdentity,
+  deriveGitIdentity,
+} from '../git-identity.js';
 import { safeHttpUrl } from '../url-safety.js';
 import { readBody } from './_shared.js';
 
@@ -254,6 +259,47 @@ export async function handleIdentity(
     catch { res.writeHead(400); res.end('bad json'); return true; }
     const r = removeGraspServer(String(parsed.url || '').trim());
     res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(r));
+    return true;
+  }
+
+  // Global git identity — read + write the user's `--global` user.name
+  // and user.email from `~/.gitconfig`. Surfaced in the Config panel
+  // so users can see what's set + change it without dropping to a
+  // terminal. Auto-seed (git-identity.ts) is the empty-state fallback
+  // for nostr-station-managed projects; this endpoint is the explicit
+  // user-facing layer that overrides the seed.
+  //
+  // The GET also includes a `presets` block — npub-synthetic and
+  // (when known) the user's npub itself, so the Config panel can
+  // offer a "Use my Nostr identity" preset button without the client
+  // having to know how to derive it.
+  if (url === '/api/git-identity/global' && method === 'GET') {
+    const ident = readIdentity();
+    const current = readGlobalGitIdentity();
+    const npubSynthetic = ident.npub ? deriveGitIdentity(ident.npub) : null;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      current,
+      presets: {
+        npubSynthetic,
+        // nip-05 preset is left for the client to assemble — it depends on
+        // a kind-0 lookup the client may already have cached via the
+        // existing /api/identity/profile endpoint, no point duplicating
+        // the relay query here.
+      },
+    }));
+    return true;
+  }
+  if (url === '/api/git-identity/global' && method === 'PUT') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+    const r = writeGlobalGitIdentity({
+      name:  typeof parsed.name  === 'string' ? parsed.name  : '',
+      email: typeof parsed.email === 'string' ? parsed.email : '',
+    });
+    res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(r));
     return true;
   }

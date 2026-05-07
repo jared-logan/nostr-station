@@ -14,6 +14,8 @@ import { execFileSync } from 'node:child_process';
 
 import {
   deriveGitIdentity, seedRepoGitIdentityIfMissing,
+  readGlobalGitIdentity, writeGlobalGitIdentity,
+  readProjectGitIdentity, writeProjectGitIdentity, clearProjectGitIdentity,
 } from '../src/lib/git-identity.ts';
 
 let ROOT: string;
@@ -111,6 +113,61 @@ test('seedRepoGitIdentityIfMissing: refuses without a Nostr npub', () => {
     });
     assert.equal(result.seeded, false);
     assert.match(result.reason, /Nostr identity/);
+  } finally {
+    process.env.HOME = prevHome;
+    fs.rmSync(FAKE_HOME, { recursive: true, force: true });
+  }
+});
+
+test('readProjectGitIdentity: returns repo-local with source=local when set there', () => {
+  // Pin the source-attribution contract the Settings UI relies on.
+  // When the repo has its own user.name + user.email (set via
+  // writeProjectGitIdentity or git config --local), the resolved
+  // identity reports source:'local'.
+  const r = writeProjectGitIdentity(ROOT, { name: 'Local Name', email: 'local@example.com' });
+  assert.equal(r.ok, true);
+  const resolved = readProjectGitIdentity(ROOT);
+  assert.equal(resolved.name,   'Local Name');
+  assert.equal(resolved.email,  'local@example.com');
+  assert.equal(resolved.source, 'local');
+});
+
+test('writeProjectGitIdentity: validates name + email + control chars', () => {
+  assert.equal((writeProjectGitIdentity(ROOT, { name: '',         email: 'a@b' }) as any).ok, false);
+  assert.equal((writeProjectGitIdentity(ROOT, { name: 'x',        email: ''    }) as any).ok, false);
+  assert.equal((writeProjectGitIdentity(ROOT, { name: 'x',        email: 'noatsign' }) as any).ok, false);
+  assert.equal((writeProjectGitIdentity(ROOT, { name: 'x\nevil',  email: 'a@b' }) as any).ok, false);
+  assert.equal((writeProjectGitIdentity(ROOT, { name: 'ok',       email: 'ok@example.com' }) as any).ok, true);
+});
+
+test('clearProjectGitIdentity: removes repo-local, falls back to global or unset', () => {
+  // Seed a local identity, then clear it. The local config slot
+  // should be empty afterward — `readProjectGitIdentity` either
+  // falls through to global (if any) or returns source:'unset'.
+  writeProjectGitIdentity(ROOT, { name: 'Temp', email: 'temp@example.com' });
+  clearProjectGitIdentity(ROOT);
+  const after = readProjectGitIdentity(ROOT);
+  // Source must NOT be 'local' anymore — that's the contract callers
+  // depend on to render "inherited from global" vs "set per-project."
+  assert.notEqual(after.source, 'local');
+});
+
+test('writeGlobalGitIdentity: rejects malformed input without writing', () => {
+  // Don't actually write to the test runner's global gitconfig —
+  // instead point HOME at a tmpdir so writes land somewhere
+  // throwaway.
+  const FAKE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-gid-glob-'));
+  const prevHome = process.env.HOME;
+  process.env.HOME = FAKE_HOME;
+  try {
+    assert.equal((writeGlobalGitIdentity({ name: '',  email: 'a@b' }) as any).ok, false);
+    assert.equal((writeGlobalGitIdentity({ name: 'x', email: ''    }) as any).ok, false);
+    // Valid input writes — verify by reading back.
+    const r = writeGlobalGitIdentity({ name: 'Glob Name', email: 'glob@example.com' });
+    assert.equal(r.ok, true);
+    const back = readGlobalGitIdentity();
+    assert.equal(back.name,  'Glob Name');
+    assert.equal(back.email, 'glob@example.com');
   } finally {
     process.env.HOME = prevHome;
     fs.rmSync(FAKE_HOME, { recursive: true, force: true });
