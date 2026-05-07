@@ -446,6 +446,18 @@ export interface NvpnRelays {
   relays:     string[];
 }
 
+// Curated "good defaults" the dashboard offers via the Config panel's
+// "Use recommended" button. Deliberately separate from whatever nvpn
+// itself ships as init defaults — those have flaked in the field
+// (snort.social / temp.iris.to returning 504s). We keep this list
+// short and only include relays we've measured as healthy. Update
+// here when relay quality changes; the UI button surfaces the new
+// list on the next dashboard load.
+export const RECOMMENDED_NVPN_RELAYS: readonly string[] = Object.freeze([
+  'wss://relay.damus.io',
+  'wss://relay.primal.net',
+]);
+
 // Pure helper — extract the relay list from the parsed sections of a
 // config.toml. Tries the [[networks]] section first (current schema),
 // then a [nostr] section (legacy). Exported for unit tests.

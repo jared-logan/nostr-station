@@ -41,6 +41,7 @@ import {
   setNvpnSettings, statsNvpn,
   setNvpnAlias, removeNvpnAlias,
   readNvpnRelays, addNvpnRelay, removeNvpnRelay, setNvpnRelays,
+  RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
 import { readBody } from './_shared.js';
 
@@ -192,6 +193,13 @@ export async function handleNvpn(
   if (url === '/api/nvpn/relays' && method === 'GET') {
     const r = readNvpnRelays();
     await writeJson(res, 200, r);
+    return true;
+  }
+  // Curated "good defaults" the dashboard offers as a one-click recovery
+  // when the configured relays are flaking. Lives in nvpn.ts so the
+  // server is the single source of truth — UI fetches and previews.
+  if (url === '/api/nvpn/relays/recommended' && method === 'GET') {
+    await writeJson(res, 200, { relays: [...RECOMMENDED_NVPN_RELAYS] });
     return true;
   }
   if (url === '/api/nvpn/relays/add' && method === 'POST') {

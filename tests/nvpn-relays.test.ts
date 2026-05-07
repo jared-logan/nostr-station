@@ -4,6 +4,7 @@ import {
   extractNvpnRelays,
   isValidRelayUrl,
   buildSetRelaysArgs,
+  RECOMMENDED_NVPN_RELAYS,
 } from '../src/lib/nvpn.ts';
 
 // ── extractNvpnRelays ──────────────────────────────────────────────────
@@ -96,4 +97,28 @@ test('buildSetRelaysArgs: empty list still produces a valid set call shape', () 
   // here, but the pure builder shouldn't crash on empty input —
   // separation lets a future "reset" code path use this if needed.
   assert.deepEqual(buildSetRelaysArgs([]), ['set', '--json']);
+});
+
+// ── RECOMMENDED_NVPN_RELAYS ────────────────────────────────────────────
+
+test('RECOMMENDED_NVPN_RELAYS: non-empty and all entries are valid relay URLs', () => {
+  // The "Use recommended" button replaces the user's list wholesale,
+  // so the curated set must (1) be non-empty (setNvpnRelays would
+  // reject otherwise), and (2) contain only URLs that pass our
+  // own validator — protects against typos sneaking in via PR.
+  assert.ok(RECOMMENDED_NVPN_RELAYS.length > 0, 'curated list must not be empty');
+  for (const url of RECOMMENDED_NVPN_RELAYS) {
+    assert.equal(isValidRelayUrl(url), true, `not a valid relay URL: ${url}`);
+  }
+});
+
+test('RECOMMENDED_NVPN_RELAYS: deduplicated', () => {
+  // Sanity: don't ship a list that contains the same URL twice. Doesn't
+  // strictly cause user-visible bugs (setNvpnRelays de-dups) but a
+  // duplicate in source is almost certainly a typo.
+  const seen = new Set();
+  for (const url of RECOMMENDED_NVPN_RELAYS) {
+    assert.equal(seen.has(url), false, `duplicate in recommended set: ${url}`);
+    seen.add(url);
+  }
 });

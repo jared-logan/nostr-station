@@ -7791,7 +7791,8 @@ const ConfigPanel = (() => {
                 <button class="primary" id="vpn-relay-add">add</button>
               </div>
             </div>
-            <div class="keyrow" style="margin-top:6px;justify-content:flex-end">
+            <div class="keyrow" style="margin-top:6px;justify-content:flex-end;gap:6px">
+              <button id="vpn-relay-recommended">Use recommended</button>
               <button id="vpn-relay-recheck">Check reachability</button>
             </div>
             <div class="key-status-line ${vpnRelays && vpnRelays.relays && vpnRelays.relays.length ? 'ok' : ''}" id="vpn-relays-status">
@@ -8017,6 +8018,12 @@ const ConfigPanel = (() => {
         e.preventDefault();
         recheckBtn.disabled = true;
         try { await loadVpnRelayHealth(); } finally { recheckBtn.disabled = false; }
+      });
+      const recommendedBtn = $('vpn-relay-recommended');
+      if (recommendedBtn) recommendedBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        recommendedBtn.disabled = true;
+        try { await useRecommendedVpnRelays(); } finally { recommendedBtn.disabled = false; }
       });
       // Auto-fetch reachability after the panel paints, but only if the
       // user actually has relays configured. Fire-and-forget — the
@@ -8906,6 +8913,36 @@ const ConfigPanel = (() => {
       toast('Relay removed', url, 'ok');
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
+  }
+
+  // One-click recovery: replace the user's relay list with the
+  // dashboard-curated set. Server holds the canonical list (via
+  // /api/nvpn/relays/recommended) so we don't drift between client
+  // and server. Confirms first because this is destructive — any
+  // relays the user has added beyond the recommended set are removed.
+  async function useRecommendedVpnRelays() {
+    let recommended = [];
+    try {
+      const r = await api('/api/nvpn/relays/recommended');
+      recommended = Array.isArray(r?.relays) ? r.relays : [];
+    } catch (e) { toast('Failed to load recommended', e.message, 'err'); return; }
+    if (recommended.length === 0) { toast('No recommended set defined', '', 'err'); return; }
+    const ok = confirm(
+      `Replace your nostr-vpn relay list with the recommended set?\n\n` +
+      recommended.map(u => `  • ${u}`).join('\n') +
+      `\n\nAny existing relays will be removed.`
+    );
+    if (!ok) return;
+    try {
+      const r = await api('/api/nvpn/relays/set', {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ relays: recommended }),
+      });
+      if (!r.ok) throw new Error(r.detail || 'set failed');
+      toast('Relays updated', `${recommended.length} recommended relay${recommended.length === 1 ? '' : 's'}`, 'ok');
+      load();
+    } catch (e) { toast('Update failed', e.message, 'err'); }
   }
 
   // Trailing-slash normalization — config.toml may store "wss://x/" while
