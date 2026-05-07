@@ -22,6 +22,7 @@ import path from 'path';
 import { spawn, execSync } from 'child_process';
 import { nip19 } from 'nostr-tools';
 import { readIdentity, isValidRelayUrl } from '../identity.js';
+import { seedRepoGitIdentityIfMissing } from '../git-identity.js';
 import { safeHttpUrl } from '../url-safety.js';
 import { readBody, streamExec } from './_shared.js';
 
@@ -490,10 +491,24 @@ export async function handleNgit(
     // Emit the fully-resolved target as an `info` frame so the client
     // can call /api/projects/detect and store the absolute path in
     // projects.json — detect does not expand "~".
+    //
+    // onClose hook: after a successful clone, seed repo-local git
+    // identity from the configured Nostr identity if the user has
+    // none set. Same fix as project-scaffold's freshenGitRepo —
+    // closes the "Author identity unknown" wall the user would
+    // otherwise hit on their first commit in the cloned repo.
     streamExec(
       { bin: 'git', args: ['clone', cloneUrl, target], env: { NO_COLOR: '1', TERM: 'dumb' } },
       res, req, undefined,
       { info: 'resolvedPath', value: target },
+      (code) => {
+        if (code !== 0) return;          // clone failed — nothing to seed
+        if (!fs.existsSync(target)) return;
+        try {
+          const ident = readIdentity();
+          seedRepoGitIdentityIfMissing(target, ident);
+        } catch { /* best-effort */ }
+      },
     );
     return true;
   }

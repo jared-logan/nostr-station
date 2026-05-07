@@ -29,6 +29,8 @@ import type http from 'http';
 import { createProject } from './projects.js';
 import { getTemplate } from './templates.js';
 import { seedProjectConfig } from './project-config.js';
+import { readIdentity } from './identity.js';
+import { seedRepoGitIdentityIfMissing } from './git-identity.js';
 
 export type ScaffoldSource =
   | { type: 'local-only' }
@@ -124,6 +126,18 @@ async function freshenGitRepo(target: string, message: string, res: http.ServerR
     writeLine(res, 'stderr', `(git reset) git init failed (code ${initCode})`);
     return;
   }
+
+  // Auto-seed git identity from the configured Nostr identity if
+  // none is configured yet (locally or globally). Closes the
+  // "fresh VM trips on `git commit`" gap that Shakespeare doesn't
+  // have because it uses isomorphic-git in the browser. Idempotent:
+  // a user with their own global git identity gets a no-op.
+  // Repo-local config only — see git-identity.ts for the
+  // blast-radius rationale.
+  try {
+    const seed = seedRepoGitIdentityIfMissing(target, readIdentity());
+    if (seed.seeded) writeLine(res, 'sys', seed.reason);
+  } catch { /* best-effort — falls through to the identity check below */ }
 
   // Check for git identity. Without name+email, `git commit` aborts with
   // a multi-line "please tell me who you are" error that adds nothing
