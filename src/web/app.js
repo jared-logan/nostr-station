@@ -395,7 +395,7 @@ function clearSessionToken() {
 // Adds the Bearer session token on every call (unauthenticated requests to
 // public /api/auth/* paths still work — the server ignores the header).
 // On 401, clears the token and shows the auth screen without a page reload.
-async function api(path, init) {
+async function api(path, init, opts) {
   const token = getSessionToken();
   const headers = new Headers(init?.headers || {});
   if (token && !headers.has('Authorization')) {
@@ -403,7 +403,7 @@ async function api(path, init) {
   }
   let res;
   try { res = await fetch(path, { ...init, headers }); }
-  catch (e) { toast('Network error', path, 'err'); throw e; }
+  catch (e) { if (!opts?.silent) toast('Network error', path, 'err'); throw e; }
 
   if (res.status === 401 && !path.startsWith('/api/auth/')) {
     // Session expired or token revoked — drop back to the auth screen
@@ -416,7 +416,12 @@ async function api(path, init) {
   if (!res.ok) {
     let body = '';
     try { body = (await res.text()).slice(0, 180); } catch {}
-    toast(`${path} → ${res.status}`, body, 'err');
+    // `silent` is for fire-and-forget background fetches whose failure
+    // is expected / non-actionable for the user (e.g. an auto-fire
+    // netcheck against a flaky relay set will time out for as long as
+    // the relays stay bad — toasting every time would be noise).
+    // Caller still gets the throw and decides what to do.
+    if (!opts?.silent) toast(`${path} → ${res.status}`, body, 'err');
     throw new Error(`${path} ${res.status}`);
   }
   const ct = res.headers.get('content-type') || '';
@@ -7371,6 +7376,13 @@ const LogsPanel = (() => {
 const ConfigPanel = (() => {
   const container = $('config-sections');
 
+  // 60s TTL cache for `nvpn netcheck --json` so the auto-fire
+  // reachability check doesn't re-spawn an 8s probe on every Config
+  // render (especially painful when the user's relay set is flaky —
+  // which is exactly when they're likely to be opening Config to fix
+  // it). Manual "Check reachability" passes { force:true } to bypass.
+  let vpnRelayHealthCache = null; // { fetchedAt: ms, raw: object|null }
+
   async function load() {
     container.innerHTML = '<div class="config-section"><div style="color:var(--muted)">loading…</div></div>';
     try {
@@ -8017,7 +8029,7 @@ const ConfigPanel = (() => {
       if (recheckBtn) recheckBtn.addEventListener('click', async (e) => {
         e.preventDefault();
         recheckBtn.disabled = true;
-        try { await loadVpnRelayHealth(); } finally { recheckBtn.disabled = false; }
+        try { await loadVpnRelayHealth({ force: true }); } finally { recheckBtn.disabled = false; }
       });
       const recommendedBtn = $('vpn-relay-recommended');
       if (recommendedBtn) recommendedBtn.addEventListener('click', async (e) => {
@@ -8898,6 +8910,10 @@ const ConfigPanel = (() => {
       if (!r.ok) throw new Error(r.detail || 'add failed');
       toast('Relay added', url, 'ok');
       input.value = '';
+      // Invalidate health cache — the new relay isn't in the cached
+      // netcheck pass, and the user is mid-troubleshoot so a fresh
+      // probe is what they want next time the panel paints.
+      vpnRelayHealthCache = null;
       load();
     } catch (e) { toast('Add failed', e.message, 'err'); }
   }
@@ -8911,6 +8927,7 @@ const ConfigPanel = (() => {
       });
       if (!r.ok) throw new Error(r.detail || 'remove failed');
       toast('Relay removed', url, 'ok');
+      vpnRelayHealthCache = null;
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
   }
@@ -8941,6 +8958,7 @@ const ConfigPanel = (() => {
       });
       if (!r.ok) throw new Error(r.detail || 'set failed');
       toast('Relays updated', `${recommended.length} recommended relay${recommended.length === 1 ? '' : 's'}`, 'ok');
+      vpnRelayHealthCache = null;
       load();
     } catch (e) { toast('Update failed', e.message, 'err'); }
   }
@@ -8958,20 +8976,40 @@ const ConfigPanel = (() => {
   // grey "?" so the absence is visible. Quiet on failure — netcheck
   // requires the daemon to be up; if it's down, leaving the rows
   // un-annotated is the right answer rather than red-flagging everything.
-  async function loadVpnRelayHealth() {
+  //
+  // Auto-fire path (no opts) shares a 60s cache so navigating between
+  // panels doesn't re-spawn an 8-second netcheck on every render. The
+  // manual "Check reachability" button passes { force: true } to bypass.
+  // Cache ttl matches the user's likely "I'm watching this" attention
+  // window — fresh enough to act on, long enough to avoid thrash.
+  async function loadVpnRelayHealth(opts) {
     const list = document.getElementById('vpn-relays');
     if (!list) return;
     const slots = list.querySelectorAll('.relay-health[data-slot="health"]');
     if (slots.length === 0) return;
-    for (const slot of slots) {
-      slot.className = 'relay-health checking';
-      slot.textContent = 'checking…';
-    }
+    const force = !!(opts && opts.force);
+    const cached = vpnRelayHealthCache;
+    const fresh = cached && (Date.now() - cached.fetchedAt < 60_000);
     let raw = null;
-    try {
-      const r = await api('/api/nvpn/netcheck');
-      if (r && r.ok) raw = r.raw || null;
-    } catch { /* silent — daemon may be down */ }
+    if (!force && fresh) {
+      raw = cached.raw;
+    } else {
+      for (const slot of slots) {
+        slot.className = 'relay-health checking';
+        slot.textContent = 'checking…';
+      }
+      try {
+        // silent:true so a flaky relay set (the very thing this UI exists
+        // to fix) doesn't pop a red toast for every Config-panel render.
+        // Caller still gets the throw and falls into the catch.
+        const r = await api('/api/nvpn/netcheck', undefined, { silent: true });
+        if (r && r.ok) raw = r.raw || null;
+      } catch { /* silent — daemon may be down or relays unreachable */ }
+      // Cache the attempt regardless of outcome. Failures are usually
+      // sticky (user's relay set stays bad until they fix it), so
+      // re-firing every render adds latency with no new info.
+      vpnRelayHealthCache = { fetchedAt: Date.now(), raw };
+    }
     if (!raw) {
       for (const slot of slots) { slot.className = 'relay-health'; slot.textContent = ''; }
       return;
