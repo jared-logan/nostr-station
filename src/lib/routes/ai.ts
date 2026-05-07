@@ -568,14 +568,24 @@ export async function handleAi(
 
     // Tool context: only enabled when an active project is selected
     // AND the project has a path. Without a path, tools have nothing
-    // to operate on (and runTool would error per-call). Permissions
-    // resolve project-override → station default 'read-only'.
+    // to operate on (and runTool would error per-call).
+    //
+    // Permissions resolve project-override → station default
+    // 'auto-edit'. Pre-fix the default was 'read-only', which forced
+    // an Approve/Reject prompt on every write_file / apply_patch /
+    // delete_file the agent attempted — closer to "over-cautious
+    // junior dev" than the bias-toward-action UX users come in with
+    // from shakespeare.diy. 'auto-edit' approves writes silently but
+    // still gates run_command (the actual exec floor stays). Users
+    // who want the old behaviour can flip to 'read-only' via the
+    // chat-header toggle (next commit on this branch); they can
+    // also flip up to 'yolo' to auto-approve run_command too.
     let toolCtx: ToolContext | null = null;
     if (project && project.path) {
       const permLocal = readProjectPermissions(project);
       toolCtx = {
         project,
-        permissions: permLocal?.mode ?? 'read-only',
+        permissions: permLocal?.mode ?? 'auto-edit',
       };
     }
 

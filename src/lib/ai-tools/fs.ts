@@ -113,9 +113,15 @@ const read_file: Tool = {
   name: 'read_file',
   description:
     'Read a UTF-8 text file under the active project. Capped at 256 KB; '
-    + 'binary files return a stub { kind: "binary", size } so the model '
-    + 'doesn\'t try to interpret them as text. To read a slice of a large '
-    + 'file, pass `range: { start, end }` (byte offsets, both inclusive).',
+    + 'binary files return a stub { kind: "binary", size }. To read a slice '
+    + 'of a large file, pass `range: { start, end }` (byte offsets, both '
+    + 'inclusive). When called on a directory, falls back to a list_dir '
+    + 'payload (kind: "directory-fallback") rather than erroring. '
+    + 'Returns two text fields for text files: '
+    + '`text` is the verbatim file content (use this for apply_patch.search); '
+    + '`display` is a numbered, <file>-wrapped variant with an end-of-file '
+    + 'footer for citing line numbers without counting manually. Pick `text` '
+    + 'for editing, `display` for navigating/quoting.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -139,13 +145,40 @@ const read_file: Tool = {
     try { stat = fs.statSync(safe.abs!); }
     catch { return { ok: false, error: `path does not exist: ${args.path}` }; }
     if (stat.isDirectory()) {
-      return { ok: false, error: `path is a directory: ${args.path} — use list_dir instead` };
+      // Self-heal: return a list_dir result with a fallback marker
+      // so the model gets useful data instead of just an error to
+      // recover from. The agent in the original repro burned three
+      // turns dead-ending on `read_file('.')` because the error
+      // message told it "use list_dir instead" but didn't include
+      // any of the data it would have gotten from list_dir. Now a
+      // single tool call delivers the listing AND a hint.
+      const projectAbs = fs.realpathSync(ctx.project.path!);
+      const entries = listDirRecursive(safe.abs!, safe.abs!, DEFAULT_LIST_DEPTH, projectAbs);
+      return {
+        ok: true,
+        content: {
+          kind:    'directory-fallback',
+          path:    args.path,
+          depth:   DEFAULT_LIST_DEPTH,
+          entries,
+          hint:    'read_file was called on a directory — returning a list_dir payload instead. To read a specific file, call read_file with that file\'s path.',
+        },
+        summary: `${entries.length} entries (directory — read_file fell back to list_dir)`,
+      };
     }
 
     const start = Number.isInteger(args.range?.start) ? Math.max(0, args.range.start) : 0;
     const endRaw = Number.isInteger(args.range?.end) ? args.range.end : start + MAX_READ_BYTES - 1;
+    // Reject inverted ranges up-front rather than silently returning
+    // an empty read with a misleading "End of file" footer. A model
+    // that passes range:{start:100, end:50} should see a clean error,
+    // not a successful-looking empty payload.
+    if (Number.isInteger(args.range?.end) && args.range.end < start) {
+      return { ok: false, error: `range.end (${args.range.end}) must be ≥ range.start (${start})` };
+    }
     const end   = Math.min(stat.size - 1, endRaw, start + MAX_READ_BYTES - 1);
     const length = Math.max(0, end - start + 1);
+    const isPartialRead = start > 0 || end < stat.size - 1;
 
     let buf: Buffer;
     try {
@@ -168,9 +201,48 @@ const read_file: Tool = {
       };
     }
     const text = buf.toString('utf8');
+    // Build a Shakespeare-style numbered display alongside the raw
+    // text. The model gets BOTH fields:
+    //   - text          — verbatim file content (for apply_patch.search)
+    //   - display       — line-numbered, <file>-wrapped, with end-of-
+    //                     file or "more available" footer (for the
+    //                     model to cite line numbers without counting
+    //                     manually).
+    //
+    // Two fields rather than one because apply_patch's search is a
+    // literal string match — if the model copies a line out of the
+    // numbered display, the "  42| " prefix would never match the
+    // actual file. The tool description spells this out so models
+    // pick the right field per task.
+    const lines = text.split('\n');
+    const totalLines = isPartialRead ? null : lines.length;
+    // display is skipped on partial reads: the numbered prefix would
+    // start at "1" regardless of where in the file we sliced, which
+    // is internally inconsistent with the "more bytes available"
+    // footer. The agent description points the model at `text` for
+    // editing and `display` for line-number citations; on a slice
+    // the model has `text` + the byte-range and that's enough.
+    let display: string | null = null;
+    if (!isPartialRead) {
+      const numberWidth = Math.max(4, String(lines.length).length);
+      const numbered = lines.map((line, idx) =>
+        `${String(idx + 1).padStart(numberWidth, ' ')}| ${line}`,
+      ).join('\n');
+      const footer = `(End of file - total ${lines.length} line${lines.length === 1 ? '' : 's'})`;
+      display = `<file path="${args.path}">\n${numbered}\n</file>\n${footer}`;
+    }
+
     return {
       ok: true,
-      content: { kind: 'text', path: args.path, size: stat.size, range: { start, end }, text },
+      content: {
+        kind:   'text',
+        path:   args.path,
+        size:   stat.size,
+        range:  { start, end },
+        lines:  totalLines,
+        text,
+        display,
+      },
       summary: `${length} B${length < stat.size ? ` of ${stat.size}` : ''}`,
     };
   },
@@ -316,4 +388,342 @@ const delete_file: Tool = {
   },
 };
 
-export const TOOLS: Tool[] = [list_dir, read_file, write_file, apply_patch, delete_file];
+// ── glob ──────────────────────────────────────────────────────────────────
+//
+// File-path search by glob pattern. Read-class — auto-executes
+// regardless of permission mode. Replaces the gated `run_command find`
+// the agent used to reach for, which forced an Approve/Reject prompt
+// even in auto-edit mode (run_command stays gated by design).
+// Mirrors shakespeare.diy's GlobTool — same intent, simpler matcher
+// since we control the workload (agent-issued patterns, dozens to a
+// few hundred file results, not arbitrary user input).
+//
+// Supported pattern syntax:
+//   *      — matches anything except /
+//   **     — matches anything including /
+//   ?      — single non-/ char
+//   plain  — literal match (regex specials escaped)
+//   {a,b}  — brace expansion (recursive)
+//
+// Out of scope: character classes `[abc]`, negation `!(...)`. Agents
+// can fall back to grep+filter for those rare cases.
+
+function globToRegex(pattern: string): RegExp {
+  // Brace expansion happens at compile time — we recursively expand
+  // {a,b,c} into alternation `(?:a|b|c)`. The split-on-commas step
+  // has to honour nested-brace depth so a pattern like
+  //   **/*.{ts,{js,jsx}}
+  // splits the *outer* inner as ['ts', '{js,jsx}'] (NOT three parts
+  // ['ts', '{js', 'jsx}']) before recursing into each. Fall-back
+  // bare split(',') would leave dangling braces and the resulting
+  // regex would silently mismatch.
+  const splitTopLevelCommas = (s: string): string[] => {
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c === '{') depth++;
+      else if (c === '}') depth--;
+      else if (c === ',' && depth === 0) {
+        parts.push(s.slice(start, i));
+        start = i + 1;
+      }
+    }
+    parts.push(s.slice(start));
+    return parts;
+  };
+  const expand = (s: string): string => {
+    const open = s.indexOf('{');
+    if (open < 0) return s;
+    let depth = 1;
+    let close = open + 1;
+    while (close < s.length && depth > 0) {
+      if (s[close] === '{') depth++;
+      else if (s[close] === '}') depth--;
+      if (depth === 0) break;
+      close++;
+    }
+    if (close >= s.length) return s;
+    const before = s.slice(0, open);
+    const inner  = s.slice(open + 1, close);
+    const after  = s.slice(close + 1);
+    const parts  = splitTopLevelCommas(inner);
+    return `${before}(?:${parts.map(expand).join('|')})${expand(after)}`;
+  };
+
+  const expanded = expand(pattern);
+  let re = '';
+  let i = 0;
+  while (i < expanded.length) {
+    const c = expanded[i];
+    if (c === '*') {
+      if (expanded[i + 1] === '*') {
+        // ** with optional trailing slash: match zero-or-more path
+        // segments. The trailing-slash absorb means `**/*.ts` matches
+        // both `foo.ts` (zero leading segments) and `a/b/foo.ts`.
+        re += '.*';
+        i += 2;
+        if (expanded[i] === '/') i++;
+        continue;
+      }
+      re += '[^/]*';
+      i++;
+      continue;
+    }
+    if (c === '?') { re += '[^/]'; i++; continue; }
+    // Pass through `(?:`, `|`, `)` from brace expansion untouched;
+    // escape every other regex meta.
+    if (c === '(' && expanded.slice(i, i + 3) === '(?:') { re += '(?:'; i += 3; continue; }
+    if (c === '|' || c === ')') { re += c; i++; continue; }
+    if ('.+[]{}^$\\'.includes(c)) re += '\\' + c;
+    else re += c;
+    i++;
+  }
+  return new RegExp(`^${re}$`);
+}
+
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'target', '.next']);
+
+interface WalkResult {
+  paths:        string[];
+  truncated:    boolean;        // true if the cap was hit before the tree was fully walked
+  walked:       number;         // total files+symlinks observed (== paths.length on the no-truncation path)
+}
+
+function walkAll(rootAbs: string, maxResults: number): WalkResult {
+  const results: string[] = [];
+  const stack: string[] = [rootAbs];
+  let truncated = false;
+  while (stack.length > 0) {
+    if (results.length >= maxResults) { truncated = true; break; }
+    const dir = stack.pop()!;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch { continue; }
+    for (const ent of entries) {
+      if (results.length >= maxResults) { truncated = true; break; }
+      if (SKIP_DIRS.has(ent.name)) continue;
+      const abs = path.join(dir, ent.name);
+      const rel = path.relative(rootAbs, abs);
+      if (ent.isDirectory()) {
+        stack.push(abs);
+      } else if (ent.isFile() || ent.isSymbolicLink()) {
+        results.push(rel);
+      }
+    }
+  }
+  return { paths: results, truncated, walked: results.length };
+}
+
+const MAX_GLOB_RESULTS = 500;
+
+const glob_tool: Tool = {
+  name: 'glob',
+  description:
+    'Find files in the active project by glob pattern. Pattern syntax: '
+    + '* (no /), ** (any path), ? (single char), {a,b,c} (alternation). '
+    + 'Returns matching paths up to ' + MAX_GLOB_RESULTS + '. Skips heavy '
+    + 'dirs by default (node_modules, .git, dist, build, target, .next). '
+    + 'Read-class — runs without approval. Use this instead of '
+    + 'run_command find — faster, ungated, deterministic.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.tsx" or "src/**/*.{ts,tsx}".' },
+    },
+    required: ['pattern'],
+    additionalProperties: false,
+  },
+  permission: 'always',
+  handler: async (args, ctx): Promise<ToolResult> => {
+    if (!ctx.project.path) return { ok: false, error: 'project has no local path' };
+    if (typeof args.pattern !== 'string' || !args.pattern) {
+      return { ok: false, error: 'pattern is required' };
+    }
+    const projectAbs = fs.realpathSync(ctx.project.path);
+    let regex: RegExp;
+    try { regex = globToRegex(args.pattern); }
+    catch (e: any) { return { ok: false, error: `invalid pattern: ${e?.message ?? 'unknown'}` }; }
+
+    const walk = walkAll(projectAbs, 10_000);
+    const matched = walk.paths.filter(p => regex.test(p)).slice(0, MAX_GLOB_RESULTS);
+    // Two distinct truncation states the model needs to distinguish:
+    //   - resultsTruncated: matches hit MAX_GLOB_RESULTS — narrow the
+    //     pattern.
+    //   - walkTruncated:    the project tree exceeded 10 000 files
+    //     before we finished walking — matches past that point are
+    //     INVISIBLE (silent-wrong if not surfaced). Narrow the path
+    //     scope or use grep with a glob filter instead.
+    const resultsTruncated = matched.length === MAX_GLOB_RESULTS;
+    return {
+      ok: true,
+      content: {
+        pattern: args.pattern,
+        count:   matched.length,
+        resultsTruncated,
+        walkTruncated: walk.truncated,
+        truncated:    resultsTruncated || walk.truncated,
+        paths:        matched,
+      },
+      summary: `${matched.length} match${matched.length === 1 ? '' : 'es'}${walk.truncated ? ' (tree partially walked)' : ''}`,
+    };
+  },
+};
+
+// ── grep ──────────────────────────────────────────────────────────────────
+//
+// File-content search by regex. Read-class — auto-executes regardless
+// of permission mode. Replaces gated `run_command grep`. Mirrors
+// shakespeare.diy's GrepTool.
+//
+// Behaviour notes:
+//   - regex is JS RegExp (not POSIX/PCRE — "\\b" works, look-behind
+//     works on modern Node, character classes work). Agents tend to
+//     use simple substrings and basic regex; we trust them not to
+//     write catastrophic-backtracking patterns within the per-file
+//     time/byte caps.
+//   - file selection: `glob` arg narrows which files to search;
+//     defaults to all files under the project root.
+//   - skips binary files (NUL byte detector) so the agent doesn't
+//     get reams of garbage from the agent reading PNGs.
+//   - cap: 200 matches total, 5 MB scanned, 50 KB per file. Past
+//     these we stop and mark truncated:true so the agent can
+//     narrow the glob and retry.
+
+const MAX_GREP_MATCHES         = 200;
+const MAX_GREP_TOTAL_BYTES     = 5  * 1024 * 1024;
+const MAX_GREP_PER_FILE_BYTES  = 50 * 1024;
+
+interface GrepMatch {
+  path:       string;
+  lineNumber: number;
+  line:       string;
+}
+
+const grep_tool: Tool = {
+  name: 'grep',
+  description:
+    'Search file contents in the active project for a regex pattern. '
+    + 'Returns up to ' + MAX_GREP_MATCHES + ' matches as { path, lineNumber, line }. '
+    + 'Use the optional `glob` arg to narrow the file set (e.g. "**/*.ts"). '
+    + 'Skips binary files and heavy dirs (node_modules, .git, dist, build, '
+    + 'target, .next). Read-class — runs without approval. Use this '
+    + 'instead of run_command grep — faster, ungated, deterministic.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      pattern:       { type: 'string',  description: 'JavaScript-flavored regex.' },
+      glob:          { type: 'string',  description: 'Optional glob to narrow which files to search. Default: all files.' },
+      caseSensitive: { type: 'boolean', description: 'Default true.' },
+    },
+    required: ['pattern'],
+    additionalProperties: false,
+  },
+  permission: 'always',
+  handler: async (args, ctx): Promise<ToolResult> => {
+    if (!ctx.project.path) return { ok: false, error: 'project has no local path' };
+    if (typeof args.pattern !== 'string' || !args.pattern) {
+      return { ok: false, error: 'pattern is required' };
+    }
+    let regex: RegExp;
+    try {
+      const flags = args.caseSensitive === false ? 'i' : '';
+      regex = new RegExp(args.pattern, flags);
+    } catch (e: any) {
+      return { ok: false, error: `invalid regex: ${e?.message ?? 'unknown'}` };
+    }
+
+    const projectAbs = fs.realpathSync(ctx.project.path);
+    const walk = walkAll(projectAbs, 10_000);
+    let candidates = walk.paths;
+    if (typeof args.glob === 'string' && args.glob) {
+      let globRegex: RegExp;
+      try { globRegex = globToRegex(args.glob); }
+      catch (e: any) { return { ok: false, error: `invalid glob: ${e?.message ?? 'unknown'}` }; }
+      candidates = candidates.filter(p => globRegex.test(p));
+    }
+
+    const matches:    GrepMatch[] = [];
+    let scannedBytes  = 0;
+    let truncated     = false;
+    let truncReason: string | null = null;
+    // Per-file truncation tracker. A file bigger than
+    // MAX_GREP_PER_FILE_BYTES gets only its first 50 KB scanned —
+    // matches past that boundary are invisible. Surfacing the count
+    // separately lets the model decide whether to use read_file with
+    // a range to keep searching, vs. accepting the result.
+    const filesPartiallyScanned: string[] = [];
+
+    for (const rel of candidates) {
+      if (matches.length >= MAX_GREP_MATCHES) {
+        truncated = true; truncReason = `match cap (${MAX_GREP_MATCHES})`; break;
+      }
+      if (scannedBytes >= MAX_GREP_TOTAL_BYTES) {
+        truncated = true; truncReason = `total-bytes cap (${MAX_GREP_TOTAL_BYTES})`; break;
+      }
+      const abs = path.join(projectAbs, rel);
+      let stat: fs.Stats;
+      try { stat = fs.statSync(abs); }
+      catch { continue; }
+      if (!stat.isFile()) continue;
+
+      const length = Math.min(stat.size, MAX_GREP_PER_FILE_BYTES,
+        MAX_GREP_TOTAL_BYTES - scannedBytes);
+      if (length <= 0) continue;
+      const partialFile = length < stat.size;
+      let buf: Buffer;
+      try {
+        const fd = fs.openSync(abs, 'r');
+        try {
+          buf = Buffer.alloc(length);
+          fs.readSync(fd, buf, 0, length, 0);
+        } finally { fs.closeSync(fd); }
+      } catch { continue; }
+      scannedBytes += length;
+      // Binary skip — same NUL-byte heuristic read_file uses.
+      if (buf.indexOf(0) !== -1) continue;
+      if (partialFile) filesPartiallyScanned.push(rel);
+
+      const text = buf.toString('utf8');
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length && matches.length < MAX_GREP_MATCHES; i++) {
+        if (regex.test(lines[i])) {
+          // Cap per-line content to keep payloads sane on tools that
+          // dump 4 KB lines (minified js, generated files).
+          const line = lines[i].length > 400
+            ? lines[i].slice(0, 400) + '… (truncated)'
+            : lines[i];
+          matches.push({ path: rel, lineNumber: i + 1, line });
+        }
+      }
+    }
+
+    // Bubble up walk truncation as a top-level signal too — a project
+    // with >10 K files where the matching file is past the cap would
+    // otherwise show 0 matches with no indication anything was missed.
+    const walkTruncated = walk.truncated;
+    return {
+      ok: true,
+      content: {
+        pattern: args.pattern,
+        glob:    args.glob ?? null,
+        caseSensitive: args.caseSensitive !== false,
+        count:   matches.length,
+        truncated: truncated || walkTruncated || filesPartiallyScanned.length > 0,
+        truncReason,
+        walkTruncated,
+        filesPartiallyScanned,
+        matches,
+      },
+      summary: `${matches.length} match${matches.length === 1 ? '' : 'es'}${
+        truncated ? ' (truncated)'
+        : walkTruncated ? ' (tree partially walked)'
+        : filesPartiallyScanned.length > 0 ? ` (${filesPartiallyScanned.length} file${filesPartiallyScanned.length === 1 ? '' : 's'} partially scanned)`
+        : ''
+      }`,
+    };
+  },
+};
+
+export const TOOLS: Tool[] = [list_dir, read_file, write_file, apply_patch, delete_file, glob_tool, grep_tool];

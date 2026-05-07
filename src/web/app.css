@@ -4490,6 +4490,58 @@ body.term-expanded .term-bar-toggle .term-chevron {
 }
 .tool-call .tc-status { width: 14px; text-align: center; color: var(--text-dim); }
 .tool-call .tc-name   { font-weight: 600; }
+/* New shakespeare-style compact label. Replaces tc-name as the
+   header content for renderToolCall(); the original tc-name class
+   stays on the rule so any in-flight calls rendered before this
+   commit lands still show. */
+.tool-call .tc-label  { font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text-bright); }
+
+/* ── Todo tracker — agent-driven [N/M tasks] block ─────────────── */
+.todo-tracker {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev, rgba(255,255,255,0.02));
+  font-size: 12px;
+}
+.todo-tracker .tt-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 6px;
+  font-family: var(--font-mono, monospace);
+}
+.todo-tracker .tt-count {
+  color: var(--accent, var(--text-bright));
+  font-weight: 600;
+}
+.todo-tracker .tt-label {
+  color: var(--text-dim);
+}
+.todo-tracker .tt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.todo-tracker .tt-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+}
+.todo-tracker .tt-glyph {
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.todo-tracker .tt-completed  .tt-content { color: var(--text-dim); text-decoration: line-through; }
+.todo-tracker .tt-in_progress .tt-glyph  { color: var(--accent, var(--text-bright)); }
+.todo-tracker .tt-in_progress .tt-content { color: var(--text-bright); font-weight: 500; }
+.todo-tracker .tt-pending    .tt-content { color: var(--text); }
 .tool-call .tc-summary { color: var(--text-dim); margin-left: auto; }
 .tool-call .tc-args,
 .tool-call .tc-preview {

@@ -1710,6 +1710,65 @@ const ChatPanel = (() => {
     } catch {}
     renderBadge();
     renderHistory();
+    syncPermissionsControl();
+  }
+
+  // Permissions toggle (chat-header dropdown). Hidden when no
+  // project is active (global chat has no project to scope perms
+  // to). Persists per-project via PUT /api/projects/:id/ai-config
+  // so the choice survives page reloads and the dispatcher's
+  // fallback default (auto-edit) only applies when nothing is
+  // stored. Useful for "explain this codebase" mode where you
+  // want to flip to read-only without leaving the chat.
+  const PERM_OPTIONS = [
+    { value: 'read-only', label: 'read-only' },
+    { value: 'auto-edit', label: 'auto-edit' },
+    { value: 'yolo',      label: 'yolo' },
+  ];
+  async function syncPermissionsControl() {
+    const group = $('chat-perm-group');
+    const sel   = $('chat-perm');
+    if (!group || !sel) return;
+    if (!activeProject) {
+      group.style.display = 'none';
+      return;
+    }
+    // Render options once; keep them stable across project switches.
+    if (sel.options.length === 0) {
+      for (const o of PERM_OPTIONS) {
+        const opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.label;
+        sel.appendChild(opt);
+      }
+      sel.addEventListener('change', persistPermissionsChange);
+    }
+    group.style.display = '';
+    // Resolve current value: project override → station default
+    // 'auto-edit' (matches the backend dispatcher).
+    let mode = 'auto-edit';
+    try {
+      const cfg = await api(`/api/projects/${activeProject.id}/ai-config`);
+      if (cfg?.permissions?.mode) mode = cfg.permissions.mode;
+    } catch {}
+    sel.value = mode;
+  }
+  async function persistPermissionsChange() {
+    if (!activeProject) return;
+    const mode = $('chat-perm').value;
+    try {
+      await api(`/api/projects/${activeProject.id}/ai-config`, {
+        method:  'PUT',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ permissions: { mode } }),
+      });
+      toast(`Permissions: ${mode}`, '', 'ok');
+    } catch (e) {
+      toast('Permissions update failed', e?.message || '', 'err');
+      // Roll back the visible value on failure so it matches what's
+      // actually persisted.
+      syncPermissionsControl();
+    }
   }
 
   // Track whether any API provider is configured; gates the send button
@@ -1893,19 +1952,63 @@ const ChatPanel = (() => {
       // Insert before the cursor so the cursor stays at the tail.
       bodyEl.insertBefore(textSpan, cur);
     }
+    // Compress a tool call into a single human-readable line —
+    // shakespeare.diy-style ("Wrote src/foo.ts", "Searched \"TARGET\"",
+    // "git status"). The full args remain available in the
+    // expandable <pre> below for power users; the header label is
+    // optimised for scannability when the agent makes 5-15 calls
+    // per turn. Truncates long paths/patterns to keep the chat
+    // column from wrapping awkwardly on narrow screens.
+    function actionLabel(name, args) {
+      const a = args || {};
+      const trunc = (s, n = 64) => {
+        const str = String(s ?? '');
+        return str.length > n ? str.slice(0, n - 1) + '…' : str;
+      };
+      switch (name) {
+        case 'read_file':    return `Viewed ${trunc(a.path)}`;
+        case 'list_dir':     return `Listed ${trunc(a.path ?? '.')}`;
+        case 'write_file':   return `Wrote ${trunc(a.path)}`;
+        case 'apply_patch':  return `Edited ${trunc(a.path)}`;
+        case 'delete_file':  return `Deleted ${trunc(a.path)}`;
+        case 'glob':         return `Globbed "${trunc(a.pattern, 48)}"`;
+        case 'grep':         return a.glob
+                                  ? `Searched "${trunc(a.pattern, 32)}" in ${trunc(a.glob, 24)}`
+                                  : `Searched "${trunc(a.pattern, 48)}"`;
+        case 'git_status':   return 'git status';
+        case 'git_log':      return `git log${Number.isInteger(a.n) ? ` -n${a.n}` : ''}`;
+        case 'git_diff':     return a.path ? `git diff ${trunc(a.path)}` : (a.staged ? 'git diff --cached' : 'git diff');
+        case 'git_commit':   return `Committed: "${trunc(a.message, 56)}"`;
+        case 'todo_read':    return 'Read todo list';
+        case 'todo_write':   return Array.isArray(a.todos)
+                                  ? `Updated todos (${a.todos.length})`
+                                  : 'Updated todos';
+        case 'build_project': return 'Built project';
+        case 'run_command': {
+          const argv = Array.isArray(a.argv) ? a.argv : [];
+          if (argv.length === 0) return 'run_command';
+          const joined = argv.map(x => /\s/.test(String(x)) ? `"${x}"` : x).join(' ');
+          return trunc(joined, 80);
+        }
+        default:             return name;
+      }
+    }
+
     function renderToolCall(id, name, args) {
       const el = document.createElement('div');
       el.className = 'tool-call pending';
       el.dataset.id = id;
+      const label = actionLabel(name, args);
       el.innerHTML = `
         <div class="tc-head">
           <span class="tc-status">▸</span>
-          <span class="tc-name">${escapeHtml(name)}</span>
+          <span class="tc-label">${escapeHtml(label)}</span>
           <span class="tc-summary"></span>
         </div>
         <pre class="tc-args">${escapeHtml(JSON.stringify(args, null, 2))}</pre>
       `;
-      // Toggle expand/collapse on header click.
+      // Toggle expand/collapse on header click — the full argv stays
+      // a click away for users who want to inspect what actually ran.
       el.querySelector('.tc-head').addEventListener('click', () => el.classList.toggle('expanded'));
       bodyEl.insertBefore(el, cur);
       startNewTextSpan();
@@ -1922,6 +2025,47 @@ const ChatPanel = (() => {
       if (status) status.textContent = ok ? '✓' : '✗';
       const sum = el.querySelector('.tc-summary');
       if (sum) sum.textContent = ok ? (summary || 'done') : (error || 'failed');
+    }
+
+    // Todo tracker — reuses one element appended to the chat feed so
+    // every todo_state SSE update mutates in place rather than
+    // stacking multiple trackers as the agent works through items.
+    // Empty list (`todos.length === 0`) hides the tracker entirely;
+    // a TodoWrite([]) effectively dismisses it once a multi-step
+    // task is fully done. The tracker re-renders inline (not as a
+    // separate sticky bar) so it scrolls with the conversation —
+    // matches shakespeare.diy's "[1/4] Create NotePreview…" style.
+    let todoTrackerEl = null;
+    function renderTodoTracker(todos) {
+      if (!Array.isArray(todos) || todos.length === 0) {
+        if (todoTrackerEl) { todoTrackerEl.remove(); todoTrackerEl = null; }
+        return;
+      }
+      if (!todoTrackerEl) {
+        todoTrackerEl = document.createElement('div');
+        todoTrackerEl.className = 'todo-tracker';
+        bodyEl.insertBefore(todoTrackerEl, cur);
+      }
+      const done   = todos.filter(t => t.status === 'completed').length;
+      const total  = todos.length;
+      todoTrackerEl.innerHTML = `
+        <div class="tt-head">
+          <span class="tt-count">[${done}/${total}]</span>
+          <span class="tt-label">${done === total ? 'tasks completed' : 'tasks'}</span>
+        </div>
+        <ul class="tt-list">
+          ${todos.map(t => {
+            const glyph = t.status === 'completed'  ? '✓'
+                        : t.status === 'in_progress' ? '▸'
+                        :                              '○';
+            return `<li class="tt-item tt-${t.status}">
+              <span class="tt-glyph">${glyph}</span>
+              <span class="tt-content">${escapeHtml(t.content)}</span>
+            </li>`;
+          }).join('')}
+        </ul>
+      `;
+      feed.scrollTop = feed.scrollHeight;
     }
     function renderApprovalRequest(id, approvalId, name, args, preview) {
       const el = renderToolCall(id, name, args);
@@ -2017,6 +2161,7 @@ const ChatPanel = (() => {
             if (p.type === 'tool_call_start') { renderToolCall(p.id, p.name, p.args); continue; }
             if (p.type === 'approval_request') { renderApprovalRequest(p.id, p.approvalId, p.name, p.args, p.preview); continue; }
             if (p.type === 'tool_result') { updateToolResult(p.id, !!p.ok, p.summary, p.error); continue; }
+            if (p.type === 'todo_state') { renderTodoTracker(p.todos); continue; }
           } catch (e) {
             if (e.message && !e.message.startsWith('{')) throw e;
           }
@@ -3333,12 +3478,14 @@ const ProjectsPanel = (() => {
       actionsEl.appendChild(snapBtn);
     }
 
-    if (p.capabilities.git || p.capabilities.ngit) {
-      const pushBtn = iconBtn('publish', 'Publish',
-        `<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`);
-      pushBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectPublish(p); });
-      actionsEl.appendChild(pushBtn);
-    }
+    // Push lives on the project drawer's git/ngit tabs (Publish-to-ngit
+    // / Push triad), where the verbs and dialog copy are explicit.
+    // Pre-fix this card-grid icon duplicated the same action with a
+    // generic up-arrow + "Publish" tooltip — for ngit-only projects
+    // it actually ran ngit push, label-vs-action mismatch noted in
+    // the PR #5 followup. Removing it eliminates the duplication;
+    // sync/snapshot stay because one-click refresh + commit still
+    // benefit from grid-level access.
     if (p.capabilities.nsite) {
       const deployBtn = iconBtn('deploy', 'Deploy',
         `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M2 12h20M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>`);

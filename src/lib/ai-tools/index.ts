@@ -30,6 +30,12 @@ import type { PermissionMode } from '../templates.js';
 import { TOOLS as FS_TOOLS } from './fs.js';
 import { TOOLS as GIT_TOOLS } from './git.js';
 import { TOOLS as EXEC_TOOLS } from './exec.js';
+import { TOOLS as TODO_TOOLS } from './todo.js';
+import { TOOLS as BUILD_TOOLS } from './build.js';
+
+// Re-export todo store helpers so test fixtures can reset between cases
+// without reaching into the implementation file.
+export { clearAllTodos } from './todo.js';
 
 export type Permission = 'always' | 'gated';
 
@@ -68,7 +74,7 @@ function register(tool: Tool): void {
   REGISTRY[tool.name] = tool;
 }
 
-[...FS_TOOLS, ...GIT_TOOLS, ...EXEC_TOOLS].forEach(register);
+[...FS_TOOLS, ...GIT_TOOLS, ...EXEC_TOOLS, ...TODO_TOOLS, ...BUILD_TOOLS].forEach(register);
 
 // ── Public API ───────────────────────────────────────────────────────────
 
@@ -91,8 +97,21 @@ export function requiresApproval(toolName: string, mode: PermissionMode): boolea
   // 'gated' tools depend on the mode.
   if (mode === 'yolo')      return false;
   if (mode === 'auto-edit') {
-    // auto-edit: file writes auto-approved; exec still gated.
-    return tool.name === 'run_command';
+    // auto-edit: file writes auto-approve; the two tools that can
+    // execute arbitrary user-supplied process commands stay gated.
+    //
+    // build_project rides the same line as run_command because of
+    // the edit-then-build escape: write tools are auto-approved in
+    // this mode, so a hostile model (e.g. via prompt injection
+    // through document content the agent reads) can use apply_patch
+    // to overwrite package.json's scripts.build with an arbitrary
+    // shell payload, then call build_project to execute it via
+    // `npm run build`. The run_command DENYLIST never fires
+    // because the spawned binary is hard-coded `npm`. Gating
+    // build_project here closes the chain — the user sees a
+    // preview of the resolved scripts.build string before any
+    // build runs (see summarizeForPreview in tool-loop.ts).
+    return tool.name === 'run_command' || tool.name === 'build_project';
   }
   // 'read-only' (default) — every gated tool needs approval.
   return true;

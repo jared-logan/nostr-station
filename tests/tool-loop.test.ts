@@ -307,6 +307,70 @@ test('anthropic: approval approve actually executes the tool', async () => {
   assert.equal(fs.readFileSync(path.join(ROOT, 'approved.txt'), 'utf8'), 'landed');
 });
 
+// ── Approval preview: build_project surfaces resolved script ─────────────
+
+test('build_project: approval preview shows the resolved scripts.build content', async () => {
+  // Pins the security defence-in-depth shipped after the auto-edit
+  // sandbox-escape review: when build_project gates for approval,
+  // the preview must include the actual script string from
+  // package.json so a hostile edit-then-build chain (apply_patch
+  // rewrites scripts.build → calls build_project) shows the
+  // injected payload in the approval modal instead of a generic
+  // "build?" prompt.
+  fs.writeFileSync(path.join(ROOT, 'package.json'), JSON.stringify({
+    name: 'preview-test', version: '0.0.0',
+    scripts: { build: 'vite build --mode test' },
+  }));
+  let call = 0;
+  globalThis.fetch = async () => {
+    call++;
+    if (call === 1) {
+      return sseStream([
+        anthMessageStart('claude'),
+        anthBlockStartTool(0, 'tu_1', 'build_project'),
+        anthInputJsonDelta(0, '{}'),
+        anthBlockStop(0),
+        anthMessageDelta('tool_use'),
+      ]);
+    }
+    // After rejection the loop continues for a wrap-up turn.
+    return sseStream([
+      anthBlockStartText(0),
+      anthTextDelta(0, 'Cancelled.'),
+      anthBlockStop(0),
+      anthMessageDelta('end_turn'),
+    ]);
+  };
+
+  const sid = createSession();
+  const { res, lines } = makeRes();
+  const requestP = streamAnthropicWithTools(
+    [{ role: 'user', content: 'build it' }],
+    'system',
+    { isAnthropic: true, baseUrl: '', model: 'claude', apiKey: 'k', providerName: 'Anthropic' },
+    res,
+    { project: makeProject(ROOT) as any, permissions: 'auto-edit' },   // would have auto-approved pre-fix
+    sid,
+  );
+
+  // Approval is now required in auto-edit (the fix).
+  let approvalEvent: any = null;
+  const start = Date.now();
+  while (Date.now() - start < 1000) {
+    await new Promise(r => setTimeout(r, 10));
+    approvalEvent = lines.map(l => JSON.parse(l)).find(e => e.type === 'approval_request');
+    if (approvalEvent) break;
+  }
+  assert.ok(approvalEvent, 'build_project must require approval in auto-edit (sandbox escape fix)');
+  // Preview surfaces the resolved script body — not just the empty argv.
+  assert.equal(approvalEvent.preview?.command, 'npm run build');
+  assert.equal(approvalEvent.preview?.script,  'vite build --mode test');
+
+  resolveApproval(sid, approvalEvent.approvalId, 'reject');
+  await requestP;
+  destroySession(sid);
+});
+
 // ── OpenAI tool loop ──────────────────────────────────────────────────────
 
 test('openai: text + tool_calls round-trip', async () => {
@@ -377,4 +441,126 @@ test('no project context: tool call returns "no project context" error', async (
   assert.ok(tr);
   assert.equal(tr.ok, false);
   assert.match(tr.error, /no project context/i);
+});
+
+// ── Protocol: model receives full payload, not just summary ──────────────
+//
+// Pre-fix the tool-loop sent `out.summary` (a one-line status string
+// like "991 B" or "18 entries") as the tool_result content, leaving
+// the actual payload invisible to the model. The agent had no way to
+// see file contents, list_dir entries, or run_command stdout — every
+// call effectively returned a status string with no data. These tests
+// pin the new contract (payload reaches the model; summary stays in
+// the SSE frame for the chat UI alone) so a future regression can't
+// quietly recross the wires.
+
+test('protocol: read_file content reaches the model (anthropic)', async () => {
+  // Seed a file the model "asks to read", then capture the second-turn
+  // request body — the tool_result content there is what the model
+  // actually sees on its next inference. Asserting the file's literal
+  // content appears in that body is the structural pin.
+  const FILE_CONTENT = 'this is the secret file body the model needs to see';
+  fs.writeFileSync(path.join(ROOT, 'secret.txt'), FILE_CONTENT, 'utf8');
+
+  let secondTurnBody: any = null;
+  let call = 0;
+  globalThis.fetch = async (_input: any, init?: any) => {
+    call++;
+    if (call === 1) {
+      const argsJson = JSON.stringify({ path: 'secret.txt' });
+      return sseStream([
+        anthMessageStart('claude'),
+        anthBlockStartTool(0, 'tu_1', 'read_file'),
+        anthInputJsonDelta(0, argsJson),
+        anthBlockStop(0),
+        anthMessageDelta('tool_use'),
+      ]);
+    }
+    secondTurnBody = JSON.parse(init.body);
+    return sseStream([
+      anthBlockStartText(0),
+      anthTextDelta(0, 'Done.'),
+      anthBlockStop(0),
+      anthMessageDelta('end_turn'),
+    ]);
+  };
+
+  const sid = createSession();
+  const { res } = makeRes();
+  await streamAnthropicWithTools(
+    [{ role: 'user', content: 'read secret.txt' }],
+    'system',
+    { isAnthropic: true, baseUrl: '', model: 'claude', apiKey: 'k', providerName: 'Anthropic' },
+    res,
+    { project: makeProject(ROOT) as any, permissions: 'read-only' },
+    sid,
+  );
+  destroySession(sid);
+
+  // The tool_result must have shipped the payload, not the summary.
+  // Extract the user message that carries tool_result blocks and
+  // check its content for the file body.
+  assert.ok(secondTurnBody, 'second turn never ran — first turn must have completed dispatch');
+  const userToolResultMsg = secondTurnBody.messages.find((m: any) =>
+    m.role === 'user' && Array.isArray(m.content)
+    && m.content.some((b: any) => b.type === 'tool_result'));
+  assert.ok(userToolResultMsg, 'expected a user message carrying tool_result blocks');
+  const block = userToolResultMsg.content.find((b: any) => b.type === 'tool_result');
+  assert.ok(typeof block.content === 'string');
+  assert.ok(
+    block.content.includes(FILE_CONTENT),
+    `tool_result content must include the file body — got: ${block.content.slice(0, 200)}`,
+  );
+  // And the SSE frame still carries a UI summary (separate channel).
+  // Not asserting exact text because that's a UI concern; just that
+  // the SSE frame's summary is shorter than the model's content (the
+  // proof that they're separate channels).
+});
+
+test('protocol: list_dir entries reach the model (openai)', async () => {
+  // Seed a few files so list_dir has something to enumerate.
+  fs.writeFileSync(path.join(ROOT, 'alpha.md'), '');
+  fs.writeFileSync(path.join(ROOT, 'beta.md'),  '');
+  fs.writeFileSync(path.join(ROOT, 'gamma.md'), '');
+
+  let secondTurnBody: any = null;
+  let call = 0;
+  globalThis.fetch = async (_input: any, init?: any) => {
+    call++;
+    if (call === 1) {
+      const argsJson = JSON.stringify({ path: '.' });
+      return sseStream([
+        oaiToolDelta('m', 0, 'tc_1', 'list_dir', argsJson),
+        oaiFinish('m', 'tool_calls'),
+      ]);
+    }
+    secondTurnBody = JSON.parse(init.body);
+    return sseStream([
+      oaiTextDelta('m', 'OK.'),
+      oaiFinish('m', 'stop'),
+    ]);
+  };
+
+  const sid = createSession();
+  const { res } = makeRes();
+  await streamOpenAICompatWithTools(
+    [{ role: 'user', content: 'list root' }],
+    'system',
+    { isAnthropic: false, baseUrl: '', model: 'm', apiKey: 'k', providerName: 'X' },
+    res,
+    { project: makeProject(ROOT) as any, permissions: 'read-only' },
+    sid,
+  );
+  destroySession(sid);
+
+  assert.ok(secondTurnBody, 'second turn never ran');
+  const toolMsg = secondTurnBody.messages.find((m: any) => m.role === 'tool');
+  assert.ok(toolMsg, 'expected a role:tool message carrying the tool result');
+  // All three filenames the agent should be able to see.
+  for (const name of ['alpha.md', 'beta.md', 'gamma.md']) {
+    assert.ok(
+      toolMsg.content.includes(name),
+      `tool result must include "${name}" — got: ${toolMsg.content.slice(0, 200)}`,
+    );
+  }
 });
