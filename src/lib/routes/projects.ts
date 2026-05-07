@@ -372,7 +372,7 @@ export async function handleProjects(
       // the exact stdout format on a real deploy. For now, the user
       // sees the live URL in the exec modal output.
       streamExec(
-        { bin: 'npm', args: ['run', 'deploy'] },
+        { bin: 'npm', args: ['run', 'deploy'], timeoutMs: 0 },
         res, req, project.path,
         { line: `$ npm run deploy  (cwd: ${project.path})`, stream: 'stdout' },
       );
@@ -410,7 +410,10 @@ export async function handleProjects(
     }
     if (tail === 'ngit/push' && method === 'POST') {
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
-      streamExec({ bin: 'ngit', args: ['push'] }, res, req, project.path);
+      // 3-min timeout — Amber sign round-trip + grasp-server upload
+      // for a busy repo can take a while; the line-cap still kills
+      // any retry-loop in well under that.
+      streamExec({ bin: 'ngit', args: ['push'], timeoutMs: 180_000 }, res, req, project.path);
       return true;
     }
 
@@ -562,7 +565,11 @@ export async function handleProjects(
     if (tail === 'nsite/deploy' && method === 'POST') {
       const cwd = project.path || process.cwd();
       streamExec(
-        { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } },
+        // timeoutMs:0 — Blossom uploads + relay publishes for a real
+        // site can legitimately span minutes; the consecutive-line
+        // cap inside streamExec still guards against retry-loop
+        // floods regardless.
+        { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' }, timeoutMs: 0 },
         res, req, cwd,
       );
       return true;

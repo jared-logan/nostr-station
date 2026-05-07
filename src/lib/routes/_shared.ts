@@ -69,7 +69,29 @@ export const CLI_SPAWN = (!IS_DEV && fs.existsSync(CLI_BIN))
 
 // ── streamExec / streamExecError ───────────────────────────────────────────
 
-export type CmdSpec = { bin: string; args: string[]; env?: Record<string, string> };
+// Default ceilings — subprocess timeout and consecutive-identical-line
+// cap. Both are safety nets, not policy: streamExec consumers can
+// override per-call via CmdSpec. Pre-fix neither existed, and a
+// retry-looping `ngit init` was able to flood the SSE buffer with
+// thousands of identical "failed to get nsec input from interactor"
+// lines per second until the dashboard heap blew. See PR followup
+// for the concrete repro.
+export const STREAM_EXEC_DEFAULT_TIMEOUT_MS  = 60_000;
+export const STREAM_EXEC_DEFAULT_MAX_REPEATS = 50;
+
+export type CmdSpec = {
+  bin:   string;
+  args:  string[];
+  env?:  Record<string, string>;
+  // Per-spec overrides for the safety net. `timeoutMs:0` opts out
+  // (used for installs whose total runtime can legitimately exceed
+  // the default — those pass `STREAM_EXEC_DEFAULT_INSTALL_TIMEOUT_MS`
+  // or 0). `maxRepeatedLines:0` likewise disables the consecutive-
+  // line cap; we don't expect any caller to want this, but the
+  // escape hatch is cheap.
+  timeoutMs?:        number;
+  maxRepeatedLines?: number;
+};
 
 export function streamExec(
   spec: CmdSpec,
@@ -95,25 +117,82 @@ export function streamExec(
   const emit = (payload: object) => {
     try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {}
   };
+
+  // Safety net: kill the child + close the stream once any of the
+  // bound conditions trip. Set the `bounded` flag so racing emits
+  // (the kill is async; the child can still flush bytes between
+  // SIGTERM and exit) don't keep flooding the response.
+  const timeoutMs        = spec.timeoutMs        ?? STREAM_EXEC_DEFAULT_TIMEOUT_MS;
+  const maxRepeatedLines = spec.maxRepeatedLines ?? STREAM_EXEC_DEFAULT_MAX_REPEATS;
+  let bounded = false;
+  const kill = (reason: string, code: number) => {
+    if (bounded) return;
+    bounded = true;
+    emit({ line: reason, stream: 'stderr' });
+    try { child.kill('SIGTERM'); } catch {}
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    emit({ done: true, code });
+    try { res.end(); } catch {}
+  };
+  const timeoutHandle = timeoutMs > 0
+    ? setTimeout(() => kill(`[killed: subprocess exceeded ${Math.round(timeoutMs / 1000)}s timeout]`, -2), timeoutMs)
+    : null;
+
+  // Per-stream consecutive-line tracker. Key = `${stream}:${line}`,
+  // counted per identical neighbour (NOT total occurrences) so a
+  // mixed-output run that intermittently repeats a normal line
+  // doesn't hit the cap. The bug pattern is "same line N times in
+  // a row, no other output" — exactly the retry-loop signature.
+  let lastKey   = '';
+  let runLength = 0;
+
+  const pushLine = (line: string, stream: 'stdout' | 'stderr') => {
+    if (bounded) return;
+    if (maxRepeatedLines > 0) {
+      const key = `${stream}\0${line}`;
+      if (key === lastKey) {
+        runLength++;
+        if (runLength > maxRepeatedLines) {
+          kill(
+            `[bounded: ${maxRepeatedLines}+ identical lines suppressed; subprocess killed — likely a retry-loop bug upstream]`,
+            -3,
+          );
+          return;
+        }
+      } else {
+        lastKey   = key;
+        runLength = 1;
+      }
+    }
+    emit({ line, stream });
+  };
+
   const pushStream = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
     const lines = chunk.toString().split('\n');
     for (const line of lines) {
-      if (line.length) emit({ line, stream });
+      if (line.length) pushLine(line, stream);
     }
   };
   child.stdout.on('data', pushStream('stdout'));
   child.stderr.on('data', pushStream('stderr'));
   child.on('close', (code) => {
+    if (bounded) return;
+    if (timeoutHandle) clearTimeout(timeoutHandle);
     emit({ done: true, code });
     try { res.end(); } catch {}
   });
   child.on('error', (e) => {
+    if (bounded) return;
+    if (timeoutHandle) clearTimeout(timeoutHandle);
     emit({ line: String(e.message || e), stream: 'stderr' });
     emit({ done: true, code: -1 });
     try { res.end(); } catch {}
   });
 
-  const cleanup = () => { try { child.kill(); } catch {} };
+  const cleanup = () => {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    try { child.kill(); } catch {}
+  };
   req.on('close', cleanup);
   req.on('error', cleanup);
 }
