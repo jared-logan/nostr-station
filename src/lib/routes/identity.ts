@@ -6,10 +6,12 @@
  * Nostr-relay plumbing it doesn't need to see.
  *
  * Surface (verbatim from the pre-refactor inline blocks):
- *   GET    /api/identity/config                — npub / readRelays / ngitRelay
+ *   GET    /api/identity/config                — npub / readRelays / ngitRelay / graspServers
  *   POST   /api/identity/set                   — npub | ngitRelay | setupComplete
  *   POST   /api/identity/relays/add            — append a read relay
  *   POST   /api/identity/relays/remove         — remove a read relay
+ *   POST   /api/identity/grasp/add             — append a grasp server
+ *   POST   /api/identity/grasp/remove          — remove a grasp server
  *   GET    /api/identity/profile/preview?npub= — wizard-time public lookup
  *   GET    /api/identity/profile               — owner profile
  *   POST   /api/identity/profile/sync          — bust cache + re-fetch
@@ -24,6 +26,7 @@ import {
   setNpub as setIdentityNpub, setNgitRelay as setIdentityNgitRelay,
   setSetupComplete, isNpubOrHex, isNsec,
   DEFAULT_READ_RELAYS, hexToNpub, npubToHex,
+  getGraspServers, addGraspServer, removeGraspServer,
 } from '../identity.js';
 import { safeHttpUrl } from '../url-safety.js';
 import { readBody } from './_shared.js';
@@ -159,10 +162,15 @@ export async function handleIdentity(
     const ident = readIdentity();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      npub:       ident.npub,
-      readRelays: ident.readRelays,
-      ngitRelay:  ident.ngitRelay || '',
-      hasProfile: !!ident.npub,
+      npub:         ident.npub,
+      readRelays:   ident.readRelays,
+      ngitRelay:    ident.ngitRelay || '',
+      // graspServers always returns a non-empty list — getGraspServers()
+      // falls back to DEFAULT_GRASP_SERVERS when the user hasn't yet
+      // touched the list, so the dashboard can render the section
+      // without an empty-state branch.
+      graspServers: getGraspServers(),
+      hasProfile:   !!ident.npub,
     }));
     return true;
   }
@@ -222,6 +230,29 @@ export async function handleIdentity(
     catch { res.writeHead(400); res.end('bad json'); return true; }
     const r = removeReadRelay(String(parsed.url || '').trim());
     bustProfileCache();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(r));
+    return true;
+  }
+
+  // Grasp server list — same shape as the read-relay endpoints above
+  // but persisted to identity.graspServers. No profile-cache bust here
+  // (grasp picks don't influence kind-0 lookups).
+  if (url === '/api/identity/grasp/add' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+    const r = addGraspServer(String(parsed.url || '').trim());
+    res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(r));
+    return true;
+  }
+
+  if (url === '/api/identity/grasp/remove' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+    const r = removeGraspServer(String(parsed.url || '').trim());
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(r));
     return true;

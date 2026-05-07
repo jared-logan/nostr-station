@@ -4128,23 +4128,84 @@ const ProjectsPanel = (() => {
     else                       fetchAndRender();
   }
 
+  // Strip the wss:// prefix for display so the picker stays scannable
+  // when the URL list grows (matches shakespeare.diy's grasp list UX,
+  // where the rows show `relay.ngit.dev` not `wss://relay.ngit.dev`).
+  function stripWsPrefix(url) {
+    return String(url || '').replace(/^wss?:\/\//, '');
+  }
+
   async function renderNgitInitForm(container, p) {
-    const owner = await api('/api/identity/config').catch(() => ({ npub: '', ngitRelay: '' }));
-    const prefill = owner.ngitRelay || '';
+    // Pull the user's global grasp list from /api/identity/config —
+    // when the user hasn't touched it, the backend serves
+    // DEFAULT_GRASP_SERVERS automatically. Any custom additions made
+    // via Config → ngit show up here pre-checked, so the per-project
+    // init form reflects "your standard grasp picks" without having
+    // to re-type them on every project.
+    const owner = await api('/api/identity/config').catch(() => ({ npub: '', graspServers: [] }));
+    const globalGrasp = Array.isArray(owner.graspServers) ? owner.graspServers : [];
+    // Probe signer state up-front so the form can show whether init
+    // will actually succeed before the user fills in fields and clicks
+    // through. /api/ngit/account is the same source of truth the
+    // backend pre-flight uses, so the pill won't ever lie about which
+    // path init will take.
+    const account = await api('/api/ngit/account').catch(() => ({ loggedIn: false }));
+    const amberPaired = !!account?.loggedIn;
     const noPath  = !p.path;
     container.innerHTML = `
       <div class="tab-section">
         <h3>Initialize ngit for this project</h3>
         <div class="muted" style="margin-bottom:10px">
           ngit is enabled for this project but no nostr remote is configured yet.
-          Publish the repo announcement to a relay to create one.
+          Publishes a kind-30617 repo announcement so collaborators can clone via
+          <code>git clone nostr://…</code>.
         </div>
 
-        <label class="field-label">Nostr relay for this repo</label>
+        <label class="field-label">Repository name</label>
         <div class="field-row">
-          <input type="text" class="ngit-init-relay" placeholder="wss://relay.damus.io" value="${escapeHtml(prefill)}" ${noPath ? 'disabled' : ''}>
+          <input type="text" class="ngit-init-name" placeholder="my-repo"
+                 value="${escapeHtml(p.name || '')}" ${noPath ? 'disabled' : ''}>
         </div>
-        ${prefill ? `<div class="muted" style="font-size:11px;margin-top:4px">Pre-filled from Config → NGIT.</div>` : ''}
+        <div class="muted" style="font-size:11px;margin-top:4px">
+          Letters, digits, dot, dash, underscore. 1-64 chars.
+        </div>
+
+        <label class="field-label" style="margin-top:12px">Description (optional)</label>
+        <div class="field-row">
+          <input type="text" class="ngit-init-description" placeholder="One-line summary"
+                 ${noPath ? 'disabled' : ''}>
+        </div>
+
+        <label class="field-label" style="margin-top:12px">GRASP servers</label>
+        <div class="muted" style="font-size:11px;margin-bottom:6px">
+          Where your git+nostr data is hosted. Pre-checked from your global list
+          (manage in <a href="#config">Config → ngit</a>). Per-project: uncheck
+          any that don't host this repo, or add a one-off below.
+        </div>
+        <div class="ngit-init-grasp">
+          ${globalGrasp.length > 0
+            ? globalGrasp.map(url => `
+                <label class="ngit-grasp-row">
+                  <input type="checkbox" class="ngit-grasp-toggle" data-url="${escapeHtml(url)}" checked ${noPath ? 'disabled' : ''}>
+                  <code>${escapeHtml(stripWsPrefix(url))}</code>
+                </label>
+              `).join('')
+            : `<div class="muted" style="font-size:11px;padding:6px 0">
+                 No global GRASP servers configured. Add some in
+                 <a href="#config">Config → ngit</a>, or use the custom input below
+                 for a one-off init. Empty submit falls back to
+                 <code>ngit init --defaults</code>.
+               </div>`}
+          <div class="ngit-grasp-custom" style="margin-top:6px">
+            <input type="text" class="ngit-grasp-custom-input"
+                   placeholder="wss://one-off-grasp.example  (optional)"
+                   ${noPath ? 'disabled' : ''}>
+            <div class="muted" style="font-size:11px;margin-top:4px">
+              One-off addition for this project only. To add it to every future
+              init, save it in Config → ngit instead.
+            </div>
+          </div>
+        </div>
 
         <label class="field-label" style="margin-top:12px">npub</label>
         <div class="field-row">
@@ -4152,10 +4213,20 @@ const ProjectsPanel = (() => {
         </div>
 
         <label class="field-label" style="margin-top:12px">Signing</label>
-        <div class="muted" style="font-size:11px">Amber will sign on first push.</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          ${amberPaired
+            ? `<span class="bin-indicator bin-indicator-ok">✓</span>
+               <span style="font-size:12px">Amber paired — ready to sign</span>`
+            : `<span class="bin-indicator bin-indicator-err">✗</span>
+               <span style="font-size:12px">Amber not paired — pair via <a href="#config">Config → ngit</a> first, then return here</span>`
+          }
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:4px">
+          ngit init publishes a signed kind-30617 event; without Amber it can't sign.
+        </div>
 
         <div class="step-actions" style="margin-top:14px">
-          <button class="primary ngit-init-btn" ${noPath ? 'disabled title="ngit requires a local repository path."' : ''}>Initialize ngit</button>
+          <button class="primary ngit-init-btn" ${(noPath || !amberPaired) ? `disabled title="${noPath ? 'ngit requires a local repository path.' : 'Pair Amber in Config → ngit first.'}"` : ''}>Initialize ngit</button>
         </div>
       </div>
     `;
@@ -4163,16 +4234,37 @@ const ProjectsPanel = (() => {
     if (noPath) return;
 
     container.querySelector('.ngit-init-btn').addEventListener('click', () => {
-      const relay = container.querySelector('.ngit-init-relay').value.trim();
-      if (!relay || !/^wss?:\/\//i.test(relay)) {
-        toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
+      const name = container.querySelector('.ngit-init-name').value.trim();
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+        toast('Invalid name', '1-64 chars: alphanumerics, dot, dash, underscore', 'err');
         return;
       }
+      const description = container.querySelector('.ngit-init-description').value.trim();
+
+      // Collect every checked default + the custom input (if filled +
+      // shaped like ws/wss). Server re-validates each URL anyway, but
+      // failing fast here keeps the modal from opening just to error.
+      const graspServers = Array.from(
+        container.querySelectorAll('.ngit-grasp-toggle:checked'),
+      ).map(el => el.dataset.url);
+      const custom = container.querySelector('.ngit-grasp-custom-input').value.trim();
+      if (custom) {
+        if (!/^wss?:\/\//i.test(custom)) {
+          toast('Invalid grasp-server URL', 'must start with wss:// or ws://', 'err');
+          return;
+        }
+        graspServers.push(custom);
+      }
+
+      const subtitle = graspServers.length > 0
+        ? `ngit init --name ${name} --grasp-server ${graspServers.length === 1 ? graspServers[0] : `(${graspServers.length} servers)`}`
+        : `ngit init --name ${name} --defaults`;
+
       openExecModal({
-        title: `Initialize ngit · ${p.name}`,
-        subtitle: `ngit init --relay ${relay}`,
+        title:    `Initialize ngit · ${p.name}`,
+        subtitle,
         endpoint: `/api/projects/${p.id}/ngit/init`,
-        body: { relay },
+        body:     { name, description, graspServers },
       }).then(async (r) => {
         if (!r.ok) return; // modal stays open on non-zero; user dismisses
         try {
@@ -6768,6 +6860,30 @@ const ConfigPanel = (() => {
         </div>
 
         <div class="config-row" style="margin-top:14px">
+          <div class="k">GRASP servers</div>
+          <div class="v">
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+              Where your git+nostr data is hosted. The Initialize ngit form on
+              each project pre-checks these — uncheck per-project if a particular
+              server doesn't host that repo. Two public defaults are seeded;
+              add your own grasp (self-hosted or otherwise) below.
+            </div>
+            <div class="relay-list" id="grasp-servers">
+              ${(ident.graspServers || []).map(url => `
+                <div class="item" data-url="${escapeHtml(url)}">
+                  <span class="url">${escapeHtml(url)}</span>
+                  <button class="danger rm-grasp">×</button>
+                </div>`).join('')}
+              <div class="add">
+                <input id="grasp-server-input" placeholder="wss://your-grasp-server.example" autocomplete="off">
+                <button id="grasp-server-paste">paste</button>
+                <button class="primary" id="grasp-server-add">add</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="config-row" style="margin-top:14px">
           <div class="k">Account (signer)</div>
           <div class="v">
             ${ngitAccount && ngitAccount.loggedIn ? `
@@ -6914,6 +7030,24 @@ const ConfigPanel = (() => {
     $('read-relay-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') addReadRelayFromInput(); });
     $('read-relay-paste').addEventListener('click', async () => {
       try { $('read-relay-input').value = (await navigator.clipboard.readText()).trim(); }
+      catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+    });
+
+    // Grasp servers list — same wire shape as the read-relay list above
+    // (item row .rm-grasp button per entry, add input + paste button at
+    // the bottom). Reload after each mutation so the list re-renders
+    // from /api/identity/config — that endpoint already handles the
+    // default-fallback for empty stored state.
+    $$('#grasp-servers .rm-grasp').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const url = e.target.closest('.item').dataset.url;
+        removeGraspServerFromList(url);
+      });
+    });
+    $('grasp-server-add').addEventListener('click', addGraspServerFromInput);
+    $('grasp-server-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') addGraspServerFromInput(); });
+    $('grasp-server-paste').addEventListener('click', async () => {
+      try { $('grasp-server-input').value = (await navigator.clipboard.readText()).trim(); }
       catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
     });
 
@@ -7660,6 +7794,36 @@ const ConfigPanel = (() => {
         body: JSON.stringify({ url }),
       });
       toast('Relay removed', url, 'ok');
+      load();
+    } catch (e) { toast('Remove failed', e.message, 'err'); }
+  }
+
+  // Grasp server list — POST /api/identity/grasp/{add,remove}. Same
+  // contract as read-relays (returns the new list); we just reload
+  // the panel so the markup re-renders from /api/identity/config.
+  async function addGraspServerFromInput() {
+    const url = $('grasp-server-input').value.trim();
+    if (!url) return;
+    try {
+      const r = await api('/api/identity/grasp/add', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      if (!r.ok) throw new Error(r.error || 'add failed');
+      toast('Grasp server added', url, 'ok');
+      load();
+    } catch (e) { toast('Add failed', e.message, 'err'); }
+  }
+
+  async function removeGraspServerFromList(url) {
+    try {
+      await api('/api/identity/grasp/remove', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      toast('Grasp server removed', url, 'ok');
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
   }
@@ -8952,7 +9116,8 @@ const SetupWizard = (() => {
               placeholder="wss://relay.damus.io" value="${escapeHtml(existingRelay)}">
           </div>
           <div class="setup-hint muted">
-            Used when initialising new repos. Change later in Config → ngit.
+            Marks ngit as "configured" on the Status panel. Per-project init
+            picks GRASP servers separately on the project's ngit tab.
           </div>
         </div>
 

@@ -44,7 +44,9 @@ const git_status: Tool = {
   permission: 'always',
   handler: async (_args, ctx): Promise<ToolResult> => {
     if (!ctx.project.path) return { ok: false, error: 'project has no path' };
-    if (!ctx.project.capabilities.git) return { ok: false, error: 'project has no git capability' };
+    if (!ctx.project.capabilities.git && !ctx.project.capabilities.ngit) {
+      return { ok: false, error: 'project has no git or ngit capability' };
+    }
 
     const branch = runGit(ctx.project.path, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
     const hash   = runGit(ctx.project.path, ['rev-parse', '--short', 'HEAD']).stdout.trim();
@@ -75,7 +77,9 @@ const git_log: Tool = {
   permission: 'always',
   handler: async (args, ctx): Promise<ToolResult> => {
     if (!ctx.project.path) return { ok: false, error: 'project has no path' };
-    if (!ctx.project.capabilities.git) return { ok: false, error: 'project has no git capability' };
+    if (!ctx.project.capabilities.git && !ctx.project.capabilities.ngit) {
+      return { ok: false, error: 'project has no git or ngit capability' };
+    }
     const n = Number.isInteger(args.n) ? Math.min(100, Math.max(1, args.n)) : 10;
     // Use a delimiter that is highly unlikely to appear in a commit
     // message; split on it server-side rather than parsing JSON from
@@ -116,7 +120,9 @@ const git_diff: Tool = {
   permission: 'always',
   handler: async (args, ctx): Promise<ToolResult> => {
     if (!ctx.project.path) return { ok: false, error: 'project has no path' };
-    if (!ctx.project.capabilities.git) return { ok: false, error: 'project has no git capability' };
+    if (!ctx.project.capabilities.git && !ctx.project.capabilities.ngit) {
+      return { ok: false, error: 'project has no git or ngit capability' };
+    }
 
     const argv = ['diff'];
     if (args.staged) argv.push('--cached');
@@ -163,7 +169,9 @@ const git_commit: Tool = {
   permission: 'gated',
   handler: async (args, ctx): Promise<ToolResult> => {
     if (!ctx.project.path) return { ok: false, error: 'project has no path' };
-    if (!ctx.project.capabilities.git) return { ok: false, error: 'project has no git capability' };
+    if (!ctx.project.capabilities.git && !ctx.project.capabilities.ngit) {
+      return { ok: false, error: 'project has no git or ngit capability' };
+    }
     if (typeof args.message !== 'string' || !args.message.trim()) {
       return { ok: false, error: 'message is required' };
     }

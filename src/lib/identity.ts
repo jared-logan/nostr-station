@@ -18,6 +18,14 @@ export interface Identity {
   // to distinguish ngit "installed but unconfigured" from "configured"
   // in the dashboard Service Health sidebar).
   ngitRelay?: string;
+  // User's preferred GRASP servers (git+nostr storage hosts). Pre-populates
+  // the per-project Initialize ngit form — same model shakespeare.diy uses
+  // (Settings → Nostr → Nostr Git Servers configures globally; per-project
+  // init picks from the global list with custom-add still available).
+  // Stored URLs are validated as ws:// or wss:// (NIP-34 transport). When
+  // absent, the project init form falls back to the hardcoded defaults
+  // (relay.ngit.dev + git.shakespeare.diy).
+  graspServers?: string[];
   // Opt-out of dashboard auth for localhost requests (127.0.0.1, ::1). Default
   // true — manual override only, not surfaced in the UI yet.
   requireAuth?: boolean;
@@ -35,6 +43,17 @@ export const DEFAULT_READ_RELAYS = [
   'wss://relay.damus.io',
   'wss://relay.nostr.band',
   'wss://nos.lol',
+];
+
+// Default GRASP server picks for a brand-new install. NIP-34 mentions
+// GRASP as infrastructure but doesn't enumerate servers, and ngit-cli's
+// README is silent too. These two are the public servers we've verified
+// in the wild — relay.ngit.dev (operated by ngit's author) and
+// git.shakespeare.diy (shakespeare.diy team). Hardcoding more would
+// be guessing; users can add custom URLs via Config → ngit.
+export const DEFAULT_GRASP_SERVERS = [
+  'wss://relay.ngit.dev',
+  'wss://git.shakespeare.diy',
 ];
 
 function configDir(): string {
@@ -58,6 +77,9 @@ export function readIdentity(): Identity {
                     ? parsed.readRelays.filter((x: any) => typeof x === 'string')
                     : DEFAULT_READ_RELAYS.slice(),
       ngitRelay:  typeof parsed.ngitRelay === 'string' && parsed.ngitRelay ? parsed.ngitRelay : undefined,
+      graspServers: Array.isArray(parsed.graspServers)
+        ? parsed.graspServers.filter((x: any): x is string => typeof x === 'string' && x.length > 0)
+        : undefined,
       requireAuth: parsed.requireAuth === false ? false : undefined,
       setupComplete: typeof parsed.setupComplete === 'boolean' ? parsed.setupComplete : undefined,
     };
@@ -118,6 +140,56 @@ export function removeReadRelay(url: string): { ok: boolean; relays: string[] } 
   ident.readRelays = ident.readRelays.filter(r => r !== url);
   writeIdentity(ident);
   return { ok: true, relays: ident.readRelays };
+}
+
+// ── Grasp server list helpers ─────────────────────────────────────────────
+
+// Returns the user's configured grasp servers, falling back to
+// DEFAULT_GRASP_SERVERS when the field is absent (legacy entries) or
+// empty. The init form treats this as the source of truth for what
+// to pre-check; an empty list means "user explicitly cleared it",
+// at which point we still hand back the hardcoded defaults so the
+// form never renders blank — they just won't be persisted unless the
+// user re-adds them.
+export function getGraspServers(): string[] {
+  const ident = readIdentity();
+  if (Array.isArray(ident.graspServers) && ident.graspServers.length > 0) {
+    return ident.graspServers.slice();
+  }
+  return DEFAULT_GRASP_SERVERS.slice();
+}
+
+export function addGraspServer(url: string): { ok: boolean; error?: string; graspServers?: string[] } {
+  const trimmed = url.trim();
+  if (!isValidRelayUrl(trimmed)) return { ok: false, error: 'url must start with ws:// or wss://' };
+  const ident = readIdentity();
+  // Persist explicitly when the user adds — once they touch the list,
+  // we stop falling back to DEFAULT_GRASP_SERVERS for reads and return
+  // exactly what's stored. addGraspServer with an empty stored list
+  // seeds it with the existing defaults + the new URL so the user
+  // doesn't accidentally end up with a single-entry list when they
+  // intended "the defaults plus mine".
+  const current = Array.isArray(ident.graspServers) ? ident.graspServers : DEFAULT_GRASP_SERVERS.slice();
+  if (current.includes(trimmed)) {
+    ident.graspServers = current;
+    writeIdentity(ident);
+    return { ok: true, graspServers: current };
+  }
+  ident.graspServers = [...current, trimmed];
+  writeIdentity(ident);
+  return { ok: true, graspServers: ident.graspServers };
+}
+
+export function removeGraspServer(url: string): { ok: boolean; graspServers: string[] } {
+  const ident = readIdentity();
+  // Same fallback semantics as add — user touching the list anchors
+  // a stored copy. Removing from a defaults-only state seeds the
+  // stored list with defaults minus the removed entry, so the next
+  // read returns the user's exact choice rather than re-adding it.
+  const current = Array.isArray(ident.graspServers) ? ident.graspServers : DEFAULT_GRASP_SERVERS.slice();
+  ident.graspServers = current.filter(s => s !== url);
+  writeIdentity(ident);
+  return { ok: true, graspServers: ident.graspServers };
 }
 
 export function setNgitRelay(url: string): { ok: boolean; error?: string; ngitRelay?: string } {

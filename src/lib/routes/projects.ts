@@ -372,7 +372,7 @@ export async function handleProjects(
       // the exact stdout format on a real deploy. For now, the user
       // sees the live URL in the exec modal output.
       streamExec(
-        { bin: 'npm', args: ['run', 'deploy'] },
+        { bin: 'npm', args: ['run', 'deploy'], timeoutMs: 0 },
         res, req, project.path,
         { line: `$ npm run deploy  (cwd: ${project.path})`, stream: 'stdout' },
       );
@@ -410,7 +410,10 @@ export async function handleProjects(
     }
     if (tail === 'ngit/push' && method === 'POST') {
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
-      streamExec({ bin: 'ngit', args: ['push'] }, res, req, project.path);
+      // 3-min timeout — Amber sign round-trip + grasp-server upload
+      // for a busy repo can take a while; the line-cap still kills
+      // any retry-loop in well under that.
+      streamExec({ bin: 'ngit', args: ['push'], timeoutMs: 180_000 }, res, req, project.path);
       return true;
     }
 
@@ -517,21 +520,89 @@ export async function handleProjects(
     }
     if (tail === 'ngit/init' && method === 'POST') {
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
-      // Relay URL arrives in a JSON body and is validated strictly before
-      // being handed to ngit as a fixed argv element. The validator
-      // rejects whitespace and any non-ws(s):// scheme, so there's no
-      // path for a user string to reach the shell.
+      // Pre-flight signer check. ngit init publishes a signed kind-30617
+      // event, so it needs an active NIP-46 session (or an nsec — which
+      // we don't store). Reading the same git-config slot /api/ngit/account
+      // checks lets us refuse the spawn upfront instead of letting ngit
+      // print "logged in as …" then fail downstream on something else,
+      // or worse, retry-loop a missing-signer prompt against a closed
+      // stdin (the original OOM symptom). The line-cap from streamExec
+      // catches the retry-loop too, but failing here gives a much clearer
+      // error than the bounded-message frame would.
+      let bunkerUri = '';
+      try {
+        bunkerUri = execFileSync('git', ['config', '--global', '--get', 'nostr.bunker-uri'], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }).toString().trim();
+      } catch { /* not logged in — bunkerUri stays empty */ }
+      if (!bunkerUri) {
+        streamExecError(res, req,
+          'ngit account not paired — open Config → ngit and click Connect Amber first, ' +
+          'then retry Initialize ngit.',
+        );
+        return true;
+      }
+      // ngit 2.x dropped the `--relay <url>` argv we used to pass and
+      // replaced it with `--name <NAME> [--description <D>]
+      // [--grasp-server <URL>...] [--defaults]`. GRASP servers (git+nostr
+      // storage protocol) are a separate concept from announcement relays
+      // — a regular Nostr relay isn't necessarily grasp-capable, and the
+      // pre-fix invocation of `--relay wss://relay.ditto.pub` produced
+      // "missing required fields" against ngit 2.4. The new contract:
+      //
+      //   { name?: string,                  — defaults to project.name
+      //     description?: string,           — optional, single line
+      //     graspServers?: string[] }       — empty/omitted → --defaults
+      //
+      // Each grasp-server URL is validated with isValidRelayUrl (same
+      // ws/wss check that protected the old --relay arg). Anything that
+      // fails validation is rejected with 400; spawn() is shell-free
+      // but the pre-spawn check keeps user-typed garbage out of logs
+      // and the SSE stream.
       let parsed: any = {};
       try { parsed = JSON.parse(await readBody(req)); }
       catch { res.writeHead(400); res.end('bad json'); return true; }
-      const raw = String(parsed.relay || '').trim();
-      if (!raw || !isValidRelayUrl(raw)) {
+
+      const name = (typeof parsed.name === 'string' && parsed.name.trim())
+        ? parsed.name.trim()
+        : project.name;
+      // Repo identifier follows ngit's expectation: short, no spaces,
+      // safe for filesystem paths and URL slugs alike. project.name is
+      // already validated upstream but the user can override here.
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'relay must be a ws:// or wss:// URL' }));
+        res.end(JSON.stringify({ error: 'name must be 1-64 chars: alphanumerics, dot, dash, underscore' }));
         return true;
       }
+      const description = typeof parsed.description === 'string'
+        ? parsed.description.trim().slice(0, 280)        // keep it tweet-length; ngit allows arbitrary
+        : '';
+      const graspServersRaw: string[] = Array.isArray(parsed.graspServers)
+        ? parsed.graspServers.filter((x: unknown): x is string => typeof x === 'string')
+        : [];
+      const graspServers = graspServersRaw.map(s => s.trim()).filter(Boolean);
+      for (const url of graspServers) {
+        if (!isValidRelayUrl(url)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `grasp-server must be a ws:// or wss:// URL: ${url}` }));
+          return true;
+        }
+      }
+
+      // argv assembly: always pass --name. If user provided grasp
+      // servers, pass each as --grasp-server <url>; otherwise
+      // --defaults so ngit picks a sensible grasp on its own.
+      // --description is appended only when non-empty so we don't
+      // hand ngit a literal empty string.
+      const args: string[] = ['init', '--name', name];
+      if (description) args.push('--description', description);
+      if (graspServers.length > 0) {
+        for (const url of graspServers) args.push('--grasp-server', url);
+      } else {
+        args.push('--defaults');
+      }
       streamExec(
-        { bin: 'ngit', args: ['init', '--relay', raw], env: { NO_COLOR: '1', TERM: 'dumb' } },
+        { bin: 'ngit', args, env: { NO_COLOR: '1', TERM: 'dumb' } },
         res, req, project.path,
       );
       return true;
@@ -562,7 +633,11 @@ export async function handleProjects(
     if (tail === 'nsite/deploy' && method === 'POST') {
       const cwd = project.path || process.cwd();
       streamExec(
-        { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } },
+        // timeoutMs:0 — Blossom uploads + relay publishes for a real
+        // site can legitimately span minutes; the consecutive-line
+        // cap inside streamExec still guards against retry-loop
+        // floods regardless.
+        { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' }, timeoutMs: 0 },
         res, req, cwd,
       );
       return true;
