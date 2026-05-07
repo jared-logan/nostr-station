@@ -116,7 +116,11 @@ function readReadmeExcerpt(projectPath: string): string | null {
 
 function inferMode(project: Project | null, template: ProjectTemplateRecord | null): 'init' | 'edit' {
   if (!project || !project.path || !template) return 'edit';
-  if (!project.capabilities.git) return 'edit';
+  // ngit projects sit on a real git working tree underneath — same
+  // log inspection applies. Pre-fix this gated on `cap.git` only and
+  // skipped the log read for ngit-only projects, which forced them
+  // into 'edit' mode regardless of commit count.
+  if (!project.capabilities.git && !project.capabilities.ngit) return 'edit';
   const log = projectGitLog(project.path, 2);
   // Exactly one commit → still on the scaffold root. More than one →
   // user has written code. Zero (no commits at all) → init.
@@ -310,7 +314,10 @@ function buildVars(project: Project | null, model?: ModelInfo): Vars {
 
   const README          = project?.path ? readReadmeExcerpt(project.path) : null;
   const overlay         = project ? readProjectContextOverlay(project) : null;
-  const recentCommits   = (project?.path && project.capabilities.git)
+  // Recent commits surface in the system prompt as project context.
+  // ngit-only projects have git history too (ngit init runs on top
+  // of a real git repo), so we accept either capability.
+  const recentCommits   = (project?.path && (project.capabilities.git || project.capabilities.ngit))
     ? projectGitLog(project.path, 10).map(c => ({ hash: c.hash, message: c.message }))
     : [];
 
