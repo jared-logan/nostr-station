@@ -46,6 +46,7 @@ test('registry: listTools returns all expected tools', () => {
     'glob', 'grep',
     'git_status', 'git_log', 'git_diff', 'git_commit',
     'run_command',
+    'todo_read', 'todo_write',
   ]) {
     assert.ok(names.has(expected), `missing tool: ${expected}`);
   }
@@ -316,6 +317,64 @@ test('grep: ungated by permission mode', async () => {
   for (const mode of ['read-only', 'auto-edit', 'yolo'] as const) {
     assert.equal(requiresApproval('grep', mode), false, `grep must be ungated in ${mode} mode`);
   }
+});
+
+// ── todo_read / todo_write ───────────────────────────────────────────────
+
+test('todo_write: stores list, todo_read returns it', async () => {
+  const ctx = { project: makeProject(ROOT) as any, permissions: 'read-only' as const };
+  const items = [
+    { id: '1', content: 'first',  status: 'pending' as const },
+    { id: '2', content: 'second', status: 'in_progress' as const },
+  ];
+  const w = await runTool('todo_write', { todos: items }, ctx);
+  assert.equal(w.ok, true);
+  if (w.ok) assert.deepEqual(w.content.todos, items);
+
+  const r = await runTool('todo_read', {}, ctx);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.deepEqual(r.content.todos, items);
+});
+
+test('todo_write: empty array clears the list', async () => {
+  const ctx = { project: makeProject(ROOT) as any, permissions: 'read-only' as const };
+  await runTool('todo_write', { todos: [{ id: '1', content: 'x', status: 'pending' as const }] }, ctx);
+  const w = await runTool('todo_write', { todos: [] }, ctx);
+  assert.equal(w.ok, true);
+  if (w.ok) assert.deepEqual(w.content.todos, []);
+});
+
+test('todo_write: rejects bad status', async () => {
+  const ctx = { project: makeProject(ROOT) as any, permissions: 'read-only' as const };
+  const w = await runTool('todo_write', { todos: [{ id: 'x', content: 'y', status: 'wat' }] }, ctx);
+  assert.equal(w.ok, false);
+  if (!w.ok) assert.match(w.error, /status/);
+});
+
+test('todo_write: requires id and content', async () => {
+  const ctx = { project: makeProject(ROOT) as any, permissions: 'read-only' as const };
+  const w1 = await runTool('todo_write', { todos: [{ id: '', content: 'x', status: 'pending' }] }, ctx);
+  assert.equal(w1.ok, false);
+  const w2 = await runTool('todo_write', { todos: [{ id: 'x', content: '', status: 'pending' }] }, ctx);
+  assert.equal(w2.ok, false);
+});
+
+test('todo_*: ungated by permission mode', () => {
+  for (const mode of ['read-only', 'auto-edit', 'yolo'] as const) {
+    assert.equal(requiresApproval('todo_read',  mode), false);
+    assert.equal(requiresApproval('todo_write', mode), false);
+  }
+});
+
+test('todo: lists are scoped per project', async () => {
+  const ROOT2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-tools-2-'));
+  const ctxA = { project: makeProject(ROOT)  as any, permissions: 'read-only' as const };
+  const ctxB = { project: { ...makeProject(ROOT2), id: 'project-b' } as any, permissions: 'read-only' as const };
+  await runTool('todo_write', { todos: [{ id: '1', content: 'A only', status: 'pending' }] }, ctxA);
+  const r = await runTool('todo_read', {}, ctxB);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.deepEqual(r.content.todos, []);
+  fs.rmSync(ROOT2, { recursive: true, force: true });
 });
 
 test('read_file: directories fall back to list_dir (no longer rejects)', async () => {

@@ -1979,6 +1979,10 @@ const ChatPanel = (() => {
         case 'git_log':      return `git log${Number.isInteger(a.n) ? ` -n${a.n}` : ''}`;
         case 'git_diff':     return a.path ? `git diff ${trunc(a.path)}` : (a.staged ? 'git diff --cached' : 'git diff');
         case 'git_commit':   return `Committed: "${trunc(a.message, 56)}"`;
+        case 'todo_read':    return 'Read todo list';
+        case 'todo_write':   return Array.isArray(a.todos)
+                                  ? `Updated todos (${a.todos.length})`
+                                  : 'Updated todos';
         case 'run_command': {
           const argv = Array.isArray(a.argv) ? a.argv : [];
           if (argv.length === 0) return 'run_command';
@@ -2020,6 +2024,47 @@ const ChatPanel = (() => {
       if (status) status.textContent = ok ? '✓' : '✗';
       const sum = el.querySelector('.tc-summary');
       if (sum) sum.textContent = ok ? (summary || 'done') : (error || 'failed');
+    }
+
+    // Todo tracker — reuses one element appended to the chat feed so
+    // every todo_state SSE update mutates in place rather than
+    // stacking multiple trackers as the agent works through items.
+    // Empty list (`todos.length === 0`) hides the tracker entirely;
+    // a TodoWrite([]) effectively dismisses it once a multi-step
+    // task is fully done. The tracker re-renders inline (not as a
+    // separate sticky bar) so it scrolls with the conversation —
+    // matches shakespeare.diy's "[1/4] Create NotePreview…" style.
+    let todoTrackerEl = null;
+    function renderTodoTracker(todos) {
+      if (!Array.isArray(todos) || todos.length === 0) {
+        if (todoTrackerEl) { todoTrackerEl.remove(); todoTrackerEl = null; }
+        return;
+      }
+      if (!todoTrackerEl) {
+        todoTrackerEl = document.createElement('div');
+        todoTrackerEl.className = 'todo-tracker';
+        bodyEl.insertBefore(todoTrackerEl, cur);
+      }
+      const done   = todos.filter(t => t.status === 'completed').length;
+      const total  = todos.length;
+      todoTrackerEl.innerHTML = `
+        <div class="tt-head">
+          <span class="tt-count">[${done}/${total}]</span>
+          <span class="tt-label">${done === total ? 'tasks completed' : 'tasks'}</span>
+        </div>
+        <ul class="tt-list">
+          ${todos.map(t => {
+            const glyph = t.status === 'completed'  ? '✓'
+                        : t.status === 'in_progress' ? '▸'
+                        :                              '○';
+            return `<li class="tt-item tt-${t.status}">
+              <span class="tt-glyph">${glyph}</span>
+              <span class="tt-content">${escapeHtml(t.content)}</span>
+            </li>`;
+          }).join('')}
+        </ul>
+      `;
+      feed.scrollTop = feed.scrollHeight;
     }
     function renderApprovalRequest(id, approvalId, name, args, preview) {
       const el = renderToolCall(id, name, args);
@@ -2115,6 +2160,7 @@ const ChatPanel = (() => {
             if (p.type === 'tool_call_start') { renderToolCall(p.id, p.name, p.args); continue; }
             if (p.type === 'approval_request') { renderApprovalRequest(p.id, p.approvalId, p.name, p.args, p.preview); continue; }
             if (p.type === 'tool_result') { updateToolResult(p.id, !!p.ok, p.summary, p.error); continue; }
+            if (p.type === 'todo_state') { renderTodoTracker(p.todos); continue; }
           } catch (e) {
             if (e.message && !e.message.startsWith('{')) throw e;
           }

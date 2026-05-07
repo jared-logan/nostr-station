@@ -501,6 +501,18 @@ async function dispatchOne(
   const result: ToolResult = await runTool(name, args, ctx);
   if (result.ok) {
     emit(res, { type: 'tool_result', id: callId, ok: true, summary: result.summary ?? '' });
+    // Side channel: todo_read / todo_write surface the current list
+    // separately so the chat UI can render the [N/M] tracker without
+    // having to parse the per-call payload (the model still receives
+    // the full payload via the tool_result content). Hardcoded here
+    // because it's the only side-effect we surface today; if more
+    // tools want side channels we'll add a `sideEffects?` field on
+    // ToolResult instead of growing this branch.
+    if ((name === 'todo_read' || name === 'todo_write')
+        && result.content && typeof result.content === 'object'
+        && Array.isArray((result.content as any).todos)) {
+      emit(res, { type: 'todo_state', todos: (result.content as any).todos });
+    }
     return { payload: { ok: true, content: result.content }, summary: result.summary ?? JSON.stringify(result.content).slice(0, 1000) };
   } else {
     emit(res, { type: 'tool_result', id: callId, ok: false, error: result.error });
