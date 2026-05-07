@@ -134,6 +134,19 @@ src/
     app.css                   Dashboard styling
     terminal.js               xterm.js + WS client for the terminal panel
     nori.svg                  Logo
+  scaffold-assets/
+    mcp-configs/              Vendored MCP configs copied verbatim into
+                              every new local-only project — `.mcp.json`
+                              (Claude Code), `opencode.json` (opencode.ai),
+                              `.vscode/mcp.json` (VS Code). Wires
+                              `@nostrbook/mcp` + `@soapbox.pub/js-dev-mcp`
+                              so terminal AI tools get Nostr docs lookup
+                              and JS dev tools out of the box, with no
+                              ongoing maintenance — nostrbook fetches
+                              NIPs live from the canonical upstream.
+                              MKStack-scaffolded projects get the same
+                              configs from the upstream template; we
+                              don't overwrite either way.
 tests/                        node:test via tsx (~2k LoC, 400+ tests)
 ```
 

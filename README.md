@@ -69,7 +69,11 @@ Inside the dashboard:
   LM Studio, Maple, or any OpenAI-compatible endpoint. Per-provider keys
   in the OS keychain.
 - **Projects** — scaffold from templates, clone GitHub or ngit, or adopt
-  an existing local repo. Per-card git state, sync, snapshot.
+  an existing local repo. Per-card git state, sync, snapshot. Every
+  newly-created project ships `.mcp.json`, `opencode.json`, and
+  `.vscode/mcp.json` wired to `@nostrbook/mcp` — any AI tool you point at
+  the project (Claude Code, opencode, VS Code) gets Nostr protocol docs
+  lookup automatically. No setup, no API keys.
 - **Terminal** — embedded shell tabs anchored at your active project.
 - **Relay** — live event feed, manual publish, NIP-11 metadata.
 - **Status** — service health, version info.

@@ -24,6 +24,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
 import type http from 'http';
 import { createProject } from './projects.js';
@@ -204,13 +205,32 @@ function makeLineEmitter(res: http.ServerResponse, stream: Stream) {
   };
 }
 
-// Minimum-surface starter for a local-only project. Just a README with
-// the project name so the folder isn't empty. No .gitignore (meaningless
-// without git), no framework, no npm init. Local-only means literally a
-// folder of files — git/ngit are opt-in later via the project card.
+// Minimum-surface starter for a local-only project. README + MCP configs
+// for AI agents — `.mcp.json` (Claude Code), `opencode.json` (opencode.ai),
+// and `.vscode/mcp.json` (VS Code). The MCP configs wire `@nostrbook/mcp`
+// + `@soapbox.pub/js-dev-mcp` into whatever AI tool the user runs against
+// the project, so blank-canvas projects get the same Nostr-aware tooling
+// MKStack-scaffolded ones do. Stack-agnostic — the configs just expose
+// docs lookups; they don't pin the user to React/Nostrify. No .gitignore
+// or git init (those happen later when the user opts into version control).
 function writeLocalStarter(target: string, name: string): void {
   const readme = `# ${name}\n\nCreated by nostr-station.\n`;
   fs.writeFileSync(path.join(target, 'README.md'), readme, { mode: 0o644 });
+  writeMcpConfigs(target);
+}
+
+// Resolve `dist/scaffold-assets/mcp-configs/` (production) or
+// `src/scaffold-assets/mcp-configs/` (dev via tsx) — same relative path
+// from project-scaffold.ts either way. Copied into the target directory
+// so newly-created projects work with MCP-aware AI tools out of the box.
+function mcpConfigsSourceDir(): string {
+  return fileURLToPath(new URL('../scaffold-assets/mcp-configs/', import.meta.url));
+}
+
+export function writeMcpConfigs(target: string): void {
+  const src = mcpConfigsSourceDir();
+  if (!fs.existsSync(src)) return; // build artifact missing — fail open
+  fs.cpSync(src, target, { recursive: true });
 }
 
 // Validate a URL we're about to hand to `git clone`. We allow http/https
