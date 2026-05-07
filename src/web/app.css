@@ -2505,6 +2505,29 @@ input:focus, textarea:focus, select:focus {
 .remote-row .k { color: var(--muted); }
 .remote-row .v { color: var(--text-bright); font-family: var(--font-mono); word-break: break-all; }
 
+/* ── ngit init grasp-server picker ────────────────────────────────────── */
+.ngit-init-grasp {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px;
+  background: var(--bg-elev);
+}
+.ngit-grasp-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  cursor: pointer;
+}
+.ngit-grasp-row code {
+  font-family: var(--font-mono);
+  color: var(--text-bright);
+}
+.ngit-grasp-custom-input {
+  width: 100%;
+  font-family: var(--font-mono);
+}
+
 /* ── ngit verb triad (Sync / Pull / Push) ─────────────────────────────── */
 .ngit-verb-row {
   display: flex;

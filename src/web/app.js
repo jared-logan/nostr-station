@@ -4128,23 +4128,68 @@ const ProjectsPanel = (() => {
     else                       fetchAndRender();
   }
 
+  // Default GRASP server picks for new ngit projects. NIP-34 mentions
+  // GRASP as infrastructure but doesn't enumerate any; ngit-cli's
+  // README is silent too. These two are the concrete public servers
+  // we've observed in the wild — relay.ngit.dev is operated by ngit's
+  // author, git.shakespeare.diy by the shakespeare.diy team. Users
+  // can uncheck either + add custom URLs via the form. Empty list at
+  // submit time → server falls back to `ngit init --defaults` and
+  // ngit picks for itself.
+  const DEFAULT_GRASP_SERVERS = [
+    { url: 'wss://relay.ngit.dev',       label: 'relay.ngit.dev',       hint: 'ngit-cli reference' },
+    { url: 'wss://git.shakespeare.diy',  label: 'git.shakespeare.diy',  hint: 'shakespeare.diy' },
+  ];
+
   async function renderNgitInitForm(container, p) {
-    const owner = await api('/api/identity/config').catch(() => ({ npub: '', ngitRelay: '' }));
-    const prefill = owner.ngitRelay || '';
+    const owner = await api('/api/identity/config').catch(() => ({ npub: '' }));
     const noPath  = !p.path;
     container.innerHTML = `
       <div class="tab-section">
         <h3>Initialize ngit for this project</h3>
         <div class="muted" style="margin-bottom:10px">
           ngit is enabled for this project but no nostr remote is configured yet.
-          Publish the repo announcement to a relay to create one.
+          Publishes a kind-30617 repo announcement so collaborators can clone via
+          <code>git clone nostr://…</code>.
         </div>
 
-        <label class="field-label">Nostr relay for this repo</label>
+        <label class="field-label">Repository name</label>
         <div class="field-row">
-          <input type="text" class="ngit-init-relay" placeholder="wss://relay.damus.io" value="${escapeHtml(prefill)}" ${noPath ? 'disabled' : ''}>
+          <input type="text" class="ngit-init-name" placeholder="my-repo"
+                 value="${escapeHtml(p.name || '')}" ${noPath ? 'disabled' : ''}>
         </div>
-        ${prefill ? `<div class="muted" style="font-size:11px;margin-top:4px">Pre-filled from Config → NGIT.</div>` : ''}
+        <div class="muted" style="font-size:11px;margin-top:4px">
+          Letters, digits, dot, dash, underscore. 1-64 chars.
+        </div>
+
+        <label class="field-label" style="margin-top:12px">Description (optional)</label>
+        <div class="field-row">
+          <input type="text" class="ngit-init-description" placeholder="One-line summary"
+                 ${noPath ? 'disabled' : ''}>
+        </div>
+
+        <label class="field-label" style="margin-top:12px">GRASP servers</label>
+        <div class="muted" style="font-size:11px;margin-bottom:6px">
+          Where your git+nostr data is hosted. Pick one or more — the announcement
+          event will list them so collaborators can clone from any.
+        </div>
+        <div class="ngit-init-grasp">
+          ${DEFAULT_GRASP_SERVERS.map(g => `
+            <label class="ngit-grasp-row">
+              <input type="checkbox" class="ngit-grasp-toggle" data-url="${escapeHtml(g.url)}" checked ${noPath ? 'disabled' : ''}>
+              <code>${escapeHtml(g.label)}</code>
+              <span class="muted" style="font-size:11px">— ${escapeHtml(g.hint)}</span>
+            </label>
+          `).join('')}
+          <div class="ngit-grasp-custom" style="margin-top:6px">
+            <input type="text" class="ngit-grasp-custom-input"
+                   placeholder="wss://your-grasp-server.example  (optional, can leave blank)"
+                   ${noPath ? 'disabled' : ''}>
+            <div class="muted" style="font-size:11px;margin-top:4px">
+              Uncheck both above + leave this empty to let ngit pick sensible defaults.
+            </div>
+          </div>
+        </div>
 
         <label class="field-label" style="margin-top:12px">npub</label>
         <div class="field-row">
@@ -4152,7 +4197,9 @@ const ProjectsPanel = (() => {
         </div>
 
         <label class="field-label" style="margin-top:12px">Signing</label>
-        <div class="muted" style="font-size:11px">Amber will sign on first push.</div>
+        <div class="muted" style="font-size:11px">
+          Amber signs init and push — pair Amber via <strong>Config → ngit</strong> first if you haven't.
+        </div>
 
         <div class="step-actions" style="margin-top:14px">
           <button class="primary ngit-init-btn" ${noPath ? 'disabled title="ngit requires a local repository path."' : ''}>Initialize ngit</button>
@@ -4163,16 +4210,37 @@ const ProjectsPanel = (() => {
     if (noPath) return;
 
     container.querySelector('.ngit-init-btn').addEventListener('click', () => {
-      const relay = container.querySelector('.ngit-init-relay').value.trim();
-      if (!relay || !/^wss?:\/\//i.test(relay)) {
-        toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
+      const name = container.querySelector('.ngit-init-name').value.trim();
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+        toast('Invalid name', '1-64 chars: alphanumerics, dot, dash, underscore', 'err');
         return;
       }
+      const description = container.querySelector('.ngit-init-description').value.trim();
+
+      // Collect every checked default + the custom input (if filled +
+      // shaped like ws/wss). Server re-validates each URL anyway, but
+      // failing fast here keeps the modal from opening just to error.
+      const graspServers = Array.from(
+        container.querySelectorAll('.ngit-grasp-toggle:checked'),
+      ).map(el => el.dataset.url);
+      const custom = container.querySelector('.ngit-grasp-custom-input').value.trim();
+      if (custom) {
+        if (!/^wss?:\/\//i.test(custom)) {
+          toast('Invalid grasp-server URL', 'must start with wss:// or ws://', 'err');
+          return;
+        }
+        graspServers.push(custom);
+      }
+
+      const subtitle = graspServers.length > 0
+        ? `ngit init --name ${name} --grasp-server ${graspServers.length === 1 ? graspServers[0] : `(${graspServers.length} servers)`}`
+        : `ngit init --name ${name} --defaults`;
+
       openExecModal({
-        title: `Initialize ngit · ${p.name}`,
-        subtitle: `ngit init --relay ${relay}`,
+        title:    `Initialize ngit · ${p.name}`,
+        subtitle,
         endpoint: `/api/projects/${p.id}/ngit/init`,
-        body: { relay },
+        body:     { name, description, graspServers },
       }).then(async (r) => {
         if (!r.ok) return; // modal stays open on non-zero; user dismisses
         try {

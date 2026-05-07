@@ -520,21 +520,67 @@ export async function handleProjects(
     }
     if (tail === 'ngit/init' && method === 'POST') {
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
-      // Relay URL arrives in a JSON body and is validated strictly before
-      // being handed to ngit as a fixed argv element. The validator
-      // rejects whitespace and any non-ws(s):// scheme, so there's no
-      // path for a user string to reach the shell.
+      // ngit 2.x dropped the `--relay <url>` argv we used to pass and
+      // replaced it with `--name <NAME> [--description <D>]
+      // [--grasp-server <URL>...] [--defaults]`. GRASP servers (git+nostr
+      // storage protocol) are a separate concept from announcement relays
+      // — a regular Nostr relay isn't necessarily grasp-capable, and the
+      // pre-fix invocation of `--relay wss://relay.ditto.pub` produced
+      // "missing required fields" against ngit 2.4. The new contract:
+      //
+      //   { name?: string,                  — defaults to project.name
+      //     description?: string,           — optional, single line
+      //     graspServers?: string[] }       — empty/omitted → --defaults
+      //
+      // Each grasp-server URL is validated with isValidRelayUrl (same
+      // ws/wss check that protected the old --relay arg). Anything that
+      // fails validation is rejected with 400; spawn() is shell-free
+      // but the pre-spawn check keeps user-typed garbage out of logs
+      // and the SSE stream.
       let parsed: any = {};
       try { parsed = JSON.parse(await readBody(req)); }
       catch { res.writeHead(400); res.end('bad json'); return true; }
-      const raw = String(parsed.relay || '').trim();
-      if (!raw || !isValidRelayUrl(raw)) {
+
+      const name = (typeof parsed.name === 'string' && parsed.name.trim())
+        ? parsed.name.trim()
+        : project.name;
+      // Repo identifier follows ngit's expectation: short, no spaces,
+      // safe for filesystem paths and URL slugs alike. project.name is
+      // already validated upstream but the user can override here.
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'relay must be a ws:// or wss:// URL' }));
+        res.end(JSON.stringify({ error: 'name must be 1-64 chars: alphanumerics, dot, dash, underscore' }));
         return true;
       }
+      const description = typeof parsed.description === 'string'
+        ? parsed.description.trim().slice(0, 280)        // keep it tweet-length; ngit allows arbitrary
+        : '';
+      const graspServersRaw: string[] = Array.isArray(parsed.graspServers)
+        ? parsed.graspServers.filter((x: unknown): x is string => typeof x === 'string')
+        : [];
+      const graspServers = graspServersRaw.map(s => s.trim()).filter(Boolean);
+      for (const url of graspServers) {
+        if (!isValidRelayUrl(url)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `grasp-server must be a ws:// or wss:// URL: ${url}` }));
+          return true;
+        }
+      }
+
+      // argv assembly: always pass --name. If user provided grasp
+      // servers, pass each as --grasp-server <url>; otherwise
+      // --defaults so ngit picks a sensible grasp on its own.
+      // --description is appended only when non-empty so we don't
+      // hand ngit a literal empty string.
+      const args: string[] = ['init', '--name', name];
+      if (description) args.push('--description', description);
+      if (graspServers.length > 0) {
+        for (const url of graspServers) args.push('--grasp-server', url);
+      } else {
+        args.push('--defaults');
+      }
       streamExec(
-        { bin: 'ngit', args: ['init', '--relay', raw], env: { NO_COLOR: '1', TERM: 'dumb' } },
+        { bin: 'ngit', args, env: { NO_COLOR: '1', TERM: 'dumb' } },
         res, req, project.path,
       );
       return true;
