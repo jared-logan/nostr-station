@@ -32,6 +32,7 @@ const THEMES = [
   { id: 'green',  label: 'Green',  swatch: '#3DDC84' },
   { id: 'red',    label: 'Red',    swatch: '#E85555' },
   { id: 'blue',   label: 'Blue',   swatch: '#4A9EFF' },
+  { id: 'white',  label: 'White',  swatch: '#FFFFFF' },
 ];
 const THEME_STORAGE_KEY = 'nostr-station:theme';
 

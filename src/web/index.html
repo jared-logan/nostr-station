@@ -12,7 +12,7 @@
   (function () {
     try {
       var t = localStorage.getItem('nostr-station:theme');
-      if (t && t !== 'purple' && /^(green|red|blue)$/.test(t)) {
+      if (t && t !== 'purple' && /^(green|red|blue|white)$/.test(t)) {
         document.documentElement.setAttribute('data-theme', t);
       }
     } catch (_) { /* localStorage may be blocked; default purple is fine */ }

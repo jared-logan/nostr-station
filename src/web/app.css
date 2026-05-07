@@ -60,6 +60,12 @@
   --accent-dim:    #2D6BBF;
   --info:          #9FBEFF;
 }
+:root[data-theme="white"] {
+  --accent:        #E0E0E8;
+  --accent-bright: #FFFFFF;
+  --accent-dim:    #8A8A98;
+  --info:          #C8C8D0;
+}
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
