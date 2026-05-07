@@ -4143,6 +4143,13 @@ const ProjectsPanel = (() => {
 
   async function renderNgitInitForm(container, p) {
     const owner = await api('/api/identity/config').catch(() => ({ npub: '' }));
+    // Probe signer state up-front so the form can show whether init
+    // will actually succeed before the user fills in fields and clicks
+    // through. /api/ngit/account is the same source of truth the
+    // backend pre-flight uses, so the pill won't ever lie about which
+    // path init will take.
+    const account = await api('/api/ngit/account').catch(() => ({ loggedIn: false }));
+    const amberPaired = !!account?.loggedIn;
     const noPath  = !p.path;
     container.innerHTML = `
       <div class="tab-section">
@@ -4197,12 +4204,20 @@ const ProjectsPanel = (() => {
         </div>
 
         <label class="field-label" style="margin-top:12px">Signing</label>
-        <div class="muted" style="font-size:11px">
-          Amber signs init and push — pair Amber via <strong>Config → ngit</strong> first if you haven't.
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          ${amberPaired
+            ? `<span class="bin-indicator bin-indicator-ok">✓</span>
+               <span style="font-size:12px">Amber paired — ready to sign</span>`
+            : `<span class="bin-indicator bin-indicator-err">✗</span>
+               <span style="font-size:12px">Amber not paired — pair via <a href="#config">Config → ngit</a> first, then return here</span>`
+          }
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:4px">
+          ngit init publishes a signed kind-30617 event; without Amber it can't sign.
         </div>
 
         <div class="step-actions" style="margin-top:14px">
-          <button class="primary ngit-init-btn" ${noPath ? 'disabled title="ngit requires a local repository path."' : ''}>Initialize ngit</button>
+          <button class="primary ngit-init-btn" ${(noPath || !amberPaired) ? `disabled title="${noPath ? 'ngit requires a local repository path.' : 'Pair Amber in Config → ngit first.'}"` : ''}>Initialize ngit</button>
         </div>
       </div>
     `;
@@ -9020,7 +9035,8 @@ const SetupWizard = (() => {
               placeholder="wss://relay.damus.io" value="${escapeHtml(existingRelay)}">
           </div>
           <div class="setup-hint muted">
-            Used when initialising new repos. Change later in Config → ngit.
+            Marks ngit as "configured" on the Status panel. Per-project init
+            picks GRASP servers separately on the project's ngit tab.
           </div>
         </div>
 
