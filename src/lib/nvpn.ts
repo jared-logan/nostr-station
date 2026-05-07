@@ -22,12 +22,24 @@
 // dashboard event loop.
 
 import { execa } from 'execa';
+import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import readline from 'readline';
 import { findBin } from './detect.js';
 import type { LogBuffer } from './log-buffer.js';
+
+// ── Lifecycle pub/sub ────────────────────────────────────────────────────
+//
+// Action helpers (startNvpn / stopNvpn / restartNvpn) emit `state-changed`
+// after the daemon transitions, so the Logs-panel SSE can push a fresh
+// status frame without forcing the user to refresh. Without this, a
+// successful Stop button click left "Running" + tunnel IP visible until
+// the next page load. Listeners must tolerate bursts (restart fires twice
+// — once for stop, once for start) and slow consequences (probeNvpnStatus
+// can take a couple of seconds; the daemon may still be tearing down).
+export const nvpnEvents = new EventEmitter();
 
 // ── Status ────────────────────────────────────────────────────────────────
 
@@ -122,6 +134,11 @@ export async function startNvpn(): Promise<ControlResult> {
     return { ok: true, detail: 'nvpn daemon started' };
   } catch (e: any) {
     return { ok: false, detail: summarizeError(e) };
+  } finally {
+    // Emit even on failure — the daemon may have partially transitioned
+    // (e.g. socket bound but config rejected) and the SSE consumer wants
+    // to see the new probe result regardless.
+    nvpnEvents.emit('state-changed');
   }
 }
 
@@ -133,6 +150,8 @@ export async function stopNvpn(): Promise<ControlResult> {
     return { ok: true, detail: 'nvpn daemon stopped' };
   } catch (e: any) {
     return { ok: false, detail: summarizeError(e) };
+  } finally {
+    nvpnEvents.emit('state-changed');
   }
 }
 
