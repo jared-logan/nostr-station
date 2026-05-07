@@ -312,8 +312,17 @@ export interface ContextStatus {
   hasContextFile: boolean;
 }
 
-export function getContextStatus(): ContextStatus {
-  const ctx = buildAiContext(getActiveChatProjectId());
+// `scope` chooses which context the caller wants to see:
+//   'active' (default) — match what the next /api/ai/chat turn will use,
+//                        i.e. the project opened in chat or station fallback.
+//   'global'           — always describe the station-level context, ignoring
+//                        whichever project is currently active in chat.
+// The Config panel passes 'global' so its row reflects the station setup
+// regardless of chat state; the chat header keeps the default so it labels
+// the live chat context.
+export function getContextStatus(scope: 'active' | 'global' = 'active'): ContextStatus {
+  const projectId = scope === 'global' ? null : getActiveChatProjectId();
+  const ctx = buildAiContext(projectId);
   return {
     hasContext:     ctx.text.length > 0,
     source:         ctx.source,
@@ -936,7 +945,8 @@ export async function startWebServer(port: number): Promise<void> {
       // API routes first — they take precedence over static.
       if (url === '/api/config' && method === 'GET') {
         const { meta } = await loadProviderConfig();
-        const ctx = getContextStatus();
+        const scope = /[?&]scope=global(?:&|$)/.test(req.url || '') ? 'global' : 'active';
+        const ctx = getContextStatus(scope);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           provider:       meta.provider,

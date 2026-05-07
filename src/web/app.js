@@ -7378,7 +7378,10 @@ const ConfigPanel = (() => {
       // backing session, and we still want the rest of the panel to render.
       const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent] = await Promise.all([
         api('/api/relay-config'),
-        api('/api/config'),
+        // scope=global so the Context row reflects the station setup
+        // regardless of which project is currently open in chat. The
+        // chat header still uses the default scope (active project).
+        api('/api/config?scope=global'),
         api('/api/identity/config'),
         api('/api/auth/session').catch(() => null),
         api('/api/identity/profile').catch(() => null),
