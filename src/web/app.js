@@ -1710,6 +1710,65 @@ const ChatPanel = (() => {
     } catch {}
     renderBadge();
     renderHistory();
+    syncPermissionsControl();
+  }
+
+  // Permissions toggle (chat-header dropdown). Hidden when no
+  // project is active (global chat has no project to scope perms
+  // to). Persists per-project via PUT /api/projects/:id/ai-config
+  // so the choice survives page reloads and the dispatcher's
+  // fallback default (auto-edit) only applies when nothing is
+  // stored. Useful for "explain this codebase" mode where you
+  // want to flip to read-only without leaving the chat.
+  const PERM_OPTIONS = [
+    { value: 'read-only', label: 'read-only' },
+    { value: 'auto-edit', label: 'auto-edit' },
+    { value: 'yolo',      label: 'yolo' },
+  ];
+  async function syncPermissionsControl() {
+    const group = $('chat-perm-group');
+    const sel   = $('chat-perm');
+    if (!group || !sel) return;
+    if (!activeProject) {
+      group.style.display = 'none';
+      return;
+    }
+    // Render options once; keep them stable across project switches.
+    if (sel.options.length === 0) {
+      for (const o of PERM_OPTIONS) {
+        const opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.label;
+        sel.appendChild(opt);
+      }
+      sel.addEventListener('change', persistPermissionsChange);
+    }
+    group.style.display = '';
+    // Resolve current value: project override → station default
+    // 'auto-edit' (matches the backend dispatcher).
+    let mode = 'auto-edit';
+    try {
+      const cfg = await api(`/api/projects/${activeProject.id}/ai-config`);
+      if (cfg?.permissions?.mode) mode = cfg.permissions.mode;
+    } catch {}
+    sel.value = mode;
+  }
+  async function persistPermissionsChange() {
+    if (!activeProject) return;
+    const mode = $('chat-perm').value;
+    try {
+      await api(`/api/projects/${activeProject.id}/ai-config`, {
+        method:  'PUT',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ permissions: { mode } }),
+      });
+      toast(`Permissions: ${mode}`, '', 'ok');
+    } catch (e) {
+      toast('Permissions update failed', e?.message || '', 'err');
+      // Roll back the visible value on failure so it matches what's
+      // actually persisted.
+      syncPermissionsControl();
+    }
   }
 
   // Track whether any API provider is configured; gates the send button

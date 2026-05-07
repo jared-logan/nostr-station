@@ -119,6 +119,10 @@
             <label>model</label>
             <select id="chat-model"></select>
           </div>
+          <div class="group" id="chat-perm-group" style="display:none">
+            <label>permissions</label>
+            <select id="chat-perm" title="What the agent can do without asking.&#10;read-only: Approve every write/exec.&#10;auto-edit: Writes auto-approve; exec gated.&#10;yolo: Everything auto-approves."></select>
+          </div>
           <span id="chat-key-warning" class="key-warning" style="display:none"></span>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
