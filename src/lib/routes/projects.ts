@@ -520,6 +520,28 @@ export async function handleProjects(
     }
     if (tail === 'ngit/init' && method === 'POST') {
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+      // Pre-flight signer check. ngit init publishes a signed kind-30617
+      // event, so it needs an active NIP-46 session (or an nsec — which
+      // we don't store). Reading the same git-config slot /api/ngit/account
+      // checks lets us refuse the spawn upfront instead of letting ngit
+      // print "logged in as …" then fail downstream on something else,
+      // or worse, retry-loop a missing-signer prompt against a closed
+      // stdin (the original OOM symptom). The line-cap from streamExec
+      // catches the retry-loop too, but failing here gives a much clearer
+      // error than the bounded-message frame would.
+      let bunkerUri = '';
+      try {
+        bunkerUri = execFileSync('git', ['config', '--global', '--get', 'nostr.bunker-uri'], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }).toString().trim();
+      } catch { /* not logged in — bunkerUri stays empty */ }
+      if (!bunkerUri) {
+        streamExecError(res, req,
+          'ngit account not paired — open Config → ngit and click Connect Amber first, ' +
+          'then retry Initialize ngit.',
+        );
+        return true;
+      }
       // ngit 2.x dropped the `--relay <url>` argv we used to pass and
       // replaced it with `--name <NAME> [--description <D>]
       // [--grasp-server <URL>...] [--defaults]`. GRASP servers (git+nostr
