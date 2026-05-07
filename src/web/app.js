@@ -7782,6 +7782,7 @@ const ConfigPanel = (() => {
               ${((vpnRelays && Array.isArray(vpnRelays.relays)) ? vpnRelays.relays : []).map(url => `
                 <div class="item" data-url="${escapeHtml(url)}">
                   <span class="url">${escapeHtml(url)}</span>
+                  <span class="relay-health" data-slot="health"></span>
                   <button class="danger rm-vpn-relay">×</button>
                 </div>`).join('')}
               <div class="add">
@@ -7789,6 +7790,9 @@ const ConfigPanel = (() => {
                 <button id="vpn-relay-paste">paste</button>
                 <button class="primary" id="vpn-relay-add">add</button>
               </div>
+            </div>
+            <div class="keyrow" style="margin-top:6px;justify-content:flex-end">
+              <button id="vpn-relay-recheck">Check reachability</button>
             </div>
             <div class="key-status-line ${vpnRelays && vpnRelays.relays && vpnRelays.relays.length ? 'ok' : ''}" id="vpn-relays-status">
               ${vpnRelays && vpnRelays.relays && vpnRelays.relays.length
@@ -8008,6 +8012,18 @@ const ConfigPanel = (() => {
         try { $('vpn-relay-input').value = (await navigator.clipboard.readText()).trim(); }
         catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
       });
+      const recheckBtn = $('vpn-relay-recheck');
+      if (recheckBtn) recheckBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        recheckBtn.disabled = true;
+        try { await loadVpnRelayHealth(); } finally { recheckBtn.disabled = false; }
+      });
+      // Auto-fetch reachability after the panel paints, but only if the
+      // user actually has relays configured. Fire-and-forget — the
+      // initial render must not wait for an 8s netcheck round-trip.
+      if (vpnRelays && Array.isArray(vpnRelays.relays) && vpnRelays.relays.length > 0) {
+        loadVpnRelayHealth();
+      }
     }
 
     // Multi-provider AI list — see renderAiProviders() for the markup.
@@ -8890,6 +8906,71 @@ const ConfigPanel = (() => {
       toast('Relay removed', url, 'ok');
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
+  }
+
+  // Trailing-slash normalization — config.toml may store "wss://x/" while
+  // netcheck reports "wss://x" (and vice versa). Match by stripping
+  // trailing '/' from both sides before comparing.
+  function normalizeRelayUrl(s) {
+    return String(s || '').replace(/\/+$/, '').toLowerCase();
+  }
+
+  // Pull `nvpn netcheck --json` and decorate each row in #vpn-relays with
+  // a coloured dot + latency. Rows with no matching entry in relayChecks
+  // (could happen if the daemon's running set diverges from disk) get a
+  // grey "?" so the absence is visible. Quiet on failure — netcheck
+  // requires the daemon to be up; if it's down, leaving the rows
+  // un-annotated is the right answer rather than red-flagging everything.
+  async function loadVpnRelayHealth() {
+    const list = document.getElementById('vpn-relays');
+    if (!list) return;
+    const slots = list.querySelectorAll('.relay-health[data-slot="health"]');
+    if (slots.length === 0) return;
+    for (const slot of slots) {
+      slot.className = 'relay-health checking';
+      slot.textContent = 'checking…';
+    }
+    let raw = null;
+    try {
+      const r = await api('/api/nvpn/netcheck');
+      if (r && r.ok) raw = r.raw || null;
+    } catch { /* silent — daemon may be down */ }
+    if (!raw) {
+      for (const slot of slots) { slot.className = 'relay-health'; slot.textContent = ''; }
+      return;
+    }
+    const checks = Array.isArray(raw.relayChecks) ? raw.relayChecks : [];
+    const preferred = typeof raw.preferredRelay === 'string'
+      ? normalizeRelayUrl(raw.preferredRelay) : null;
+    const byUrl = new Map();
+    for (const c of checks) {
+      if (c && typeof c.relay === 'string') byUrl.set(normalizeRelayUrl(c.relay), c);
+    }
+    for (const item of list.querySelectorAll('.item')) {
+      const slot = item.querySelector('.relay-health[data-slot="health"]');
+      if (!slot) continue;
+      const url = normalizeRelayUrl(item.dataset.url);
+      const check = byUrl.get(url);
+      slot.className = 'relay-health';
+      if (!check) {
+        // Configured but not in this netcheck pass — could be a relay
+        // nvpn doesn't probe on `netcheck`. Show "?" so the user knows
+        // we don't have signal rather than a misleading green/red.
+        slot.innerHTML = '<span class="dot warn"></span><span>untested</span>';
+        continue;
+      }
+      const latency = typeof check.latencyMs === 'number' ? check.latencyMs : null;
+      // Color by latency: <200ms ok, <800ms warn, otherwise still warn.
+      // Reachability errors aren't carried in the v0.3.x schema we observed,
+      // so we treat absence-of-latency as warn rather than err.
+      const cls = latency === null ? 'warn'
+                : latency < 200    ? 'ok'
+                :                    'warn';
+      const star = (preferred && url === preferred)
+        ? '<span class="preferred-star" title="nvpn-preferred relay">★</span>' : '';
+      const text = latency === null ? 'no latency' : `${latency}ms`;
+      slot.innerHTML = `<span class="dot ${cls}"></span><span>${escapeHtml(text)}</span>${star}`;
+    }
   }
 
   async function saveRelayFlag(key, value) {
