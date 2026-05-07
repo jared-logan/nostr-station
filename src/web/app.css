@@ -1021,6 +1021,100 @@ input:focus, textarea:focus, select:focus {
   font-size: 11px;
 }
 
+/* ── nostr-vpn panel ──────────────────────────────────────────────────── */
+/* Standalone control surface — see VpnPanel in app.js. The status strip
+   sits between the panel head and the sub-tab bar; sub-tabs render into
+   #vpn-panel-body which is just the standard .panel-body wrapper. */
+
+.vpn-status-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.vpn-strip-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.vpn-strip-state .vpn-strip-label {
+  color: var(--text-bright);
+  font-weight: 500;
+}
+.vpn-strip-state .vpn-strip-value {
+  color: var(--text-dim);
+}
+.vpn-strip-state .vpn-strip-tunnel {
+  font-size: 11px;
+}
+.vpn-strip-actions {
+  display: flex;
+  gap: 6px;
+}
+.vpn-strip-actions button {
+  padding: 4px 12px;
+  font-size: 11px;
+}
+.vpn-strip-loading {
+  font-style: italic;
+  font-size: 11px;
+}
+
+.vpn-section {
+  padding: 16px 24px;
+}
+.vpn-section-help {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin: 0 0 12px 0;
+  max-width: 640px;
+}
+.vpn-empty {
+  padding: 24px;
+  text-align: center;
+}
+.vpn-empty-title {
+  font-size: 13px;
+  color: var(--text-bright);
+  margin-bottom: 6px;
+}
+.vpn-empty-detail {
+  font-size: 11px;
+  line-height: 1.5;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.vpn-kv {
+  display: grid;
+  gap: 6px;
+}
+.vpn-kv-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 12px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.vpn-kv-key {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.vpn-kv-val {
+  color: var(--text-bright);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
 /* ── logs ─────────────────────────────────────────────────────────────── */
 
 .tabs {

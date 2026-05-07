@@ -144,6 +144,10 @@
           <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 7.5V18a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-8l-2-2.5H5a2 2 0 0 0-2 2Z"/></svg></span>
           Projects
         </a>
+        <a href="#vpn" data-panel="vpn">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 4 6v6c0 4.5 3.4 8.6 8 10 4.6-1.4 8-5.5 8-10V6l-8-4Z"/><path d="M9 12l2 2 4-4"/></svg></span>
+          nostr-vpn
+        </a>
         <a href="#logs" data-panel="logs">
           <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></span>
           Logs
@@ -374,6 +378,33 @@
       <div id="logs-status" class="logs-status" hidden></div>
       <div id="logs-meta" class="logs-meta" hidden></div>
       <div class="log-view" id="log-view"></div>
+    </section>
+
+    <!-- NOSTR-VPN
+         Dedicated control surface for the nostr-vpn daemon. The Logs panel
+         used to host all of this inside its nostr-vpn tab, but the page
+         had outgrown a "tab inside a log viewer" — peers, relays,
+         settings, service lifecycle, plus a log tail, all stacked. This
+         panel splits those into sub-tabs while the Logs panel goes back
+         to being just a log viewer. -->
+    <section class="panel" data-panel="vpn">
+      <div class="panel-head">
+        <div>
+          <div class="title">nostr-vpn</div>
+          <div class="subtitle" id="vpn-panel-subtitle">Mesh peer discovery + WireGuard control plane</div>
+        </div>
+        <div class="panel-head-actions" id="vpn-head-actions"></div>
+      </div>
+      <div id="vpn-status-strip" class="vpn-status-strip"></div>
+      <div class="tabs" id="vpn-tabs">
+        <button class="tab active" data-vpn-tab="status">Status</button>
+        <button class="tab" data-vpn-tab="network">Network</button>
+        <button class="tab" data-vpn-tab="relays">Relays</button>
+        <button class="tab" data-vpn-tab="settings">Settings</button>
+        <button class="tab" data-vpn-tab="service">Service</button>
+        <button class="tab" data-vpn-tab="diagnostics">Diagnostics</button>
+      </div>
+      <div class="panel-body" id="vpn-panel-body"></div>
     </section>
 
     <!-- CONFIG -->

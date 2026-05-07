@@ -7,7 +7,7 @@ import { previewRetryDecision } from './preview-retry.js';
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'projects', 'logs', 'config'];
+const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'config'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -7505,24 +7505,464 @@ const LogsPanel = (() => {
   };
 })();
 
+// ── Panel: nostr-vpn ─────────────────────────────────────────────────────
+//
+// Dedicated control surface for the nostr-vpn daemon. Until this landed,
+// every nvpn affordance lived in one of two places:
+//   - Logs > nostr-vpn tab: status/peers/settings/service/danger zone +
+//     log tail, all stacked into a "tab inside a logs viewer" that had
+//     outgrown its container.
+//   - Config: discovery relays + reachability dots + recommended set.
+// Two surfaces, partial overlap, mental-model split. This panel is the
+// canonical home; the Logs panel goes back to being just a log viewer
+// (vpn tab kept for the live tail) and the Config relay block moves
+// here verbatim.
+
+const VpnPanel = (() => {
+  const subtitleEl = $('vpn-panel-subtitle');
+  const stripEl    = $('vpn-status-strip');
+  const headEl     = $('vpn-head-actions');
+  const tabsEl     = $('vpn-tabs');
+  const bodyEl     = $('vpn-panel-body');
+
+  let currentTab = 'status';
+  // Cached payloads — shared across sub-tab renders so flipping tabs
+  // doesn't refetch what we already have. Each onEnter() refreshes.
+  let lastStatus  = null;     // GET /api/nvpn/status
+  let lastService = null;     // GET /api/nvpn/service/status
+  let lastRoster  = null;     // GET /api/nvpn/roster
+  let lastRelays  = null;     // GET /api/nvpn/relays
+  // 60s TTL for the auto-fired netcheck — same idea as ConfigPanel's
+  // cache. Manual "Check reachability" passes { force:true } to bypass.
+  let relayHealthCache = null; // { fetchedAt: ms, raw: object|null }
+
+  // Sub-tab switching is purely visual + lazy. Each sub-tab has a
+  // render function that draws into bodyEl from the cached payloads.
+  function selectTab(name) {
+    currentTab = name;
+    $$('#vpn-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.vpnTab === name));
+    renderActiveTab();
+  }
+  tabsEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab');
+    if (!btn || !btn.dataset.vpnTab) return;
+    selectTab(btn.dataset.vpnTab);
+  });
+
+  function renderActiveTab() {
+    const renderer = TAB_RENDERERS[currentTab];
+    if (!renderer) { bodyEl.innerHTML = ''; return; }
+    bodyEl.innerHTML = renderer();
+    // Each renderer attaches its event handlers in a wire() callback we
+    // expose on the function itself. Keeps the render-then-bind split
+    // close together and lets us re-render without re-wiring globals.
+    if (typeof renderer.wire === 'function') renderer.wire();
+  }
+
+  // Top-of-panel status strip — pill + control buttons. Always rendered
+  // (independent of which sub-tab is active) so the user can Stop /
+  // Restart / etc. without leaving Diagnostics, Settings, etc.
+  function renderStatusStrip() {
+    const status = lastStatus;
+    if (!status) {
+      stripEl.innerHTML = '<div class="muted vpn-strip-loading">loading…</div>';
+      return;
+    }
+    const stateText = !status.installed ? 'not installed'
+                    : !status.running   ? 'stopped'
+                    :                     'running';
+    const stateClass = !status.installed ? 'err'
+                     : !status.running   ? 'warn'
+                     :                     'ok';
+    const tunnel = status.tunnelIp
+      ? `<code class="cmd-inline vpn-strip-tunnel">${escapeHtml(status.tunnelIp)}</code>`
+      : '';
+    const pid = (status.raw && status.raw.daemon && status.raw.daemon.pid != null)
+      ? `<span class="muted">pid ${escapeHtml(String(status.raw.daemon.pid))}</span>` : '';
+    stripEl.innerHTML = `
+      <div class="vpn-strip-state">
+        <span class="dot ${stateClass}"></span>
+        <span class="vpn-strip-label">nostr-vpn</span>
+        <span class="vpn-strip-value">${escapeHtml(stateText)}</span>
+        ${tunnel}
+        ${pid}
+      </div>
+      <div class="vpn-strip-actions" id="vpn-strip-actions"></div>
+    `;
+    const actions = $('vpn-strip-actions');
+    if (!status.installed) {
+      // Only meaningful when the binary is missing — directs the user
+      // to the install wizard / dedicated install button.
+      const b = document.createElement('button');
+      b.className = 'primary';
+      b.textContent = 'Install nvpn';
+      b.addEventListener('click', () => runNvpnInstall());
+      actions.appendChild(b);
+    } else if (!status.running) {
+      const b = document.createElement('button');
+      b.className = 'primary';
+      b.textContent = 'Start';
+      b.addEventListener('click', async (e) => {
+        e.preventDefault(); b.disabled = true;
+        await callNvpnAction('start', 'started');
+        await refresh();
+        b.disabled = false;
+      });
+      actions.appendChild(b);
+    } else {
+      for (const [action, label, cls] of [
+        ['restart', 'Restart', ''],
+        ['pause',   'Pause',   ''],
+        ['resume',  'Resume',  ''],
+        ['stop',    'Stop',    'danger'],
+      ]) {
+        const b = document.createElement('button');
+        if (cls) b.className = cls;
+        b.textContent = label;
+        b.addEventListener('click', async (e) => {
+          e.preventDefault(); b.disabled = true;
+          await callNvpnAction(action, label.toLowerCase());
+          await refresh();
+          b.disabled = false;
+        });
+        actions.appendChild(b);
+      }
+    }
+    // Refresh button — explicit re-poll for users who want fresh data
+    // immediately after toggling something out-of-band (e.g. a
+    // terminal-side `nvpn set`).
+    const refreshBtn = document.createElement('button');
+    refreshBtn.textContent = 'Refresh';
+    refreshBtn.addEventListener('click', async (e) => {
+      e.preventDefault(); refreshBtn.disabled = true;
+      try { await refresh(); } finally { refreshBtn.disabled = false; }
+    });
+    actions.appendChild(refreshBtn);
+  }
+
+  // Pull every payload the panel needs in parallel, then re-render.
+  // Errors are swallowed per-call so a flaky daemon doesn't blank the
+  // whole panel — each sub-tab handles missing data with its own
+  // empty-state.
+  async function refresh() {
+    const [s, svc, roster, relays] = await Promise.all([
+      api('/api/nvpn/status').catch(() => null),
+      api('/api/nvpn/service/status').catch(() => null),
+      api('/api/nvpn/roster').catch(() => null),
+      api('/api/nvpn/relays').catch(() => null),
+    ]);
+    lastStatus  = s;
+    lastService = svc;
+    lastRoster  = roster;
+    lastRelays  = relays;
+    renderStatusStrip();
+    renderActiveTab();
+  }
+
+  // Sub-tab renderers. Each returns the inner HTML; their .wire()
+  // method (set after the function definition) attaches event
+  // handlers. Keeping render + wire local to each renderer keeps the
+  // file structure sectioned by feature rather than by lifecycle hook.
+  const TAB_RENDERERS = {
+    status:      renderStatusBody,
+    network:     renderNetworkBody,
+    relays:      renderRelaysBody,
+    settings:    renderSettingsBody,
+    service:     renderServiceBody,
+    diagnostics: renderDiagnosticsBody,
+  };
+
+  function renderStatusBody() {
+    if (!lastStatus) return '<div class="vpn-empty muted">loading…</div>';
+    if (!lastStatus.installed) {
+      return `<div class="vpn-empty">
+        <div class="vpn-empty-title">nostr-vpn isn't installed</div>
+        <div class="vpn-empty-detail muted">
+          Use the <strong>Install nvpn</strong> button above to download +
+          register the daemon. The whole flow runs in the dashboard — no
+          terminal needed.
+        </div>
+      </div>`;
+    }
+    const r = lastStatus.raw || {};
+    const rows = [];
+    if (r.daemon && r.daemon.pid != null) rows.push(['daemon pid', String(r.daemon.pid)]);
+    if (r.daemon && r.daemon.started_at) rows.push(['started', String(r.daemon.started_at)]);
+    if (lastStatus.tunnelIp) rows.push(['tunnel ip', lastStatus.tunnelIp]);
+    if (typeof r.npub === 'string')   rows.push(['npub',   r.npub]);
+    if (typeof r.pubkey === 'string') rows.push(['pubkey', r.pubkey]);
+    if (typeof r.endpoint === 'string') rows.push(['endpoint', r.endpoint]);
+    if (typeof r.session_status === 'string') rows.push(['session', r.session_status]);
+    if (lastStatus.error) rows.push(['last probe', lastStatus.error]);
+    const rowsHtml = rows.map(([k, v]) => `
+      <div class="vpn-kv-row">
+        <span class="vpn-kv-key">${escapeHtml(k)}</span>
+        <code class="vpn-kv-val">${escapeHtml(v)}</code>
+      </div>`).join('');
+    return `<div class="vpn-section vpn-kv">${rowsHtml}</div>`;
+  }
+  renderStatusBody.wire = () => { /* read-only block */ };
+
+  function renderNetworkBody() {
+    return `<div class="vpn-empty muted">Network — peers + roster (coming soon).</div>`;
+  }
+  renderNetworkBody.wire = () => {};
+
+  // Relays sub-tab — discovery relays (where nvpn publishes presence
+  // and discovers peers). Read goes straight from config.toml so the
+  // list renders even when the daemon is down; mutations go through
+  // `nvpn set --relay` followed by an automatic `nvpn reload`.
+  // Auto-fired netcheck decorates each row with latency + a coloured
+  // dot (60s panel-scope cache; "Check reachability" forces refetch).
+  function renderRelaysBody() {
+    const r = lastRelays;
+    if (!r) return '<div class="vpn-empty muted">loading…</div>';
+    const items = (Array.isArray(r.relays) ? r.relays : []).map(url => `
+      <div class="item" data-url="${escapeHtml(url)}">
+        <span class="url">${escapeHtml(url)}</span>
+        <span class="relay-health" data-slot="health"></span>
+        <button class="danger rm-vpn-relay">×</button>
+      </div>`).join('');
+    const errorLine = r.found === false
+      ? `<div class="key-status-line">${r.configPath
+          ? '✗ config.toml unreadable'
+          : 'no nvpn config — run <code>nvpn init</code> first'}</div>`
+      : '';
+    return `
+      <div class="vpn-section">
+        <p class="vpn-section-help">
+          Nostr relays nostr-vpn uses to publish presence and discover
+          peers. Distinct from your identity / ngit relay sets — these
+          are mesh-only. If the log shows <code>504 Gateway Timeout</code>
+          loops, the configured relay is likely flaky; add a healthier
+          one and the daemon will pick it up on the next reload.
+        </p>
+        ${errorLine}
+        <div class="relay-list" id="vpn-relays">
+          ${items}
+          <div class="add">
+            <input id="vpn-relay-input" placeholder="wss://your-relay.example" autocomplete="off" spellcheck="false">
+            <button id="vpn-relay-paste">paste</button>
+            <button class="primary" id="vpn-relay-add">add</button>
+          </div>
+        </div>
+        <div class="keyrow" style="margin-top:6px;justify-content:flex-end;gap:6px">
+          <button id="vpn-relay-recommended">Use recommended</button>
+          <button id="vpn-relay-recheck">Check reachability</button>
+        </div>
+        <div class="key-status-line ${r.relays && r.relays.length ? 'ok' : ''}">
+          ${r.relays && r.relays.length
+            ? `✓ ${r.relays.length} relay${r.relays.length === 1 ? '' : 's'} configured`
+            : 'no relays configured'}
+        </div>
+      </div>`;
+  }
+  renderRelaysBody.wire = () => {
+    $$('#vpn-relays .rm-vpn-relay').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const url = e.target.closest('.item').dataset.url;
+        void removeRelay(url);
+      });
+    });
+    const addBtn = $('vpn-relay-add');
+    if (!addBtn) return;
+    addBtn.addEventListener('click', addRelayFromInput);
+    $('vpn-relay-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') addRelayFromInput();
+    });
+    $('vpn-relay-paste').addEventListener('click', async () => {
+      try { $('vpn-relay-input').value = (await navigator.clipboard.readText()).trim(); }
+      catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+    });
+    const recheckBtn = $('vpn-relay-recheck');
+    if (recheckBtn) recheckBtn.addEventListener('click', async (e) => {
+      e.preventDefault(); recheckBtn.disabled = true;
+      try { await loadRelayHealth({ force: true }); }
+      finally { recheckBtn.disabled = false; }
+    });
+    const recommendedBtn = $('vpn-relay-recommended');
+    if (recommendedBtn) recommendedBtn.addEventListener('click', async (e) => {
+      e.preventDefault(); recommendedBtn.disabled = true;
+      try { await useRecommendedRelays(); }
+      finally { recommendedBtn.disabled = false; }
+    });
+    // Auto-fire reachability after this sub-tab paints, only if relays
+    // are configured. 60s cache avoids re-spawning an 8s netcheck on
+    // every tab switch; manual recheck bypasses with { force:true }.
+    if (lastRelays && Array.isArray(lastRelays.relays) && lastRelays.relays.length > 0) {
+      void loadRelayHealth();
+    }
+  };
+
+  // Trailing-slash normalization — config.toml may store "wss://x/"
+  // while netcheck reports "wss://x" (and vice versa). Match on the
+  // canonical form so reachability decorates the right row.
+  function normalizeRelayUrl(s) {
+    return String(s || '').replace(/\/+$/, '').toLowerCase();
+  }
+
+  async function addRelayFromInput() {
+    const input = $('vpn-relay-input');
+    const url = input.value.trim();
+    if (!url) return;
+    if (!/^wss?:\/\//i.test(url)) {
+      toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
+      return;
+    }
+    try {
+      const r = await api('/api/nvpn/relays/add', {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ url }),
+      });
+      if (!r.ok) throw new Error(r.detail || 'add failed');
+      toast('Relay added', url, 'ok');
+      input.value = '';
+      // Invalidate health cache — the new relay isn't in the cached
+      // netcheck pass and the user is mid-troubleshoot.
+      relayHealthCache = null;
+      await refresh();
+    } catch (e) { toast('Add failed', e.message, 'err'); }
+  }
+
+  async function removeRelay(url) {
+    try {
+      const r = await api('/api/nvpn/relays/remove', {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ url }),
+      });
+      if (!r.ok) throw new Error(r.detail || 'remove failed');
+      toast('Relay removed', url, 'ok');
+      relayHealthCache = null;
+      await refresh();
+    } catch (e) { toast('Remove failed', e.message, 'err'); }
+  }
+
+  // One-click recovery: replace with the dashboard-curated set
+  // (RECOMMENDED_NVPN_RELAYS in nvpn.ts; server is the single source).
+  // Confirms first because this is destructive.
+  async function useRecommendedRelays() {
+    let recommended = [];
+    try {
+      const r = await api('/api/nvpn/relays/recommended');
+      recommended = Array.isArray(r?.relays) ? r.relays : [];
+    } catch (e) { toast('Failed to load recommended', e.message, 'err'); return; }
+    if (recommended.length === 0) {
+      toast('No recommended set defined', '', 'err'); return;
+    }
+    const ok = confirm(
+      `Replace your nostr-vpn relay list with the recommended set?\n\n` +
+      recommended.map(u => `  • ${u}`).join('\n') +
+      `\n\nAny existing relays will be removed.`
+    );
+    if (!ok) return;
+    try {
+      const r = await api('/api/nvpn/relays/set', {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ relays: recommended }),
+      });
+      if (!r.ok) throw new Error(r.detail || 'set failed');
+      toast('Relays updated', `${recommended.length} recommended relay${recommended.length === 1 ? '' : 's'}`, 'ok');
+      relayHealthCache = null;
+      await refresh();
+    } catch (e) { toast('Update failed', e.message, 'err'); }
+  }
+
+  // Pull `nvpn netcheck --json` and decorate each row in #vpn-relays
+  // with a coloured dot + latency. Auto-fire path (no opts) shares a
+  // 60s cache; manual "Check reachability" passes { force:true } to
+  // bypass. Quiet on failure — if netcheck times out (relays really
+  // are unreachable, daemon down, etc.) we leave rows un-annotated
+  // rather than red-flagging everything.
+  async function loadRelayHealth(opts) {
+    const list = document.getElementById('vpn-relays');
+    if (!list) return;
+    const slots = list.querySelectorAll('.relay-health[data-slot="health"]');
+    if (slots.length === 0) return;
+    const force = !!(opts && opts.force);
+    const cached = relayHealthCache;
+    const fresh = cached && (Date.now() - cached.fetchedAt < 60_000);
+    let raw = null;
+    if (!force && fresh) {
+      raw = cached.raw;
+    } else {
+      for (const slot of slots) {
+        slot.className = 'relay-health checking';
+        slot.textContent = 'checking…';
+      }
+      try {
+        // silent:true so a flaky relay set (the very thing this UI
+        // exists to fix) doesn't pop a red toast for every render.
+        const r = await api('/api/nvpn/netcheck', undefined, { silent: true });
+        if (r && r.ok) raw = r.raw || null;
+      } catch { /* daemon down or relays unreachable — silent */ }
+      relayHealthCache = { fetchedAt: Date.now(), raw };
+    }
+    if (!raw) {
+      for (const slot of slots) { slot.className = 'relay-health'; slot.textContent = ''; }
+      return;
+    }
+    const checks = Array.isArray(raw.relayChecks) ? raw.relayChecks : [];
+    const preferred = typeof raw.preferredRelay === 'string'
+      ? normalizeRelayUrl(raw.preferredRelay) : null;
+    const byUrl = new Map();
+    for (const c of checks) {
+      if (c && typeof c.relay === 'string') byUrl.set(normalizeRelayUrl(c.relay), c);
+    }
+    for (const item of list.querySelectorAll('.item')) {
+      const slot = item.querySelector('.relay-health[data-slot="health"]');
+      if (!slot) continue;
+      const url = normalizeRelayUrl(item.dataset.url);
+      const check = byUrl.get(url);
+      slot.className = 'relay-health';
+      if (!check) {
+        slot.innerHTML = '<span class="dot warn"></span><span>untested</span>';
+        continue;
+      }
+      const latency = typeof check.latencyMs === 'number' ? check.latencyMs : null;
+      const cls = latency === null ? 'warn'
+                : latency < 200    ? 'ok'
+                :                    'warn';
+      const star = (preferred && url === preferred)
+        ? '<span class="preferred-star" title="nvpn-preferred relay">★</span>' : '';
+      const text = latency === null ? 'no latency' : `${latency}ms`;
+      slot.innerHTML = `<span class="dot ${cls}"></span><span>${escapeHtml(text)}</span>${star}`;
+    }
+  }
+
+  function renderSettingsBody() {
+    return `<div class="vpn-empty muted">Settings — node name, listen port, autoconnect, etc. (coming soon).</div>`;
+  }
+  renderSettingsBody.wire = () => {};
+
+  function renderServiceBody() {
+    return `<div class="vpn-empty muted">Service — systemd / launchd unit lifecycle (coming soon).</div>`;
+  }
+  renderServiceBody.wire = () => {};
+
+  function renderDiagnosticsBody() {
+    return `<div class="vpn-empty muted">Diagnostics — netcheck / doctor / repair-network / stats (coming soon).</div>`;
+  }
+  renderDiagnosticsBody.wire = () => {};
+
+  return {
+    onEnter() { void refresh(); },
+  };
+})();
+
 // ── Panel: Config ────────────────────────────────────────────────────────
 
 const ConfigPanel = (() => {
   const container = $('config-sections');
-
-  // 60s TTL cache for `nvpn netcheck --json` so the auto-fire
-  // reachability check doesn't re-spawn an 8s probe on every Config
-  // render (especially painful when the user's relay set is flaky —
-  // which is exactly when they're likely to be opening Config to fix
-  // it). Manual "Check reachability" passes { force:true } to bypass.
-  let vpnRelayHealthCache = null; // { fetchedAt: ms, raw: object|null }
 
   async function load() {
     container.innerHTML = '<div class="config-section"><div style="color:var(--muted)">loading…</div></div>';
     try {
       // Session fetch is best-effort: the localhost-exemption path has no
       // backing session, and we still want the rest of the panel to render.
-      const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent, vpnRelays] = await Promise.all([
+      const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent] = await Promise.all([
         api('/api/relay-config'),
         // scope=global so the Context row reflects the station setup
         // regardless of which project is currently open in chat. The
@@ -7540,11 +7980,6 @@ const ConfigPanel = (() => {
         // config section render the user's current values + offer
         // npub-synthetic / nip-05 presets without a second round-trip.
         api('/api/git-identity/global').catch(() => null),
-        // nvpn discovery relays — read straight off config.toml so the
-        // section renders even when the daemon is down. Catch keeps an
-        // older backend (no /api/nvpn/relays route) from breaking the
-        // whole panel; the section just stays empty.
-        api('/api/nvpn/relays').catch(() => null),
       ]);
       // Augment presets with the nip-05 from the cached profile if
       // we have one. The backend stays focused on git config; the
@@ -7565,7 +8000,7 @@ const ConfigPanel = (() => {
           email: profile.nip05,
         };
       }
-      render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent, vpnRelays);
+      render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent);
     } catch (e) {
       container.innerHTML = `<div class="config-section"><div style="color:var(--error)">failed to load: ${escapeHtml(e.message)}</div></div>`;
     }
@@ -7767,7 +8202,7 @@ const ConfigPanel = (() => {
     return `in ${mins}m`;
   }
 
-  function render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent, vpnRelays) {
+  function render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent) {
     const whitelistHtml = rc.whitelist && rc.whitelist.length
       ? `<a href="#relay" style="color:var(--accent-bright)">${rc.whitelist.length} npub${rc.whitelist.length !== 1 ? 's' : ''} →</a>`
       : `<a href="#relay" style="color:var(--warn)">empty — add one →</a>`;
@@ -7905,47 +8340,6 @@ const ConfigPanel = (() => {
                 <button class="primary" id="cfg-ngit-relogin">Login</button>
               </div>
             `}
-          </div>
-        </div>
-      </div>
-
-      <div class="config-section" id="cfg-vpn-section">
-        <h3>nostr-vpn relays</h3>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Nostr relays nostr-vpn uses to publish presence and discover peers.
-          Distinct from your identity / ngit relay sets — these are mesh-only.
-          If you're seeing repeated <code>504 Gateway Timeout</code> in the
-          nostr-vpn log, the configured relay is likely flaky; add a healthier
-          one and the daemon will pick it up on the next reload.
-        </div>
-        <div class="config-row">
-          <div class="k">Relays</div>
-          <div class="v">
-            ${vpnRelays && vpnRelays.found === false
-              ? `<div class="key-status-line">${vpnRelays.configPath ? '✗ config.toml unreadable' : 'no nvpn config — run <code>nvpn init</code> first'}</div>`
-              : ''}
-            <div class="relay-list" id="vpn-relays">
-              ${((vpnRelays && Array.isArray(vpnRelays.relays)) ? vpnRelays.relays : []).map(url => `
-                <div class="item" data-url="${escapeHtml(url)}">
-                  <span class="url">${escapeHtml(url)}</span>
-                  <span class="relay-health" data-slot="health"></span>
-                  <button class="danger rm-vpn-relay">×</button>
-                </div>`).join('')}
-              <div class="add">
-                <input id="vpn-relay-input" placeholder="wss://your-relay.example" autocomplete="off" spellcheck="false">
-                <button id="vpn-relay-paste">paste</button>
-                <button class="primary" id="vpn-relay-add">add</button>
-              </div>
-            </div>
-            <div class="keyrow" style="margin-top:6px;justify-content:flex-end;gap:6px">
-              <button id="vpn-relay-recommended">Use recommended</button>
-              <button id="vpn-relay-recheck">Check reachability</button>
-            </div>
-            <div class="key-status-line ${vpnRelays && vpnRelays.relays && vpnRelays.relays.length ? 'ok' : ''}" id="vpn-relays-status">
-              ${vpnRelays && vpnRelays.relays && vpnRelays.relays.length
-                ? `✓ ${vpnRelays.relays.length} relay${vpnRelays.relays.length === 1 ? '' : 's'} configured`
-                : 'no relays configured'}
-            </div>
           </div>
         </div>
       </div>
@@ -8141,43 +8535,6 @@ const ConfigPanel = (() => {
       try { $('grasp-server-input').value = (await navigator.clipboard.readText()).trim(); }
       catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
     });
-
-    // nostr-vpn discovery relays — same shape as grasp servers above. Each
-    // mutation calls load() to re-fetch /api/nvpn/relays so the displayed
-    // list matches what's actually persisted (after `nvpn set` + reload).
-    $$('#vpn-relays .rm-vpn-relay').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        const url = e.target.closest('.item').dataset.url;
-        removeVpnRelayFromList(url);
-      });
-    });
-    const vpnRelayAdd = $('vpn-relay-add');
-    if (vpnRelayAdd) {
-      vpnRelayAdd.addEventListener('click', addVpnRelayFromInput);
-      $('vpn-relay-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') addVpnRelayFromInput(); });
-      $('vpn-relay-paste').addEventListener('click', async () => {
-        try { $('vpn-relay-input').value = (await navigator.clipboard.readText()).trim(); }
-        catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
-      });
-      const recheckBtn = $('vpn-relay-recheck');
-      if (recheckBtn) recheckBtn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        recheckBtn.disabled = true;
-        try { await loadVpnRelayHealth({ force: true }); } finally { recheckBtn.disabled = false; }
-      });
-      const recommendedBtn = $('vpn-relay-recommended');
-      if (recommendedBtn) recommendedBtn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        recommendedBtn.disabled = true;
-        try { await useRecommendedVpnRelays(); } finally { recommendedBtn.disabled = false; }
-      });
-      // Auto-fetch reachability after the panel paints, but only if the
-      // user actually has relays configured. Fire-and-forget — the
-      // initial render must not wait for an 8s netcheck round-trip.
-      if (vpnRelays && Array.isArray(vpnRelays.relays) && vpnRelays.relays.length > 0) {
-        loadVpnRelayHealth();
-      }
-    }
 
     // Multi-provider AI list — see renderAiProviders() for the markup.
     // Wire up all row actions + the "Add provider" dropdown in one place.
@@ -9025,161 +9382,6 @@ const ConfigPanel = (() => {
       toast('Grasp server removed', url, 'ok');
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
-  }
-
-  async function addVpnRelayFromInput() {
-    const input = $('vpn-relay-input');
-    const url = input.value.trim();
-    if (!url) return;
-    if (!/^wss?:\/\//i.test(url)) {
-      toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
-      return;
-    }
-    try {
-      const r = await api('/api/nvpn/relays/add', {
-        method:  'POST',
-        headers: { 'content-type': 'application/json' },
-        body:    JSON.stringify({ url }),
-      });
-      if (!r.ok) throw new Error(r.detail || 'add failed');
-      toast('Relay added', url, 'ok');
-      input.value = '';
-      // Invalidate health cache — the new relay isn't in the cached
-      // netcheck pass, and the user is mid-troubleshoot so a fresh
-      // probe is what they want next time the panel paints.
-      vpnRelayHealthCache = null;
-      load();
-    } catch (e) { toast('Add failed', e.message, 'err'); }
-  }
-
-  async function removeVpnRelayFromList(url) {
-    try {
-      const r = await api('/api/nvpn/relays/remove', {
-        method:  'POST',
-        headers: { 'content-type': 'application/json' },
-        body:    JSON.stringify({ url }),
-      });
-      if (!r.ok) throw new Error(r.detail || 'remove failed');
-      toast('Relay removed', url, 'ok');
-      vpnRelayHealthCache = null;
-      load();
-    } catch (e) { toast('Remove failed', e.message, 'err'); }
-  }
-
-  // One-click recovery: replace the user's relay list with the
-  // dashboard-curated set. Server holds the canonical list (via
-  // /api/nvpn/relays/recommended) so we don't drift between client
-  // and server. Confirms first because this is destructive — any
-  // relays the user has added beyond the recommended set are removed.
-  async function useRecommendedVpnRelays() {
-    let recommended = [];
-    try {
-      const r = await api('/api/nvpn/relays/recommended');
-      recommended = Array.isArray(r?.relays) ? r.relays : [];
-    } catch (e) { toast('Failed to load recommended', e.message, 'err'); return; }
-    if (recommended.length === 0) { toast('No recommended set defined', '', 'err'); return; }
-    const ok = confirm(
-      `Replace your nostr-vpn relay list with the recommended set?\n\n` +
-      recommended.map(u => `  • ${u}`).join('\n') +
-      `\n\nAny existing relays will be removed.`
-    );
-    if (!ok) return;
-    try {
-      const r = await api('/api/nvpn/relays/set', {
-        method:  'POST',
-        headers: { 'content-type': 'application/json' },
-        body:    JSON.stringify({ relays: recommended }),
-      });
-      if (!r.ok) throw new Error(r.detail || 'set failed');
-      toast('Relays updated', `${recommended.length} recommended relay${recommended.length === 1 ? '' : 's'}`, 'ok');
-      vpnRelayHealthCache = null;
-      load();
-    } catch (e) { toast('Update failed', e.message, 'err'); }
-  }
-
-  // Trailing-slash normalization — config.toml may store "wss://x/" while
-  // netcheck reports "wss://x" (and vice versa). Match by stripping
-  // trailing '/' from both sides before comparing.
-  function normalizeRelayUrl(s) {
-    return String(s || '').replace(/\/+$/, '').toLowerCase();
-  }
-
-  // Pull `nvpn netcheck --json` and decorate each row in #vpn-relays with
-  // a coloured dot + latency. Rows with no matching entry in relayChecks
-  // (could happen if the daemon's running set diverges from disk) get a
-  // grey "?" so the absence is visible. Quiet on failure — netcheck
-  // requires the daemon to be up; if it's down, leaving the rows
-  // un-annotated is the right answer rather than red-flagging everything.
-  //
-  // Auto-fire path (no opts) shares a 60s cache so navigating between
-  // panels doesn't re-spawn an 8-second netcheck on every render. The
-  // manual "Check reachability" button passes { force: true } to bypass.
-  // Cache ttl matches the user's likely "I'm watching this" attention
-  // window — fresh enough to act on, long enough to avoid thrash.
-  async function loadVpnRelayHealth(opts) {
-    const list = document.getElementById('vpn-relays');
-    if (!list) return;
-    const slots = list.querySelectorAll('.relay-health[data-slot="health"]');
-    if (slots.length === 0) return;
-    const force = !!(opts && opts.force);
-    const cached = vpnRelayHealthCache;
-    const fresh = cached && (Date.now() - cached.fetchedAt < 60_000);
-    let raw = null;
-    if (!force && fresh) {
-      raw = cached.raw;
-    } else {
-      for (const slot of slots) {
-        slot.className = 'relay-health checking';
-        slot.textContent = 'checking…';
-      }
-      try {
-        // silent:true so a flaky relay set (the very thing this UI exists
-        // to fix) doesn't pop a red toast for every Config-panel render.
-        // Caller still gets the throw and falls into the catch.
-        const r = await api('/api/nvpn/netcheck', undefined, { silent: true });
-        if (r && r.ok) raw = r.raw || null;
-      } catch { /* silent — daemon may be down or relays unreachable */ }
-      // Cache the attempt regardless of outcome. Failures are usually
-      // sticky (user's relay set stays bad until they fix it), so
-      // re-firing every render adds latency with no new info.
-      vpnRelayHealthCache = { fetchedAt: Date.now(), raw };
-    }
-    if (!raw) {
-      for (const slot of slots) { slot.className = 'relay-health'; slot.textContent = ''; }
-      return;
-    }
-    const checks = Array.isArray(raw.relayChecks) ? raw.relayChecks : [];
-    const preferred = typeof raw.preferredRelay === 'string'
-      ? normalizeRelayUrl(raw.preferredRelay) : null;
-    const byUrl = new Map();
-    for (const c of checks) {
-      if (c && typeof c.relay === 'string') byUrl.set(normalizeRelayUrl(c.relay), c);
-    }
-    for (const item of list.querySelectorAll('.item')) {
-      const slot = item.querySelector('.relay-health[data-slot="health"]');
-      if (!slot) continue;
-      const url = normalizeRelayUrl(item.dataset.url);
-      const check = byUrl.get(url);
-      slot.className = 'relay-health';
-      if (!check) {
-        // Configured but not in this netcheck pass — could be a relay
-        // nvpn doesn't probe on `netcheck`. Show "?" so the user knows
-        // we don't have signal rather than a misleading green/red.
-        slot.innerHTML = '<span class="dot warn"></span><span>untested</span>';
-        continue;
-      }
-      const latency = typeof check.latencyMs === 'number' ? check.latencyMs : null;
-      // Color by latency: <200ms ok, <800ms warn, otherwise still warn.
-      // Reachability errors aren't carried in the v0.3.x schema we observed,
-      // so we treat absence-of-latency as warn rather than err.
-      const cls = latency === null ? 'warn'
-                : latency < 200    ? 'ok'
-                :                    'warn';
-      const star = (preferred && url === preferred)
-        ? '<span class="preferred-star" title="nvpn-preferred relay">★</span>' : '';
-      const text = latency === null ? 'no latency' : `${latency}ms`;
-      slot.innerHTML = `<span class="dot ${cls}"></span><span>${escapeHtml(text)}</span>${star}`;
-    }
   }
 
   async function saveRelayFlag(key, value) {
@@ -10981,6 +11183,7 @@ const Panels = {
   chat:     ChatPanel,
   relay:    RelayPanel,
   projects: ProjectsPanel,
+  vpn:      VpnPanel,
   logs:     LogsPanel,
   config:   ConfigPanel,
 };
