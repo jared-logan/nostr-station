@@ -49,7 +49,7 @@ import { execFileSync, spawn } from 'child_process';
 import {
   readProjects, getProject, createProject, updateProject, deleteProject,
   detectPath, projectGitStatus, projectGitLog, resolveProjectContext,
-  isStacksProject, validateProjectPath,
+  isStacksProject, hasDevScript, validateProjectPath,
 } from '../projects.js';
 import { checkCollision, scaffoldProject } from '../project-scaffold.js';
 import { getTemplate } from '../templates.js';
@@ -79,19 +79,25 @@ export async function handleProjects(
 ): Promise<boolean> {
   // ── Projects ───────────────────────────────────────────────────────
   if (url === '/api/projects' && method === 'GET') {
-    // Annotate each project with two derived flags:
+    // Annotate each project with derived flags:
     //   - stacksProject — has stack.json (gates Dork/dev/deploy).
+    //   - previewable   — has package.json with a `dev` script. Gates
+    //                     the chat panel's live-preview pane. Wider
+    //                     net than stacksProject so shakespeare.diy
+    //                     clones (vite.config.ts + package.json, no
+    //                     stack.json) get the iframe too.
     //   - pathMissing   — path was recorded but the dir no longer
     //                     exists on disk (user deleted the folder
     //                     outside nostr-station, or scaffold
     //                     failed between mkdir and register). The
     //                     UI uses this to paint the card red and
     //                     guide the user toward Remove.
-    // Both are cheap fs checks — list size is single-digit on any
-    // install we've seen.
+    // All cheap fs checks — list size is single-digit on any install
+    // we've seen.
     const annotated = readProjects().map(p => ({
       ...p,
       stacksProject: isStacksProject(p),
+      previewable:   hasDevScript(p),
       pathMissing:   !!p.path && !fs.existsSync(p.path),
     }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -244,7 +250,11 @@ export async function handleProjects(
 
     if (tail === '' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ...project, stacksProject: isStacksProject(project) }));
+      res.end(JSON.stringify({
+        ...project,
+        stacksProject: isStacksProject(project),
+        previewable:   hasDevScript(project),
+      }));
       return true;
     }
     if (tail === '' && method === 'PATCH') {

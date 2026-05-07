@@ -228,6 +228,25 @@ export function isStacksProject(p: Project): boolean {
   catch { return false; }
 }
 
+// Derived check — does this project ship an `npm run dev` script? This is
+// the gate for the chat panel's live-preview pane: any Vite/Next/etc.
+// project with a `dev` script can be iframed once it's running, even if
+// it's not a stacks/MKStack project (e.g. a shakespeare.diy clone has
+// vite.config.ts + package.json but no stack.json).
+//
+// Read package.json synchronously and parse the bare minimum. Returns
+// false for any I/O or parse failure — preview pane just stays hidden,
+// no error surfaced. Same not-cached rationale as isStacksProject:
+// users can `npm init` a directory between dashboard polls.
+export function hasDevScript(p: Project): boolean {
+  if (!p.path) return false;
+  try {
+    const raw = fs.readFileSync(`${p.path}/package.json`, 'utf8');
+    const pkg = JSON.parse(raw);
+    return typeof pkg?.scripts?.dev === 'string' && pkg.scripts.dev.length > 0;
+  } catch { return false; }
+}
+
 function writeProjects(projects: Project[]): void {
   fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 });
   fs.writeFileSync(projectsPath(), JSON.stringify(projects, null, 2), { mode: 0o600 });
