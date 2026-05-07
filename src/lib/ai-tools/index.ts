@@ -31,6 +31,7 @@ import { TOOLS as FS_TOOLS } from './fs.js';
 import { TOOLS as GIT_TOOLS } from './git.js';
 import { TOOLS as EXEC_TOOLS } from './exec.js';
 import { TOOLS as TODO_TOOLS } from './todo.js';
+import { TOOLS as BUILD_TOOLS } from './build.js';
 
 export type Permission = 'always' | 'gated';
 
@@ -69,7 +70,7 @@ function register(tool: Tool): void {
   REGISTRY[tool.name] = tool;
 }
 
-[...FS_TOOLS, ...GIT_TOOLS, ...EXEC_TOOLS, ...TODO_TOOLS].forEach(register);
+[...FS_TOOLS, ...GIT_TOOLS, ...EXEC_TOOLS, ...TODO_TOOLS, ...BUILD_TOOLS].forEach(register);
 
 // ── Public API ───────────────────────────────────────────────────────────
 

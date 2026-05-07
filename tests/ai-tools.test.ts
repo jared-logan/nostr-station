@@ -47,6 +47,7 @@ test('registry: listTools returns all expected tools', () => {
     'git_status', 'git_log', 'git_diff', 'git_commit',
     'run_command',
     'todo_read', 'todo_write',
+    'build_project',
   ]) {
     assert.ok(names.has(expected), `missing tool: ${expected}`);
   }
@@ -364,6 +365,58 @@ test('todo_*: ungated by permission mode', () => {
     assert.equal(requiresApproval('todo_read',  mode), false);
     assert.equal(requiresApproval('todo_write', mode), false);
   }
+});
+
+// ── build_project ────────────────────────────────────────────────────────
+
+test('build_project: refuses when no package.json', async () => {
+  const r = await runTool('build_project', {}, { project: makeProject(ROOT) as any, permissions: 'auto-edit' });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /no build script/i);
+});
+
+test('build_project: refuses when package.json has no build/compile script', async () => {
+  fs.writeFileSync(path.join(ROOT, 'package.json'), JSON.stringify({ scripts: { test: 'echo hi' } }));
+  const r = await runTool('build_project', {}, { project: makeProject(ROOT) as any, permissions: 'auto-edit' });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /no build script/i);
+});
+
+test('build_project: success path returns exitCode 0 and ok:true', async () => {
+  // sh -c "echo built" exits 0; npm run will use this as the build
+  // command. Reasonable proxy for a real build short of installing
+  // a full project's deps in tests.
+  fs.writeFileSync(path.join(ROOT, 'package.json'), JSON.stringify({
+    name: 'test', version: '0.0.0', scripts: { build: 'echo built' },
+  }));
+  const r = await runTool('build_project', {}, { project: makeProject(ROOT) as any, permissions: 'auto-edit' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.content.ok, true);
+  assert.equal(r.content.exitCode, 0);
+  assert.match(r.content.stdout, /built/);
+});
+
+test('build_project: failure path surfaces stderr + non-zero exit', async () => {
+  fs.writeFileSync(path.join(ROOT, 'package.json'), JSON.stringify({
+    name: 'test', version: '0.0.0', scripts: { build: 'sh -c "echo nope >&2; exit 7"' },
+  }));
+  const r = await runTool('build_project', {}, { project: makeProject(ROOT) as any, permissions: 'auto-edit' });
+  assert.equal(r.ok, true);          // tool ran
+  if (!r.ok) return;
+  assert.equal(r.content.ok, false); // build failed
+  assert.notEqual(r.content.exitCode, 0);
+  assert.match(r.content.stderr, /nope/);
+});
+
+test('build_project: gated in read-only, auto-approves in auto-edit', () => {
+  // requiresApproval returns false in auto-edit for everything except
+  // run_command — build_project rides that exception, which is the
+  // whole point: self-correction loops shouldn't pause for approval
+  // every iteration.
+  assert.equal(requiresApproval('build_project', 'read-only'), true);
+  assert.equal(requiresApproval('build_project', 'auto-edit'), false);
+  assert.equal(requiresApproval('build_project', 'yolo'),      false);
 });
 
 test('todo: lists are scoped per project', async () => {

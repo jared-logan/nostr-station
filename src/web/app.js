@@ -1983,6 +1983,7 @@ const ChatPanel = (() => {
         case 'todo_write':   return Array.isArray(a.todos)
                                   ? `Updated todos (${a.todos.length})`
                                   : 'Updated todos';
+        case 'build_project': return 'Built project';
         case 'run_command': {
           const argv = Array.isArray(a.argv) ? a.argv : [];
           if (argv.length === 0) return 'run_command';
