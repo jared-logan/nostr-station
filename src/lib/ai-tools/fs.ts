@@ -139,7 +139,26 @@ const read_file: Tool = {
     try { stat = fs.statSync(safe.abs!); }
     catch { return { ok: false, error: `path does not exist: ${args.path}` }; }
     if (stat.isDirectory()) {
-      return { ok: false, error: `path is a directory: ${args.path} — use list_dir instead` };
+      // Self-heal: return a list_dir result with a fallback marker
+      // so the model gets useful data instead of just an error to
+      // recover from. The agent in the original repro burned three
+      // turns dead-ending on `read_file('.')` because the error
+      // message told it "use list_dir instead" but didn't include
+      // any of the data it would have gotten from list_dir. Now a
+      // single tool call delivers the listing AND a hint.
+      const projectAbs = fs.realpathSync(ctx.project.path!);
+      const entries = listDirRecursive(safe.abs!, safe.abs!, DEFAULT_LIST_DEPTH, projectAbs);
+      return {
+        ok: true,
+        content: {
+          kind:    'directory-fallback',
+          path:    args.path,
+          depth:   DEFAULT_LIST_DEPTH,
+          entries,
+          hint:    'read_file was called on a directory — returning a list_dir payload instead. To read a specific file, call read_file with that file\'s path.',
+        },
+        summary: `${entries.length} entries (directory — read_file fell back to list_dir)`,
+      };
     }
 
     const start = Number.isInteger(args.range?.start) ? Math.max(0, args.range.start) : 0;

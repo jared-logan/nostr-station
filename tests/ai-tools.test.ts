@@ -148,10 +148,36 @@ test('read_file: range slicing', async () => {
   if (r.ok) assert.equal(r.content.text, 'cdef');
 });
 
-test('read_file: rejects directories', async () => {
+test('read_file: directory falls back to list_dir payload (no dead-end)', async () => {
+  // Pre-fix calling read_file on a directory returned an error and
+  // the agent often dead-ended on it (loop trace from the OOM repro:
+  // the agent burned three turns retrying read_file('.') after each
+  // hit the "use list_dir instead" error). Now the same call returns
+  // a list_dir-shaped payload + a hint, so the agent can keep going
+  // without the recovery turn.
+  fs.writeFileSync(path.join(ROOT, 'one.md'), '');
+  fs.writeFileSync(path.join(ROOT, 'two.md'), '');
+  const r = await runTool('read_file', { path: '.' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.content.kind, 'directory-fallback');
+  assert.equal(r.content.entries.length, 2);
+  const names = r.content.entries.map((e: any) => e.name).sort();
+  assert.deepEqual(names, ['one.md', 'two.md']);
+  assert.match(r.content.hint, /list_dir/);
+});
+
+test('read_file: directories fall back to list_dir (no longer rejects)', async () => {
+  // Replaces the prior "rejects directories" test. read_file used to
+  // return ok:false with "use list_dir instead"; now it self-heals
+  // and returns the listing in the same call. Empty directory still
+  // returns ok:true with kind:'directory-fallback' and zero entries.
   fs.mkdirSync(path.join(ROOT, 'd'));
   const r = await runTool('read_file', { path: 'd' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
-  assert.equal(r.ok, false);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.content.kind, 'directory-fallback');
+  assert.deepEqual(r.content.entries, []);
 });
 
 // ── write_file ───────────────────────────────────────────────────────────
