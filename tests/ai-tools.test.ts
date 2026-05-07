@@ -174,7 +174,11 @@ test('read_file: display footer signals "more available" on a partial read', asy
   const r = await runTool('read_file', { path: 'big.txt', range: { start: 0, end: 2 } }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
   assert.equal(r.ok, true);
   if (!r.ok) return;
-  assert.match(r.content.display, /File has more bytes/);
+  // Display is null on partial reads — numbered prefix would lie about
+  // line numbers (would say "  1|" for whatever byte offset the slice
+  // started at). The agent has `text` + the byte range and that's
+  // enough to keep editing without misciting positions.
+  assert.equal(r.content.display, null, 'display must be null on partial reads (line numbers would be wrong)');
   assert.equal(r.content.lines, null, 'lines must be null for partial reads since we don\'t know the total');
 });
 
@@ -257,6 +261,30 @@ test('glob: empty pattern errors gracefully', async () => {
   if (!r.ok) assert.match(r.error, /required/i);
 });
 
+test('glob: rejects when project has no path', async () => {
+  // Pre-fix this threw raw ENOENT through runTool's wrapper. Now a
+  // clean error matches what build_project / git tools already do.
+  const r = await runTool('glob', { pattern: '**/*.ts' }, { project: makeProject(null) as any, permissions: 'read-only' });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /no local path/);
+});
+
+test('glob: nested brace expansion {a,{b,c}}', async () => {
+  // Pre-fix `inner.split(',')` ignored brace depth and produced
+  // ['a', '{b', 'c}'], yielding garbage regex. Now top-level commas
+  // honour depth and the alternation expands correctly.
+  fs.mkdirSync(path.join(ROOT, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(ROOT, 'src/x.a'), '');
+  fs.writeFileSync(path.join(ROOT, 'src/x.b'), '');
+  fs.writeFileSync(path.join(ROOT, 'src/x.c'), '');
+  fs.writeFileSync(path.join(ROOT, 'src/x.d'), '');
+  const r = await runTool('glob', { pattern: 'src/x.{a,{b,c}}' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const paths: string[] = r.content.paths.sort();
+  assert.deepEqual(paths, ['src/x.a', 'src/x.b', 'src/x.c']);
+});
+
 // ── grep ─────────────────────────────────────────────────────────────────
 
 test('grep: matches across multiple files with line numbers', async () => {
@@ -318,6 +346,30 @@ test('grep: ungated by permission mode', async () => {
   for (const mode of ['read-only', 'auto-edit', 'yolo'] as const) {
     assert.equal(requiresApproval('grep', mode), false, `grep must be ungated in ${mode} mode`);
   }
+});
+
+test('grep: rejects when project has no path', async () => {
+  const r = await runTool('grep', { pattern: 'TARGET' }, { project: makeProject(null) as any, permissions: 'read-only' });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /no local path/);
+});
+
+test('grep: surfaces filesPartiallyScanned for files past the per-file cap', async () => {
+  // Build a 60 KB file (>MAX_GREP_PER_FILE_BYTES = 50 KB). The match
+  // body lives at byte 0 (first scan window) so it's findable; the
+  // tail is invisible. Pre-fix the agent had no signal that the
+  // tail wasn't scanned — now the result lists the partially-scanned
+  // file so the agent can keep searching with read_file ranges if it
+  // matters.
+  const head = 'TARGET line at top\n';
+  const filler = 'x'.repeat(60 * 1024);
+  fs.writeFileSync(path.join(ROOT, 'big.txt'), head + filler);
+  const r = await runTool('grep', { pattern: 'TARGET' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.content.matches.length, 1, 'first-window match must still be found');
+  assert.deepEqual(r.content.filesPartiallyScanned, ['big.txt']);
+  assert.equal(r.content.truncated, true, 'top-level truncated flag must surface partial-file scans');
 });
 
 // ── todo_read / todo_write ───────────────────────────────────────────────
@@ -409,6 +461,27 @@ test('build_project: failure path surfaces stderr + non-zero exit', async () => 
   assert.match(r.content.stderr, /nope/);
 });
 
+test('build_project: surfaces timedOut flag distinct from a failed build', async () => {
+  // Pre-fix a timeout returned exitCode 143 (or null → -1) with no
+  // signal that the kill came from us. The model could waste a turn
+  // debugging working code instead of asking for a longer timeout.
+  // Now the result carries timedOut:true and the summary names it.
+  fs.writeFileSync(path.join(ROOT, 'package.json'), JSON.stringify({
+    name: 'slow', version: '0.0.0',
+    scripts: { build: 'sleep 5' },
+  }));
+  const r = await runTool(
+    'build_project',
+    { timeoutMs: 1000 },
+    { project: makeProject(ROOT) as any, permissions: 'auto-edit' },
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.content.timedOut, true, 'timedOut must be true after a timeout kill');
+  assert.equal(r.content.ok, false);
+  assert.match(r.summary || '', /timed out/);
+});
+
 test('build_project: gated in read-only AND auto-edit (closes the edit-then-build escape)', () => {
   // build_project rides the same line as run_command in auto-edit.
   // A prior version of this branch let it auto-approve (alongside
@@ -437,6 +510,18 @@ test('todo: lists are scoped per project', async () => {
   assert.equal(r.ok, true);
   if (r.ok) assert.deepEqual(r.content.todos, []);
   fs.rmSync(ROOT2, { recursive: true, force: true });
+});
+
+test('read_file: rejects inverted range (end < start)', async () => {
+  // Pre-fix this silently returned an empty read with a misleading
+  // "End of file - total 1 lines" footer because length floored to
+  // 0 and an empty string still split into [''] → 1 line. Now the
+  // range is validated up-front and the model sees a clean error
+  // it can recover from.
+  fs.writeFileSync(path.join(ROOT, 'r.txt'), 'abcdefghij');
+  const r = await runTool('read_file', { path: 'r.txt', range: { start: 100, end: 50 } }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /range\.end.*≥.*range\.start/);
 });
 
 test('read_file: directories fall back to list_dir (no longer rejects)', async () => {

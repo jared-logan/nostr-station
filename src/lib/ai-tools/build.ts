@@ -61,11 +61,18 @@ export function detectBuildCommand(projectPath: string): BuildSpec | null {
 }
 
 interface BuildResult {
-  command:  string;
-  exitCode: number;
-  stdout:   string;
-  stderr:   string;
-  truncated: boolean;
+  command:    string;
+  exitCode:   number;
+  stdout:     string;
+  stderr:     string;
+  truncated:  boolean;
+  // True when the build was killed by our timeout, distinct from a
+  // legitimate non-zero exit. Lets the model distinguish "your build
+  // is broken" from "your build is too slow"; without this flag the
+  // model sees an unintelligible exit code (typically 143 from
+  // SIGTERM, sometimes -1) and may waste a turn debugging working
+  // code.
+  timedOut:   boolean;
   durationMs: number;
 }
 
@@ -82,6 +89,7 @@ function runBuild(spec: BuildSpec, cwd: string, timeoutMs: number): Promise<Buil
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let truncated = false;
+    let timedOut  = false;
 
     const child = spawn(spec.argv[0], spec.argv.slice(1), {
       cwd,
@@ -105,6 +113,7 @@ function runBuild(spec: BuildSpec, cwd: string, timeoutMs: number): Promise<Buil
     child.stderr.on('data', (c) => eat(c, 'stderr'));
 
     const timer = setTimeout(() => {
+      timedOut = true;
       try { child.kill('SIGTERM'); } catch {}
       // SIGTERM may not land instantly on a stuck process; give it
       // a 2s grace period then SIGKILL so the promise resolves.
@@ -119,6 +128,7 @@ function runBuild(spec: BuildSpec, cwd: string, timeoutMs: number): Promise<Buil
         stdout:     stdoutTail,
         stderr:     stderrTail + (stderrTail ? '\n' : '') + `[spawn error: ${e.message}]`,
         truncated,
+        timedOut,
         durationMs: Date.now() - start,
       });
     });
@@ -130,6 +140,7 @@ function runBuild(spec: BuildSpec, cwd: string, timeoutMs: number): Promise<Buil
         stdout:     stdoutTail,
         stderr:     stderrTail,
         truncated,
+        timedOut,
         durationMs: Date.now() - start,
       });
     });
@@ -179,7 +190,9 @@ const build_project: Tool = {
       },
       summary: ok
         ? `built in ${(result.durationMs / 1000).toFixed(1)}s`
-        : `build failed (exit ${result.exitCode}, ${(result.durationMs / 1000).toFixed(1)}s)`,
+        : result.timedOut
+          ? `build timed out after ${(result.durationMs / 1000).toFixed(1)}s — pass timeoutMs to extend`
+          : `build failed (exit ${result.exitCode}, ${(result.durationMs / 1000).toFixed(1)}s)`,
     };
   },
 };

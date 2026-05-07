@@ -169,8 +169,16 @@ const read_file: Tool = {
 
     const start = Number.isInteger(args.range?.start) ? Math.max(0, args.range.start) : 0;
     const endRaw = Number.isInteger(args.range?.end) ? args.range.end : start + MAX_READ_BYTES - 1;
+    // Reject inverted ranges up-front rather than silently returning
+    // an empty read with a misleading "End of file" footer. A model
+    // that passes range:{start:100, end:50} should see a clean error,
+    // not a successful-looking empty payload.
+    if (Number.isInteger(args.range?.end) && args.range.end < start) {
+      return { ok: false, error: `range.end (${args.range.end}) must be ≥ range.start (${start})` };
+    }
     const end   = Math.min(stat.size - 1, endRaw, start + MAX_READ_BYTES - 1);
     const length = Math.max(0, end - start + 1);
+    const isPartialRead = start > 0 || end < stat.size - 1;
 
     let buf: Buffer;
     try {
@@ -207,17 +215,22 @@ const read_file: Tool = {
     // actual file. The tool description spells this out so models
     // pick the right field per task.
     const lines = text.split('\n');
-    const lastLineNumber = start === 0 ? lines.length : -1; // -1 = unknown when reading a slice
-    const totalLines = start === 0 && end === stat.size - 1 ? lines.length : null;
-    const numberWidth = Math.max(4, String(start === 0 ? lines.length : 9999).length);
-    const numbered = lines.map((line, idx) => {
-      const n = (start === 0 ? idx + 1 : idx + 1).toString().padStart(numberWidth, ' ');
-      return `${n}| ${line}`;
-    }).join('\n');
-    const footer = totalLines !== null
-      ? `(End of file - total ${totalLines} line${totalLines === 1 ? '' : 's'})`
-      : `(File has more bytes. Use range:{start,end} to read beyond byte ${end + 1})`;
-    const display = `<file path="${args.path}">\n${numbered}\n</file>\n${footer}`;
+    const totalLines = isPartialRead ? null : lines.length;
+    // display is skipped on partial reads: the numbered prefix would
+    // start at "1" regardless of where in the file we sliced, which
+    // is internally inconsistent with the "more bytes available"
+    // footer. The agent description points the model at `text` for
+    // editing and `display` for line-number citations; on a slice
+    // the model has `text` + the byte-range and that's enough.
+    let display: string | null = null;
+    if (!isPartialRead) {
+      const numberWidth = Math.max(4, String(lines.length).length);
+      const numbered = lines.map((line, idx) =>
+        `${String(idx + 1).padStart(numberWidth, ' ')}| ${line}`,
+      ).join('\n');
+      const footer = `(End of file - total ${lines.length} line${lines.length === 1 ? '' : 's'})`;
+      display = `<file path="${args.path}">\n${numbered}\n</file>\n${footer}`;
+    }
 
     return {
       ok: true,
@@ -397,8 +410,29 @@ const delete_file: Tool = {
 
 function globToRegex(pattern: string): RegExp {
   // Brace expansion happens at compile time — we recursively expand
-  // {a,b,c} into alternation `(?:a|b|c)`. Nested braces are flattened
-  // by Node's regex engine, no special handling needed here.
+  // {a,b,c} into alternation `(?:a|b|c)`. The split-on-commas step
+  // has to honour nested-brace depth so a pattern like
+  //   **/*.{ts,{js,jsx}}
+  // splits the *outer* inner as ['ts', '{js,jsx}'] (NOT three parts
+  // ['ts', '{js', 'jsx}']) before recursing into each. Fall-back
+  // bare split(',') would leave dangling braces and the resulting
+  // regex would silently mismatch.
+  const splitTopLevelCommas = (s: string): string[] => {
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c === '{') depth++;
+      else if (c === '}') depth--;
+      else if (c === ',' && depth === 0) {
+        parts.push(s.slice(start, i));
+        start = i + 1;
+      }
+    }
+    parts.push(s.slice(start));
+    return parts;
+  };
   const expand = (s: string): string => {
     const open = s.indexOf('{');
     if (open < 0) return s;
@@ -414,7 +448,7 @@ function globToRegex(pattern: string): RegExp {
     const before = s.slice(0, open);
     const inner  = s.slice(open + 1, close);
     const after  = s.slice(close + 1);
-    const parts  = inner.split(',');
+    const parts  = splitTopLevelCommas(inner);
     return `${before}(?:${parts.map(expand).join('|')})${expand(after)}`;
   };
 
@@ -451,16 +485,24 @@ function globToRegex(pattern: string): RegExp {
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'target', '.next']);
 
-function walkAll(rootAbs: string, maxResults: number): string[] {
+interface WalkResult {
+  paths:        string[];
+  truncated:    boolean;        // true if the cap was hit before the tree was fully walked
+  walked:       number;         // total files+symlinks observed (== paths.length on the no-truncation path)
+}
+
+function walkAll(rootAbs: string, maxResults: number): WalkResult {
   const results: string[] = [];
   const stack: string[] = [rootAbs];
-  while (stack.length > 0 && results.length < maxResults) {
+  let truncated = false;
+  while (stack.length > 0) {
+    if (results.length >= maxResults) { truncated = true; break; }
     const dir = stack.pop()!;
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
     catch { continue; }
     for (const ent of entries) {
-      if (results.length >= maxResults) break;
+      if (results.length >= maxResults) { truncated = true; break; }
       if (SKIP_DIRS.has(ent.name)) continue;
       const abs = path.join(dir, ent.name);
       const rel = path.relative(rootAbs, abs);
@@ -471,7 +513,7 @@ function walkAll(rootAbs: string, maxResults: number): string[] {
       }
     }
   }
-  return results;
+  return { paths: results, truncated, walked: results.length };
 }
 
 const MAX_GLOB_RESULTS = 500;
@@ -495,25 +537,36 @@ const glob_tool: Tool = {
   },
   permission: 'always',
   handler: async (args, ctx): Promise<ToolResult> => {
+    if (!ctx.project.path) return { ok: false, error: 'project has no local path' };
     if (typeof args.pattern !== 'string' || !args.pattern) {
       return { ok: false, error: 'pattern is required' };
     }
-    const projectAbs = fs.realpathSync(ctx.project.path!);
+    const projectAbs = fs.realpathSync(ctx.project.path);
     let regex: RegExp;
     try { regex = globToRegex(args.pattern); }
     catch (e: any) { return { ok: false, error: `invalid pattern: ${e?.message ?? 'unknown'}` }; }
 
-    const all = walkAll(projectAbs, 10_000);  // walk cap independent of result cap
-    const matched = all.filter(p => regex.test(p)).slice(0, MAX_GLOB_RESULTS);
+    const walk = walkAll(projectAbs, 10_000);
+    const matched = walk.paths.filter(p => regex.test(p)).slice(0, MAX_GLOB_RESULTS);
+    // Two distinct truncation states the model needs to distinguish:
+    //   - resultsTruncated: matches hit MAX_GLOB_RESULTS — narrow the
+    //     pattern.
+    //   - walkTruncated:    the project tree exceeded 10 000 files
+    //     before we finished walking — matches past that point are
+    //     INVISIBLE (silent-wrong if not surfaced). Narrow the path
+    //     scope or use grep with a glob filter instead.
+    const resultsTruncated = matched.length === MAX_GLOB_RESULTS;
     return {
       ok: true,
       content: {
         pattern: args.pattern,
         count:   matched.length,
-        truncated: matched.length === MAX_GLOB_RESULTS,
-        paths:   matched,
+        resultsTruncated,
+        walkTruncated: walk.truncated,
+        truncated:    resultsTruncated || walk.truncated,
+        paths:        matched,
       },
-      summary: `${matched.length} match${matched.length === 1 ? '' : 'es'}`,
+      summary: `${matched.length} match${matched.length === 1 ? '' : 'es'}${walk.truncated ? ' (tree partially walked)' : ''}`,
     };
   },
 };
@@ -569,6 +622,7 @@ const grep_tool: Tool = {
   },
   permission: 'always',
   handler: async (args, ctx): Promise<ToolResult> => {
+    if (!ctx.project.path) return { ok: false, error: 'project has no local path' };
     if (typeof args.pattern !== 'string' || !args.pattern) {
       return { ok: false, error: 'pattern is required' };
     }
@@ -580,9 +634,9 @@ const grep_tool: Tool = {
       return { ok: false, error: `invalid regex: ${e?.message ?? 'unknown'}` };
     }
 
-    const projectAbs = fs.realpathSync(ctx.project.path!);
-    const allFiles = walkAll(projectAbs, 10_000);
-    let candidates = allFiles;
+    const projectAbs = fs.realpathSync(ctx.project.path);
+    const walk = walkAll(projectAbs, 10_000);
+    let candidates = walk.paths;
     if (typeof args.glob === 'string' && args.glob) {
       let globRegex: RegExp;
       try { globRegex = globToRegex(args.glob); }
@@ -594,6 +648,12 @@ const grep_tool: Tool = {
     let scannedBytes  = 0;
     let truncated     = false;
     let truncReason: string | null = null;
+    // Per-file truncation tracker. A file bigger than
+    // MAX_GREP_PER_FILE_BYTES gets only its first 50 KB scanned —
+    // matches past that boundary are invisible. Surfacing the count
+    // separately lets the model decide whether to use read_file with
+    // a range to keep searching, vs. accepting the result.
+    const filesPartiallyScanned: string[] = [];
 
     for (const rel of candidates) {
       if (matches.length >= MAX_GREP_MATCHES) {
@@ -611,6 +671,7 @@ const grep_tool: Tool = {
       const length = Math.min(stat.size, MAX_GREP_PER_FILE_BYTES,
         MAX_GREP_TOTAL_BYTES - scannedBytes);
       if (length <= 0) continue;
+      const partialFile = length < stat.size;
       let buf: Buffer;
       try {
         const fd = fs.openSync(abs, 'r');
@@ -622,6 +683,7 @@ const grep_tool: Tool = {
       scannedBytes += length;
       // Binary skip — same NUL-byte heuristic read_file uses.
       if (buf.indexOf(0) !== -1) continue;
+      if (partialFile) filesPartiallyScanned.push(rel);
 
       const text = buf.toString('utf8');
       const lines = text.split('\n');
@@ -637,6 +699,10 @@ const grep_tool: Tool = {
       }
     }
 
+    // Bubble up walk truncation as a top-level signal too — a project
+    // with >10 K files where the matching file is past the cap would
+    // otherwise show 0 matches with no indication anything was missed.
+    const walkTruncated = walk.truncated;
     return {
       ok: true,
       content: {
@@ -644,11 +710,18 @@ const grep_tool: Tool = {
         glob:    args.glob ?? null,
         caseSensitive: args.caseSensitive !== false,
         count:   matches.length,
-        truncated,
+        truncated: truncated || walkTruncated || filesPartiallyScanned.length > 0,
         truncReason,
+        walkTruncated,
+        filesPartiallyScanned,
         matches,
       },
-      summary: `${matches.length} match${matches.length === 1 ? '' : 'es'}${truncated ? ' (truncated)' : ''}`,
+      summary: `${matches.length} match${matches.length === 1 ? '' : 'es'}${
+        truncated ? ' (truncated)'
+        : walkTruncated ? ' (tree partially walked)'
+        : filesPartiallyScanned.length > 0 ? ` (${filesPartiallyScanned.length} file${filesPartiallyScanned.length === 1 ? '' : 's'} partially scanned)`
+        : ''
+      }`,
     };
   },
 };
