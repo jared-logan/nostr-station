@@ -48,6 +48,7 @@ import {
 } from './project-config.js';
 import { renderPrompt } from './prompt-render.js';
 import { readIdentity, hexToNpub, isNpubOrHex } from './identity.js';
+import { extractUserRegion, USER_REGION_BEGIN, USER_REGION_END } from './editor.js';
 
 export interface AiContext {
   text:        string;
@@ -84,6 +85,52 @@ export function readProjectContext(projectPath: string): string | null {
     raw = fs.readFileSync(filePath, 'utf8');
   } catch {
     return null;
+  }
+  const trimmed = raw.trimEnd();
+  if (!trimmed) return null;
+  return trimmed;
+}
+
+/**
+ * Path to the user-editable station context file. Always-on layer that
+ * applies to every chat turn regardless of which project (if any) is
+ * active. Seeded once at first run by `seedStationContext()` in
+ * web-server.ts; users edit it from the Config panel.
+ *
+ * Centralized here so the editor route, the preview route, and
+ * `buildVars()` all agree on the location — no second source of truth.
+ */
+export function stationContextPath(): string {
+  return path.join(os.homedir(), 'nostr-station', 'projects', 'NOSTR_STATION.md');
+}
+
+/**
+ * Read the user-editable station context for splicing into the live
+ * system prompt. Returns null when there's nothing useful to inject so
+ * the template's `{% if stationContext %}` block omits the section
+ * cleanly.
+ *
+ * The seeded file ships with Nori-persona / NIP-reference / command-table
+ * sections that already live verbatim in DEFAULT_PROMPT_TEMPLATE — re-
+ * injecting them would duplicate hundreds of tokens per turn. The seed
+ * fences the user's own additive notes between USER_REGION_BEGIN /
+ * USER_REGION_END markers, so:
+ *
+ *   - Markers present → splice only the user region (additive notes).
+ *   - Markers absent  → user has rewritten the file freely; splice the
+ *                       whole content rather than silently dropping it.
+ *   - File missing or empty after the above → null.
+ */
+export function readStationContext(): string | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(stationContextPath(), 'utf8');
+  } catch {
+    return null;
+  }
+  if (raw.includes(USER_REGION_BEGIN) && raw.includes(USER_REGION_END)) {
+    const region = extractUserRegion(raw);
+    return region || null;
   }
   const trimmed = raw.trimEnd();
   if (!trimmed) return null;
@@ -222,7 +269,12 @@ When a project is first created, the AI chooses a template from the list below b
 - NIP-65 — relay list metadata.
 - NIP-98 — HTTP auth (used by the dashboard's session sign-in).
 
-{% if project %}# Your Tools
+{% if stationContext %}# Station context
+*(user notes from \`~/nostr-station/projects/NOSTR_STATION.md\` — applies to every chat turn)*
+
+{{ stationContext }}
+
+{% endif %}{% if project %}# Your Tools
 
 You have file-system tools scoped to the active project ({{ cwd }}). Use them
 to explore and edit code; do not ask the user to paste files when you can read
@@ -286,6 +338,9 @@ interface Vars {
   permissions:    { mode: PermissionMode };
   user:           UserVars;
   config:         { templates: Array<{ id: string; name: string; description: string }> };
+  // Always-on station-level overlay from ~/nostr-station/projects/NOSTR_STATION.md.
+  // null when the file is missing or empty.
+  stationContext: string | null;
   // Project-specific (null when no project)
   project:        null | {
     name:         string;
@@ -342,6 +397,7 @@ function buildVars(project: Project | null, model?: ModelInfo): Vars {
     permissions:    { mode: permission },
     user:           readUserVars(),
     config:         { templates },
+    stationContext: readStationContext(),
     project:        project ? {
       name:         project.name,
       path:         project.path,
