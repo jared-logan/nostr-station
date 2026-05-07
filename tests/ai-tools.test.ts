@@ -43,6 +43,7 @@ test('registry: listTools returns all expected tools', () => {
   const names = new Set(listTools().map(t => t.name));
   for (const expected of [
     'list_dir', 'read_file', 'write_file', 'apply_patch', 'delete_file',
+    'glob',
     'git_status', 'git_log', 'git_diff', 'git_commit',
     'run_command',
   ]) {
@@ -165,6 +166,66 @@ test('read_file: directory falls back to list_dir payload (no dead-end)', async 
   const names = r.content.entries.map((e: any) => e.name).sort();
   assert.deepEqual(names, ['one.md', 'two.md']);
   assert.match(r.content.hint, /list_dir/);
+});
+
+// ── glob ─────────────────────────────────────────────────────────────────
+
+test('glob: matches **/*.ext across nested dirs', async () => {
+  fs.mkdirSync(path.join(ROOT, 'src/components'), { recursive: true });
+  fs.writeFileSync(path.join(ROOT, 'src/components/Button.tsx'), '');
+  fs.writeFileSync(path.join(ROOT, 'src/App.tsx'),                '');
+  fs.writeFileSync(path.join(ROOT, 'src/main.ts'),                '');
+  fs.writeFileSync(path.join(ROOT, 'README.md'),                  '');
+
+  const r = await runTool('glob', { pattern: '**/*.tsx' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const paths: string[] = r.content.paths.sort();
+  assert.deepEqual(paths, ['src/App.tsx', 'src/components/Button.tsx']);
+});
+
+test('glob: brace expansion {a,b}', async () => {
+  fs.mkdirSync(path.join(ROOT, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(ROOT, 'src/main.ts'),  '');
+  fs.writeFileSync(path.join(ROOT, 'src/App.tsx'),  '');
+  fs.writeFileSync(path.join(ROOT, 'src/style.css'), '');
+
+  const r = await runTool('glob', { pattern: 'src/**/*.{ts,tsx}' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const paths: string[] = r.content.paths.sort();
+  assert.deepEqual(paths, ['src/App.tsx', 'src/main.ts']);
+});
+
+test('glob: skips heavy dirs by default (node_modules, .git, dist)', async () => {
+  fs.mkdirSync(path.join(ROOT, 'node_modules/react'), { recursive: true });
+  fs.mkdirSync(path.join(ROOT, '.git/objects'),       { recursive: true });
+  fs.mkdirSync(path.join(ROOT, 'dist'),               { recursive: true });
+  fs.mkdirSync(path.join(ROOT, 'src'),                { recursive: true });
+  fs.writeFileSync(path.join(ROOT, 'node_modules/react/index.js'), '');
+  fs.writeFileSync(path.join(ROOT, '.git/objects/aa.js'),          '');
+  fs.writeFileSync(path.join(ROOT, 'dist/bundle.js'),              '');
+  fs.writeFileSync(path.join(ROOT, 'src/index.js'),                '');
+
+  const r = await runTool('glob', { pattern: '**/*.js' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const paths: string[] = r.content.paths;
+  assert.deepEqual(paths, ['src/index.js']);
+});
+
+test('glob: ungated by permission mode', async () => {
+  // Mirror requiresApproval test pattern — read-class tools must not
+  // gate even in read-only mode.
+  for (const mode of ['read-only', 'auto-edit', 'yolo'] as const) {
+    assert.equal(requiresApproval('glob', mode), false, `glob must be ungated in ${mode} mode`);
+  }
+});
+
+test('glob: empty pattern errors gracefully', async () => {
+  const r = await runTool('glob', { pattern: '' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /required/i);
 });
 
 test('read_file: directories fall back to list_dir (no longer rejects)', async () => {

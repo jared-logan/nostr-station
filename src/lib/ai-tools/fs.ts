@@ -335,4 +335,147 @@ const delete_file: Tool = {
   },
 };
 
-export const TOOLS: Tool[] = [list_dir, read_file, write_file, apply_patch, delete_file];
+// ── glob ──────────────────────────────────────────────────────────────────
+//
+// File-path search by glob pattern. Read-class — auto-executes
+// regardless of permission mode. Replaces the gated `run_command find`
+// the agent used to reach for, which forced an Approve/Reject prompt
+// even in auto-edit mode (run_command stays gated by design).
+// Mirrors shakespeare.diy's GlobTool — same intent, simpler matcher
+// since we control the workload (agent-issued patterns, dozens to a
+// few hundred file results, not arbitrary user input).
+//
+// Supported pattern syntax:
+//   *      — matches anything except /
+//   **     — matches anything including /
+//   ?      — single non-/ char
+//   plain  — literal match (regex specials escaped)
+//   {a,b}  — brace expansion (recursive)
+//
+// Out of scope: character classes `[abc]`, negation `!(...)`. Agents
+// can fall back to grep+filter for those rare cases.
+
+function globToRegex(pattern: string): RegExp {
+  // Brace expansion happens at compile time — we recursively expand
+  // {a,b,c} into alternation `(?:a|b|c)`. Nested braces are flattened
+  // by Node's regex engine, no special handling needed here.
+  const expand = (s: string): string => {
+    const open = s.indexOf('{');
+    if (open < 0) return s;
+    let depth = 1;
+    let close = open + 1;
+    while (close < s.length && depth > 0) {
+      if (s[close] === '{') depth++;
+      else if (s[close] === '}') depth--;
+      if (depth === 0) break;
+      close++;
+    }
+    if (close >= s.length) return s;
+    const before = s.slice(0, open);
+    const inner  = s.slice(open + 1, close);
+    const after  = s.slice(close + 1);
+    const parts  = inner.split(',');
+    return `${before}(?:${parts.map(expand).join('|')})${expand(after)}`;
+  };
+
+  const expanded = expand(pattern);
+  let re = '';
+  let i = 0;
+  while (i < expanded.length) {
+    const c = expanded[i];
+    if (c === '*') {
+      if (expanded[i + 1] === '*') {
+        // ** with optional trailing slash: match zero-or-more path
+        // segments. The trailing-slash absorb means `**/*.ts` matches
+        // both `foo.ts` (zero leading segments) and `a/b/foo.ts`.
+        re += '.*';
+        i += 2;
+        if (expanded[i] === '/') i++;
+        continue;
+      }
+      re += '[^/]*';
+      i++;
+      continue;
+    }
+    if (c === '?') { re += '[^/]'; i++; continue; }
+    // Pass through `(?:`, `|`, `)` from brace expansion untouched;
+    // escape every other regex meta.
+    if (c === '(' && expanded.slice(i, i + 3) === '(?:') { re += '(?:'; i += 3; continue; }
+    if (c === '|' || c === ')') { re += c; i++; continue; }
+    if ('.+[]{}^$\\'.includes(c)) re += '\\' + c;
+    else re += c;
+    i++;
+  }
+  return new RegExp(`^${re}$`);
+}
+
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'target', '.next']);
+
+function walkAll(rootAbs: string, maxResults: number): string[] {
+  const results: string[] = [];
+  const stack: string[] = [rootAbs];
+  while (stack.length > 0 && results.length < maxResults) {
+    const dir = stack.pop()!;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch { continue; }
+    for (const ent of entries) {
+      if (results.length >= maxResults) break;
+      if (SKIP_DIRS.has(ent.name)) continue;
+      const abs = path.join(dir, ent.name);
+      const rel = path.relative(rootAbs, abs);
+      if (ent.isDirectory()) {
+        stack.push(abs);
+      } else if (ent.isFile() || ent.isSymbolicLink()) {
+        results.push(rel);
+      }
+    }
+  }
+  return results;
+}
+
+const MAX_GLOB_RESULTS = 500;
+
+const glob_tool: Tool = {
+  name: 'glob',
+  description:
+    'Find files in the active project by glob pattern. Pattern syntax: '
+    + '* (no /), ** (any path), ? (single char), {a,b,c} (alternation). '
+    + 'Returns matching paths up to ' + MAX_GLOB_RESULTS + '. Skips heavy '
+    + 'dirs by default (node_modules, .git, dist, build, target, .next). '
+    + 'Read-class — runs without approval. Use this instead of '
+    + 'run_command find — faster, ungated, deterministic.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.tsx" or "src/**/*.{ts,tsx}".' },
+    },
+    required: ['pattern'],
+    additionalProperties: false,
+  },
+  permission: 'always',
+  handler: async (args, ctx): Promise<ToolResult> => {
+    if (typeof args.pattern !== 'string' || !args.pattern) {
+      return { ok: false, error: 'pattern is required' };
+    }
+    const projectAbs = fs.realpathSync(ctx.project.path!);
+    let regex: RegExp;
+    try { regex = globToRegex(args.pattern); }
+    catch (e: any) { return { ok: false, error: `invalid pattern: ${e?.message ?? 'unknown'}` }; }
+
+    const all = walkAll(projectAbs, 10_000);  // walk cap independent of result cap
+    const matched = all.filter(p => regex.test(p)).slice(0, MAX_GLOB_RESULTS);
+    return {
+      ok: true,
+      content: {
+        pattern: args.pattern,
+        count:   matched.length,
+        truncated: matched.length === MAX_GLOB_RESULTS,
+        paths:   matched,
+      },
+      summary: `${matched.length} match${matched.length === 1 ? '' : 'es'}`,
+    };
+  },
+};
+
+export const TOOLS: Tool[] = [list_dir, read_file, write_file, apply_patch, delete_file, glob_tool];
