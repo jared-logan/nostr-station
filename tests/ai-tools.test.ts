@@ -43,7 +43,7 @@ test('registry: listTools returns all expected tools', () => {
   const names = new Set(listTools().map(t => t.name));
   for (const expected of [
     'list_dir', 'read_file', 'write_file', 'apply_patch', 'delete_file',
-    'glob',
+    'glob', 'grep',
     'git_status', 'git_log', 'git_diff', 'git_commit',
     'run_command',
   ]) {
@@ -226,6 +226,69 @@ test('glob: empty pattern errors gracefully', async () => {
   const r = await runTool('glob', { pattern: '' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
   assert.equal(r.ok, false);
   if (!r.ok) assert.match(r.error, /required/i);
+});
+
+// ── grep ─────────────────────────────────────────────────────────────────
+
+test('grep: matches across multiple files with line numbers', async () => {
+  fs.mkdirSync(path.join(ROOT, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(ROOT, 'src/a.ts'), 'const TARGET = 1;\nconst other = 2;\n');
+  fs.writeFileSync(path.join(ROOT, 'src/b.ts'), 'function f() {}\nconst TARGET = 3;\n');
+  fs.writeFileSync(path.join(ROOT, 'src/c.ts'), 'no match here\n');
+
+  const r = await runTool('grep', { pattern: 'TARGET' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const matches: { path: string; lineNumber: number }[] = r.content.matches.map((m: any) => ({ path: m.path, lineNumber: m.lineNumber }));
+  matches.sort((x, y) => x.path.localeCompare(y.path));
+  assert.deepEqual(matches, [
+    { path: 'src/a.ts', lineNumber: 1 },
+    { path: 'src/b.ts', lineNumber: 2 },
+  ]);
+});
+
+test('grep: caseSensitive=false', async () => {
+  fs.writeFileSync(path.join(ROOT, 'a.txt'), 'Hello\nhello\nHELLO\n');
+  const r = await runTool('grep', { pattern: 'hello', caseSensitive: false }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.content.matches.length, 3);
+});
+
+test('grep: glob filter narrows the file set', async () => {
+  fs.mkdirSync(path.join(ROOT, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(ROOT, 'src/match.ts'),  'TARGET\n');
+  fs.writeFileSync(path.join(ROOT, 'src/match.tsx'), 'TARGET\n');
+  fs.writeFileSync(path.join(ROOT, 'src/match.js'),  'TARGET\n');
+
+  const r = await runTool('grep', { pattern: 'TARGET', glob: '**/*.{ts,tsx}' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const paths: string[] = r.content.matches.map((m: any) => m.path).sort();
+  assert.deepEqual(paths, ['src/match.ts', 'src/match.tsx']);
+});
+
+test('grep: skips binary files', async () => {
+  fs.writeFileSync(path.join(ROOT, 'a.txt'), 'plain TARGET\n');
+  fs.writeFileSync(path.join(ROOT, 'b.bin'), Buffer.from([0, 1, 2, 0xff, 0x54, 0x41, 0x52]));  // contains "TAR" but is binary
+  const r = await runTool('grep', { pattern: 'TAR' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  // Only the text file should match — binary skipped.
+  const paths: string[] = r.content.matches.map((m: any) => m.path);
+  assert.deepEqual(paths, ['a.txt']);
+});
+
+test('grep: invalid regex errors gracefully', async () => {
+  const r = await runTool('grep', { pattern: '[unclosed' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /invalid regex/i);
+});
+
+test('grep: ungated by permission mode', async () => {
+  for (const mode of ['read-only', 'auto-edit', 'yolo'] as const) {
+    assert.equal(requiresApproval('grep', mode), false, `grep must be ungated in ${mode} mode`);
+  }
 });
 
 test('read_file: directories fall back to list_dir (no longer rejects)', async () => {

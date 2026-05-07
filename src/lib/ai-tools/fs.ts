@@ -478,4 +478,139 @@ const glob_tool: Tool = {
   },
 };
 
-export const TOOLS: Tool[] = [list_dir, read_file, write_file, apply_patch, delete_file, glob_tool];
+// ── grep ──────────────────────────────────────────────────────────────────
+//
+// File-content search by regex. Read-class — auto-executes regardless
+// of permission mode. Replaces gated `run_command grep`. Mirrors
+// shakespeare.diy's GrepTool.
+//
+// Behaviour notes:
+//   - regex is JS RegExp (not POSIX/PCRE — "\\b" works, look-behind
+//     works on modern Node, character classes work). Agents tend to
+//     use simple substrings and basic regex; we trust them not to
+//     write catastrophic-backtracking patterns within the per-file
+//     time/byte caps.
+//   - file selection: `glob` arg narrows which files to search;
+//     defaults to all files under the project root.
+//   - skips binary files (NUL byte detector) so the agent doesn't
+//     get reams of garbage from the agent reading PNGs.
+//   - cap: 200 matches total, 5 MB scanned, 50 KB per file. Past
+//     these we stop and mark truncated:true so the agent can
+//     narrow the glob and retry.
+
+const MAX_GREP_MATCHES         = 200;
+const MAX_GREP_TOTAL_BYTES     = 5  * 1024 * 1024;
+const MAX_GREP_PER_FILE_BYTES  = 50 * 1024;
+
+interface GrepMatch {
+  path:       string;
+  lineNumber: number;
+  line:       string;
+}
+
+const grep_tool: Tool = {
+  name: 'grep',
+  description:
+    'Search file contents in the active project for a regex pattern. '
+    + 'Returns up to ' + MAX_GREP_MATCHES + ' matches as { path, lineNumber, line }. '
+    + 'Use the optional `glob` arg to narrow the file set (e.g. "**/*.ts"). '
+    + 'Skips binary files and heavy dirs (node_modules, .git, dist, build, '
+    + 'target, .next). Read-class — runs without approval. Use this '
+    + 'instead of run_command grep — faster, ungated, deterministic.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      pattern:       { type: 'string',  description: 'JavaScript-flavored regex.' },
+      glob:          { type: 'string',  description: 'Optional glob to narrow which files to search. Default: all files.' },
+      caseSensitive: { type: 'boolean', description: 'Default true.' },
+    },
+    required: ['pattern'],
+    additionalProperties: false,
+  },
+  permission: 'always',
+  handler: async (args, ctx): Promise<ToolResult> => {
+    if (typeof args.pattern !== 'string' || !args.pattern) {
+      return { ok: false, error: 'pattern is required' };
+    }
+    let regex: RegExp;
+    try {
+      const flags = args.caseSensitive === false ? 'i' : '';
+      regex = new RegExp(args.pattern, flags);
+    } catch (e: any) {
+      return { ok: false, error: `invalid regex: ${e?.message ?? 'unknown'}` };
+    }
+
+    const projectAbs = fs.realpathSync(ctx.project.path!);
+    const allFiles = walkAll(projectAbs, 10_000);
+    let candidates = allFiles;
+    if (typeof args.glob === 'string' && args.glob) {
+      let globRegex: RegExp;
+      try { globRegex = globToRegex(args.glob); }
+      catch (e: any) { return { ok: false, error: `invalid glob: ${e?.message ?? 'unknown'}` }; }
+      candidates = candidates.filter(p => globRegex.test(p));
+    }
+
+    const matches:    GrepMatch[] = [];
+    let scannedBytes  = 0;
+    let truncated     = false;
+    let truncReason: string | null = null;
+
+    for (const rel of candidates) {
+      if (matches.length >= MAX_GREP_MATCHES) {
+        truncated = true; truncReason = `match cap (${MAX_GREP_MATCHES})`; break;
+      }
+      if (scannedBytes >= MAX_GREP_TOTAL_BYTES) {
+        truncated = true; truncReason = `total-bytes cap (${MAX_GREP_TOTAL_BYTES})`; break;
+      }
+      const abs = path.join(projectAbs, rel);
+      let stat: fs.Stats;
+      try { stat = fs.statSync(abs); }
+      catch { continue; }
+      if (!stat.isFile()) continue;
+
+      const length = Math.min(stat.size, MAX_GREP_PER_FILE_BYTES,
+        MAX_GREP_TOTAL_BYTES - scannedBytes);
+      if (length <= 0) continue;
+      let buf: Buffer;
+      try {
+        const fd = fs.openSync(abs, 'r');
+        try {
+          buf = Buffer.alloc(length);
+          fs.readSync(fd, buf, 0, length, 0);
+        } finally { fs.closeSync(fd); }
+      } catch { continue; }
+      scannedBytes += length;
+      // Binary skip — same NUL-byte heuristic read_file uses.
+      if (buf.indexOf(0) !== -1) continue;
+
+      const text = buf.toString('utf8');
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length && matches.length < MAX_GREP_MATCHES; i++) {
+        if (regex.test(lines[i])) {
+          // Cap per-line content to keep payloads sane on tools that
+          // dump 4 KB lines (minified js, generated files).
+          const line = lines[i].length > 400
+            ? lines[i].slice(0, 400) + '… (truncated)'
+            : lines[i];
+          matches.push({ path: rel, lineNumber: i + 1, line });
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      content: {
+        pattern: args.pattern,
+        glob:    args.glob ?? null,
+        caseSensitive: args.caseSensitive !== false,
+        count:   matches.length,
+        truncated,
+        truncReason,
+        matches,
+      },
+      summary: `${matches.length} match${matches.length === 1 ? '' : 'es'}${truncated ? ' (truncated)' : ''}`,
+    };
+  },
+};
+
+export const TOOLS: Tool[] = [list_dir, read_file, write_file, apply_patch, delete_file, glob_tool, grep_tool];
