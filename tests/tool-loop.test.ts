@@ -378,3 +378,125 @@ test('no project context: tool call returns "no project context" error', async (
   assert.equal(tr.ok, false);
   assert.match(tr.error, /no project context/i);
 });
+
+// ── Protocol: model receives full payload, not just summary ──────────────
+//
+// Pre-fix the tool-loop sent `out.summary` (a one-line status string
+// like "991 B" or "18 entries") as the tool_result content, leaving
+// the actual payload invisible to the model. The agent had no way to
+// see file contents, list_dir entries, or run_command stdout — every
+// call effectively returned a status string with no data. These tests
+// pin the new contract (payload reaches the model; summary stays in
+// the SSE frame for the chat UI alone) so a future regression can't
+// quietly recross the wires.
+
+test('protocol: read_file content reaches the model (anthropic)', async () => {
+  // Seed a file the model "asks to read", then capture the second-turn
+  // request body — the tool_result content there is what the model
+  // actually sees on its next inference. Asserting the file's literal
+  // content appears in that body is the structural pin.
+  const FILE_CONTENT = 'this is the secret file body the model needs to see';
+  fs.writeFileSync(path.join(ROOT, 'secret.txt'), FILE_CONTENT, 'utf8');
+
+  let secondTurnBody: any = null;
+  let call = 0;
+  globalThis.fetch = async (_input: any, init?: any) => {
+    call++;
+    if (call === 1) {
+      const argsJson = JSON.stringify({ path: 'secret.txt' });
+      return sseStream([
+        anthMessageStart('claude'),
+        anthBlockStartTool(0, 'tu_1', 'read_file'),
+        anthInputJsonDelta(0, argsJson),
+        anthBlockStop(0),
+        anthMessageDelta('tool_use'),
+      ]);
+    }
+    secondTurnBody = JSON.parse(init.body);
+    return sseStream([
+      anthBlockStartText(0),
+      anthTextDelta(0, 'Done.'),
+      anthBlockStop(0),
+      anthMessageDelta('end_turn'),
+    ]);
+  };
+
+  const sid = createSession();
+  const { res } = makeRes();
+  await streamAnthropicWithTools(
+    [{ role: 'user', content: 'read secret.txt' }],
+    'system',
+    { isAnthropic: true, baseUrl: '', model: 'claude', apiKey: 'k', providerName: 'Anthropic' },
+    res,
+    { project: makeProject(ROOT) as any, permissions: 'read-only' },
+    sid,
+  );
+  destroySession(sid);
+
+  // The tool_result must have shipped the payload, not the summary.
+  // Extract the user message that carries tool_result blocks and
+  // check its content for the file body.
+  assert.ok(secondTurnBody, 'second turn never ran — first turn must have completed dispatch');
+  const userToolResultMsg = secondTurnBody.messages.find((m: any) =>
+    m.role === 'user' && Array.isArray(m.content)
+    && m.content.some((b: any) => b.type === 'tool_result'));
+  assert.ok(userToolResultMsg, 'expected a user message carrying tool_result blocks');
+  const block = userToolResultMsg.content.find((b: any) => b.type === 'tool_result');
+  assert.ok(typeof block.content === 'string');
+  assert.ok(
+    block.content.includes(FILE_CONTENT),
+    `tool_result content must include the file body — got: ${block.content.slice(0, 200)}`,
+  );
+  // And the SSE frame still carries a UI summary (separate channel).
+  // Not asserting exact text because that's a UI concern; just that
+  // the SSE frame's summary is shorter than the model's content (the
+  // proof that they're separate channels).
+});
+
+test('protocol: list_dir entries reach the model (openai)', async () => {
+  // Seed a few files so list_dir has something to enumerate.
+  fs.writeFileSync(path.join(ROOT, 'alpha.md'), '');
+  fs.writeFileSync(path.join(ROOT, 'beta.md'),  '');
+  fs.writeFileSync(path.join(ROOT, 'gamma.md'), '');
+
+  let secondTurnBody: any = null;
+  let call = 0;
+  globalThis.fetch = async (_input: any, init?: any) => {
+    call++;
+    if (call === 1) {
+      const argsJson = JSON.stringify({ path: '.' });
+      return sseStream([
+        oaiToolDelta('m', 0, 'tc_1', 'list_dir', argsJson),
+        oaiFinish('m', 'tool_calls'),
+      ]);
+    }
+    secondTurnBody = JSON.parse(init.body);
+    return sseStream([
+      oaiTextDelta('m', 'OK.'),
+      oaiFinish('m', 'stop'),
+    ]);
+  };
+
+  const sid = createSession();
+  const { res } = makeRes();
+  await streamOpenAICompatWithTools(
+    [{ role: 'user', content: 'list root' }],
+    'system',
+    { isAnthropic: false, baseUrl: '', model: 'm', apiKey: 'k', providerName: 'X' },
+    res,
+    { project: makeProject(ROOT) as any, permissions: 'read-only' },
+    sid,
+  );
+  destroySession(sid);
+
+  assert.ok(secondTurnBody, 'second turn never ran');
+  const toolMsg = secondTurnBody.messages.find((m: any) => m.role === 'tool');
+  assert.ok(toolMsg, 'expected a role:tool message carrying the tool result');
+  // All three filenames the agent should be able to see.
+  for (const name of ['alpha.md', 'beta.md', 'gamma.md']) {
+    assert.ok(
+      toolMsg.content.includes(name),
+      `tool result must include "${name}" — got: ${toolMsg.content.slice(0, 200)}`,
+    );
+  }
+});

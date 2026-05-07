@@ -44,7 +44,46 @@ import { awaitApproval, type ApprovalDecision } from './approval-gate.js';
 import type { Msg, ProviderConfig } from '../routes/ai.js';
 
 const MAX_ROUNDS = 25;
-const MAX_TOOL_RESULTS_BYTES = 200 * 1024;
+// Cumulative cap on tool_result content fed back to the model across
+// the entire loop. Bumped 200 KB → 1 MB because the model now receives
+// real tool payloads instead of one-line summaries; a session that
+// reads a few moderately-sized files plus some grep/glob output can
+// legitimately spend hundreds of KB before the loop is done. The
+// per-call cap below stops any single call from monopolising it.
+const MAX_TOOL_RESULTS_BYTES = 1024 * 1024;
+// Per-call cap. Matches read_file's MAX_READ_BYTES so a single
+// read_file call can deliver a complete file to the model without
+// being truncated by the loop. Anything bigger gets replaced by a
+// structured truncation marker so the model can choose to retry
+// with a narrower scope rather than seeing garbled JSON.
+const MAX_TOOL_RESULT_BYTES_PER_CALL = 256 * 1024;
+
+// Serialize a tool's payload for the model. Keeps the JSON shape so
+// the model gets structured signal (ok / error / nested fields), and
+// degrades gracefully when over-budget instead of slicing mid-string
+// and breaking JSON parsing on the model's side.
+//
+// Pre-fix the loop sent `out.summary` (a human-readable string like
+// "18 entries" or "991 B") as the tool_result content, leaving the
+// actual payload invisible to the model. The agent had no way to
+// see file contents, list_dir entries, or run_command stdout — every
+// call effectively returned a status string with no data. This
+// helper is the structural fix: payload always reaches the model;
+// summary stays in the SSE tool_result frame for the chat UI alone.
+function stringifyForModel(payload: unknown): string {
+  const json = JSON.stringify(payload);
+  if (json.length <= MAX_TOOL_RESULT_BYTES_PER_CALL) return json;
+  const ok = (payload as { ok?: unknown })?.ok ?? false;
+  return JSON.stringify({
+    ok,
+    truncated:  true,
+    fullBytes:  json.length,
+    capBytes:   MAX_TOOL_RESULT_BYTES_PER_CALL,
+    hint:       'tool result exceeded the per-call cap; retry with a ' +
+                'narrower range (read_file), smaller depth (list_dir), ' +
+                'or a more specific path/pattern (glob/grep).',
+  });
+}
 
 function emit(res: http.ServerResponse, payload: any): void {
   try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {}
@@ -220,16 +259,20 @@ export async function streamAnthropicWithTools(
     if (toolUses.length === 0 || stopReason !== 'tool_use') break;
 
     // Dispatch each tool call. Append a single user message with all
-    // tool_results in the same order.
+    // tool_results in the same order. content (sent to the model) is
+    // the JSON-stringified payload; summary stays in the SSE
+    // tool_result frame for the chat UI alone — see stringifyForModel
+    // above for the rationale.
     const toolResultBlocks: AnthropicContentBlock[] = [];
     for (const tu of toolUses) {
       const out = await dispatchOne(tu.name!, tu.input, toolCtx, sessionId, res, tu.id!);
+      const modelContent = stringifyForModel(out.payload);
       toolResultBlocks.push({
         type:        'tool_result',
         tool_use_id: tu.id!,
-        content:     out.summary ?? JSON.stringify(out.payload).slice(0, 4000),
+        content:     modelContent,
       });
-      totalToolBytes += JSON.stringify(out.payload).length;
+      totalToolBytes += modelContent.length;
       if (totalToolBytes > MAX_TOOL_RESULTS_BYTES) {
         emit(res, { error: 'tool result budget exceeded — stopping loop' });
         return;
@@ -379,17 +422,21 @@ export async function streamOpenAICompatWithTools(
     if (finishReason !== 'tool_calls' || toolCalls.length === 0) break;
 
     // Dispatch each tool call → append one role:'tool' message per.
+    // content (sent to the model) is the JSON-stringified payload;
+    // summary stays in the SSE tool_result frame for the chat UI
+    // alone — see stringifyForModel above for the rationale.
     for (const tc of toolCalls) {
       let parsedArgs: any = {};
       try { parsedArgs = tc.function.arguments ? JSON.parse(tc.function.arguments) : {}; }
       catch { parsedArgs = {}; }
       const out = await dispatchOne(tc.function.name, parsedArgs, toolCtx, sessionId, res, tc.id);
+      const modelContent = stringifyForModel(out.payload);
       messages.push({
         role:         'tool',
         tool_call_id: tc.id,
-        content:      out.summary ?? JSON.stringify(out.payload).slice(0, 4000),
+        content:      modelContent,
       });
-      totalToolBytes += JSON.stringify(out.payload).length;
+      totalToolBytes += modelContent.length;
       if (totalToolBytes > MAX_TOOL_RESULTS_BYTES) {
         emit(res, { error: 'tool result budget exceeded — stopping loop' });
         return;
