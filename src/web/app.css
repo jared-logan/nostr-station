@@ -4490,6 +4490,11 @@ body.term-expanded .term-bar-toggle .term-chevron {
 }
 .tool-call .tc-status { width: 14px; text-align: center; color: var(--text-dim); }
 .tool-call .tc-name   { font-weight: 600; }
+/* New shakespeare-style compact label. Replaces tc-name as the
+   header content for renderToolCall(); the original tc-name class
+   stays on the rule so any in-flight calls rendered before this
+   commit lands still show. */
+.tool-call .tc-label  { font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text-bright); }
 .tool-call .tc-summary { color: var(--text-dim); margin-left: auto; }
 .tool-call .tc-args,
 .tool-call .tc-preview {

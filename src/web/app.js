@@ -1952,19 +1952,58 @@ const ChatPanel = (() => {
       // Insert before the cursor so the cursor stays at the tail.
       bodyEl.insertBefore(textSpan, cur);
     }
+    // Compress a tool call into a single human-readable line —
+    // shakespeare.diy-style ("Wrote src/foo.ts", "Searched \"TARGET\"",
+    // "git status"). The full args remain available in the
+    // expandable <pre> below for power users; the header label is
+    // optimised for scannability when the agent makes 5-15 calls
+    // per turn. Truncates long paths/patterns to keep the chat
+    // column from wrapping awkwardly on narrow screens.
+    function actionLabel(name, args) {
+      const a = args || {};
+      const trunc = (s, n = 64) => {
+        const str = String(s ?? '');
+        return str.length > n ? str.slice(0, n - 1) + '…' : str;
+      };
+      switch (name) {
+        case 'read_file':    return `Viewed ${trunc(a.path)}`;
+        case 'list_dir':     return `Listed ${trunc(a.path ?? '.')}`;
+        case 'write_file':   return `Wrote ${trunc(a.path)}`;
+        case 'apply_patch':  return `Edited ${trunc(a.path)}`;
+        case 'delete_file':  return `Deleted ${trunc(a.path)}`;
+        case 'glob':         return `Globbed "${trunc(a.pattern, 48)}"`;
+        case 'grep':         return a.glob
+                                  ? `Searched "${trunc(a.pattern, 32)}" in ${trunc(a.glob, 24)}`
+                                  : `Searched "${trunc(a.pattern, 48)}"`;
+        case 'git_status':   return 'git status';
+        case 'git_log':      return `git log${Number.isInteger(a.n) ? ` -n${a.n}` : ''}`;
+        case 'git_diff':     return a.path ? `git diff ${trunc(a.path)}` : (a.staged ? 'git diff --cached' : 'git diff');
+        case 'git_commit':   return `Committed: "${trunc(a.message, 56)}"`;
+        case 'run_command': {
+          const argv = Array.isArray(a.argv) ? a.argv : [];
+          if (argv.length === 0) return 'run_command';
+          const joined = argv.map(x => /\s/.test(String(x)) ? `"${x}"` : x).join(' ');
+          return trunc(joined, 80);
+        }
+        default:             return name;
+      }
+    }
+
     function renderToolCall(id, name, args) {
       const el = document.createElement('div');
       el.className = 'tool-call pending';
       el.dataset.id = id;
+      const label = actionLabel(name, args);
       el.innerHTML = `
         <div class="tc-head">
           <span class="tc-status">▸</span>
-          <span class="tc-name">${escapeHtml(name)}</span>
+          <span class="tc-label">${escapeHtml(label)}</span>
           <span class="tc-summary"></span>
         </div>
         <pre class="tc-args">${escapeHtml(JSON.stringify(args, null, 2))}</pre>
       `;
-      // Toggle expand/collapse on header click.
+      // Toggle expand/collapse on header click — the full argv stays
+      // a click away for users who want to inspect what actually ran.
       el.querySelector('.tc-head').addEventListener('click', () => el.classList.toggle('expanded'));
       bodyEl.insertBefore(el, cur);
       startNewTextSpan();
