@@ -113,9 +113,15 @@ const read_file: Tool = {
   name: 'read_file',
   description:
     'Read a UTF-8 text file under the active project. Capped at 256 KB; '
-    + 'binary files return a stub { kind: "binary", size } so the model '
-    + 'doesn\'t try to interpret them as text. To read a slice of a large '
-    + 'file, pass `range: { start, end }` (byte offsets, both inclusive).',
+    + 'binary files return a stub { kind: "binary", size }. To read a slice '
+    + 'of a large file, pass `range: { start, end }` (byte offsets, both '
+    + 'inclusive). When called on a directory, falls back to a list_dir '
+    + 'payload (kind: "directory-fallback") rather than erroring. '
+    + 'Returns two text fields for text files: '
+    + '`text` is the verbatim file content (use this for apply_patch.search); '
+    + '`display` is a numbered, <file>-wrapped variant with an end-of-file '
+    + 'footer for citing line numbers without counting manually. Pick `text` '
+    + 'for editing, `display` for navigating/quoting.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -187,9 +193,43 @@ const read_file: Tool = {
       };
     }
     const text = buf.toString('utf8');
+    // Build a Shakespeare-style numbered display alongside the raw
+    // text. The model gets BOTH fields:
+    //   - text          — verbatim file content (for apply_patch.search)
+    //   - display       — line-numbered, <file>-wrapped, with end-of-
+    //                     file or "more available" footer (for the
+    //                     model to cite line numbers without counting
+    //                     manually).
+    //
+    // Two fields rather than one because apply_patch's search is a
+    // literal string match — if the model copies a line out of the
+    // numbered display, the "  42| " prefix would never match the
+    // actual file. The tool description spells this out so models
+    // pick the right field per task.
+    const lines = text.split('\n');
+    const lastLineNumber = start === 0 ? lines.length : -1; // -1 = unknown when reading a slice
+    const totalLines = start === 0 && end === stat.size - 1 ? lines.length : null;
+    const numberWidth = Math.max(4, String(start === 0 ? lines.length : 9999).length);
+    const numbered = lines.map((line, idx) => {
+      const n = (start === 0 ? idx + 1 : idx + 1).toString().padStart(numberWidth, ' ');
+      return `${n}| ${line}`;
+    }).join('\n');
+    const footer = totalLines !== null
+      ? `(End of file - total ${totalLines} line${totalLines === 1 ? '' : 's'})`
+      : `(File has more bytes. Use range:{start,end} to read beyond byte ${end + 1})`;
+    const display = `<file path="${args.path}">\n${numbered}\n</file>\n${footer}`;
+
     return {
       ok: true,
-      content: { kind: 'text', path: args.path, size: stat.size, range: { start, end }, text },
+      content: {
+        kind:   'text',
+        path:   args.path,
+        size:   stat.size,
+        range:  { start, end },
+        lines:  totalLines,
+        text,
+        display,
+      },
       summary: `${length} B${length < stat.size ? ` of ${stat.size}` : ''}`,
     };
   },

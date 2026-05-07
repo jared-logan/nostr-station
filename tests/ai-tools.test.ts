@@ -149,6 +149,33 @@ test('read_file: range slicing', async () => {
   if (r.ok) assert.equal(r.content.text, 'cdef');
 });
 
+test('read_file: display field is line-numbered + <file>-wrapped', async () => {
+  fs.writeFileSync(path.join(ROOT, 'three.ts'), 'const a = 1;\nconst b = 2;\nconst c = 3;');
+  const r = await runTool('read_file', { path: 'three.ts' }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  // text stays raw — apply_patch.search needs literal content.
+  assert.equal(r.content.text, 'const a = 1;\nconst b = 2;\nconst c = 3;');
+  assert.equal(r.content.lines, 3);
+  // display is the Shakespeare-style numbered variant.
+  assert.match(r.content.display, /^<file path="three\.ts">/);
+  assert.match(r.content.display, /\n {3}1\| const a = 1;\n/);
+  assert.match(r.content.display, /\n {3}2\| const b = 2;\n/);
+  assert.match(r.content.display, /\n {3}3\| const c = 3;\n<\/file>/);
+  assert.match(r.content.display, /\(End of file - total 3 lines\)/);
+});
+
+test('read_file: display footer signals "more available" on a partial read', async () => {
+  // Slice read — total file is bigger than the range we asked for, so
+  // the footer should NOT claim end-of-file.
+  fs.writeFileSync(path.join(ROOT, 'big.txt'), 'abcdefghij');
+  const r = await runTool('read_file', { path: 'big.txt', range: { start: 0, end: 2 } }, { project: makeProject(ROOT) as any, permissions: 'read-only' });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.match(r.content.display, /File has more bytes/);
+  assert.equal(r.content.lines, null, 'lines must be null for partial reads since we don\'t know the total');
+});
+
 test('read_file: directory falls back to list_dir payload (no dead-end)', async () => {
   // Pre-fix calling read_file on a directory returned an error and
   // the agent often dead-ended on it (loop trace from the OOM repro:
