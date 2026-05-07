@@ -181,6 +181,11 @@ const HTML_SECURITY_HEADERS: Record<string, string> = {
     "connect-src 'self' ws://127.0.0.1:* ws://localhost:* wss:",
     "img-src 'self' data: https:",
     "font-src 'self' data:",
+    // Loopback only — used by the chat panel's live-preview iframe to embed
+    // a project's local Vite dev server (default :5173). Cross-origin frames
+    // are still rejected. frame-ancestors above keeps the dashboard itself
+    // un-embeddable.
+    "frame-src 'self' http://127.0.0.1:* http://localhost:*",
   ].join('; '),
 };
 
