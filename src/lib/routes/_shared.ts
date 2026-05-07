@@ -99,6 +99,13 @@ export function streamExec(
   req: http.IncomingMessage,
   cwd?: string,
   prelude?: object,
+  // Optional post-close hook — fires AFTER the child exits but
+  // BEFORE the response ends. Lets callers attach side effects
+  // (e.g. seed git identity in a freshly-cloned repo) without
+  // having to duplicate the streamExec spawn loop. Best-effort:
+  // throws inside onClose are swallowed so a hook bug can't
+  // wedge the response.
+  onClose?: (exitCode: number | null) => void,
 ): void {
   res.writeHead(200, {
     'Content-Type':  'text/event-stream',
@@ -178,6 +185,14 @@ export function streamExec(
   child.on('close', (code) => {
     if (bounded) return;
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (onClose) {
+      try { onClose(code); }
+      catch (e: any) {
+        // Swallow but emit so a hook bug surfaces in the modal
+        // rather than wedging the response.
+        emit({ line: `[onClose hook error: ${(e?.message ?? 'unknown').slice(0, 120)}]`, stream: 'stderr' });
+      }
+    }
     emit({ done: true, code });
     try { res.end(); } catch {}
   });

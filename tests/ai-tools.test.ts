@@ -584,6 +584,66 @@ test('apply_patch: rejects no-match', async () => {
   assert.equal(r.ok, false);
 });
 
+test('apply_patch: failure attaches current file content for recovery', async () => {
+  // Pre-fix the agent burned multiple turns iterating on the same
+  // failed apply_patch because the error gave it nothing to pivot
+  // on. Now the error envelope carries the literal file text + a
+  // numbered display so the model can reconstruct an exact search
+  // in one round.
+  fs.writeFileSync(path.join(ROOT, 'a.txt'), 'line one\nline two\nline three');
+  const r = await runTool(
+    'apply_patch',
+    { path: 'a.txt', search: 'NOT-PRESENT', replace: 'x' },
+    { project: makeProject(ROOT) as any, permissions: 'auto-edit' },
+  );
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.match(r.error, /search string not found/);
+  assert.ok((r as any).content, 'failure must attach recovery content');
+  const c = (r as any).content;
+  assert.equal(c.path, 'a.txt');
+  assert.equal(c.searchTried, 'NOT-PRESENT');
+  assert.equal(c.occurrences, 0);
+  assert.equal(c.currentText, 'line one\nline two\nline three');
+  assert.match(c.currentDisplay, /<file path="a\.txt">/);
+  assert.match(c.currentDisplay, / {3}1\| line one/);
+  assert.equal(c.truncated, false);
+});
+
+test('apply_patch: ambiguous-match failure attaches recovery content too', async () => {
+  fs.writeFileSync(path.join(ROOT, 'a.txt'), 'foo\nfoo\nfoo\n');
+  const r = await runTool(
+    'apply_patch',
+    { path: 'a.txt', search: 'foo', replace: 'bar' },
+    { project: makeProject(ROOT) as any, permissions: 'auto-edit' },
+  );
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.match(r.error, /not unique.*3 matches/);
+  const c = (r as any).content;
+  assert.equal(c.occurrences, 3);
+  assert.equal(c.currentText, 'foo\nfoo\nfoo\n');
+});
+
+test('apply_patch: failure recovery content truncates large files', async () => {
+  // Files past the FAIL_CONTENT_CAP (32 KB) come back truncated
+  // with the totalBytes pinned so the model knows to use read_file
+  // with a range instead of the inline content.
+  const big = 'x'.repeat(33 * 1024) + '\nNEEDLE NOT HERE\n';
+  fs.writeFileSync(path.join(ROOT, 'big.txt'), big);
+  const r = await runTool(
+    'apply_patch',
+    { path: 'big.txt', search: 'ABSENT', replace: 'y' },
+    { project: makeProject(ROOT) as any, permissions: 'auto-edit' },
+  );
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  const c = (r as any).content;
+  assert.equal(c.truncated, true);
+  assert.ok(c.currentText.length <= 32 * 1024);
+  assert.ok(c.totalBytes > 32 * 1024);
+});
+
 // ── delete_file ──────────────────────────────────────────────────────────
 
 test('delete_file: removes a file', async () => {

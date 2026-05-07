@@ -541,7 +541,18 @@ async function dispatchOne(
     }
     return { payload: { ok: true, content: result.content }, summary: result.summary ?? JSON.stringify(result.content).slice(0, 1000) };
   } else {
+    // Tools may attach a `content` field on the error variant for
+    // recovery context — apply_patch uses it to ship the current
+    // file content when its search didn't match, so the model can
+    // see the ground truth without an extra read_file round-trip.
+    // Forward it through the model-bound payload (the SSE frame
+    // for the UI keeps just the error text — recovery context is
+    // model-only signal).
+    const errPayload: { ok: false; error: string; content?: any } = {
+      ok: false, error: result.error,
+    };
+    if ((result as any).content !== undefined) errPayload.content = (result as any).content;
     emit(res, { type: 'tool_result', id: callId, ok: false, error: result.error });
-    return { payload: { ok: false, error: result.error }, summary: result.error };
+    return { payload: errPayload, summary: result.error };
   }
 }

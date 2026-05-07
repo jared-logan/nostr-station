@@ -46,7 +46,13 @@ export interface ToolContext {
 
 export type ToolResult =
   | { ok: true;  content: any; summary?: string }
-  | { ok: false; error: string };
+  // `content` on the error variant carries optional recovery context
+  // — e.g. apply_patch attaches the current file content when its
+  // search string didn't match, so the model has the exact bytes to
+  // reconstruct a working search without an extra read_file round-trip.
+  // Models that don't know to look for it ignore it; models that do
+  // recover in one turn instead of three.
+  | { ok: false; error: string; content?: any };
 
 export interface Tool {
   name:        string;

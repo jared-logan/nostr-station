@@ -371,6 +371,73 @@ test('build_project: approval preview shows the resolved scripts.build content',
   destroySession(sid);
 });
 
+// ── Failure recovery: apply_patch ships current file content ─────────────
+
+test('apply_patch failure: recovery content reaches the model', async () => {
+  // Pins the end-to-end contract for commit 2 of the
+  // ngit2x-recovery branch: when apply_patch fails (search not
+  // found OR not unique), the tool-loop forwards the recovery
+  // `content` field through to the model's tool_result so the
+  // agent can reconstruct an exact-match search without an extra
+  // read_file call.
+  fs.writeFileSync(path.join(ROOT, 'recover.txt'), 'alpha\nbeta\ngamma\n');
+
+  let secondTurnBody: any = null;
+  let call = 0;
+  globalThis.fetch = async (_input: any, init?: any) => {
+    call++;
+    if (call === 1) {
+      const argsJson = JSON.stringify({ path: 'recover.txt', search: 'NOT-THERE', replace: 'x' });
+      return sseStream([
+        anthMessageStart('claude'),
+        anthBlockStartTool(0, 'tu_1', 'apply_patch'),
+        anthInputJsonDelta(0, argsJson),
+        anthBlockStop(0),
+        anthMessageDelta('tool_use'),
+      ]);
+    }
+    secondTurnBody = JSON.parse(init.body);
+    return sseStream([
+      anthBlockStartText(0),
+      anthTextDelta(0, 'Got it.'),
+      anthBlockStop(0),
+      anthMessageDelta('end_turn'),
+    ]);
+  };
+
+  const sid = createSession();
+  const { res } = makeRes();
+  await streamAnthropicWithTools(
+    [{ role: 'user', content: 'try the patch' }],
+    'system',
+    { isAnthropic: true, baseUrl: '', model: 'claude', apiKey: 'k', providerName: 'Anthropic' },
+    res,
+    { project: makeProject(ROOT) as any, permissions: 'yolo' },
+    sid,
+  );
+  destroySession(sid);
+
+  // Assert the second-turn request body carried the recovery content
+  // through to the model — not just the error string.
+  assert.ok(secondTurnBody);
+  const userToolResultMsg = secondTurnBody.messages.find((m: any) =>
+    m.role === 'user' && Array.isArray(m.content)
+    && m.content.some((b: any) => b.type === 'tool_result'));
+  assert.ok(userToolResultMsg);
+  const block = userToolResultMsg.content.find((b: any) => b.type === 'tool_result');
+  // Block content is the JSON-stringified payload. Should contain the
+  // current file text the model needs to recover.
+  assert.ok(typeof block.content === 'string');
+  assert.ok(
+    block.content.includes('alpha\\nbeta\\ngamma'),
+    `recovery content must include current file text — got: ${block.content.slice(0, 200)}`,
+  );
+  assert.ok(
+    block.content.includes('searchTried'),
+    'recovery payload must include the search string the model tried, for context',
+  );
+});
+
 // ── OpenAI tool loop ──────────────────────────────────────────────────────
 
 test('openai: text + tool_calls round-trip', async () => {

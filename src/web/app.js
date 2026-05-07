@@ -4488,6 +4488,17 @@ const ProjectsPanel = (() => {
         <div class="step-actions"><button class="primary save-caps">save capabilities</button></div>
       </div>
 
+      <div class="tab-section" id="git-identity-section">
+        <h3>Git Identity</h3>
+        <div class="muted" style="margin-bottom:8px">
+          Author name + email baked into every <code>git commit</code> in this
+          repo. Resolves repo-local first, then global. Set per-project to
+          override (e.g. real email for a client project, npub-shorthand for
+          a Nostr-native one).
+        </div>
+        <div class="git-identity-body">loading…</div>
+      </div>
+
       <div class="tab-section">
         <h3>Identity</h3>
         <label class="radio-row">
@@ -4563,9 +4574,12 @@ const ProjectsPanel = (() => {
     // section fills in as soon as /api/projects/:id/ai-config returns.
     if (p.path) {
       paintProjectAiConfig(container.querySelector('#pcfg-section .pcfg-body'), p);
+      paintProjectGitIdentity(container.querySelector('#git-identity-section .git-identity-body'), p);
     } else {
       const sec = container.querySelector('#pcfg-section .pcfg-body');
       if (sec) sec.innerHTML = '<div class="muted">Project has no local path — AI config requires a path.</div>';
+      const gid = container.querySelector('#git-identity-section .git-identity-body');
+      if (gid) gid.innerHTML = '<div class="muted">Project has no local path — git identity requires a path.</div>';
     }
 
     container.querySelector('.save-name').addEventListener('click', async () => {
@@ -4694,6 +4708,99 @@ const ProjectsPanel = (() => {
           reload();
         } catch (e) {
           toast('Delete failed', e.message, 'err');
+        }
+      });
+    }
+  }
+
+  // Renders the per-project git-identity row in Settings: shows the
+  // resolved value + source ('local' / 'global' / 'unset'), with an
+  // inline form to set/clear repo-local override. Source attribution
+  // is the load-bearing UX bit — users can tell at a glance whether
+  // a repo inherits the global identity or has its own override,
+  // without dropping to `git config --show-origin user.email`.
+  async function paintProjectGitIdentity(root, p) {
+    if (!root) return;
+    let resolved;
+    try {
+      resolved = await api(`/api/projects/${p.id}/git-identity`);
+    } catch (e) {
+      root.innerHTML = `<div class="muted">failed to load: ${escapeHtml(e?.message || 'unknown')}</div>`;
+      return;
+    }
+    const sourceLabel = resolved.source === 'local'  ? 'set per-project'
+                      : resolved.source === 'global' ? 'inherited from global config'
+                      :                                'unset (auto-seed will fire on first commit)';
+    const sourceClass = resolved.source === 'local'  ? 'ok'
+                      : resolved.source === 'global' ? ''
+                      :                                'warn';
+    root.innerHTML = `
+      <div class="config-row">
+        <div class="k">Resolved</div>
+        <div class="v">
+          <div>${resolved.name && resolved.email
+            ? `<code>${escapeHtml(resolved.name)} &lt;${escapeHtml(resolved.email)}&gt;</code>`
+            : '<span class="muted">(none)</span>'}</div>
+          <div class="key-status-line ${sourceClass}" style="margin-top:4px">${escapeHtml(sourceLabel)}</div>
+        </div>
+      </div>
+      <div class="config-row" style="margin-top:14px">
+        <div class="k">Repo-local override</div>
+        <div class="v">
+          <div class="keyrow">
+            <div class="keyfield">
+              <input class="gid-name" type="text" autocomplete="off"
+                     placeholder="Your Name (this repo only)"
+                     value="${escapeHtml(resolved.source === 'local' ? resolved.name : '')}">
+            </div>
+          </div>
+          <div class="keyrow" style="margin-top:6px">
+            <div class="keyfield">
+              <input class="gid-email" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="you@example.com (this repo only)"
+                     value="${escapeHtml(resolved.source === 'local' ? resolved.email : '')}">
+            </div>
+            <button class="primary gid-save">save</button>
+            ${resolved.source === 'local' ? `<button class="gid-clear">inherit global</button>` : ''}
+          </div>
+          <div class="muted" style="font-size:11px;margin-top:6px">
+            Setting a repo-local override changes <code>.git/config</code> in this project
+            only. Clearing it falls back to whatever's in <code>~/.gitconfig</code> (manage in <a href="#config">Config → Git Identity</a>).
+          </div>
+        </div>
+      </div>
+    `;
+
+    root.querySelector('.gid-save').addEventListener('click', async () => {
+      const name  = root.querySelector('.gid-name').value.trim();
+      const email = root.querySelector('.gid-email').value.trim();
+      if (!name || !email) {
+        toast('Name and email are required', '', 'err');
+        return;
+      }
+      try {
+        const r = await api(`/api/projects/${p.id}/git-identity`, {
+          method:  'PUT',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify({ name, email }),
+        });
+        if (!r.ok) throw new Error(r.error || 'save failed');
+        toast('Repo-local git identity saved', email, 'ok');
+        paintProjectGitIdentity(root, p);
+      } catch (e) {
+        toast('Save failed', e?.message || '', 'err');
+      }
+    });
+
+    const clearBtn = root.querySelector('.gid-clear');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', async () => {
+        try {
+          await api(`/api/projects/${p.id}/git-identity`, { method: 'DELETE' });
+          toast('Repo-local override cleared', 'now inherits global', 'ok');
+          paintProjectGitIdentity(root, p);
+        } catch (e) {
+          toast('Clear failed', e?.message || '', 'err');
         }
       });
     }
@@ -6849,7 +6956,7 @@ const ConfigPanel = (() => {
     try {
       // Session fetch is best-effort: the localhost-exemption path has no
       // backing session, and we still want the rest of the panel to render.
-      const [rc, cfg, ident, session, profile, ngitAccount, aiList] = await Promise.all([
+      const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent] = await Promise.all([
         api('/api/relay-config'),
         api('/api/config'),
         api('/api/identity/config'),
@@ -6860,8 +6967,31 @@ const ConfigPanel = (() => {
         // Pre-4.x servers won't have this endpoint; a catch keeps the
         // panel renderable against a stale backend (providers list hides).
         api('/api/ai/providers').catch(() => null),
+        // Global git identity + presets. Lets the new Git Identity
+        // config section render the user's current values + offer
+        // npub-synthetic / nip-05 presets without a second round-trip.
+        api('/api/git-identity/global').catch(() => null),
       ]);
-      render(rc, cfg, ident, session, profile, ngitAccount, aiList);
+      // Augment presets with the nip-05 from the cached profile if
+      // we have one. The backend stays focused on git config; the
+      // nip-05 lookup lives on the client where the profile fetch
+      // already happens.
+      if (gitIdent && profile?.nip05 && profile?.name) {
+        gitIdent.presets = gitIdent.presets || {};
+        gitIdent.presets.nip05 = {
+          name:  profile.name,
+          email: profile.nip05,
+        };
+      } else if (gitIdent && profile?.nip05) {
+        gitIdent.presets = gitIdent.presets || {};
+        gitIdent.presets.nip05 = {
+          // Fall back to nip-05 localpart as the display name when
+          // kind-0 metadata didn't carry a separate `name` field.
+          name:  (profile.nip05.split('@')[0] || 'nostr-station user'),
+          email: profile.nip05,
+        };
+      }
+      render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent);
     } catch (e) {
       container.innerHTML = `<div class="config-section"><div style="color:var(--error)">failed to load: ${escapeHtml(e.message)}</div></div>`;
     }
@@ -6934,7 +7064,7 @@ const ConfigPanel = (() => {
     return `in ${mins}m`;
   }
 
-  function render(rc, cfg, ident, session, profile, ngitAccount, aiList) {
+  function render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent) {
     const whitelistHtml = rc.whitelist && rc.whitelist.length
       ? `<a href="#relay" style="color:var(--accent-bright)">${rc.whitelist.length} npub${rc.whitelist.length !== 1 ? 's' : ''} →</a>`
       : `<a href="#relay" style="color:var(--warn)">empty — add one →</a>`;
@@ -7058,6 +7188,54 @@ const ConfigPanel = (() => {
                 <button class="primary" id="cfg-ngit-relogin">Login</button>
               </div>
             `}
+          </div>
+        </div>
+      </div>
+
+      <div class="config-section" id="cfg-git-identity-section">
+        <h3>Git Identity</h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+          Author name + email baked into every <code>git commit</code> on this machine. Git records ONE author per commit — when you push to multiple platforms (GitHub, ngit, etc.), all of them see this same author. Per-project overrides are managed in each project's Settings tab.
+        </div>
+        <div class="config-row">
+          <div class="k">Global identity</div>
+          <div class="v">
+            <div class="keyrow">
+              <div class="keyfield">
+                <input id="cfg-git-identity-name" type="text" autocomplete="off" placeholder="Your Name" value="${escapeHtml(gitIdent?.current?.name || '')}">
+              </div>
+            </div>
+            <div class="keyrow" style="margin-top:6px">
+              <div class="keyfield">
+                <input id="cfg-git-identity-email" type="text" autocomplete="off" spellcheck="false" placeholder="you@example.com" value="${escapeHtml(gitIdent?.current?.email || '')}">
+              </div>
+              <button class="primary" id="cfg-git-identity-save">save</button>
+            </div>
+            <div class="key-status-line ${gitIdent?.current?.name && gitIdent?.current?.email ? 'ok' : ''}" id="cfg-git-identity-status">
+              ${gitIdent?.current?.name && gitIdent?.current?.email ? '✓ saved (~/.gitconfig)' : 'not set — projects nostr-station scaffolds will auto-seed an npub-synthetic identity per repo'}
+            </div>
+            <div style="margin-top:10px">
+              <span class="muted" style="font-size:11px">Presets:</span>
+              <div class="keyrow" style="margin-top:6px;flex-wrap:wrap;gap:6px">
+                ${gitIdent?.presets?.npubSynthetic ? `
+                  <button id="cfg-git-identity-preset-npub" type="button"
+                          title="${escapeHtml(gitIdent.presets.npubSynthetic.name)} &lt;${escapeHtml(gitIdent.presets.npubSynthetic.email)}&gt;">
+                    Use npub shorthand
+                  </button>
+                ` : ''}
+                ${gitIdent?.presets?.nip05 ? `
+                  <button id="cfg-git-identity-preset-nip05" type="button"
+                          title="${escapeHtml(gitIdent.presets.nip05.email)}">
+                    Use my nip-05 (${escapeHtml(gitIdent.presets.nip05.email)})
+                  </button>
+                ` : ''}
+              </div>
+              <div class="muted" style="font-size:11px;margin-top:6px">
+                <strong>npub shorthand</strong> — pure Nostr identity, links to your npub but not to any GitHub user.<br>
+                <strong>nip-05</strong> — your Nostr handle as an email-shaped identifier; links to your npub via DNS, AND can link to a GitHub user if that exact email is registered there.<br>
+                <strong>Set my own</strong> — type a real email above (e.g. your GitHub-registered address) for full GitHub user attribution.
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -7240,6 +7418,65 @@ const ConfigPanel = (() => {
     }
     ngitSave.addEventListener('click', saveNgitRelay);
     ngitInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveNgitRelay(); });
+
+    // ── Git Identity — global config view + edit + presets ──────────
+    //
+    // Persists to ~/.gitconfig via PUT /api/git-identity/global. The
+    // form values are pre-filled from the readGlobalGitIdentity()
+    // response baked into the Config-panel render. Save validates
+    // server-side (empty / missing-@ / control-char rejected) and
+    // reloads the panel so the status line + presets re-render with
+    // the new state.
+    const gidName  = $('cfg-git-identity-name');
+    const gidEmail = $('cfg-git-identity-email');
+    const gidSave  = $('cfg-git-identity-save');
+    async function saveGitIdentity() {
+      const name  = gidName.value.trim();
+      const email = gidEmail.value.trim();
+      if (!name || !email) {
+        toast('Name and email are required', '', 'err');
+        return;
+      }
+      gidSave.disabled = true;
+      try {
+        const r = await api('/api/git-identity/global', {
+          method:  'PUT',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify({ name, email }),
+        });
+        if (!r.ok) throw new Error(r.error || 'save failed');
+        toast('Git identity saved', `~/.gitconfig — ${email}`, 'ok');
+        load();    // re-render so status line + presets reflect the new state
+      } catch (e) {
+        toast('Save failed', e?.message || '', 'err');
+      } finally {
+        gidSave.disabled = false;
+      }
+    }
+    gidSave?.addEventListener('click', saveGitIdentity);
+    gidEmail?.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveGitIdentity(); });
+    gidName?.addEventListener('keydown',  (e) => { if (e.key === 'Enter') saveGitIdentity(); });
+
+    // Preset buttons — fill the form fields from the npub-synthetic /
+    // nip-05 derivations the backend (and, for nip-05, the cached
+    // profile) provided. User still has to click Save to persist; we
+    // don't write silently from a preset click.
+    const presetNpub  = $('cfg-git-identity-preset-npub');
+    const presetNip05 = $('cfg-git-identity-preset-nip05');
+    if (presetNpub && gitIdent?.presets?.npubSynthetic) {
+      presetNpub.addEventListener('click', () => {
+        gidName.value  = gitIdent.presets.npubSynthetic.name;
+        gidEmail.value = gitIdent.presets.npubSynthetic.email;
+        gidEmail.focus();
+      });
+    }
+    if (presetNip05 && gitIdent?.presets?.nip05) {
+      presetNip05.addEventListener('click', () => {
+        gidName.value  = gitIdent.presets.nip05.name;
+        gidEmail.value = gitIdent.presets.nip05.email;
+        gidEmail.focus();
+      });
+    }
 
     // ngit account (signer).
     //
@@ -8452,7 +8689,7 @@ const SetupWizard = (() => {
   // signing-pipeline verification — together those replace the legacy
   // "paste an npub" identity stage with "scan, tap, proven." nvpn is the
   // last optional step; users can skip it and still complete onboarding.
-  const STAGES = ['welcome', 'amber', 'verify', 'ai', 'ngit', 'vpn', 'done'];
+  const STAGES = ['welcome', 'amber', 'verify', 'ai', 'gitident', 'ngit', 'vpn', 'done'];
   let stageIdx = 0;
   const state = { npub: '', profile: null };
 
@@ -8536,6 +8773,7 @@ const SetupWizard = (() => {
     else if (stage === 'identity') renderIdentity();
     else if (stage === 'relay')    renderRelay();
     else if (stage === 'ai')       renderAi();
+    else if (stage === 'gitident') renderGitIdent();
     else if (stage === 'ngit')     renderNgit();
     else if (stage === 'vpn')      renderVpn();
     else if (stage === 'done')     renderDone();
@@ -9207,6 +9445,140 @@ const SetupWizard = (() => {
       });
     };
     paint();
+  }
+
+  // ── Git identity ─────────────────────────────────────────────────────
+  // Optional step. Sets the user's global git identity (~/.gitconfig)
+  // before they start scaffolding/cloning projects. Surfaces three
+  // explicit choices + skip:
+  //   - npub shorthand (synthetic, pure Nostr-native)
+  //   - nip-05 (when cached) — bridges Nostr + GitHub via one string
+  //   - custom name + email — for users with a separate GitHub identity
+  //   - skip — auto-seed kicks in per-repo for nostr-station-managed
+  //     projects, user can configure later via Config → Git Identity.
+  // Skippable so "I just want to play with Nostr stuff" users aren't
+  // blocked.
+  async function renderGitIdent() {
+    let gitIdent = null;
+    let profile  = null;
+    try {
+      [gitIdent, profile] = await Promise.all([
+        fetch('/api/git-identity/global').then(r => r.ok ? r.json() : null),
+        fetch('/api/identity/profile').then(r => r.ok ? r.json() : null),
+      ]);
+    } catch {}
+
+    const nip05Preset = profile?.nip05
+      ? { name: profile.name || (profile.nip05.split('@')[0] || 'nostr-station user'), email: profile.nip05 }
+      : null;
+    const npubPreset  = gitIdent?.presets?.npubSynthetic ?? null;
+    const current     = gitIdent?.current ?? { name: '', email: '' };
+    const alreadySet  = !!(current.name && current.email);
+
+    root.innerHTML = shell(
+      'Git identity (optional)',
+      'Author info baked into every git commit on this machine.',
+      `
+        ${alreadySet ? `
+          <div class="setup-hint" style="margin-bottom:14px">
+            Already configured: <code>${escapeHtml(current.name)} &lt;${escapeHtml(current.email)}&gt;</code>.
+            You can change it below or continue.
+          </div>
+        ` : ''}
+
+        <div class="setup-field">
+          <label>Choose how commits attribute</label>
+          <div class="setup-hint muted" style="margin-bottom:10px">
+            Git records ONE author per commit. You can override per-project later
+            in each project's Settings tab.
+          </div>
+
+          <label class="radio-row">
+            <input type="radio" name="setup-git-ident-mode" value="custom" checked>
+            <div>
+              <div class="radio-title">Set my own (best for GitHub users)</div>
+              <div class="radio-sub">Type a real email below. GitHub will link commits to that user.</div>
+            </div>
+          </label>
+          <div class="setup-row" style="gap:8px;margin:6px 0 12px 26px">
+            <input id="setup-git-ident-name"  type="text" placeholder="Your Name"
+                   value="${escapeHtml(current.name || profile?.name || '')}">
+            <input id="setup-git-ident-email" type="text" placeholder="you@example.com"
+                   value="${escapeHtml(current.email || '')}">
+          </div>
+
+          ${nip05Preset ? `
+            <label class="radio-row">
+              <input type="radio" name="setup-git-ident-mode" value="nip05">
+              <div>
+                <div class="radio-title">Use my nip-05 (<code>${escapeHtml(nip05Preset.email)}</code>)</div>
+                <div class="radio-sub">Bridges Nostr + GitHub: links to your npub via DNS lookup, AND to a GitHub user if that exact email is registered there.</div>
+              </div>
+            </label>
+          ` : ''}
+
+          ${npubPreset ? `
+            <label class="radio-row">
+              <input type="radio" name="setup-git-ident-mode" value="npub">
+              <div>
+                <div class="radio-title">Use npub shorthand (<code>${escapeHtml(npubPreset.email)}</code>)</div>
+                <div class="radio-sub">Pure Nostr-native identity. No real-world info, no GitHub user link.</div>
+              </div>
+            </label>
+          ` : ''}
+
+          <label class="radio-row">
+            <input type="radio" name="setup-git-ident-mode" value="skip">
+            <div>
+              <div class="radio-title">Skip — let auto-seed handle it</div>
+              <div class="radio-sub">nostr-station-managed projects get an npub-synthetic identity per repo until you configure one in <strong>Config → Git Identity</strong>.</div>
+            </div>
+          </label>
+        </div>
+
+        <div class="setup-actions">
+          <button class="setup-back">← Back</button>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="primary setup-next" id="setup-git-ident-next">Save &amp; continue →</button>
+          </div>
+        </div>
+      `,
+    );
+
+    root.querySelector('.setup-back').addEventListener('click', back);
+    root.querySelector('#setup-git-ident-next').addEventListener('click', async () => {
+      const mode = root.querySelector('input[name="setup-git-ident-mode"]:checked')?.value || 'skip';
+      let payload = null;
+      if (mode === 'custom') {
+        const name  = $('setup-git-ident-name')?.value.trim();
+        const email = $('setup-git-ident-email')?.value.trim();
+        if (!name || !email) {
+          toast('Name and email are required for "Set my own"', 'or pick a different option', 'err');
+          return;
+        }
+        payload = { name, email };
+      } else if (mode === 'nip05' && nip05Preset) {
+        payload = nip05Preset;
+      } else if (mode === 'npub' && npubPreset) {
+        payload = npubPreset;
+      }
+      // mode === 'skip' → payload stays null, no PUT, just advance.
+      if (payload) {
+        try {
+          const r = await fetch('/api/git-identity/global', {
+            method:  'PUT',
+            headers: { 'content-type': 'application/json' },
+            body:    JSON.stringify(payload),
+          }).then(r => r.json());
+          if (!r.ok) throw new Error(r.error || 'save failed');
+          toast('Git identity saved', payload.email, 'ok');
+        } catch (e) {
+          toast('Save failed', e?.message || '', 'err');
+          return;
+        }
+      }
+      next();
+    });
   }
 
   // ── ngit signing ─────────────────────────────────────────────────────
