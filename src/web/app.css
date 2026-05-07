@@ -3211,6 +3211,16 @@ input:focus, textarea:focus, select:focus {
 }
 .relay-list .item .url { flex: 1; color: var(--text-bright); word-break: break-all; font-family: var(--font-mono); }
 .relay-list .item button { padding: 2px 8px; font-size: 11px; }
+.relay-list .item .relay-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.relay-list .item .relay-health.checking { font-style: italic; }
+.relay-list .item .relay-health .preferred-star { color: var(--accent-bright); font-size: 10px; }
 .relay-list .add {
   display: flex;
   gap: 6px;

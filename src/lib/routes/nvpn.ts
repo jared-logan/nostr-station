@@ -40,6 +40,8 @@ import {
   pingNvpnPeer, netcheckNvpn, doctorNvpn, natDiscoverNvpn,
   setNvpnSettings, statsNvpn,
   setNvpnAlias, removeNvpnAlias,
+  readNvpnRelays, addNvpnRelay, removeNvpnRelay, setNvpnRelays,
+  RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
 import { readBody } from './_shared.js';
 
@@ -181,6 +183,47 @@ export async function handleNvpn(
   if (url === '/api/nvpn/roster/publish' && method === 'POST') {
     const r = await publishRoster();
     await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // ── Discovery relays ──────────────────────────────────────────────
+  // Read goes straight from config.toml so it works while the daemon
+  // is down; mutations go through `nvpn set --relay` so persistence +
+  // reload semantics stay consistent with every other settings change.
+  if (url === '/api/nvpn/relays' && method === 'GET') {
+    const r = readNvpnRelays();
+    await writeJson(res, 200, r);
+    return true;
+  }
+  // Curated "good defaults" the dashboard offers as a one-click recovery
+  // when the configured relays are flaking. Lives in nvpn.ts so the
+  // server is the single source of truth — UI fetches and previews.
+  if (url === '/api/nvpn/relays/recommended' && method === 'GET') {
+    await writeJson(res, 200, { relays: [...RECOMMENDED_NVPN_RELAYS] });
+    return true;
+  }
+  if (url === '/api/nvpn/relays/add' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const r = await addNvpnRelay(typeof body.url === 'string' ? body.url : '');
+    await writeJson(res, r.ok ? 200 : 400, r);
+    return true;
+  }
+  if (url === '/api/nvpn/relays/remove' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const r = await removeNvpnRelay(typeof body.url === 'string' ? body.url : '');
+    await writeJson(res, r.ok ? 200 : 400, r);
+    return true;
+  }
+  // Bulk replace — useful for "reset to defaults" or paste-a-list flows.
+  // Refuses an empty list at the lib layer to avoid stranding the node.
+  if (url === '/api/nvpn/relays/set' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const list = Array.isArray(body.relays) ? body.relays : [];
+    const r = await setNvpnRelays(list);
+    await writeJson(res, r.ok ? 200 : 400, r);
     return true;
   }
 

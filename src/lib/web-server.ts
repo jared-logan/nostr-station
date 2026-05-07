@@ -41,7 +41,10 @@ import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
 import { AutoSyncManager } from './auto-sync.js';
 import { installNostrVpn } from './nvpn-installer.js';
-import { probeNvpnStatus, startNvpnLogTail } from './nvpn.js';
+import {
+  probeNvpnStatus, probeNvpnServiceStatus, startNvpnLogTail, vpnBannerRunningFor,
+  nvpnEvents,
+} from './nvpn.js';
 import { installNak } from './nak-installer.js';
 import { installNgit } from './ngit-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
@@ -1548,7 +1551,49 @@ export async function startWebServer(port: number): Promise<void> {
         //   watchdog  — running iff the in-Node watchdog is alive,
         //               carries watchdogNpub for the meta strip
         //   vpn       — pending until Phase 2.2 installer lands
-        const status = (() => {
+        // vpn — probe the daemon directly so the banner reflects daemon
+        // state, not just "is the tunnel up". Going through gatherStatus
+        // collapsed everything below `state==='ok'` to running:false,
+        // which flipped the banner to "stopped" whenever a healthy
+        // daemon's status socket stalled briefly. probeNvpnStatus keeps
+        // running and tunnelIp separate; vpnBannerRunningFor cross-checks
+        // probeNvpnServiceStatus (systemd/launchd) when the direct probe
+        // errored, so a slow socket on a healthy daemon doesn't lie
+        // about whether the process is alive. The service probe is only
+        // run on the failure path, so the happy case stays one shell-out.
+        // The vpn LogBuffer is fed by startNvpnLogTail at boot — once
+        // the daemon is up and writing to its log file, the panel
+        // streams real lines. Until then a banner explains the gap.
+        const computeVpnStatus = async () => {
+          const direct = await probeNvpnStatus();
+          const installed = direct.installed;
+          const service = (installed && direct.error)
+            ? await probeNvpnServiceStatus()
+            : null;
+          const running = vpnBannerRunningFor(direct, service);
+          return {
+            service:    'vpn',
+            installed,
+            running,
+            logExists:  installed,
+            logPath:    installed
+              ? 'nvpn daemon log (auto-tailed)'
+              : '(not installed)',
+            stale:      false,
+            logMtimeMs: Date.now(),
+            note:       installed
+              ? (running
+                  ? (direct.tunnelIp ? `tunnel: ${direct.tunnelIp}` : 'running, no tunnel ip')
+                  : 'not connected')
+              : 'install via the setup wizard\'s vpn step',
+            // Hint for the Logs panel renderMeta — shown as a copy-able
+            // identity strip alongside the buffer. Mirrors the watchdog
+            // tab's npub field.
+            tunnelIp:   running ? direct.tunnelIp : null,
+          };
+        };
+
+        const status = await (async () => {
           if (channel === 'relay') {
             return {
               service:    'relay',
@@ -1573,38 +1618,34 @@ export async function startWebServer(port: number): Promise<void> {
               watchdogNpub:   s?.npub ?? null,
             };
           }
-          // vpn — pluck the nvpn row from gatherStatus so we report the
-          // same install/running state Status panel sees. Pre-fix the
-          // logs panel had a hardcoded "installer wiring pending" stub
-          // that misrepresented a working install as "not installed".
-          // gatherStatus emits state ok (tunnel up) / warn (binary
-          // present, no tunnel) / err (binary missing).
-          const vpnRow = gatherStatus().find(r => r.id === 'vpn');
-          const installed = vpnRow ? vpnRow.state !== 'err' : false;
-          const running   = vpnRow ? vpnRow.state === 'ok'  : false;
-          // The vpn LogBuffer is fed by startNvpnLogTail at boot — once
-          // the daemon is up and writing to its log file, the panel
-          // streams real lines. Until then a banner explains the gap.
-          return {
-            service:    channel,
-            installed,
-            running,
-            logExists:  installed,
-            logPath:    installed
-              ? 'nvpn daemon log (auto-tailed)'
-              : '(not installed)',
-            stale:      false,
-            logMtimeMs: Date.now(),
-            note:       installed
-              ? (running ? `tunnel: ${vpnRow?.value ?? ''}` : (vpnRow?.value ?? 'not connected'))
-              : 'install via the setup wizard\'s vpn step',
-            // Hint for the Logs panel renderMeta — shown as a copy-able
-            // identity strip alongside the buffer. Mirrors the watchdog
-            // tab's npub field.
-            tunnelIp:   running ? (vpnRow?.value ?? null) : null,
-          };
+          return computeVpnStatus();
         })();
         res.write(`data: ${JSON.stringify({ status })}\n\n`);
+
+        // Push fresh status frames when nvpn lifecycle events fire so the
+        // Logs panel reflects Stop / Start / Restart immediately. Without
+        // this, the meta strip stayed on its connect-time snapshot ("nvpn
+        // Running …") even after a successful Stop click. We're already
+        // open — the client doesn't need to reconnect or re-render the
+        // history. Other channels (relay, watchdog) don't have an
+        // equivalent emitter today; they fall through with no change.
+        let onVpnStateChanged: (() => void) | null = null;
+        if (channel === 'vpn') {
+          onVpnStateChanged = () => {
+            if (res.writableEnded) return;
+            // Schedule the probe in a microtask so a synchronous emit from
+            // inside an action handler returns immediately to the request
+            // path; the SSE push happens after the action's HTTP response.
+            void (async () => {
+              try {
+                const fresh = await computeVpnStatus();
+                if (res.writableEnded) return;
+                res.write(`data: ${JSON.stringify({ status: fresh })}\n\n`);
+              } catch { /* probe failed — keep the stream alive, drop frame */ }
+            })();
+          };
+          nvpnEvents.on('state-changed', onVpnStateChanged);
+        }
 
         // Replay the ring on connect so the user sees recent history
         // immediately, not just whatever happens after the panel opened.
@@ -1632,6 +1673,7 @@ export async function startWebServer(port: number): Promise<void> {
         const cleanup = () => {
           clearInterval(heartbeat);
           unsubscribe();
+          if (onVpnStateChanged) nvpnEvents.off('state-changed', onVpnStateChanged);
         };
         req.on('close', cleanup);
         res.on('close', cleanup);
