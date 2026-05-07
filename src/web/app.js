@@ -3392,12 +3392,14 @@ const ProjectsPanel = (() => {
       actionsEl.appendChild(snapBtn);
     }
 
-    if (p.capabilities.git || p.capabilities.ngit) {
-      const pushBtn = iconBtn('publish', 'Publish',
-        `<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`);
-      pushBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectPublish(p); });
-      actionsEl.appendChild(pushBtn);
-    }
+    // Push lives on the project drawer's git/ngit tabs (Publish-to-ngit
+    // / Push triad), where the verbs and dialog copy are explicit.
+    // Pre-fix this card-grid icon duplicated the same action with a
+    // generic up-arrow + "Publish" tooltip — for ngit-only projects
+    // it actually ran ngit push, label-vs-action mismatch noted in
+    // the PR #5 followup. Removing it eliminates the duplication;
+    // sync/snapshot stay because one-click refresh + commit still
+    // benefit from grid-level access.
     if (p.capabilities.nsite) {
       const deployBtn = iconBtn('deploy', 'Deploy',
         `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M2 12h20M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>`);
