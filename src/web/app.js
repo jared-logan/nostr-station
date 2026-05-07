@@ -7376,7 +7376,7 @@ const ConfigPanel = (() => {
     try {
       // Session fetch is best-effort: the localhost-exemption path has no
       // backing session, and we still want the rest of the panel to render.
-      const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent] = await Promise.all([
+      const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent, vpnRelays] = await Promise.all([
         api('/api/relay-config'),
         // scope=global so the Context row reflects the station setup
         // regardless of which project is currently open in chat. The
@@ -7394,6 +7394,11 @@ const ConfigPanel = (() => {
         // config section render the user's current values + offer
         // npub-synthetic / nip-05 presets without a second round-trip.
         api('/api/git-identity/global').catch(() => null),
+        // nvpn discovery relays — read straight off config.toml so the
+        // section renders even when the daemon is down. Catch keeps an
+        // older backend (no /api/nvpn/relays route) from breaking the
+        // whole panel; the section just stays empty.
+        api('/api/nvpn/relays').catch(() => null),
       ]);
       // Augment presets with the nip-05 from the cached profile if
       // we have one. The backend stays focused on git config; the
@@ -7414,7 +7419,7 @@ const ConfigPanel = (() => {
           email: profile.nip05,
         };
       }
-      render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent);
+      render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent, vpnRelays);
     } catch (e) {
       container.innerHTML = `<div class="config-section"><div style="color:var(--error)">failed to load: ${escapeHtml(e.message)}</div></div>`;
     }
@@ -7616,7 +7621,7 @@ const ConfigPanel = (() => {
     return `in ${mins}m`;
   }
 
-  function render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent) {
+  function render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent, vpnRelays) {
     const whitelistHtml = rc.whitelist && rc.whitelist.length
       ? `<a href="#relay" style="color:var(--accent-bright)">${rc.whitelist.length} npub${rc.whitelist.length !== 1 ? 's' : ''} →</a>`
       : `<a href="#relay" style="color:var(--warn)">empty — add one →</a>`;
@@ -7754,6 +7759,42 @@ const ConfigPanel = (() => {
                 <button class="primary" id="cfg-ngit-relogin">Login</button>
               </div>
             `}
+          </div>
+        </div>
+      </div>
+
+      <div class="config-section" id="cfg-vpn-section">
+        <h3>nostr-vpn relays</h3>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+          Nostr relays nostr-vpn uses to publish presence and discover peers.
+          Distinct from your identity / ngit relay sets — these are mesh-only.
+          If you're seeing repeated <code>504 Gateway Timeout</code> in the
+          nostr-vpn log, the configured relay is likely flaky; add a healthier
+          one and the daemon will pick it up on the next reload.
+        </div>
+        <div class="config-row">
+          <div class="k">Relays</div>
+          <div class="v">
+            ${vpnRelays && vpnRelays.found === false
+              ? `<div class="key-status-line">${vpnRelays.configPath ? '✗ config.toml unreadable' : 'no nvpn config — run <code>nvpn init</code> first'}</div>`
+              : ''}
+            <div class="relay-list" id="vpn-relays">
+              ${((vpnRelays && Array.isArray(vpnRelays.relays)) ? vpnRelays.relays : []).map(url => `
+                <div class="item" data-url="${escapeHtml(url)}">
+                  <span class="url">${escapeHtml(url)}</span>
+                  <button class="danger rm-vpn-relay">×</button>
+                </div>`).join('')}
+              <div class="add">
+                <input id="vpn-relay-input" placeholder="wss://your-relay.example" autocomplete="off" spellcheck="false">
+                <button id="vpn-relay-paste">paste</button>
+                <button class="primary" id="vpn-relay-add">add</button>
+              </div>
+            </div>
+            <div class="key-status-line ${vpnRelays && vpnRelays.relays && vpnRelays.relays.length ? 'ok' : ''}" id="vpn-relays-status">
+              ${vpnRelays && vpnRelays.relays && vpnRelays.relays.length
+                ? `✓ ${vpnRelays.relays.length} relay${vpnRelays.relays.length === 1 ? '' : 's'} configured`
+                : 'no relays configured'}
+            </div>
           </div>
         </div>
       </div>
@@ -7949,6 +7990,25 @@ const ConfigPanel = (() => {
       try { $('grasp-server-input').value = (await navigator.clipboard.readText()).trim(); }
       catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
     });
+
+    // nostr-vpn discovery relays — same shape as grasp servers above. Each
+    // mutation calls load() to re-fetch /api/nvpn/relays so the displayed
+    // list matches what's actually persisted (after `nvpn set` + reload).
+    $$('#vpn-relays .rm-vpn-relay').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const url = e.target.closest('.item').dataset.url;
+        removeVpnRelayFromList(url);
+      });
+    });
+    const vpnRelayAdd = $('vpn-relay-add');
+    if (vpnRelayAdd) {
+      vpnRelayAdd.addEventListener('click', addVpnRelayFromInput);
+      $('vpn-relay-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') addVpnRelayFromInput(); });
+      $('vpn-relay-paste').addEventListener('click', async () => {
+        try { $('vpn-relay-input').value = (await navigator.clipboard.readText()).trim(); }
+        catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+      });
+    }
 
     // Multi-provider AI list — see renderAiProviders() for the markup.
     // Wire up all row actions + the "Add provider" dropdown in one place.
@@ -8794,6 +8854,40 @@ const ConfigPanel = (() => {
         body: JSON.stringify({ url }),
       });
       toast('Grasp server removed', url, 'ok');
+      load();
+    } catch (e) { toast('Remove failed', e.message, 'err'); }
+  }
+
+  async function addVpnRelayFromInput() {
+    const input = $('vpn-relay-input');
+    const url = input.value.trim();
+    if (!url) return;
+    if (!/^wss?:\/\//i.test(url)) {
+      toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
+      return;
+    }
+    try {
+      const r = await api('/api/nvpn/relays/add', {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ url }),
+      });
+      if (!r.ok) throw new Error(r.detail || 'add failed');
+      toast('Relay added', url, 'ok');
+      input.value = '';
+      load();
+    } catch (e) { toast('Add failed', e.message, 'err'); }
+  }
+
+  async function removeVpnRelayFromList(url) {
+    try {
+      const r = await api('/api/nvpn/relays/remove', {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ url }),
+      });
+      if (!r.ok) throw new Error(r.detail || 'remove failed');
+      toast('Relay removed', url, 'ok');
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
   }

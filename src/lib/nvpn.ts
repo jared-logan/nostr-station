@@ -422,6 +422,156 @@ export function readNvpnRoster(): NvpnRoster {
   };
 }
 
+// ── Discovery relays (Nostr presence/signaling) ──────────────────────
+//
+// nvpn discovers peers by publishing/subscribing to presence events on a
+// configured set of Nostr relays. Out-of-the-box defaults
+// (relay.snort.social, temp.iris.to, …) flake intermittently with 504
+// Gateway Timeouts and the dashboard had no surface for swapping them
+// without hand-editing TOML. This block pairs read-from-disk + write-via-
+// CLI: we parse the current list straight out of config.toml so the UI
+// can render even when the daemon is down, and we mutate via
+// `nvpn set --relay <url>` so persistence + reload semantics match
+// every other settings change.
+//
+// Storage location is the `[[networks]]` block's `relays = […]` entry —
+// same scoping as participants/admins. We try [nostr] as a fallback for
+// older configs that put the relay set at the top level; if neither
+// matches we return [] and let the user populate via the UI (the very
+// first `nvpn set --relay` call will create the entry correctly).
+
+export interface NvpnRelays {
+  found:      boolean;
+  configPath: string | null;
+  relays:     string[];
+}
+
+// Pure helper — extract the relay list from the parsed sections of a
+// config.toml. Tries the [[networks]] section first (current schema),
+// then a [nostr] section (legacy). Exported for unit tests.
+export function extractNvpnRelays(toml: string): string[] {
+  const networksSection = extractFirstNetworksSection(toml);
+  const fromNetworks = extractTomlList(networksSection, 'relays');
+  if (fromNetworks.length > 0) return fromNetworks;
+  // Legacy fallback — older configs put `relays = [...]` directly under
+  // a top-level `[nostr]` table. Slice that section out the same way
+  // extractPeerAliasesSection does, then run extractTomlList against it.
+  const nostrHdr = toml.match(/^\s*\[nostr\][^\S\r\n]*\r?\n?/m);
+  if (!nostrHdr || nostrHdr.index === undefined) return [];
+  const rest = toml.slice(nostrHdr.index + nostrHdr[0].length);
+  const next = rest.search(/^\s*\[(?:\[)?/m);
+  const body = next >= 0 ? rest.slice(0, next) : rest;
+  return extractTomlList(body, 'relays');
+}
+
+export function readNvpnRelays(): NvpnRelays {
+  const configPath = findNvpnConfigPath();
+  if (!configPath) return { found: false, configPath: null, relays: [] };
+  let toml = '';
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch { return { found: false, configPath, relays: [] }; }
+  return { found: true, configPath, relays: extractNvpnRelays(toml) };
+}
+
+// Validation: wss://… or ws://… up to a reasonable max length. We keep
+// the regex tight on protocol and host shape but defer the deeper
+// "is this a real relay" question to nvpn itself — a bad URL gets
+// surfaced on the next netcheck/probe rather than blocked client-side.
+const RELAY_URL_RE = /^wss?:\/\/[A-Za-z0-9.\-_:[\]/?&=%~+]+$/;
+const RELAY_URL_MAX = 256;
+export function isValidRelayUrl(s: unknown): s is string {
+  return typeof s === 'string'
+    && s.length > 0
+    && s.length <= RELAY_URL_MAX
+    && RELAY_URL_RE.test(s);
+}
+
+// Build the argv for `nvpn set` given a desired full relay list.
+// Pure + exported so tests can pin the shape without a binary on PATH.
+// `nvpn set --relay <url>` is repeatable (same shape as --participant
+// in add-participant), and a single `nvpn set` call rewrites the
+// list to exactly the args provided. Empty list → caller should not
+// invoke (nvpn would refuse / the user would lose connectivity); we
+// guard that at the route layer with a clear error.
+export function buildSetRelaysArgs(relays: string[]): string[] {
+  const args: string[] = ['set'];
+  for (const r of relays) { args.push('--relay', r); }
+  args.push('--json');
+  return args;
+}
+
+export interface NvpnRelaysResult extends ControlResult {
+  relays?: string[];
+  raw?:    Record<string, unknown> | null;
+}
+
+// Replace the entire relay list. Single `nvpn set` invocation; the
+// daemon picks up the new set on the next reload (we follow with
+// `nvpn reload` best-effort, mirroring the alias mutation path).
+//
+// Refuses empty input — clearing the relay set would strand the
+// node (presence won't publish, peers won't be discovered). The
+// caller wanting to reset should remove relays one at a time and
+// stop before the last.
+export async function setNvpnRelays(relays: string[]): Promise<NvpnRelaysResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  const cleaned = relays.map(s => String(s).trim()).filter(Boolean);
+  if (cleaned.length === 0) {
+    return { ok: false, detail: 'refusing to clear the entire relay list — keep at least one' };
+  }
+  const bad = cleaned.filter(r => !isValidRelayUrl(r));
+  if (bad.length > 0) {
+    return {
+      ok: false,
+      detail: `invalid relay URL${bad.length > 1 ? 's' : ''}: ${bad.slice(0, 3).join(', ')}` +
+              (bad.length > 3 ? ` (+${bad.length - 3} more)` : ''),
+    };
+  }
+  // De-dup while preserving order — nvpn would probably accept dupes
+  // but the visible state should match what the user intended.
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const r of cleaned) { if (!seen.has(r)) { seen.add(r); unique.push(r); } }
+
+  try {
+    const { stdout } = await execa(binPath, buildSetRelaysArgs(unique), {
+      timeout: 10_000, stdio: 'pipe',
+    });
+    let raw: Record<string, unknown> | null = null;
+    try { raw = JSON.parse(stdout); } catch { /* nvpn may return non-JSON for `set`; treat as best-effort */ }
+    // Best-effort reload so the running daemon picks up the new set
+    // without a Stop/Start cycle.
+    await reloadNvpn().catch(() => null);
+    return { ok: true, detail: `relay list updated (${unique.length})`, relays: unique, raw };
+  } catch (e: any) {
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+export async function addNvpnRelay(url: string): Promise<NvpnRelaysResult> {
+  if (!isValidRelayUrl(url)) {
+    return { ok: false, detail: 'invalid relay URL — must be ws:// or wss://' };
+  }
+  const current = readNvpnRelays();
+  if (current.relays.includes(url)) {
+    return { ok: true, detail: 'relay already in list', relays: current.relays };
+  }
+  return setNvpnRelays([...current.relays, url]);
+}
+
+export async function removeNvpnRelay(url: string): Promise<NvpnRelaysResult> {
+  const current = readNvpnRelays();
+  if (!current.relays.includes(url)) {
+    return { ok: true, detail: 'relay was not in list', relays: current.relays };
+  }
+  const next = current.relays.filter(r => r !== url);
+  if (next.length === 0) {
+    return { ok: false, detail: 'refusing to remove the last relay — add a replacement first' };
+  }
+  return setNvpnRelays(next);
+}
+
 // ── Alias mutation (config.toml [peer_aliases] table) ──────────────
 //
 // nvpn has no CLI command for aliases — the `[peer_aliases]` table is
