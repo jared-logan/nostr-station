@@ -7378,7 +7378,10 @@ const ConfigPanel = (() => {
       // backing session, and we still want the rest of the panel to render.
       const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent] = await Promise.all([
         api('/api/relay-config'),
-        api('/api/config'),
+        // scope=global so the Context row reflects the station setup
+        // regardless of which project is currently open in chat. The
+        // chat header still uses the default scope (active project).
+        api('/api/config?scope=global'),
         api('/api/identity/config'),
         api('/api/auth/session').catch(() => null),
         api('/api/identity/profile').catch(() => null),
@@ -7419,6 +7422,135 @@ const ConfigPanel = (() => {
 
   function row(k, v, cls = '') {
     return `<div class="config-row"><div class="k">${escapeHtml(k)}</div><div class="v ${cls}">${escapeHtml(v)}</div></div>`;
+  }
+
+  // ── Station-context editor ──────────────────────────────────────────
+  // Modal backed by GET/PUT /api/station-context. The whole file content
+  // is editable; the server-side chat path splices only the user-region
+  // (between USER_REGION_BEGIN/END) so the persona text above the
+  // markers stays as documentation without duplicating into prompts.
+  async function openStationContextEditor() {
+    let initial;
+    try { initial = await api('/api/station-context'); }
+    catch { return; }
+
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">
+        File: <code>${escapeHtml(initial.path)}</code>
+        ${initial.hasMarkers
+          ? '· Splice mode: user-region only'
+          : '· Splice mode: whole file (markers absent)'}
+      </div>
+      <textarea id="station-edit-textarea" spellcheck="false"
+        style="width:100%;min-height:380px;font-family:var(--font-mono,monospace);font-size:12px;padding:8px;background:var(--bg-elev);color:var(--text);border:1px solid var(--border);border-radius:4px"
+      >${escapeHtml(initial.content || '')}</textarea>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:6px">
+        Tip: edits between
+        <code>${escapeHtml(initial.userRegionBegin)}</code> and
+        <code>${escapeHtml(initial.userRegionEnd)}</code>
+        are what the model sees. Text outside the markers serves as on-disk reference and is not sent to chat.
+      </div>
+    `;
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px';
+    const cancel = document.createElement('button'); cancel.textContent = 'Cancel';
+    const save   = document.createElement('button'); save.textContent = 'Save';
+    save.classList.add('primary');
+    foot.appendChild(cancel); foot.appendChild(save);
+
+    const modal = openModal({
+      title: 'Edit station context',
+      subtitle: 'Always-on notes that layer into every chat turn',
+      body,
+      footer: foot,
+    });
+    const ta = body.querySelector('#station-edit-textarea');
+    cancel.addEventListener('click', () => modal.close());
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      try {
+        await api('/api/station-context', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ content: ta.value }),
+        });
+        toast('Station context saved', `${ta.value.length} chars`, 'ok');
+        modal.close();
+        // Refresh the panel + chat header so the "Context" row reflects
+        // the new state (e.g. station context now non-empty).
+        load();
+        refreshHeader();
+      } catch {
+        save.disabled = false;
+      }
+    });
+  }
+
+  // ── Rendered-prompt preview ─────────────────────────────────────────
+  // Shows the exact text /api/ai/chat will use as the system prompt for
+  // the next turn. Project dropdown defaults to "Station only" so the
+  // Config panel's primary view is the global state.
+  async function openPromptPreview() {
+    let projects = [];
+    try {
+      const r = await api('/api/projects');
+      // /api/projects returns a bare array of project records.
+      projects = Array.isArray(r) ? r : (Array.isArray(r?.projects) ? r.projects : []);
+    } catch { /* projects list is optional */ }
+
+    const body = document.createElement('div');
+    const projectOptions = projects
+      .map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`)
+      .join('');
+    body.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <label for="preview-project" style="font-size:11px;color:var(--text-dim)">View as:</label>
+        <select id="preview-project">
+          <option value="">Station only (no project)</option>
+          ${projectOptions}
+        </select>
+        <span id="preview-meta" style="font-size:11px;color:var(--text-dim);margin-left:auto"></span>
+      </div>
+      <pre id="preview-output"
+        style="max-height:60vh;overflow:auto;background:var(--bg-elev);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:10px;white-space:pre-wrap;font-size:12px;margin:0"
+      >loading…</pre>
+    `;
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px';
+    const closeBtn = document.createElement('button'); closeBtn.textContent = 'Close';
+    foot.appendChild(closeBtn);
+
+    const modal = openModal({
+      title: 'Rendered system prompt',
+      subtitle: 'Exactly what the next chat turn will send to the model',
+      body,
+      footer: foot,
+    });
+    closeBtn.addEventListener('click', () => modal.close());
+
+    const sel  = body.querySelector('#preview-project');
+    const out  = body.querySelector('#preview-output');
+    const meta = body.querySelector('#preview-meta');
+    async function refresh() {
+      out.textContent = 'loading…';
+      meta.textContent = '';
+      const qs = sel.value ? `?projectId=${encodeURIComponent(sel.value)}` : '';
+      try {
+        const r = await api(`/api/ai/preview${qs}`);
+        out.textContent = r.text || '(empty)';
+        const bits = [];
+        bits.push(`source: ${r.source}`);
+        if (r.projectName) bits.push(`project: ${r.projectName}`);
+        bits.push(`${r.bytes} bytes`);
+        if (r.model?.fullId) bits.push(r.model.fullId);
+        meta.textContent = bits.join(' · ');
+      } catch (e) {
+        out.textContent = `failed to load preview: ${e?.message || e}`;
+      }
+    }
+    sel.addEventListener('change', refresh);
+    refresh();
   }
 
   // Identity section echoes who the dashboard is signed in as. The server
@@ -7683,7 +7815,11 @@ const ConfigPanel = (() => {
         ${renderAiProviders(aiList)}
         <div class="config-row" style="margin-top:10px">
           <div class="k">Context</div>
-          <div class="v ${cfg.hasContext ? 'on' : 'off'}">${describeContext(cfg)}</div>
+          <div class="v ${cfg.hasContext ? 'on' : 'off'}" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span>${describeContext(cfg)}</span>
+            <button id="cfg-station-edit" type="button">Edit notes</button>
+            <button id="cfg-prompt-preview" type="button">Preview prompt</button>
+          </div>
         </div>
         <div class="callout">
           Per-provider keys live in the OS keychain as <code>ai:&lt;provider&gt;</code>.
@@ -7819,6 +7955,18 @@ const ConfigPanel = (() => {
     // aiList is captured explicitly; wireAiProviders() lives at the panel
     // scope and can't reach render()'s param otherwise.
     wireAiProviders(aiList);
+
+    // Edit station context — opens a modal backed by NOSTR_STATION.md.
+    // Saves go through PUT /api/station-context; the chat path picks up
+    // edits on the next turn (no restart needed).
+    const editStationBtn = $('cfg-station-edit');
+    if (editStationBtn) editStationBtn.addEventListener('click', openStationContextEditor);
+
+    // Preview rendered prompt — calls GET /api/ai/preview and shows the
+    // exact text the next chat turn will receive. Project selector lets
+    // the user inspect any project's resolved prompt, not just station.
+    const previewPromptBtn = $('cfg-prompt-preview');
+    if (previewPromptBtn) previewPromptBtn.addEventListener('click', openPromptPreview);
 
     // Templates registry section — fetched + rendered after the rest of
     // the panel paints. Failures are non-fatal (the section shows an

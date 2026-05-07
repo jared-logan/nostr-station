@@ -71,8 +71,8 @@ import {
   setAutoSyncRef,
   type CmdSpec,
 } from './routes/_shared.js';
-import { buildAiContext } from './ai-context.js';
-import { seedStationContext } from './editor.js';
+import { buildAiContext, readStationContext, stationContextPath } from './ai-context.js';
+import { seedStationContext, USER_REGION_BEGIN, USER_REGION_END } from './editor.js';
 import { handleProjects } from './routes/projects.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleDitto } from './routes/ditto.js';
@@ -312,8 +312,17 @@ export interface ContextStatus {
   hasContextFile: boolean;
 }
 
-export function getContextStatus(): ContextStatus {
-  const ctx = buildAiContext(getActiveChatProjectId());
+// `scope` chooses which context the caller wants to see:
+//   'active' (default) — match what the next /api/ai/chat turn will use,
+//                        i.e. the project opened in chat or station fallback.
+//   'global'           — always describe the station-level context, ignoring
+//                        whichever project is currently active in chat.
+// The Config panel passes 'global' so its row reflects the station setup
+// regardless of chat state; the chat header keeps the default so it labels
+// the live chat context.
+export function getContextStatus(scope: 'active' | 'global' = 'active'): ContextStatus {
+  const projectId = scope === 'global' ? null : getActiveChatProjectId();
+  const ctx = buildAiContext(projectId);
   return {
     hasContext:     ctx.text.length > 0,
     source:         ctx.source,
@@ -936,7 +945,8 @@ export async function startWebServer(port: number): Promise<void> {
       // API routes first — they take precedence over static.
       if (url === '/api/config' && method === 'GET') {
         const { meta } = await loadProviderConfig();
-        const ctx = getContextStatus();
+        const scope = /[?&]scope=global(?:&|$)/.test(req.url || '') ? 'global' : 'active';
+        const ctx = getContextStatus(scope);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           provider:       meta.provider,
@@ -949,6 +959,71 @@ export async function startWebServer(port: number): Promise<void> {
           contextProject: ctx.projectName ?? null,
           hasContextFile: ctx.hasContextFile,
         }));
+        return;
+      }
+
+      // ── Station context (user-editable always-on overlay) ──────────────
+      // The Config panel reads this to render the editor textarea, and
+      // writes back when the user saves. Content is the full file body
+      // including the persona/seed text — `readStationContext()` (used
+      // by the chat path) splices only the user-region into prompts.
+      if (url === '/api/station-context' && method === 'GET') {
+        const filePath = stationContextPath();
+        let raw = '';
+        let exists = false;
+        try {
+          raw = fs.readFileSync(filePath, 'utf8');
+          exists = true;
+        } catch { /* file may not be seeded yet; return empty */ }
+        const hasMarkers = raw.includes(USER_REGION_BEGIN) && raw.includes(USER_REGION_END);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          path:           filePath,
+          content:        raw,
+          exists,
+          hasMarkers,
+          userRegionBegin: USER_REGION_BEGIN,
+          userRegionEnd:   USER_REGION_END,
+          // Effective overlay actually injected into prompts. null when
+          // there are no user notes — the Config UI uses this to label
+          // "no notes yet" vs "X bytes spliced in".
+          effectiveOverlay: readStationContext(),
+        }));
+        return;
+      }
+
+      if (url === '/api/station-context' && method === 'PUT') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad json' }));
+          return;
+        }
+        const content = typeof parsed.content === 'string' ? parsed.content : null;
+        if (content === null) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'content (string) required' }));
+          return;
+        }
+        // 256 KB cap matches the read_file tool — large enough for any
+        // realistic note set, small enough to refuse runaway pastes.
+        if (content.length > 256 * 1024) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'content too large (>256KB)' }));
+          return;
+        }
+        const filePath = stationContextPath();
+        try {
+          fs.mkdirSync(path.dirname(filePath), { recursive: true });
+          fs.writeFileSync(filePath, content, { mode: 0o644 });
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e?.message || 'write failed' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, path: filePath, bytes: Buffer.byteLength(content) }));
         return;
       }
 

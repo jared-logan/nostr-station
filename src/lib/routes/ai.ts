@@ -467,6 +467,43 @@ export async function handleAi(
     return true;
   }
 
+  // GET /api/ai/preview[?projectId=…] — returns the fully rendered system
+  // prompt that the next chat turn would receive. Mirrors the resolution
+  // chain of /api/ai/chat (project override → built-in template, plus the
+  // station-context overlay) without hitting the model. Used by the
+  // Config panel's "Preview rendered prompt" modal so users can see
+  // exactly what the model sees.
+  if (url.startsWith('/api/ai/preview') && method === 'GET') {
+    const m = (req.url || '').match(/[?&]projectId=([^&]+)/);
+    const projectId = m ? decodeURIComponent(m[1]) : null;
+    if (projectId && !getProject(projectId)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'project not found' }));
+      return true;
+    }
+    const cfg = readAiConfig();
+    const chatProviderId = cfg.defaults.chat;
+    const chatEntry = chatProviderId ? cfg.providers[chatProviderId] : null;
+    const chatProvider = chatProviderId ? getProvider(chatProviderId) : null;
+    const model = (chatProvider?.type === 'api')
+      ? (chatEntry?.model ?? (chatProvider as ApiProvider).defaultModel)
+      : undefined;
+    const ctx = buildAiContext(projectId, {
+      provider: chatProviderId ?? undefined,
+      fullId:   model,
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      text:        ctx.text,
+      source:      ctx.source,
+      projectId:   ctx.projectId ?? null,
+      projectName: ctx.projectName ?? null,
+      bytes:       Buffer.byteLength(ctx.text),
+      model:       { provider: chatProviderId ?? null, fullId: model ?? null },
+    }));
+    return true;
+  }
+
   if (url === '/api/ai/chat' && method === 'POST') {
     let parsed: any = {};
     try { parsed = JSON.parse(await readBody(req)); }
