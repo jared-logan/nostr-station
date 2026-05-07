@@ -2109,7 +2109,10 @@ const ChatPanel = (() => {
     function sync(project) {
       init();
       if (!split) return;
-      const applicable = !!(project && project.stacksProject);
+      // `previewable` is the package.json-has-dev-script gate (works for
+      // any Vite/Next/etc. project). Older callers may still set only
+      // `stacksProject`, so accept either as a back-compat fallback.
+      const applicable = !!(project && (project.previewable || project.stacksProject));
       if (!applicable) {
         split.dataset.preview = 'hidden';
         showBtn.hidden = true;
@@ -5436,10 +5439,16 @@ const ProjectsPanel = (() => {
         body: JSON.stringify({ projectId: p.id }),
       });
     } catch {}
-    // Pass stacksProject through so the chat side knows whether to surface
+    // Pass previewable through so the chat side knows whether to surface
     // the live-preview pane (the iframe + dev-server button only makes
-    // sense for projects with `stack.json` + an `npm run dev` script).
-    ChatPanel.setActiveProject({ id: p.id, name: p.name, stacksProject: !!p.stacksProject });
+    // sense for projects with an `npm run dev` script — Vite/Next/etc.,
+    // including shakespeare.diy clones, not just MKStack stacks projects).
+    ChatPanel.setActiveProject({
+      id: p.id,
+      name: p.name,
+      previewable:   !!p.previewable,
+      stacksProject: !!p.stacksProject,
+    });
     location.hash = '#chat';
   }
 
