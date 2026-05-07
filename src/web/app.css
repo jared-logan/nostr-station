@@ -1115,6 +1115,110 @@ input:focus, textarea:focus, select:focus {
   word-break: break-all;
 }
 
+.vpn-section-footer {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.vpn-section-footer a {
+  color: var(--accent-bright);
+}
+
+.vpn-peers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.vpn-peer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elev);
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+}
+.vpn-peer-id {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.vpn-peer-alias {
+  color: var(--text-bright);
+  font-size: 11px;
+  font-weight: 500;
+}
+.vpn-peer-meta {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.vpn-peer-admin {
+  color: var(--accent-bright);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.vpn-diag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.vpn-diag-result {
+  margin-top: 8px;
+}
+.vpn-diag-pre {
+  background: var(--bg-elev);
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  overflow: auto;
+  max-height: 320px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.vpn-diag-err {
+  color: var(--warn);
+  font-size: 12px;
+  padding: 8px;
+}
+
+/* Reuse the Logs-meta service-pill styles in the new panel too. */
+.vpn-svc-pills {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.vpn-svc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  border: 1px solid;
+  background: rgba(255,255,255,0.03);
+}
+.vpn-svc-pill-ok {
+  border-color: color-mix(in srgb, var(--success) 50%, transparent);
+  color: var(--success);
+}
+.vpn-svc-pill-warn {
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+  color: var(--warn);
+}
+.vpn-svc-pill-muted {
+  border-color: rgba(255,255,255,0.10);
+  color: var(--text-dim);
+}
+
 /* ── logs ─────────────────────────────────────────────────────────────── */
 
 .tabs {

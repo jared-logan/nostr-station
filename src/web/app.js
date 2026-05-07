@@ -7703,8 +7703,79 @@ const VpnPanel = (() => {
   }
   renderStatusBody.wire = () => { /* read-only block */ };
 
+  // Network sub-tab — read-only summary of mesh state. Roster is the
+  // configured set (lives in config.toml); live peers come from `nvpn
+  // status --json`. Both are merged so the user sees who's invited
+  // vs who's actually online. Add-peer / invite-share / publish-roster
+  // controls remain on the Logs > nostr-vpn tab for now; this is a v1
+  // viewer surface — see the panel's TODO note for the full migration.
   function renderNetworkBody() {
-    return `<div class="vpn-empty muted">Network — peers + roster (coming soon).</div>`;
+    const r = lastStatus && lastStatus.raw ? lastStatus.raw : null;
+    const roster = lastRoster;
+    if (!r && !roster) return '<div class="vpn-empty muted">loading…</div>';
+    const networkId = (roster && roster.networkId)
+      || (r && typeof r.network_id === 'string' ? r.network_id : null);
+    const liveByKey = new Map();
+    if (r && Array.isArray(r.peers)) {
+      for (const p of r.peers) {
+        if (!p) continue;
+        const key = (p.npub || p.pubkey || p.address || p.ip || '').toLowerCase();
+        if (key) liveByKey.set(key, p);
+      }
+    }
+    const rosterParts = (roster && Array.isArray(roster.participants)) ? roster.participants : [];
+    const rosterAdmins = (roster && Array.isArray(roster.admins)) ? roster.admins : [];
+    const aliases = (roster && roster.aliases && typeof roster.aliases === 'object')
+      ? roster.aliases : {};
+    const peerRows = rosterParts.map(p => {
+      const live = liveByKey.get(String(p).toLowerCase());
+      const alias = aliases[p] || '';
+      const admin = rosterAdmins.includes(p);
+      const online = !!(live && (live.connected ?? live.online ?? live.up));
+      const statusCls = online ? 'ok' : 'warn';
+      const statusText = online ? 'online' : 'offline';
+      return `<div class="vpn-peer-row">
+        <span class="dot ${statusCls}"></span>
+        <span class="vpn-peer-id">
+          ${alias ? `<span class="vpn-peer-alias">${escapeHtml(alias)}</span>` : ''}
+          <code class="cmd-inline">${escapeHtml(p)}</code>
+        </span>
+        <span class="vpn-peer-meta muted">
+          ${admin ? '<span class="vpn-peer-admin">admin</span> · ' : ''}${statusText}
+        </span>
+      </div>`;
+    }).join('');
+    const onlineCount = rosterParts.filter(p => {
+      const live = liveByKey.get(String(p).toLowerCase());
+      return !!(live && (live.connected ?? live.online ?? live.up));
+    }).length;
+    return `
+      <div class="vpn-section">
+        <div class="vpn-kv">
+          <div class="vpn-kv-row">
+            <span class="vpn-kv-key">network id</span>
+            <code class="vpn-kv-val">${networkId ? escapeHtml(networkId) : '<span class="muted">unconfigured</span>'}</code>
+          </div>
+          <div class="vpn-kv-row">
+            <span class="vpn-kv-key">roster</span>
+            <span class="vpn-kv-val">
+              ${rosterParts.length} participant${rosterParts.length === 1 ? '' : 's'}
+              · ${rosterAdmins.length} admin${rosterAdmins.length === 1 ? '' : 's'}
+              · ${onlineCount} online
+            </span>
+          </div>
+        </div>
+        <div class="vpn-peers-list" style="margin-top:14px">
+          ${rosterParts.length === 0
+            ? '<div class="vpn-empty muted">No peers configured. Use the Logs &rsaquo; nostr-vpn tab to add one or import an invite.</div>'
+            : peerRows}
+        </div>
+        <div class="vpn-section-footer muted">
+          Add peer / share invite / publish roster live on the
+          <a href="#logs">Logs &rsaquo; nostr-vpn</a> tab. Move to this
+          panel scheduled for a follow-up.
+        </div>
+      </div>`;
   }
   renderNetworkBody.wire = () => {};
 
@@ -7932,20 +8003,145 @@ const VpnPanel = (() => {
     }
   }
 
+  // Settings sub-tab — read-only view of current values from
+  // `nvpn status --json`. Editing (Save & reload) lives on Logs >
+  // nostr-vpn for now; full editor migration is a follow-up.
   function renderSettingsBody() {
-    return `<div class="vpn-empty muted">Settings — node name, listen port, autoconnect, etc. (coming soon).</div>`;
+    const r = lastStatus && lastStatus.raw ? lastStatus.raw : null;
+    if (!r) return '<div class="vpn-empty muted">loading…</div>';
+    const rows = [
+      ['node name',          r.node_name            ?? r.nodeName          ?? null],
+      ['listen port',        r.listen_port          ?? r.listenPort        ?? null],
+      ['magic dns suffix',   r.magic_dns_suffix     ?? r.magicDnsSuffix    ?? null],
+      ['autoconnect',        r.autoconnect          ?? null],
+      ['advertise routes',   r.advertise_routes     ?? r.advertiseRoutes   ?? null],
+      ['advertise exit',     r.advertise_exit_node  ?? r.advertiseExitNode ?? null],
+      ['relay for others',   r.relay_for_others     ?? r.relayForOthers    ?? null],
+      ['provide nat assist', r.provide_nat_assist   ?? r.provideNatAssist  ?? null],
+    ];
+    const rowsHtml = rows.map(([k, v]) => {
+      const display = v === null || v === undefined || v === ''
+        ? '<span class="muted">—</span>'
+        : `<code>${escapeHtml(String(Array.isArray(v) ? v.join(', ') : v))}</code>`;
+      return `<div class="vpn-kv-row">
+        <span class="vpn-kv-key">${escapeHtml(k)}</span>
+        <span class="vpn-kv-val">${display}</span>
+      </div>`;
+    }).join('');
+    return `
+      <div class="vpn-section">
+        <div class="vpn-kv">${rowsHtml}</div>
+        <div class="vpn-section-footer muted">
+          Edit these via <code>nvpn set</code> or the editor on the
+          <a href="#logs">Logs &rsaquo; nostr-vpn</a> tab. In-panel
+          editing is scheduled for a follow-up.
+        </div>
+      </div>`;
   }
   renderSettingsBody.wire = () => {};
 
+  // Service sub-tab — same four-pill layout the Logs panel renders,
+  // plus the friendlier "standalone mode" callout when the systemd
+  // unit is not registered. Action handlers (Install / Reinstall /
+  // Enable / Disable / Remove) live on the Logs tab; this surface is
+  // currently view-only.
   function renderServiceBody() {
-    return `<div class="vpn-empty muted">Service — systemd / launchd unit lifecycle (coming soon).</div>`;
+    const svc = lastService;
+    if (!svc) return '<div class="vpn-empty muted">loading…</div>';
+    if (!svc.supported) {
+      return `<div class="vpn-section vpn-empty muted">
+        System service not supported on this platform${
+          svc.binaryVersion ? ` · binary v${escapeHtml(svc.binaryVersion)}` : ''
+        }.
+      </div>`;
+    }
+    const meta = [];
+    if (svc.binaryPath)    meta.push(`bin: <code>${escapeHtml(svc.binaryPath)}</code>`);
+    if (svc.binaryVersion) meta.push(`v${escapeHtml(svc.binaryVersion)}`);
+    if (svc.label)         meta.push(`unit: <code>${escapeHtml(svc.label)}</code>`);
+    if (svc.error)         meta.push(`<span class="muted">${escapeHtml(svc.error)}</span>`);
+    if (!svc.installed) {
+      return `
+        <div class="vpn-section">
+          <div class="vpn-empty">
+            <div class="vpn-empty-title">Not registered with systemd</div>
+            <div class="vpn-empty-detail muted">
+              Daemon is running in standalone mode — fine for use, but
+              won't auto-start at boot. Install the system unit from the
+              <a href="#logs">Logs &rsaquo; nostr-vpn</a> tab.
+            </div>
+          </div>
+          ${meta.length > 0
+            ? `<div class="vpn-kv-row" style="margin-top:14px">
+                <span class="vpn-kv-key">binary</span>
+                <span class="vpn-kv-val">${meta.join(' · ')}</span>
+              </div>`
+            : ''}
+        </div>`;
+    }
+    const pill = (label, on, dim = false) => {
+      const cls = on ? 'ok' : (dim ? 'muted' : 'warn');
+      return `<span class="vpn-svc-pill vpn-svc-pill-${cls}">${on ? '✓' : '✗'} ${escapeHtml(label)}</span>`;
+    };
+    const enabledAtBoot = svc.installed && !svc.disabled;
+    const pills = [
+      pill('installed',       svc.installed),
+      pill('enabled at boot', enabledAtBoot, !svc.installed),
+      pill('loaded',          svc.loaded,    !svc.installed),
+      pill('running',         svc.running,   !svc.installed),
+    ].join('');
+    return `
+      <div class="vpn-section">
+        <div class="vpn-svc-pills" style="margin-bottom:12px">${pills}</div>
+        ${meta.length > 0
+          ? `<div class="vpn-kv-row">
+              <span class="vpn-kv-key">unit</span>
+              <span class="vpn-kv-val">${meta.join(' · ')}</span>
+            </div>`
+          : ''}
+        <div class="vpn-section-footer muted">
+          Install / Reinstall / Enable boot / Disable boot / Remove
+          live on the <a href="#logs">Logs &rsaquo; nostr-vpn</a> tab.
+        </div>
+      </div>`;
   }
   renderServiceBody.wire = () => {};
 
+  // Diagnostics sub-tab — listing of available diagnostic commands
+  // with a one-click runner for the safe read-only ones (netcheck,
+  // stats). Doctor / repair-network / write-bundle remain on the
+  // Logs tab where they have richer output panes.
   function renderDiagnosticsBody() {
-    return `<div class="vpn-empty muted">Diagnostics — netcheck / doctor / repair-network / stats (coming soon).</div>`;
+    return `
+      <div class="vpn-section">
+        <p class="vpn-section-help">
+          Quick diagnostics. Output is shown inline below; for long-form
+          doctor output / support bundles use the
+          <a href="#logs">Logs &rsaquo; nostr-vpn</a> tab.
+        </p>
+        <div class="vpn-diag-actions">
+          <button id="vpn-diag-netcheck">Run netcheck</button>
+          <button id="vpn-diag-stats">Show stats</button>
+          <button id="vpn-diag-reload">Reload config</button>
+        </div>
+        <div class="vpn-diag-result" id="vpn-diag-result"></div>
+      </div>`;
   }
-  renderDiagnosticsBody.wire = () => {};
+  renderDiagnosticsBody.wire = () => {
+    const result = $('vpn-diag-result');
+    const run = async (label, fetcher) => {
+      result.innerHTML = `<div class="muted">running ${escapeHtml(label)}…</div>`;
+      try {
+        const r = await fetcher();
+        result.innerHTML = `<pre class="vpn-diag-pre">${escapeHtml(JSON.stringify(r, null, 2))}</pre>`;
+      } catch (e) {
+        result.innerHTML = `<div class="vpn-diag-err">${escapeHtml(e.message || String(e))}</div>`;
+      }
+    };
+    $('vpn-diag-netcheck').addEventListener('click', () => run('netcheck', () => api('/api/nvpn/netcheck')));
+    $('vpn-diag-stats').addEventListener('click',    () => run('stats',    () => api('/api/nvpn/stats')));
+    $('vpn-diag-reload').addEventListener('click',   () => run('reload',   () => api('/api/nvpn/reload', { method: 'POST' })));
+  };
 
   return {
     onEnter() { void refresh(); },
