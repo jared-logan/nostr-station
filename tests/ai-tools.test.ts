@@ -10,7 +10,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
 
-import { runTool, requiresApproval, listTools, getTool } from '../src/lib/ai-tools/index.js';
+import { runTool, requiresApproval, listTools, getTool, clearAllTodos } from '../src/lib/ai-tools/index.js';
 
 interface MinimalProject {
   id: string; name: string; path: string | null;
@@ -35,6 +35,12 @@ function makeProject(p: string | null, gitCap = false): MinimalProject {
 let ROOT: string;
 beforeEach(() => {
   ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-tools-'));
+  // Todo store is module-level + per-project keyed; without an explicit
+  // reset the 'starts empty' invariant tests would depend on test
+  // ordering (tests reusing `id: 't'` would inherit each other's
+  // todos). Clear on every test so any reordering or future parallel
+  // runner is safe.
+  clearAllTodos();
 });
 
 // ── Registry ────────────────────────────────────────────────────────────

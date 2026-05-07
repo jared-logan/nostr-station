@@ -74,7 +74,10 @@ const todo_read: Tool = {
     const todos = getTodos(ctx.project.id);
     return {
       ok: true,
-      content: { todos, summary: summarize(todos) },
+      // summary lives on the ToolResult envelope (above) and in the
+      // SSE tool_result frame; the model sees a single source of
+      // truth for it. Don't duplicate it inside content.
+      content: { todos },
       summary: summarize(todos),
     };
   },
@@ -135,7 +138,7 @@ const todo_write: Tool = {
     const stored = setTodos(ctx.project.id, next);
     return {
       ok: true,
-      content: { todos: stored, summary: summarize(stored) },
+      content: { todos: stored },
       summary: summarize(stored),
     };
   },

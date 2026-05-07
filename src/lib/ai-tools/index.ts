@@ -33,6 +33,10 @@ import { TOOLS as EXEC_TOOLS } from './exec.js';
 import { TOOLS as TODO_TOOLS } from './todo.js';
 import { TOOLS as BUILD_TOOLS } from './build.js';
 
+// Re-export todo store helpers so test fixtures can reset between cases
+// without reaching into the implementation file.
+export { clearAllTodos } from './todo.js';
+
 export type Permission = 'always' | 'gated';
 
 export interface ToolContext {
