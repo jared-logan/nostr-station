@@ -21,7 +21,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, execSync } from 'child_process';
 import { nip19 } from 'nostr-tools';
-import { readIdentity, isValidRelayUrl } from '../identity.js';
+import { readIdentity, isValidRelayUrl, getGraspServers } from '../identity.js';
 import { seedRepoGitIdentityIfMissing } from '../git-identity.js';
 import { safeHttpUrl } from '../url-safety.js';
 import { readBody, streamExec } from './_shared.js';
@@ -66,11 +66,23 @@ export async function handleNgit(
       res.end(JSON.stringify({ error: 'could not decode npub to hex' }));
       return true;
     }
+    // ngit init publishes kind-30617 announcements to the user's GRASP
+    // servers (relay.ngit.dev, git.shakespeare.diy, etc.) — those events
+    // do NOT propagate to plain read relays like damus.io / nostr.band.
+    // Querying readRelays alone is why Scan ngit came back empty even
+    // when the user has live ngit repos. Union readRelays + GRASP
+    // servers (+ ngitRelay if set) and dedupe so we hit every place an
+    // announcement might live.
     const DEFAULT_DISCOVERY_RELAYS = ['wss://relay.damus.io', 'wss://relay.nostr.band'];
-    const relays = (ident.readRelays && ident.readRelays.length
+    const readRelays = ident.readRelays && ident.readRelays.length
       ? ident.readRelays
-      : DEFAULT_DISCOVERY_RELAYS
-    ).filter(isValidRelayUrl).slice(0, 8);
+      : DEFAULT_DISCOVERY_RELAYS;
+    const graspServers = getGraspServers();
+    const ngitRelay = ident.ngitRelay ? [ident.ngitRelay] : [];
+    const relays = [...readRelays, ...graspServers, ...ngitRelay]
+      .filter(isValidRelayUrl)
+      .filter((r, i, a) => a.indexOf(r) === i)
+      .slice(0, 8);
     if (relays.length === 0) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ repos: [], empty: true, queried: [] }));
