@@ -1,6 +1,10 @@
 /* nostr-station dashboard — dark terminal aesthetic, nostr-purple accent.
    Matches the ostrich-palette tokens from src/cli-ui/palette.ts
-   so the CLI and web UI read as the same product. */
+   so the CLI and web UI read as the same product.
+
+   The accent color is themable via [data-theme] on <html> — see the
+   theme blocks below `:root`. --accent-soft is derived from --accent
+   so each theme only has to set the four accent hexes + --info. */
 
 :root {
   --bg:        #0a0a0a;
@@ -18,7 +22,7 @@
   --accent:       #7B68EE;
   --accent-bright:#9B8FFF;
   --accent-dim:   #5A4FBF;
-  --accent-soft:  rgba(123, 104, 238, 0.12);
+  --accent-soft:  color-mix(in srgb, var(--accent) 12%, transparent);
 
   --success: #3DDC84;
   --warn:    #FFB020;
@@ -34,6 +38,27 @@
   --r-sm: 3px;
   --r:    5px;
   --r-lg: 8px;
+}
+
+/* Accent theme presets — applied via data-theme on <html>. Default
+   (no attribute, or data-theme="purple") keeps the values from :root. */
+:root[data-theme="green"] {
+  --accent:        #3DDC84;
+  --accent-bright: #5BFFA1;
+  --accent-dim:    #2BA862;
+  --info:          #7CE3A8;
+}
+:root[data-theme="red"] {
+  --accent:        #E85555;
+  --accent-bright: #FF8080;
+  --accent-dim:    #B23A3A;
+  --info:          #FF9F9F;
+}
+:root[data-theme="blue"] {
+  --accent:        #4A9EFF;
+  --accent-bright: #7BB4FF;
+  --accent-dim:    #2D6BBF;
+  --info:          #9FBEFF;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1541,6 +1566,47 @@ input:focus, textarea:focus, select:focus {
 .config-row .v { color: var(--text-bright); word-break: break-all; }
 .config-row .v.on  { color: var(--success); }
 .config-row .v.off { color: var(--warn); }
+
+/* Appearance section — theme picker swatches */
+.theme-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.theme-swatch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 120ms, background 120ms, color 120ms;
+}
+.theme-swatch:hover {
+  border-color: var(--border-strong);
+  color: var(--text-bright);
+}
+.theme-swatch.active {
+  border-color: var(--swatch);
+  background: color-mix(in srgb, var(--swatch) 12%, transparent);
+  color: var(--text-bright);
+}
+.theme-swatch .dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--swatch) 50%, transparent);
+}
+.theme-swatch .check {
+  margin-left: 4px;
+  color: var(--swatch);
+  font-weight: 600;
+}
 
 .npub-list {
   display: flex;

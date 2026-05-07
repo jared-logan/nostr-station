@@ -6,6 +6,18 @@
 <title>nostr-station</title>
 <link rel="stylesheet" href="/app.css">
 <link rel="icon" href="/nori.svg" type="image/svg+xml">
+<script>
+  // Apply persisted accent theme before paint to avoid a flash of purple
+  // when the user has picked a different color in the Config panel.
+  (function () {
+    try {
+      var t = localStorage.getItem('nostr-station:theme');
+      if (t && t !== 'purple' && /^(green|red|blue)$/.test(t)) {
+        document.documentElement.setAttribute('data-theme', t);
+      }
+    } catch (_) { /* localStorage may be blocked; default purple is fine */ }
+  })();
+</script>
 </head>
 <body>
 

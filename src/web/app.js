@@ -22,6 +22,66 @@ function escapeHtml(s) {
 
 function stateClass(s) { return s === 'ok' ? 'ok' : s === 'warn' ? 'warn' : 'err'; }
 
+// ── Accent theme ────────────────────────────────────────────────────────
+// The accent color (purple by default) is themable via [data-theme] on
+// <html>. The early boot script in index.html applies the persisted
+// choice before paint; this module owns reads/writes after load and
+// renders the Config → Appearance picker.
+const THEMES = [
+  { id: 'purple', label: 'Purple', swatch: '#7B68EE' },
+  { id: 'green',  label: 'Green',  swatch: '#3DDC84' },
+  { id: 'red',    label: 'Red',    swatch: '#E85555' },
+  { id: 'blue',   label: 'Blue',   swatch: '#4A9EFF' },
+];
+const THEME_STORAGE_KEY = 'nostr-station:theme';
+
+function getTheme() {
+  try {
+    const t = localStorage.getItem(THEME_STORAGE_KEY);
+    if (t && THEMES.some(x => x.id === t)) return t;
+  } catch (_) { /* ignore */ }
+  return 'purple';
+}
+function setTheme(id) {
+  if (!THEMES.some(x => x.id === id)) return;
+  if (id === 'purple') {
+    document.documentElement.removeAttribute('data-theme');
+  } else {
+    document.documentElement.setAttribute('data-theme', id);
+  }
+  try { localStorage.setItem(THEME_STORAGE_KEY, id); } catch (_) { /* ignore */ }
+}
+function renderThemePicker() {
+  const current = getTheme();
+  return `<div class="theme-picker" id="cfg-theme-picker">${
+    THEMES.map(t => `
+      <button type="button"
+              class="theme-swatch ${t.id === current ? 'active' : ''}"
+              data-theme-id="${t.id}"
+              style="--swatch:${t.swatch}">
+        <span class="dot"></span>
+        <span>${escapeHtml(t.label)}</span>
+        ${t.id === current ? '<span class="check">✓</span>' : ''}
+      </button>
+    `).join('')
+  }</div>`;
+}
+function wireThemePicker() {
+  const root = $('cfg-theme-picker');
+  if (!root) return;
+  root.addEventListener('click', (e) => {
+    const btn = e.target.closest('.theme-swatch');
+    if (!btn) return;
+    const id = btn.dataset.themeId;
+    if (!id || id === getTheme()) return;
+    setTheme(id);
+    // Re-render swatches in place — cheaper than reloading the whole
+    // panel and keeps focus state on the picker.
+    root.outerHTML = renderThemePicker();
+    wireThemePicker();
+  });
+}
+
 const toast = (() => {
   const host = () => $('toasts');
   return function toast(title, body, kind = 'ok') {
@@ -7076,6 +7136,19 @@ const ConfigPanel = (() => {
       </div>`).join('');
 
     container.innerHTML = `
+      <div class="config-section" id="cfg-appearance-section">
+        <h3>Appearance</h3>
+        <div class="config-row">
+          <div class="k">Accent color</div>
+          <div class="v">
+            ${renderThemePicker()}
+            <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
+              Recolors UI accents (links, active nav, primary buttons). Persists in this browser.
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="config-section">
         <h3>Relay</h3>
         ${row('Name', rc.name || '—')}
@@ -7300,6 +7373,9 @@ const ConfigPanel = (() => {
 
 
     `;
+
+    // Appearance — accent theme picker (purple/green/red/blue)
+    wireThemePicker();
 
     // Wire toggles
     $('cfg-auth').addEventListener('change', (e) => saveRelayFlag('auth', e.target.checked));
