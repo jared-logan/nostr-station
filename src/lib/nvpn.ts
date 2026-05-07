@@ -41,6 +41,48 @@ import type { LogBuffer } from './log-buffer.js';
 // can take a couple of seconds; the daemon may still be tearing down).
 export const nvpnEvents = new EventEmitter();
 
+// ── Probe cache primitive ───────────────────────────────────────────────
+//
+// Every API surface that needs nvpn state used to spawn its own
+// `nvpn status --json` (or `nvpn service status --json`) subprocess —
+// /api/status, /api/nvpn/status, the SSE banner-frame, gatherStatus,
+// loadVpnDetail, etc. A single Config-panel open could fan out to 4–5
+// concurrent probes, each bounded at 4s. On a slow daemon this stacked
+// up enough to make the dashboard feel sluggish.
+//
+// memoizeWithTtl wraps an async fn with a TTL cache that ALSO dedupes
+// in-flight calls — concurrent callers within the window share one
+// promise, so we spawn at most one subprocess per TTL slice. State
+// hardly moves second-to-second; 2s is short enough that nothing
+// surprising goes stale, long enough to absorb the typical burst of
+// concurrent calls a single panel render emits.
+//
+// On error we drop the cache so the next caller retries (a wedged
+// daemon shouldn't sticky-cache its own failure for the full TTL).
+// Action helpers also call .invalidate() via the state-changed event
+// below, so a Stop/Start round-trip never sees pre-action cached data.
+
+export type Memoized<T> = (() => Promise<T>) & { invalidate: () => void };
+
+export function memoizeWithTtl<T>(fn: () => Promise<T>, ttlMs: number): Memoized<T> {
+  let cache: { fetchedAt: number; promise: Promise<T> } | null = null;
+  const wrapped = (() => {
+    const now = Date.now();
+    if (cache && now - cache.fetchedAt < ttlMs) return cache.promise;
+    const promise = fn();
+    cache = { fetchedAt: now, promise };
+    // Drop the cached entry on rejection so the next caller retries.
+    // Guard with identity check in case .invalidate() (or another fresh
+    // call) replaced the cache slot while we were awaiting.
+    promise.catch(() => { if (cache && cache.promise === promise) cache = null; });
+    return promise;
+  }) as Memoized<T>;
+  wrapped.invalidate = () => { cache = null; };
+  return wrapped;
+}
+
+const PROBE_CACHE_TTL_MS = 2_000;
+
 // ── Status ────────────────────────────────────────────────────────────────
 
 // Schema-flexible — upstream `nvpn status --json` shape has shifted across
@@ -81,7 +123,7 @@ export interface NvpnStatus {
 const STATUS_TIMEOUT_MS = 4_000;
 const CONTROL_TIMEOUT_MS = 20_000;
 
-export async function probeNvpnStatus(): Promise<NvpnStatus> {
+async function probeNvpnStatusUncached(): Promise<NvpnStatus> {
   const binPath = findBin('nvpn');
   const fetchedAt = Date.now();
   if (!binPath) {
@@ -112,6 +154,12 @@ export async function probeNvpnStatus(): Promise<NvpnStatus> {
   const tunnelIp = (raw?.tunnel_ip as string) ?? null;
   return { installed: true, binPath, running, tunnelIp, raw, error, fetchedAt };
 }
+
+// Public probe — TTL-cached + concurrent-call deduped (see memoizeWithTtl
+// rationale above). Routes / SSE / gatherStatus all call this; it spawns
+// at most one nvpn subprocess per PROBE_CACHE_TTL_MS slice.
+export const probeNvpnStatus: Memoized<NvpnStatus> =
+  memoizeWithTtl(probeNvpnStatusUncached, PROBE_CACHE_TTL_MS);
 
 // ── Control ───────────────────────────────────────────────────────────────
 
@@ -198,7 +246,7 @@ export interface NvpnServiceStatus {
   error:         string | null;
 }
 
-export async function probeNvpnServiceStatus(): Promise<NvpnServiceStatus> {
+async function probeNvpnServiceStatusUncached(): Promise<NvpnServiceStatus> {
   const binPath = findBin('nvpn');
   if (!binPath) {
     return {
@@ -240,6 +288,25 @@ function svcErrorResponse(error: string): NvpnServiceStatus {
     raw: null, error,
   };
 }
+
+// Public service-status probe — same cache treatment as probeNvpnStatus
+// above. Used by the SSE banner's running fallback, the Logs-panel meta
+// strip, and the renderServiceBlock UI.
+export const probeNvpnServiceStatus: Memoized<NvpnServiceStatus> =
+  memoizeWithTtl(probeNvpnServiceStatusUncached, PROBE_CACHE_TTL_MS);
+
+// ── Cache invalidation on lifecycle events ────────────────────────────
+//
+// Listener registers at module load, before any per-connection SSE
+// listener — EventEmitter dispatches in registration order so the cache
+// busts before the SSE handler awaits a fresh probe. Without this, a
+// Stop click would emit state-changed → SSE handler probes → cache
+// returns the pre-stop value still inside its 2s window, the meta strip
+// renders "running" for a beat before the next user-driven probe.
+nvpnEvents.on('state-changed', () => {
+  probeNvpnStatus.invalidate();
+  probeNvpnServiceStatus.invalidate();
+});
 
 // `sudo -n` so it fails fast on an empty cred cache. The dashboard runs
 // without a TTY for prompting; the user has to have run a sudo command
