@@ -152,11 +152,11 @@ export function watchdogStateFor(p: WatchdogProbe): { value: string; state: Serv
 // nvpn probe — separate from watchdog so each can fail cleanly. Three
 // sub-states stack underneath the binary-present split:
 //   binary missing     → err  · "not installed"
-//   binary present, no daemon response within 1s → warn · "not connected"
-//   binary present + daemon up + tunnel_ip set    → ok   · tunnel IP
+//   binary present, no daemon response within timeout → warn · "not connected"
+//   binary present + daemon up + tunnel_ip set         → ok   · tunnel IP
 // `nvpn status --json` may hang indefinitely on a daemon socket that's
-// listening but wedged; we cap it tight (1s) and treat any failure as
-// "not connected" rather than blocking the whole /api/status call.
+// listening but wedged; we cap it (a few seconds) and treat any failure
+// as "not connected" rather than blocking the whole /api/status call.
 export interface NvpnProbe {
   binPresent: boolean;
   meshIp:     string | null;
@@ -183,14 +183,16 @@ export function gatherStatus(): ServiceStatus[] {
   const probePort = Number(process.env.RELAY_PORT || '7777');
   const relayUp   = cmd(`nc -z -w 1 ${probeHost} ${probePort}`, 1500) !== null;
 
-  // nvpn probe — binary on PATH, then a tight 1s `nvpn status --json` to
-  // pull the tunnel IP. We cap aggressively because the daemon socket can
-  // hang indefinitely when nvpn is installed but the mesh peer is down.
+  // nvpn probe — binary on PATH, then `nvpn status --json` to pull the
+  // tunnel IP. The daemon socket can hang indefinitely when the mesh peer
+  // is down, so we still cap; 4s matches the dashboard's banner probe and
+  // is forgiving enough that a healthy-but-loaded daemon doesn't get
+  // mis-reported as "not connected" on a transient stall.
   const nvpnPath = findBin('nvpn');
   const meshIp = (() => {
     if (!nvpnPath) return null;
     try {
-      const out = cmd(`${nvpnPath} status --json`, 1000);
+      const out = cmd(`${nvpnPath} status --json`, 4000);
       return out ? JSON.parse(out)?.tunnel_ip ?? null : null;
     } catch { return null; }
   })();

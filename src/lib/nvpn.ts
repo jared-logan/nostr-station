@@ -60,7 +60,13 @@ export interface NvpnStatus {
   fetchedAt:    number;
 }
 
-const STATUS_TIMEOUT_MS = 1500;
+// `nvpn status --json` walks the relay set + collects session state, so a
+// healthy daemon under modest load can take a couple of seconds. Tighter
+// budgets (we ran with 1.5s previously) caused the dashboard to flap the
+// "stopped" banner whenever the probe stalled briefly, even with the
+// daemon clearly running per systemd. 4s gives the daemon room and stays
+// well under the 5s status tick.
+const STATUS_TIMEOUT_MS = 4_000;
 const CONTROL_TIMEOUT_MS = 20_000;
 
 export async function probeNvpnStatus(): Promise<NvpnStatus> {
@@ -82,9 +88,12 @@ export async function probeNvpnStatus(): Promise<NvpnStatus> {
     catch (e: any) { error = `unparseable status JSON: ${(e?.message || '').slice(0, 120)}`; }
   } catch (e: any) {
     // execa surfaces both timeout and non-zero exit via thrown errors. We
-    // collapse both to a short single-line string for the UI; the binary
-    // not responding within 1.5s means the daemon socket is wedged or
-    // not listening — which we represent as `running: false`.
+    // collapse both to a short single-line string for the UI. NB: a probe
+    // failure leaves `running: false` because we never saw a daemon.running
+    // payload — but consumers must NOT read that as "daemon stopped" on its
+    // own. A wedged or slow socket on a healthy daemon hits this same
+    // branch; the banner code in web-server.ts cross-checks
+    // probeNvpnServiceStatus() before flipping the user-facing pill.
     error = (e?.shortMessage || e?.message || String(e)).slice(0, 240);
   }
   const running  = !!raw?.daemon?.running;
@@ -1087,4 +1096,35 @@ export function nvpnRowStateFor(p: NvpnRowProbe): NvpnRowState {
   if (!p.running)     return { state: 'warn', value: 'not connected', ok: false };
   if (p.tunnelIp)     return { state: 'ok',   value: p.tunnelIp,      ok: true  };
   return { state: 'warn', value: 'running, no tunnel ip',             ok: false };
+}
+
+// ── Banner running decision ─────────────────────────────────────────────
+//
+// The Logs panel banner needs a single boolean — "should we tell the user
+// the daemon is stopped and offer them a Start button?" — but a brief
+// stall on `nvpn status --json` is not enough evidence to claim the
+// daemon is down. Systemd / launchd already know whether the process is
+// running; we cross-check against that signal whenever the direct probe
+// errored out (timeout, broken socket, transient nvpn crash mid-call).
+//
+// Decision table (D = direct probe, S = service probe):
+//   D.running:true                       → running:true   (happy path)
+//   D.running:false, no D.error          → running:false  (daemon really stopped)
+//   D.running:false, D.error, S.running  → running:true   (probe stalled, process alive)
+//   D.running:false, D.error, !S.running → running:false  (process down)
+//
+// Pure + exported for tests. Caller passes the same NvpnStatus shape
+// probeNvpnStatus emits and (optionally) a NvpnServiceStatus from
+// probeNvpnServiceStatus; passing `null` for the service skips the
+// fallback and is equivalent to "no second opinion available."
+export function vpnBannerRunningFor(
+  direct: Pick<NvpnStatus, 'installed' | 'running' | 'error'>,
+  service: Pick<NvpnServiceStatus, 'running'> | null,
+): boolean {
+  if (!direct.installed) return false;
+  if (direct.running)    return true;
+  // direct probe says not-running. If it errored, the answer is unknown
+  // until we consult the service supervisor.
+  if (direct.error && service && service.running) return true;
+  return false;
 }
