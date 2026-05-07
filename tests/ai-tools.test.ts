@@ -409,13 +409,22 @@ test('build_project: failure path surfaces stderr + non-zero exit', async () => 
   assert.match(r.content.stderr, /nope/);
 });
 
-test('build_project: gated in read-only, auto-approves in auto-edit', () => {
-  // requiresApproval returns false in auto-edit for everything except
-  // run_command — build_project rides that exception, which is the
-  // whole point: self-correction loops shouldn't pause for approval
-  // every iteration.
+test('build_project: gated in read-only AND auto-edit (closes the edit-then-build escape)', () => {
+  // build_project rides the same line as run_command in auto-edit.
+  // A prior version of this branch let it auto-approve (alongside
+  // file writes) but a security review caught the chain: write tools
+  // auto-approve, so a hostile model could apply_patch package.json's
+  // scripts.build to an arbitrary shell payload, then call
+  // build_project to execute it via `npm run build`. The run_command
+  // DENYLIST never fires because the spawned binary is hard-coded
+  // `npm`. Gating build_project in auto-edit closes the chain — the
+  // user sees a preview of the resolved scripts.build string before
+  // any build runs (see summarizeForPreview in tool-loop.ts).
+  //
+  // YOLO still auto-approves: the whole point of YOLO is "I trust
+  // the agent, run everything", and that's a deliberate user choice.
   assert.equal(requiresApproval('build_project', 'read-only'), true);
-  assert.equal(requiresApproval('build_project', 'auto-edit'), false);
+  assert.equal(requiresApproval('build_project', 'auto-edit'), true);
   assert.equal(requiresApproval('build_project', 'yolo'),      false);
 });
 

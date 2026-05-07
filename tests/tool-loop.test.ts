@@ -307,6 +307,70 @@ test('anthropic: approval approve actually executes the tool', async () => {
   assert.equal(fs.readFileSync(path.join(ROOT, 'approved.txt'), 'utf8'), 'landed');
 });
 
+// ── Approval preview: build_project surfaces resolved script ─────────────
+
+test('build_project: approval preview shows the resolved scripts.build content', async () => {
+  // Pins the security defence-in-depth shipped after the auto-edit
+  // sandbox-escape review: when build_project gates for approval,
+  // the preview must include the actual script string from
+  // package.json so a hostile edit-then-build chain (apply_patch
+  // rewrites scripts.build → calls build_project) shows the
+  // injected payload in the approval modal instead of a generic
+  // "build?" prompt.
+  fs.writeFileSync(path.join(ROOT, 'package.json'), JSON.stringify({
+    name: 'preview-test', version: '0.0.0',
+    scripts: { build: 'vite build --mode test' },
+  }));
+  let call = 0;
+  globalThis.fetch = async () => {
+    call++;
+    if (call === 1) {
+      return sseStream([
+        anthMessageStart('claude'),
+        anthBlockStartTool(0, 'tu_1', 'build_project'),
+        anthInputJsonDelta(0, '{}'),
+        anthBlockStop(0),
+        anthMessageDelta('tool_use'),
+      ]);
+    }
+    // After rejection the loop continues for a wrap-up turn.
+    return sseStream([
+      anthBlockStartText(0),
+      anthTextDelta(0, 'Cancelled.'),
+      anthBlockStop(0),
+      anthMessageDelta('end_turn'),
+    ]);
+  };
+
+  const sid = createSession();
+  const { res, lines } = makeRes();
+  const requestP = streamAnthropicWithTools(
+    [{ role: 'user', content: 'build it' }],
+    'system',
+    { isAnthropic: true, baseUrl: '', model: 'claude', apiKey: 'k', providerName: 'Anthropic' },
+    res,
+    { project: makeProject(ROOT) as any, permissions: 'auto-edit' },   // would have auto-approved pre-fix
+    sid,
+  );
+
+  // Approval is now required in auto-edit (the fix).
+  let approvalEvent: any = null;
+  const start = Date.now();
+  while (Date.now() - start < 1000) {
+    await new Promise(r => setTimeout(r, 10));
+    approvalEvent = lines.map(l => JSON.parse(l)).find(e => e.type === 'approval_request');
+    if (approvalEvent) break;
+  }
+  assert.ok(approvalEvent, 'build_project must require approval in auto-edit (sandbox escape fix)');
+  // Preview surfaces the resolved script body — not just the empty argv.
+  assert.equal(approvalEvent.preview?.command, 'npm run build');
+  assert.equal(approvalEvent.preview?.script,  'vite build --mode test');
+
+  resolveApproval(sid, approvalEvent.approvalId, 'reject');
+  await requestP;
+  destroySession(sid);
+});
+
 // ── OpenAI tool loop ──────────────────────────────────────────────────────
 
 test('openai: text + tool_calls round-trip', async () => {

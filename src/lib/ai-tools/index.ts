@@ -93,8 +93,21 @@ export function requiresApproval(toolName: string, mode: PermissionMode): boolea
   // 'gated' tools depend on the mode.
   if (mode === 'yolo')      return false;
   if (mode === 'auto-edit') {
-    // auto-edit: file writes auto-approved; exec still gated.
-    return tool.name === 'run_command';
+    // auto-edit: file writes auto-approve; the two tools that can
+    // execute arbitrary user-supplied process commands stay gated.
+    //
+    // build_project rides the same line as run_command because of
+    // the edit-then-build escape: write tools are auto-approved in
+    // this mode, so a hostile model (e.g. via prompt injection
+    // through document content the agent reads) can use apply_patch
+    // to overwrite package.json's scripts.build with an arbitrary
+    // shell payload, then call build_project to execute it via
+    // `npm run build`. The run_command DENYLIST never fires
+    // because the spawned binary is hard-coded `npm`. Gating
+    // build_project here closes the chain — the user sees a
+    // preview of the resolved scripts.build string before any
+    // build runs (see summarizeForPreview in tool-loop.ts).
+    return tool.name === 'run_command' || tool.name === 'build_project';
   }
   // 'read-only' (default) — every gated tool needs approval.
   return true;

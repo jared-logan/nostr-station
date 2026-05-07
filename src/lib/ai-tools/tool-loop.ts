@@ -35,6 +35,8 @@
  */
 
 import http from 'http';
+import { readFileSync } from 'fs';
+import { join as joinPath } from 'path';
 import {
   runTool, requiresApproval, getTool,
   toolsForAnthropic, toolsForOpenAI,
@@ -89,7 +91,7 @@ function emit(res: http.ServerResponse, payload: any): void {
   try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {}
 }
 
-function summarizeForPreview(toolName: string, args: any): any {
+function summarizeForPreview(toolName: string, args: any, ctx: ToolContext | null): any {
   // Strip large fields so the approval request stays human-readable.
   if (toolName === 'write_file') {
     const content = String(args?.content ?? '');
@@ -104,6 +106,27 @@ function summarizeForPreview(toolName: string, args: any): any {
   }
   if (toolName === 'run_command') {
     return { argv: args?.argv, cwd: args?.cwd, timeoutMs: args?.timeoutMs };
+  }
+  // build_project resolves the actual command from package.json at
+  // approve-time so the user sees the script body that will run, not
+  // just a generic "build?" prompt. Critical for catching the
+  // edit-then-build escape: a hostile apply_patch to package.json
+  // would show up as a payload in scripts.build here, distinct from
+  // a benign "vite build" / "tsc -p ." that a real project ships.
+  if (toolName === 'build_project' && ctx?.project?.path) {
+    let scripts: { build?: string; compile?: string } = {};
+    try {
+      const pkgRaw = readFileSync(joinPath(ctx.project.path, 'package.json'), 'utf8');
+      const pkg = JSON.parse(pkgRaw);
+      if (pkg?.scripts?.build   && typeof pkg.scripts.build   === 'string') scripts.build   = pkg.scripts.build;
+      if (pkg?.scripts?.compile && typeof pkg.scripts.compile === 'string') scripts.compile = pkg.scripts.compile;
+    } catch { /* malformed / missing — handler will surface its own error */ }
+    return {
+      cwd:      ctx.project.path,
+      command:  scripts.build ? 'npm run build' : (scripts.compile ? 'npm run compile' : '(none — handler will refuse)'),
+      script:   scripts.build ?? scripts.compile ?? null,
+      timeoutMs: args?.timeoutMs,
+    };
   }
   return args;
 }
@@ -486,7 +509,7 @@ async function dispatchOne(
       approvalId,
       name,
       args,
-      preview:    summarizeForPreview(name, args),
+      preview:    summarizeForPreview(name, args, ctx),
     });
     let decision: ApprovalDecision = 'reject';
     try { decision = await promise; }
