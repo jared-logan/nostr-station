@@ -53,19 +53,19 @@
         var repeat = bgMode === 'tile' ? 'repeat' : 'no-repeat';
         var fallback = background || '#0a0a0a';
         rootDecls.push('--bg: ' + fallback);
-        rootDecls.push('--bg-elev:       rgba(0, 0, 0, 0.55)');
-        rootDecls.push('--bg-card:       rgba(0, 0, 0, 0.50)');
-        rootDecls.push('--bg-hover:      rgba(255, 255, 255, 0.06)');
-        rootDecls.push('--border:        rgba(255, 255, 255, 0.12)');
-        rootDecls.push('--border-strong: rgba(255, 255, 255, 0.20)');
+        rootDecls.push('--bg-elev:       rgba(0, 0, 0, 0.72)');
+        rootDecls.push('--bg-card:       rgba(0, 0, 0, 0.65)');
+        rootDecls.push('--bg-hover:      rgba(255, 255, 255, 0.08)');
+        rootDecls.push('--border:        rgba(255, 255, 255, 0.16)');
+        rootDecls.push('--border-strong: rgba(255, 255, 255, 0.28)');
         var safeUrl = bgImage.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         var bodyCss = ':root[data-theme="ditto"] body {' +
-          ' background-image: url("' + safeUrl + '");' +
+          ' background-image: linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.6)), url("' + safeUrl + '");' +
           ' background-color: ' + fallback + ';' +
-          ' background-size: ' + size + ';' +
-          ' background-position: center center;' +
-          ' background-repeat: ' + repeat + ';' +
-          ' background-attachment: fixed;' +
+          ' background-size: 100% 100%, ' + size + ';' +
+          ' background-position: center center, center center;' +
+          ' background-repeat: no-repeat, ' + repeat + ';' +
+          ' background-attachment: fixed, fixed;' +
           ' }';
         var headerCss = ':root[data-theme="ditto"] .header {' +
           ' background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.45) 100%);' +
