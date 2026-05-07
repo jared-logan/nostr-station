@@ -282,23 +282,35 @@ export async function syncProject(project: Project): Promise<SyncResult> {
 
   // ── ngit ───────────────────────────────────────────────────────────
   //
-  // Two phases: local fetch via the ngit binary, then a kind-1617
-  // proposals query against the project's relay set. Proposals come
-  // back as a first-class array on the result (NOT flattened into a
-  // generic message) so the dashboard can render them as a count badge.
-
-  const ngitBin = findBin('ngit');
-  if (!ngitBin) {
-    return { ok: false, backend: 'ngit', message: 'ngit not found on PATH' };
+  // Two phases: local fetch via stock git (ngit-remote-nostr handles
+  // the protocol), then a kind-1617 proposals query against the
+  // project's relay set. Proposals come back as a first-class array
+  // on the result (NOT flattened into a generic message) so the
+  // dashboard can render them as a count badge.
+  //
+  // Pre-fix this spawned `ngit fetch`. ngit 2.x dropped the `fetch`
+  // subcommand — fetching from a nostr remote is now stock git
+  // against the nostr:// origin URL, with the git-remote-nostr
+  // helper (installed alongside ngit, see src/lib/ngit-installer.ts)
+  // handling the relay query + grasp-server pull under the hood.
+  // We still gate on findBin('ngit') because the helper relies on
+  // ngit being installed; without it, git would fail with
+  // "fatal: protocol 'nostr' is not supported".
+  if (!findBin('ngit')) {
+    return { ok: false, backend: 'ngit', message: 'ngit not found on PATH (provides git-remote-nostr helper)' };
+  }
+  const gitBinNgit = findBin('git');
+  if (!gitBinNgit) {
+    return { ok: false, backend: 'ngit', message: 'git not found on PATH' };
   }
 
   try {
-    await execFileAsync(ngitBin, ['fetch'],
+    await execFileAsync(gitBinNgit, ['fetch', 'origin'],
       { cwd: project.path, timeout: 30_000 });
   } catch (e: any) {
     return {
       ok: false, backend: 'ngit',
-      message: `ngit fetch failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`,
+      message: `git fetch origin failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`,
     };
   }
 

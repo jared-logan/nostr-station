@@ -332,23 +332,32 @@ export async function handleProjects(
       // Route based on which capabilities are enabled.
       // git + ngit → nostr-station publish --yes (handles both remotes)
       // git only   → git push origin HEAD
-      // ngit only  → ngit push
+      // ngit only  → git push origin HEAD via git-remote-nostr
+      //
+      // ngit 2.x dropped the `ngit push` subcommand entirely — pushing
+      // is now stock git against a nostr:// remote URL, with the
+      // git-remote-nostr helper (installed alongside the ngit binary)
+      // handling the actual signing + relay publishing under the hood.
+      // ngit init configures `origin` to the nostr URL, so the same
+      // `git push origin HEAD` works across git, ngit, and combined
+      // projects — only the helper / endpoint at the other end differs.
       let spec: CmdSpec;
       if (project.capabilities.git && project.capabilities.ngit) {
         spec = { bin: process.execPath, args: [CLI_BIN, 'publish', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
-      } else if (project.capabilities.git) {
+      } else if (project.capabilities.git || project.capabilities.ngit) {
         // Preflight: if the repo has no `origin` remote, git push would
         // fail with a cryptic "fatal: 'origin' does not appear…". Surface
         // a readable error through the existing SSE modal instead.
         try {
           execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: project.path, stdio: 'pipe' });
         } catch {
-          streamExecError(res, req, "No git remote named 'origin' — add one in project Settings.");
+          const hint = project.capabilities.ngit
+            ? "No git remote named 'origin' — run `ngit init` from the project's ngit tab to configure one."
+            : "No git remote named 'origin' — add one in project Settings.";
+          streamExecError(res, req, hint);
           return true;
         }
         spec = { bin: 'git', args: ['push', 'origin', 'HEAD'] };
-      } else if (project.capabilities.ngit) {
-        spec = { bin: 'ngit', args: ['push'] };
       } else {
         res.writeHead(400); res.end('no push-capable capability enabled'); return true;
       }
@@ -410,10 +419,19 @@ export async function handleProjects(
     }
     if (tail === 'ngit/push' && method === 'POST') {
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+      // ngit 2.x dropped `ngit push` — pushing is now stock `git push`
+      // against the nostr:// origin URL, with git-remote-nostr (the
+      // protocol helper installed alongside ngit) doing the signing
+      // + relay publishing. Same shape as /git/push above; this
+      // endpoint stays distinct because the ngit-tab Push button
+      // wires to it specifically.
       // 3-min timeout — Amber sign round-trip + grasp-server upload
       // for a busy repo can take a while; the line-cap still kills
-      // any retry-loop in well under that.
-      streamExec({ bin: 'ngit', args: ['push'], timeoutMs: 180_000 }, res, req, project.path);
+      // any retry-loop well under that.
+      streamExec(
+        { bin: 'git', args: ['push', 'origin', 'HEAD'], timeoutMs: 180_000 },
+        res, req, project.path,
+      );
       return true;
     }
 
@@ -441,11 +459,16 @@ export async function handleProjects(
       const onClientClose = () => { killed = true; };
       req.on('close', onClientClose);
 
-      const runPhase = (label: string, args: string[]): Promise<number> =>
+      // ngit 2.x dropped both `ngit fetch` and `ngit push` — the 2.x
+      // model is stock git via the git-remote-nostr helper. So both
+      // phases here spawn `git` against the nostr:// origin URL
+      // (configured by `ngit init`), and the helper handles the
+      // protocol-specific work transparently.
+      const runPhase = (label: string, bin: string, args: string[]): Promise<number> =>
         new Promise((resolve) => {
           if (killed) return resolve(-1);
           emit({ line: `▸ ${label}`, stream: 'stdout' });
-          const child = spawn('ngit', args, { stdio: ['ignore', 'pipe', 'pipe'], env, cwd });
+          const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], env, cwd });
           const pipe = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
             for (const line of chunk.toString().split('\n')) {
               if (line.length) emit({ line, stream });
@@ -463,14 +486,14 @@ export async function handleProjects(
         });
 
       try {
-        const fetchCode = await runPhase('ngit fetch', ['fetch']);
+        const fetchCode = await runPhase('git fetch origin', 'git', ['fetch', 'origin']);
         if (fetchCode !== 0) {
           emit({ line: `pull failed (exit ${fetchCode}) — skipping push`, stream: 'stderr' });
           emit({ done: true, code: fetchCode });
           try { res.end(); } catch {}
           return true;
         }
-        const pushCode = await runPhase('ngit push', ['push']);
+        const pushCode = await runPhase('git push origin HEAD', 'git', ['push', 'origin', 'HEAD']);
         emit({ done: true, code: pushCode });
       } finally {
         try { res.end(); } catch {}
@@ -479,17 +502,28 @@ export async function handleProjects(
     }
     if (tail === 'ngit/send' && method === 'POST') {
       // Opens a proposal (kind-1617 + patch events) from the current
-      // branch by spawning `ngit send`. ngit pulls the branch state
-      // and signing identity from the local repo + Amber session;
-      // there are no user-supplied args to validate. The frontend
-      // gates the button on (ngit cap + non-default branch + ahead
-      // count > 0) so the SSE modal only opens with something to
-      // actually send. Streaming output here is essential — `ngit
-      // send` triggers Amber sign prompts on the user's phone, and
-      // the modal is how the user knows to look at their device.
+      // branch by spawning `ngit send --defaults`. ngit pulls the
+      // branch state and signing identity from the local repo +
+      // Amber session; --defaults lets it pick subject/description
+      // from the commit message non-interactively (vs. the
+      // --interactive flag which would prompt for values via stdin
+      // and stall in the SSE modal). The frontend gates the button
+      // on (ngit cap + non-default branch + ahead count > 0) so the
+      // SSE modal only opens with something to actually send.
+      //
+      // Pre-fix this called bare `ngit send`, which on ngit 2.x
+      // errors with "ngit send requires additional arguments" — the
+      // CLI requires either <SINCE_OR_RANGE>, --defaults, or
+      // --interactive. --defaults is the headless-friendly choice;
+      // future commits can layer a UI for picking SINCE_OR_RANGE
+      // when users want PR boundaries narrower than HEAD.
+      //
+      // Streaming output here is essential — `ngit send` triggers
+      // Amber sign prompts on the user's phone, and the modal is
+      // how the user knows to look at their device.
       if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
       streamExec(
-        { bin: 'ngit', args: ['send'], env: { NO_COLOR: '1', TERM: 'dumb' } },
+        { bin: 'ngit', args: ['send', '--defaults'], env: { NO_COLOR: '1', TERM: 'dumb' } },
         res, req, project.path,
       );
       return true;
