@@ -6,8 +6,8 @@
  * Nostr-relay plumbing it doesn't need to see.
  *
  * Surface (verbatim from the pre-refactor inline blocks):
- *   GET    /api/identity/config                — npub / readRelays / ngitRelay / graspServers
- *   POST   /api/identity/set                   — npub | ngitRelay | setupComplete
+ *   GET    /api/identity/config                — npub / readRelays / graspServers
+ *   POST   /api/identity/set                   — npub | setupComplete
  *   POST   /api/identity/relays/add            — append a read relay
  *   POST   /api/identity/relays/remove         — remove a read relay
  *   POST   /api/identity/grasp/add             — append a grasp server
@@ -24,7 +24,7 @@
 import http from 'http';
 import { WebSocket } from 'ws';
 import { readIdentity, addReadRelay, removeReadRelay,
-  setNpub as setIdentityNpub, setNgitRelay as setIdentityNgitRelay,
+  setNpub as setIdentityNpub,
   setSetupComplete, isNpubOrHex, isNsec,
   DEFAULT_READ_RELAYS, hexToNpub, npubToHex,
   getGraspServers, addGraspServer, removeGraspServer,
@@ -169,7 +169,6 @@ export async function handleIdentity(
     res.end(JSON.stringify({
       npub:         ident.npub,
       readRelays:   ident.readRelays,
-      ngitRelay:    ident.ngitRelay || '',
       // graspServers always returns a non-empty list — getGraspServers()
       // falls back to DEFAULT_GRASP_SERVERS when the user hasn't yet
       // touched the list, so the dashboard can render the section
@@ -186,33 +185,26 @@ export async function handleIdentity(
     catch { res.writeHead(400); res.end('bad json'); return true; }
     // Fields accepted by this route:
     //   - npub          (bootstrap owner)
-    //   - ngitRelay     (station-level default for ngit)
     //   - setupComplete (wizard progress marker — see localhostExempt)
     // All optional; handler updates whichever is present.
-    const hasNpub     = typeof parsed.npub      === 'string';
-    const hasNgitRly  = typeof parsed.ngitRelay === 'string';
-    const hasSetup    = typeof parsed.setupComplete === 'boolean';
-    if (!hasNpub && !hasNgitRly && !hasSetup) {
+    const hasNpub  = typeof parsed.npub === 'string';
+    const hasSetup = typeof parsed.setupComplete === 'boolean';
+    if (!hasNpub && !hasSetup) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: 'nothing to update' }));
       return true;
     }
     let npubResult: { ok: boolean; error?: string; npub?: string } | null = null;
-    let ngitResult: { ok: boolean; error?: string; ngitRelay?: string } | null = null;
     if (hasNpub) {
       npubResult = setIdentityNpub(String(parsed.npub || '').trim());
       if (npubResult.ok) bustProfileCache();
     }
-    if (hasNgitRly) {
-      ngitResult = setIdentityNgitRelay(String(parsed.ngitRelay || '').trim());
-    }
     if (hasSetup) {
       setSetupComplete(parsed.setupComplete);
     }
-    const ok = (!npubResult || npubResult.ok) && (!ngitResult || ngitResult.ok);
+    const ok = !npubResult || npubResult.ok;
     const body: any = { ok };
     if (npubResult) { if (npubResult.npub) body.npub = npubResult.npub; if (npubResult.error) body.error = npubResult.error; }
-    if (ngitResult) { if (ngitResult.ngitRelay !== undefined) body.ngitRelay = ngitResult.ngitRelay; if (ngitResult.error) body.error = ngitResult.error; }
     res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
     return true;

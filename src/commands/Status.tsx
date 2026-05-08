@@ -5,7 +5,6 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { readIdentity } from '../lib/identity.js';
 import { findBin, hasBin } from '../lib/detect.js';
 import { HEARTBEAT_FILE } from '../lib/watchdog.js';
 
@@ -19,8 +18,7 @@ export type ServiceState = 'ok' | 'warn' | 'err';
 // `kind` lets the dashboard group entries in both the sidebar Service Health
 // list and the Status panel — services (daemons / scheduled jobs with a
 // running state) get colored dots; binaries (CLI tools that are installed or
-// not) get ✓/✗ glyphs, with a yellow ! reserved for the rare binary that has
-// a warn-worthy mid-state (ngit installed but no default relay configured).
+// not) get ✓/✗ glyphs.
 export type ServiceKind = 'service' | 'binary';
 
 export interface ServiceStatus {
@@ -211,20 +209,14 @@ export function gatherStatus(): ServiceStatus[] {
   })();
   const wdRow = watchdogStateFor(wdProbe);
 
-  const ngitBin   = hasBin('ngit');
-  // Station-level "configured" signal is the default nostr relay the user
-  // saved in identity.json — set via Config → NGIT in the dashboard. This
-  // matches what the dashboard can act on; project-specific ngit remotes
-  // are surfaced inside the Projects panel instead.
-  const ngitRelay = (() => {
-    try { return readIdentity().ngitRelay || ''; }
-    catch { return ''; }
-  })();
-
   // Binary presence goes through findBin (absolute-path walk) so a fresh
   // Linux install where ~/.cargo/bin isn't on the Node PATH still shows
   // ✓ for installed tools. Version probes spawn the resolved absolute
   // path directly rather than relying on shell PATH lookup.
+  const ngitPath  = findBin('ngit');
+  const ngitV     = ngitPath ? cmd(`${ngitPath} --version 2>/dev/null`) : null;
+  const ngitBin   = ngitPath !== null;
+
   const claudePath = findBin('claude');
   const claudeV    = claudePath ? cmd(`${claudePath} --version 2>/dev/null`) : null;
 
@@ -243,7 +235,7 @@ export function gatherStatus(): ServiceStatus[] {
   //   warn — installed but not running/configured
   //   err  — not installed
   const relayState:    ServiceState = relayUp ? 'ok' : 'warn';
-  const ngitState:     ServiceState = ngitBin && ngitRelay ? 'ok' : ngitBin ? 'warn' : 'err';
+  const ngitState:     ServiceState = ngitBin ? 'ok' : 'err';
   const claudeState:   ServiceState = claudeBin ? 'ok' : 'err';
   const nakState:      ServiceState = nakBin ? 'ok' : 'err';
   const stacksState:   ServiceState = stacksBin ? 'ok' : 'err';
@@ -253,9 +245,8 @@ export function gatherStatus(): ServiceStatus[] {
     { id: 'relay',     label: 'Relay',       value: relayUp ? `ws://${probeHost}:${probePort} ✓` : 'not running',                       ok: relayUp,      state: relayState,    kind: 'service' },
     { id: 'vpn',       label: 'nostr-vpn',   value: vpnRow.value,                                                                        ok: vpnRow.ok,    state: vpnRow.state,  kind: 'service' },
     { id: 'watchdog',  label: 'watchdog',    value: wdRow.value,                                                                         ok: wdRow.ok,     state: wdRow.state,   kind: 'service' },
-    // Binaries — CLI tools; installed or not. `ngit` is the lone binary with
-    // a warn state (installed but no default relay set — configure in Config).
-    { id: 'ngit',      label: 'ngit',        value: ngitBin && ngitRelay ? `relay: ${ngitRelay.replace(/^wss?:\/\//, '')}` : ngitBin ? 'not configured' : 'not installed', ok: ngitBin && !!ngitRelay, state: ngitState,    kind: 'binary' },
+    // Binaries — CLI tools; installed or not.
+    { id: 'ngit',      label: 'ngit',        value: ngitV ?? 'not installed',                                                                ok: !!ngitV,      state: ngitState,    kind: 'binary' },
     { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed',                                                           ok: !!claudeV,    state: claudeState,   kind: 'binary', plugins: gatherClaudePlugins() },
     { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState,      kind: 'binary' },
     { id: 'stacks',    label: 'Stacks',      value: stacksV  ?? (stacksBin ? 'installed' : 'not installed'),                               ok: stacksBin,    state: stacksState,   kind: 'binary' },

@@ -1294,7 +1294,6 @@ const IdentityDrawer = (() => {
 function healthTooltip(s) {
   if (s.state === 'err') return `${s.label} not installed`;
   if (s.state === 'warn') {
-    if (s.id === 'ngit')  return 'ngit not configured — set a default relay in Config';
     if (s.id === 'relay') return 'Relay installed but not running — start it in the Relay panel';
     if (s.id === 'vpn')   return 'nostr-vpn installed but not connected';
     return `${s.label}: ${s.value}`;
@@ -1422,8 +1421,7 @@ const SERVICE_DETAILS = {
     panel: { hash: '#logs', label: 'Open Logs → nostr-vpn' },
   },
   'ngit': {
-    summaryOk:   s => `Git-over-Nostr ready. Default ngit relay: <code class="cmd-inline">${escapeHtml(s.value.replace(/^relay:\s*/, ''))}</code>.`,
-    summaryWarn: _ => 'ngit is installed but no default relay is set — push/clone will prompt every time. Configure in the Config panel.',
+    summaryOk:   s => `Git-over-Nostr ready. <code class="cmd-inline">${escapeHtml(s.value)}</code>.`,
     summaryErr:  _ => 'ngit isn\'t installed. It lets you push signed git commits to Nostr relays instead of a central host.',
     panel: { hash: '#config', label: 'Open Config → ngit' },
   },
@@ -1788,23 +1786,6 @@ function buildStatusRow(s) {
     meta.innerHTML = `run: <span class="cmd-inline">${escapeHtml(cta.configHint)}</span>`;
     ctaRow.appendChild(meta);
     ctaRow.appendChild(copyBtn(cta.configHint));
-  } else if (s.state === 'warn' && s.id === 'ngit') {
-    const btn = document.createElement('button');
-    btn.className = 'primary';
-    btn.textContent = 'Configure in Config';
-    btn.addEventListener('click', (e) => {
-      e.preventDefault();
-      location.hash = '#config';
-      setTimeout(() => {
-        const sec = document.getElementById('cfg-ngit-section');
-        if (sec) {
-          sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          const input = document.getElementById('cfg-ngit-relay-input');
-          if (input) input.focus();
-        }
-      }, 120);
-    });
-    ctaRow.appendChild(btn);
   }
 
   if (detail.panel) {
@@ -4442,8 +4423,7 @@ const ProjectsPanel = (() => {
 
   function renderNgitTab(container, p) {
     // When ngit capability is enabled but we haven't detected a nostr remote
-    // yet, the tab swaps to an Initialize form. The station-level default
-    // relay (identity.ngitRelay) pre-fills the field when available.
+    // yet, the tab swaps to an Initialize form (GRASP server picker + d-tag).
     if (p.capabilities.ngit && !p.remotes.ngit) {
       renderNgitInitForm(container, p);
       return;
@@ -8528,26 +8508,11 @@ const ConfigPanel = (() => {
       <div class="config-section" id="cfg-ngit-section">
         <h3>NGIT</h3>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Default nostr relay for ngit. Used to pre-fill <code>ngit init</code>
-          in the Projects panel. When set, the <b>ngit</b> service shows green
-          in Service Health.
-        </div>
-        <div class="config-row">
-          <div class="k">Default relay</div>
-          <div class="v">
-            <div class="keyrow">
-              <div class="keyfield">
-                <input id="cfg-ngit-relay-input" type="text" autocomplete="off" spellcheck="false" placeholder="wss://relay.damus.io" value="${escapeHtml(ident.ngitRelay || '')}">
-              </div>
-              <button class="primary" id="cfg-ngit-relay-save">save</button>
-            </div>
-            <div class="key-status-line ${ident.ngitRelay ? 'ok' : ''}" id="cfg-ngit-relay-status">
-              ${ident.ngitRelay ? '✓ saved' : 'not set'}
-            </div>
-          </div>
+          Configure git-over-Nostr: pick which GRASP servers host your repos
+          and pair an Amber signer for push/clone.
         </div>
 
-        <div class="config-row" style="margin-top:14px">
+        <div class="config-row">
           <div class="k">GRASP servers</div>
           <div class="v">
             <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
@@ -8818,37 +8783,6 @@ const ConfigPanel = (() => {
     // inline error). The /api/templates endpoint self-heals so the
     // first render after a fresh install seeds the built-ins.
     refreshTemplates();
-
-    // NGIT default relay — persists to identity.json via /api/identity/set.
-    const ngitInput  = $('cfg-ngit-relay-input');
-    const ngitSave   = $('cfg-ngit-relay-save');
-    const ngitStatus = $('cfg-ngit-relay-status');
-    async function saveNgitRelay() {
-      const val = ngitInput.value.trim();
-      if (val && !/^wss?:\/\//i.test(val)) {
-        toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
-        return;
-      }
-      ngitSave.disabled = true;
-      try {
-        const r = await api('/api/identity/set', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ ngitRelay: val }),
-        });
-        if (!r.ok) throw new Error(r.error || 'save failed');
-        ngitStatus.className = 'key-status-line ok';
-        ngitStatus.textContent = val ? '✓ saved' : 'cleared';
-        toast(val ? 'ngit relay saved' : 'ngit relay cleared', val, 'ok');
-        // Sidebar dot + Status card may change color after this.
-        refreshHealth();
-      } catch (e) {
-        toast('Save failed', e.message, 'err');
-      }
-      ngitSave.disabled = false;
-    }
-    ngitSave.addEventListener('click', saveNgitRelay);
-    ngitInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveNgitRelay(); });
 
     // ── Git Identity — global config view + edit + presets ──────────
     //
@@ -11022,17 +10956,8 @@ const SetupWizard = (() => {
   // session completes in the same browser tab, no shell hand-off
   // required.
   async function renderNgit() {
-    // Pre-fill the relay field from whatever identity.json already has.
-    let existingRelay = '';
-    try {
-      const cfg = await fetch('/api/identity/config').then(r => r.ok ? r.json() : null);
-      if (cfg?.ngitRelay) existingRelay = cfg.ngitRelay;
-    } catch {}
-
     // Probe ngit binary presence via /api/status. The 'ngit' row's
-    // state is 'err' when the binary isn't on PATH, 'warn' when it is
-    // but no default relay is set, 'ok' when both. We only need
-    // installed-or-not here — relay config gets its own field below.
+    // state is 'ok' when the binary is on PATH, 'err' otherwise.
     const probeNgitInstalled = async () => {
       try {
         const rows = await api('/api/status');
@@ -11056,18 +10981,6 @@ const SetupWizard = (() => {
             <code>github.com/DanConwayDev/ngit-cli</code>
             (sha256-pinned in versions.ts) and installs to
             <code>/usr/local/bin/ngit</code>.
-          </div>
-        </div>
-
-        <div class="setup-field">
-          <label>Default ngit relay</label>
-          <div class="setup-row">
-            <input id="setup-ngit-relay" type="text"
-              placeholder="wss://relay.damus.io" value="${escapeHtml(existingRelay)}">
-          </div>
-          <div class="setup-hint muted">
-            Marks ngit as "configured" on the Status panel. Per-project init
-            picks GRASP servers separately on the project's ngit tab.
           </div>
         </div>
 
@@ -11098,7 +11011,7 @@ const SetupWizard = (() => {
           <button class="setup-back">← Back</button>
           <div style="display:flex;gap:8px;align-items:center">
             <button class="setup-skip" id="setup-ngit-skip">Skip for now</button>
-            <button class="primary setup-next" id="setup-ngit-next">Save &amp; continue →</button>
+            <button class="primary setup-next" id="setup-ngit-next">Continue →</button>
           </div>
         </div>
       `,
@@ -11173,38 +11086,11 @@ const SetupWizard = (() => {
 
     root.querySelector('.setup-back').addEventListener('click', back);
     root.querySelector('#setup-ngit-skip').addEventListener('click', next);
-
-    const relayInput = $('setup-ngit-relay');
-    const saveRelay = async () => {
-      const val = relayInput.value.trim();
-      if (!val) return true;
-      // Basic shape check — server validates via isValidRelayUrl.
-      if (!/^wss?:\/\//i.test(val)) {
-        toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
-        return false;
-      }
-      try {
-        const r = await fetch('/api/identity/set', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ ngitRelay: val }),
-        }).then(r => r.json());
-        if (!r.ok) throw new Error(r.error || 'save failed');
-        return true;
-      } catch (e) {
-        toast('Save failed', e.message, 'err');
-        return false;
-      }
-    };
-
-    root.querySelector('#setup-ngit-next').addEventListener('click', async () => {
-      if (await saveRelay()) next();
-    });
+    root.querySelector('#setup-ngit-next').addEventListener('click', next);
 
     const amberBtn = $('setup-ngit-amber-btn');
     if (amberBtn) {
       amberBtn.addEventListener('click', async () => {
-        if (!(await saveRelay())) return;
         if (!window.NSTerminal?.isAvailable?.()) {
           toast('Terminal unavailable', 'Use Config → ngit → Re-login after setup', 'warn');
           return;
