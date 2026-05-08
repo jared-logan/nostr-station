@@ -5543,7 +5543,7 @@ const ProjectsPanel = (() => {
           <div class="discover-empty">
             <div class="big">No ngit repositories found under your npub.</div>
             <div class="muted" style="margin-top:8px;font-size:11px">Queried: ${escapeHtml(queried || '(no relays)')}</div>
-            <a href="#config" class="config-link" style="display:inline-block;margin-top:10px">Check your read relays + GRASP servers in Config →</a>
+            <a href="#config" class="config-link" style="display:inline-block;margin-top:10px">Check your GRASP servers in Config →</a>
             ${diagHtml}
           </div>
         `;

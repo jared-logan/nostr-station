@@ -34,10 +34,10 @@ export async function handleNgit(
 ): Promise<boolean> {
   // ── ngit discovery (kind 30617 repo announcements) ─────────────────
   //
-  // Queries the station owner's read relays for kind 30617 (NIP-34 repo
-  // announcement) events authored by the owner's npub. Results populate
-  // the Projects → Discover modal so users can import existing ngit
-  // repos as nostr-station Projects.
+  // Queries the station owner's GRASP servers for kind 30617 (NIP-34
+  // repo announcement) events authored by the owner's npub. Results
+  // populate the Projects → Discover modal so users can import existing
+  // ngit repos as nostr-station Projects.
   //
   // Security: nak is invoked via spawn() with a fixed argv array (no
   // shell), and every arg is either a literal, a bech32-decoded hex
@@ -66,20 +66,22 @@ export async function handleNgit(
       res.end(JSON.stringify({ error: 'could not decode npub to hex' }));
       return true;
     }
-    // ngit init publishes kind-30617 announcements to the user's GRASP
-    // servers (relay.ngit.dev, git.shakespeare.diy, etc.) — those events
-    // do NOT propagate to plain read relays like damus.io / nostr.band.
-    // Querying readRelays alone is why Scan ngit came back empty even
-    // when the user has live ngit repos. Union readRelays + GRASP
-    // servers (+ ngitRelay if set) and dedupe so we hit every place an
-    // announcement might live.
-    const DEFAULT_DISCOVERY_RELAYS = ['wss://relay.damus.io', 'wss://relay.nostr.band'];
-    const readRelays = ident.readRelays && ident.readRelays.length
-      ? ident.readRelays
-      : DEFAULT_DISCOVERY_RELAYS;
+    // kind-30617 announcements live exclusively on GRASP servers
+    // (relay.ngit.dev, git.shakespeare.diy, etc.) — they do NOT
+    // propagate to general read relays like damus.io / nostr.band.
+    // Both Shakespeare and gitworkshop.dev split their UI for the same
+    // reason: "Nostr Git Servers" is a separate list from "Relays".
+    //
+    // Earlier this handler unioned readRelays + graspServers, but a
+    // slow read relay (nostr.band: "connection took too long") could
+    // eat the outer 10s budget before the GRASP handshakes finished —
+    // empty results despite the events existing. Querying GRASPs only
+    // eliminates that race and matches where the events actually live.
+    // `ngitRelay` (the optional user-configured custom ngit relay)
+    // still rides along for self-hosted GRASP setups.
     const graspServers = getGraspServers();
     const ngitRelay = ident.ngitRelay ? [ident.ngitRelay] : [];
-    const relays = [...readRelays, ...graspServers, ...ngitRelay]
+    const relays = [...graspServers, ...ngitRelay]
       .filter(isValidRelayUrl)
       .filter((r, i, a) => a.indexOf(r) === i)
       .slice(0, 8);
@@ -416,7 +418,7 @@ export async function handleNgit(
     //      git-remote-nostr only accepts `nostr://<npub>/<d-tag>`.
     //
     //  (2) Fetch the kind-30617 repo announcement from the naddr's
-    //      embedded relay hints (plus the user's read relays as
+    //      embedded relay hints (plus the user's GRASP servers as
     //      fallback). That announcement carries `clone` tags with
     //      real transport URLs — usually https://git.shakespeare.diy
     //      or https://relay.ngit.dev — which we prefer because
@@ -450,12 +452,14 @@ export async function handleNgit(
       }
 
       // Build the relay set. naddr hints go first (the publisher told
-      // us where this event lives); user read relays as fallback so
-      // we've got some breadth. Cap at 6 to keep nak's connection
+      // us where this event lives); GRASP servers as fallback because
+      // that's where kind-30617 events actually live — read relays
+      // don't carry them and a slow read relay can blow our budget
+      // before the GRASP handshake completes (same race the Discover
+      // handler used to hit). Cap at 6 to keep nak's connection
       // fanout bounded — one slow relay shouldn't block the rest.
-      const ident = readIdentity();
-      const userReadRelays = (ident.readRelays || []).filter(isValidRelayUrl);
-      const relays = [...relayHints, ...userReadRelays]
+      const graspServers = getGraspServers();
+      const relays = [...relayHints, ...graspServers]
         .filter(isValidRelayUrl)
         .filter((r, i, a) => a.indexOf(r) === i) // dedupe preserving order
         .slice(0, 6);
