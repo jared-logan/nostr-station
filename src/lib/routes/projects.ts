@@ -453,10 +453,15 @@ export async function handleProjects(
 
     if (tail === 'ngit/sync' && method === 'POST') {
       // Bidirectional sync à la Shakespeare's clean ngit popover:
-      // pull (ngit fetch) then push (ngit push), in one SSE stream.
+      // pull (fetch + ff-merge) then push, in one SSE stream.
       // Two separate child processes share one response so the user
       // sees both phases scrolling in the same modal — and so a
       // failure in phase 1 cleanly skips phase 2 with a clear marker.
+      //
+      // Phase 1 must be a real `git pull --ff-only`, not just `git
+      // fetch`: a bare fetch updates origin/* refs but leaves local
+      // HEAD where it was, so phase 2's push immediately fails
+      // non-fast-forward whenever the remote has advanced.
       //
       // Kept distinct from /api/projects/:id/sync (the card-grid
       // icon) which is intentionally pull-only + ff-merge + proposals
@@ -502,10 +507,13 @@ export async function handleProjects(
         });
 
       try {
-        const fetchCode = await runPhase('git fetch origin', 'git', ['fetch', 'origin']);
-        if (fetchCode !== 0) {
-          emit({ line: `pull failed (exit ${fetchCode}) — skipping push`, stream: 'stderr' });
-          emit({ done: true, code: fetchCode });
+        const pullCode = await runPhase(
+          'git pull --no-rebase --ff-only',
+          'git', ['pull', '--no-rebase', '--ff-only'],
+        );
+        if (pullCode !== 0) {
+          emit({ line: `pull failed (exit ${pullCode}) — skipping push`, stream: 'stderr' });
+          emit({ done: true, code: pullCode });
           try { res.end(); } catch {}
           return true;
         }

@@ -102,12 +102,10 @@ export function isGitRepo(): boolean {
 
 export async function pushToRemote(remote: Remote, branch: string): Promise<PushResult> {
   try {
-    if (remote.type === 'ngit') {
-      await execa('ngit', ['push'], { stdio: 'pipe' });
-    } else {
-      // Use gh for github remotes if available, otherwise plain git push
-      await execa('git', ['push', remote.name, branch], { stdio: 'pipe' });
-    }
+    // ngit 2.x dropped the `ngit push` subcommand; nostr:// remotes push
+    // through stock git via the git-remote-nostr protocol helper, so the
+    // same `git push <name> <branch>` works for github + ngit + other.
+    await execa('git', ['push', remote.name, branch], { stdio: 'pipe' });
     return { remote: remote.name, type: remote.type, ok: true };
   } catch (e) {
     const err = e as ExecaError;

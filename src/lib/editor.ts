@@ -145,7 +145,7 @@ You are Nori, the assistant for nostr-station — an open-source CLI that sets u
 | Add npub to whitelist | \`nostr-station relay whitelist --add <npub>\` |
 | Switch AI editor target | \`nostr-station editor\` |
 | Clone a Nostr repo | \`ngit clone <naddr>\` |
-| Push + sign via Amber | \`ngit push\` |
+| Push + sign via Amber | \`git push origin HEAD\` (ngit 2.x: pushes go through git-remote-nostr) |
 
 **Editor target files.** Switch which file your AI coding tool reads with \`nostr-station editor\`. The canonical content lives at \`~/nostr-station/projects/${CONTEXT_FILENAME}\` and the editor command symlinks the tool-specific filename to it (\`CLAUDE.md\` for Claude Code, \`AGENTS.md\` for Codex / generic agents, \`.cursorrules\`, \`.windsurfrules\`, \`.github/copilot-instructions.md\`, \`CONVENTIONS.md\` for aider).
 

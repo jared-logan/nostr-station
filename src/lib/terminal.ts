@@ -326,8 +326,12 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
       return ns(['publish', '--yes'], cwd ? `publish · ${path.basename(cwd)}` : 'publish');
     case 'git-push':
       return { cmd: 'git', args: ['push', 'origin', 'HEAD'], cwd, label: cwd ? `git push · ${path.basename(cwd)}` : 'git push' };
+    // ngit 2.x dropped `ngit push`; pushing is stock git against a nostr://
+    // origin URL with git-remote-nostr signing under the hood. Same shape
+    // as /api/projects/:id/ngit/push. Label stays "ngit push" to match the
+    // button users clicked.
     case 'ngit-push':
-      return { cmd: 'ngit', args: ['push'], cwd, label: cwd ? `ngit push · ${path.basename(cwd)}` : 'ngit push' };
+      return { cmd: 'git', args: ['push', 'origin', 'HEAD'], cwd, label: cwd ? `ngit push · ${path.basename(cwd)}` : 'ngit push' };
 
     // nsite deploy — keep --yes because the dashboard already confirms via
     // its destructive-action dialog before reaching here. Terminal gives
