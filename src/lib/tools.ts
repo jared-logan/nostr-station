@@ -15,6 +15,9 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { hasBin } from './detect.js';
 
 const execFileAsync = promisify(execFile);
@@ -191,13 +194,70 @@ export async function installTool(
       return { ok: false, ranSteps: ran, detail: 'install step missing argv' };
     }
     onProgress(`▸ ${step.display}`);
-    const stepResult = await runStep(step.argv, onProgress);
+    // npm-global without a writable prefix → EACCES on /usr/lib/node_modules.
+    // Redirect to a user-writable prefix (~/.local) so install works without
+    // sudo and the resulting bin lands somewhere findBin() already checks.
+    const argv = step.kind === 'npm-global'
+      ? await resolveNpmGlobalArgv(step.argv, onProgress)
+      : step.argv;
+    const stepResult = await runStep(argv, onProgress);
     if (!stepResult.ok) {
       return { ok: false, ranSteps: ran, detail: stepResult.detail || `step failed: ${step.display}` };
     }
     ran++;
   }
   return { ok: true, ranSteps: ran };
+}
+
+// `npm install -g` writes to `npm config get prefix` — on system-wide Node
+// installs (apt, .pkg, /usr/local) that prefix isn't user-writable, and the
+// install dies with EACCES on /usr/lib/node_modules. Detect that case and
+// rewrite argv to use --prefix=$HOME/.local, which puts the bin shim at
+// ~/.local/bin (already in detect.ts:augmentedBinDirs, so the post-install
+// detect probe finds it). When the prefix is already writable (nvm, brew on
+// user-owned /opt/homebrew, Windows %APPDATA%\npm) we leave argv alone.
+async function resolveNpmGlobalArgv(
+  argv:       [string, ...string[]],
+  onProgress: (line: string) => void,
+): Promise<[string, ...string[]]> {
+  // If the user already passed an explicit --prefix, respect it.
+  if (argv.includes('--prefix')) return argv;
+  let prefix: string | null = null;
+  try {
+    const r = await execFileAsync('npm', ['config', 'get', 'prefix'], { timeout: 5000 });
+    prefix = (r.stdout || '').trim() || null;
+  } catch { /* fall through to user-prefix path */ }
+  if (prefix && isWritableForCurrentUser(prefix)) return argv;
+
+  const userPrefix = path.join(os.homedir(), '.local');
+  try {
+    fs.mkdirSync(path.join(userPrefix, 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(userPrefix, 'lib'), { recursive: true });
+  } catch { /* mkdir best-effort; npm will surface a real error if it can't write */ }
+  onProgress(`note: npm global prefix${prefix ? ` (${prefix})` : ''} is not writable;`);
+  onProgress(`      installing into ${userPrefix} instead — make sure ${path.join(userPrefix, 'bin')} is on your PATH.`);
+  // argv = ['npm', <subcommand>, ...rest]. Insert --prefix before the rest
+  // so it applies to the install/whatever subcommand.
+  const [bin, sub, ...rest] = argv;
+  return [bin, sub!, '--prefix', userPrefix, ...rest] as [string, ...string[]];
+}
+
+function isWritableForCurrentUser(p: string): boolean {
+  // Walk up to the nearest existing ancestor — npm's prefix dir may not
+  // exist yet on a fresh install. If that ancestor is writable, npm can
+  // create the prefix; if not, it can't.
+  let cur = p;
+  while (cur && !fs.existsSync(cur)) {
+    const parent = path.dirname(cur);
+    if (parent === cur) return false;
+    cur = parent;
+  }
+  try {
+    fs.accessSync(cur, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function runStep(

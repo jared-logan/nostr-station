@@ -120,6 +120,102 @@ test('installTool: streams progress + reports failure on non-zero exit', async (
   assert.ok(lines.some(l => l.includes('about-to-fail')), 'progress should stream stdout');
 });
 
+test('installTool: npm-global redirects to user prefix when global prefix is not writable', async (t) => {
+  // Fresh-install regression: `npm install -g @getstacks/stacks` died with
+  // EACCES on /usr/lib/node_modules because system Node owns its global
+  // prefix. The fix detects that, rewrites argv to `--prefix=$HOME/.local`,
+  // and the install lands in a user-writable dir whose bin is already on
+  // findBin()'s augmented PATH.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    t.skip('root can write anywhere; the writability check has no false case to exercise');
+    return;
+  }
+  const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-tools-npm-'));
+  const argvLogPath = path.join(tmpdir, 'install-argv.txt');
+  const fakeNpm = path.join(tmpdir, 'npm');
+  // Fake npm: returns a not-writable path for `config get prefix`, records
+  // the install argv to a file, exits 0 either way.
+  fs.writeFileSync(fakeNpm,
+    `#!/bin/sh
+if [ "$1" = "config" ] && [ "$2" = "get" ] && [ "$3" = "prefix" ]; then
+  echo "/__nostr_station_test_unwritable_root_dir__"
+  exit 0
+fi
+if [ "$1" = "install" ]; then
+  printf '%s\\n' "$@" > "${argvLogPath}"
+  exit 0
+fi
+exit 1
+`);
+  fs.chmodSync(fakeNpm, 0o755);
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${tmpdir}:${prevPath}`;
+  try {
+    const fake = {
+      id: 'fake-npm-global', name: 'fake', description: '', binary: 'fakebin',
+      detect: ['fakebin', '--version'] as [string, string],
+      installSteps: [
+        { kind: 'npm-global' as const, display: 'npm install -g some-pkg',
+          argv: ['npm', 'install', '-g', 'some-pkg'] as [string, string, string, string] },
+      ],
+    };
+    const lines: string[] = [];
+    const r = await installTool(fake, (l: string) => lines.push(l));
+    assert.equal(r.ok, true, `install should succeed; detail=${r.detail}`);
+    const captured = fs.readFileSync(argvLogPath, 'utf8').trim().split('\n');
+    assert.ok(captured.includes('--prefix'), `expected --prefix in argv, got: ${captured.join(' ')}`);
+    assert.ok(captured.includes('some-pkg'), `expected package name in argv, got: ${captured.join(' ')}`);
+    assert.ok(captured.includes('-g'), `-g should be preserved, got: ${captured.join(' ')}`);
+    assert.ok(lines.some(l => l.includes('not writable')), 'should warn user about prefix override');
+  } finally {
+    process.env.PATH = prevPath;
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  }
+});
+
+test('installTool: npm-global leaves argv alone when global prefix is writable', async () => {
+  const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-tools-npm-ok-'));
+  const argvLogPath = path.join(tmpdir, 'install-argv.txt');
+  const writablePrefix = path.join(tmpdir, 'writable-prefix');
+  fs.mkdirSync(writablePrefix);
+  const fakeNpm = path.join(tmpdir, 'npm');
+  fs.writeFileSync(fakeNpm,
+    `#!/bin/sh
+if [ "$1" = "config" ] && [ "$2" = "get" ] && [ "$3" = "prefix" ]; then
+  echo "${writablePrefix}"
+  exit 0
+fi
+if [ "$1" = "install" ]; then
+  printf '%s\\n' "$@" > "${argvLogPath}"
+  exit 0
+fi
+exit 1
+`);
+  fs.chmodSync(fakeNpm, 0o755);
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${tmpdir}:${prevPath}`;
+  try {
+    const fake = {
+      id: 'fake-npm-global-ok', name: 'fake', description: '', binary: 'fakebin',
+      detect: ['fakebin', '--version'] as [string, string],
+      installSteps: [
+        { kind: 'npm-global' as const, display: 'npm install -g some-pkg',
+          argv: ['npm', 'install', '-g', 'some-pkg'] as [string, string, string, string] },
+      ],
+    };
+    const lines: string[] = [];
+    const r = await installTool(fake, (l: string) => lines.push(l));
+    assert.equal(r.ok, true);
+    const captured = fs.readFileSync(argvLogPath, 'utf8').trim().split('\n');
+    assert.ok(!captured.includes('--prefix'),
+      `--prefix should NOT be injected when prefix is writable, got: ${captured.join(' ')}`);
+    assert.ok(captured.includes('some-pkg'));
+  } finally {
+    process.env.PATH = prevPath;
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  }
+});
+
 test('installTool: surfaces declared prereqs before running steps', async () => {
   // Use a manual step so installTool short-circuits before the
   // missing-runner pre-flight could fire — we want to assert the
