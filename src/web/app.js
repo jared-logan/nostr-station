@@ -4575,13 +4575,16 @@ const ProjectsPanel = (() => {
     });
 
     container.querySelector('.ngit-pull-btn').addEventListener('click', () => {
-      // Pull-only — reuses the existing /api/projects/:id/sync endpoint
-      // which does ngit fetch + ff-merge + proposals query for ngit
-      // projects. Same code path as the card-grid Sync icon.
+      // Pull-only — hits /git/pull, the SSE endpoint that runs
+      // `git pull --no-rebase --ff-only`. Pre-fix this targeted /sync
+      // (the card-grid endpoint), which returns plain JSON and only
+      // does `git fetch` — so the streaming modal got one JSON blob
+      // it couldn't parse and finished with code:null ("exit null"),
+      // while the user's local HEAD never advanced.
       openExecModal({
         title:    `ngit pull · ${p.name}`,
-        subtitle: 'ngit fetch + ff-merge',
-        endpoint: `/api/projects/${p.id}/sync`,
+        subtitle: 'git pull --ff-only',
+        endpoint: `/api/projects/${p.id}/git/pull`,
       }).then(r => {
         if (r.ok) toast('ngit pull complete', '', 'ok');
         else      toast('ngit pull failed', `exit ${r.code}`, 'err');
