@@ -5518,11 +5518,33 @@ const ProjectsPanel = (() => {
       if (res.empty || !res.repos || res.repos.length === 0) {
         statusEl.style.display = 'none';
         resultsEl.style.display = '';
+        // Diagnostics block — empty result used to give zero hint as to
+        // which relay rejected the query, whether nak ran at all, or
+        // whether events came back but got filtered. Show the captured
+        // nak stderr and event counts so the next scan is debuggable.
+        const diag = res.diagnostics || {};
+        const diagBits = [];
+        if (diag.spawnError) {
+          diagBits.push(`<div class="diag-row err">nak failed to start: <code>${escapeHtml(diag.spawnError)}</code></div>`);
+        }
+        if (typeof diag.eventsSeen === 'number') {
+          diagBits.push(`<div class="diag-row">Events seen: ${diag.eventsSeen} · Unique repos: ${diag.uniqueRepos ?? 0}${diag.parseFailures ? ` · Parse failures: ${diag.parseFailures}` : ''}</div>`);
+        }
+        if (diag.exitCode !== undefined && diag.exitCode !== null) {
+          diagBits.push(`<div class="diag-row">nak exit: ${diag.exitCode}</div>`);
+        }
+        if (diag.stderrTail) {
+          diagBits.push(`<details class="diag-stderr"><summary>nak stderr (tail)</summary><pre>${escapeHtml(diag.stderrTail)}</pre></details>`);
+        }
+        const diagHtml = diagBits.length
+          ? `<details class="discover-diag" open><summary>Diagnostics</summary>${diagBits.join('')}</details>`
+          : '';
         resultsEl.innerHTML = `
           <div class="discover-empty">
             <div class="big">No ngit repositories found under your npub.</div>
             <div class="muted" style="margin-top:8px;font-size:11px">Queried: ${escapeHtml(queried || '(no relays)')}</div>
             <a href="#config" class="config-link" style="display:inline-block;margin-top:10px">Check your read relays + GRASP servers in Config →</a>
+            ${diagHtml}
           </div>
         `;
         resultsEl.querySelector('.config-link').addEventListener('click', () => modal.close());

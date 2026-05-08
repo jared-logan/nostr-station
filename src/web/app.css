@@ -366,6 +366,22 @@ input:focus, textarea:focus, select:focus {
 .discover-empty .big { font-size: 14px; color: var(--text-bright); }
 .discover-empty.err .big { color: var(--error); }
 .discover-empty a { color: var(--accent-bright, #7bb4ff); }
+.discover-diag {
+  margin-top: 16px; text-align: left; font-size: 11px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg-soft, rgba(255,255,255,0.02));
+}
+.discover-diag > summary { cursor: pointer; color: var(--text-dim); font-weight: 600; }
+.discover-diag .diag-row { margin-top: 6px; font-family: var(--font-mono); color: var(--text-dim); }
+.discover-diag .diag-row.err { color: var(--error); }
+.discover-diag .diag-stderr { margin-top: 8px; }
+.discover-diag .diag-stderr > summary { cursor: pointer; color: var(--text-dim); }
+.discover-diag .diag-stderr pre {
+  margin-top: 6px; padding: 8px; max-height: 220px; overflow: auto;
+  background: var(--bg, #0a0a0a); border: 1px solid var(--border);
+  font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap;
+  word-break: break-word; color: var(--text-dim);
+}
 
 /* ── Pre-fill banner in Project drawer (when seeded from Discover) ──── */
 .prefill-banner {

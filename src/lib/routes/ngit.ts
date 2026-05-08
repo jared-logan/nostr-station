@@ -95,13 +95,40 @@ export async function handleNgit(
     const repos = new Map<string, any>();
     let buf = '';
     let settled = false;
+    // nak writes per-relay status to stderr ("connecting to …", "closed:
+    // AUTH required", "EOSE from …"). We never used to read it, so the UI
+    // had no way to tell the difference between "relay returned 0 events"
+    // and "relay required AUTH and rejected the query". Capture a tail
+    // and surface it in diagnostics so the empty-state has actionable info.
+    let stderrTail = '';
+    let eventsSeen = 0;       // raw event lines (before kind/d-tag filtering)
+    let parseFailures = 0;    // JSON parse failures on stdout
+    let spawnError: string | null = null;
     const finish = (status: number, body: any) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       try { child.kill('SIGTERM'); } catch {}
+      const list = Array.from(repos.values()).sort((a, b) => b.published_at - a.published_at);
+      // Always include diagnostics so the UI can render them whether the
+      // result is empty, partial, or complete.
+      const merged = {
+        ...body,
+        repos: body.repos ?? list,
+        empty: body.empty ?? (list.length === 0),
+        queried: body.queried ?? relays,
+        diagnostics: {
+          eventsSeen,
+          uniqueRepos:   list.length,
+          parseFailures,
+          stderrTail:    stderrTail.trim().slice(-2000),
+          spawnError,
+          exitCode:      body.exitCode ?? null,
+          nakArgs:       args,
+        },
+      };
       res.writeHead(status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(body));
+      res.end(JSON.stringify(merged));
     };
 
     child.stdout.on('data', (chunk: Buffer) => {
@@ -112,8 +139,9 @@ export async function handleNgit(
         const s = line.trim();
         if (!s) continue;
         let ev: any;
-        try { ev = JSON.parse(s); } catch { continue; }
+        try { ev = JSON.parse(s); } catch { parseFailures++; continue; }
         if (!ev || ev.kind !== 30617 || !Array.isArray(ev.tags)) continue;
+        eventsSeen++;
         const dTag = ev.tags.find((t: any[]) => Array.isArray(t) && t[0] === 'd')?.[1];
         if (!dTag) continue;
         const key = `${ev.pubkey}:${dTag}`;
@@ -161,22 +189,26 @@ export async function handleNgit(
         });
       }
     });
+    child.stderr.on('data', (chunk: Buffer) => {
+      // Bounded so a chatty relay can't blow up memory; keep the tail
+      // because that's where nak prints final status (AUTH errors, close
+      // reasons) after the EOSEs.
+      stderrTail = (stderrTail + chunk.toString()).slice(-4000);
+    });
 
     // --stream never exits on its own; cap at 10s and return whatever
     // we've collected. Enough for typical npub inventories; pagination
     // can come later if users start publishing hundreds of repos.
-    const timer = setTimeout(() => {
-      const list = Array.from(repos.values()).sort((a, b) => b.published_at - a.published_at);
-      finish(200, { repos: list, empty: list.length === 0, queried: relays });
-    }, 10000);
+    const timer = setTimeout(() => finish(200, { exitCode: null }), 10000);
 
     child.on('error', (e) => {
-      finish(500, { error: String(e.message || e), repos: [], empty: true, queried: relays });
+      // ENOENT when nak isn't on PATH — that's the most common silent
+      // failure mode and used to come back as a generic 500 with no hint.
+      // Now it lands in diagnostics.spawnError so the UI can say so.
+      spawnError = String(e?.message || e);
+      finish(200, { exitCode: null });
     });
-    child.on('close', () => {
-      const list = Array.from(repos.values()).sort((a, b) => b.published_at - a.published_at);
-      finish(200, { repos: list, empty: list.length === 0, queried: relays });
-    });
+    child.on('close', (code) => finish(200, { exitCode: code }));
 
     req.on('close', () => { try { child.kill('SIGTERM'); } catch {} });
     return true;
