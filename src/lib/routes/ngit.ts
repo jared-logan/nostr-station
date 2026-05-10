@@ -77,11 +77,10 @@ export async function handleNgit(
     // eat the outer 10s budget before the GRASP handshakes finished —
     // empty results despite the events existing. Querying GRASPs only
     // eliminates that race and matches where the events actually live.
-    // `ngitRelay` (the optional user-configured custom ngit relay)
-    // still rides along for self-hosted GRASP setups.
-    const graspServers = getGraspServers();
-    const ngitRelay = ident.ngitRelay ? [ident.ngitRelay] : [];
-    const relays = [...graspServers, ...ngitRelay]
+    // Self-hosted GRASP setups: add the URL via Config → ngit → GRASP
+    // servers; legacy `ngitRelay` values are migrated into that list
+    // by readIdentity() on first read after upgrade.
+    const relays = getGraspServers()
       .filter(isValidRelayUrl)
       .filter((r, i, a) => a.indexOf(r) === i)
       .slice(0, 8);

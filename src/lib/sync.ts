@@ -282,11 +282,11 @@ export async function syncProject(project: Project): Promise<SyncResult> {
 
   // ── ngit ───────────────────────────────────────────────────────────
   //
-  // Two phases: local fetch via stock git (ngit-remote-nostr handles
-  // the protocol), then a kind-1617 proposals query against the
-  // project's relay set. Proposals come back as a first-class array
-  // on the result (NOT flattened into a generic message) so the
-  // dashboard can render them as a count badge.
+  // Two phases: local pull via stock git (git-remote-nostr handles the
+  // protocol), then a kind-1617 proposals query against the project's
+  // relay set. Proposals come back as a first-class array on the
+  // result (NOT flattened into a generic message) so the dashboard
+  // can render them as a count badge.
   //
   // Pre-fix this spawned `ngit fetch`. ngit 2.x dropped the `fetch`
   // subcommand — fetching from a nostr remote is now stock git
@@ -296,6 +296,13 @@ export async function syncProject(project: Project): Promise<SyncResult> {
   // We still gate on findBin('ngit') because the helper relies on
   // ngit being installed; without it, git would fail with
   // "fatal: protocol 'nostr' is not supported".
+  //
+  // Phase 1 is `git pull --ff-only`, not just `git fetch`: the
+  // dashboard's Sync icon promises to bring local up to date with
+  // the remote, and a bare fetch leaves local HEAD untouched. Mirrors
+  // /api/projects/:id/git/pull and the ngit-tab Pull button so all
+  // three pull paths behave the same. Diverged histories surface as
+  // a clear ff-only failure rather than silently leaving local stale.
   if (!findBin('ngit')) {
     return { ok: false, backend: 'ngit', message: 'ngit not found on PATH (provides git-remote-nostr helper)' };
   }
@@ -305,21 +312,21 @@ export async function syncProject(project: Project): Promise<SyncResult> {
   }
 
   try {
-    await execFileAsync(gitBinNgit, ['fetch', 'origin'],
+    await execFileAsync(gitBinNgit, ['pull', '--no-rebase', '--ff-only'],
       { cwd: project.path, timeout: 30_000 });
   } catch (e: any) {
     return {
       ok: false, backend: 'ngit',
-      message: `git fetch origin failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`,
+      message: `git pull --ff-only failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`,
     };
   }
 
   // Resolve the repo coords (pubkey + d-tag) from the stored remote.
   // Proposals are queried by `a` tag = `30617:<pubkey>:<d-tag>` per
-  // NIP-34. If we can't decode the remote, the fetch itself succeeded,
+  // NIP-34. If we can't decode the remote, the pull itself succeeded,
   // so we still return ok with an empty proposals list.
   const proposals = await fetchNgitProposals(project).catch(() => [] as NgitProposal[]);
-  return { ok: true, backend: 'ngit', message: 'fetched', proposals };
+  return { ok: true, backend: 'ngit', message: 'pulled', proposals };
 }
 
 // ── ngit proposals (kind-1617) ────────────────────────────────────────────

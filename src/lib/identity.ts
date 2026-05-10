@@ -14,10 +14,6 @@ import path from 'path';
 export interface Identity {
   npub:       string;       // bech32 "npub1..." or 64-char hex
   readRelays: string[];     // ws:// or wss:// URLs
-  // Default nostr relay for ngit (used by Projects → ngit init pre-fill and
-  // to distinguish ngit "installed but unconfigured" from "configured"
-  // in the dashboard Service Health sidebar).
-  ngitRelay?: string;
   // User's preferred GRASP servers (git+nostr storage hosts). Pre-populates
   // the per-project Initialize ngit form — same model shakespeare.diy uses
   // (Settings → Nostr → Nostr Git Servers configures globally; per-project
@@ -25,6 +21,11 @@ export interface Identity {
   // Stored URLs are validated as ws:// or wss:// (NIP-34 transport). When
   // absent, the project init form falls back to the hardcoded defaults
   // (relay.ngit.dev + git.shakespeare.diy).
+  //
+  // Pre-2.x there was a separate `ngitRelay` field — a single default relay
+  // ngit 1.x prompted for on every push/clone. ngit 2.x replaced that with
+  // GRASP servers + git-remote-nostr, so the field became redundant.
+  // readIdentity() migrates legacy values into this list on first read.
   graspServers?: string[];
   // Opt-out of dashboard auth for localhost requests (127.0.0.1, ::1). Default
   // true — manual override only, not surfaced in the UI yet.
@@ -71,18 +72,35 @@ export function readIdentity(): Identity {
   try {
     const raw = fs.readFileSync(configPath(), 'utf8');
     const parsed = JSON.parse(raw);
-    return {
+    const ident: Identity = {
       npub:       typeof parsed.npub === 'string' ? parsed.npub : '',
       readRelays: Array.isArray(parsed.readRelays) && parsed.readRelays.length > 0
                     ? parsed.readRelays.filter((x: any) => typeof x === 'string')
                     : DEFAULT_READ_RELAYS.slice(),
-      ngitRelay:  typeof parsed.ngitRelay === 'string' && parsed.ngitRelay ? parsed.ngitRelay : undefined,
       graspServers: Array.isArray(parsed.graspServers)
         ? parsed.graspServers.filter((x: any): x is string => typeof x === 'string' && x.length > 0)
         : undefined,
       requireAuth: parsed.requireAuth === false ? false : undefined,
       setupComplete: typeof parsed.setupComplete === 'boolean' ? parsed.setupComplete : undefined,
     };
+    // Legacy migration: ngit 1.x stored a single default relay in
+    // `ngitRelay`; 2.x folds that into the GRASP server list. Port any
+    // stored value into graspServers (deduped, validated) and persist
+    // the cleaned record so subsequent reads stop seeing the legacy
+    // field. Idempotent — once migrated, parsed.ngitRelay is undefined.
+    if (typeof parsed.ngitRelay === 'string' && parsed.ngitRelay && isValidRelayUrl(parsed.ngitRelay)) {
+      const current = Array.isArray(ident.graspServers) ? ident.graspServers : DEFAULT_GRASP_SERVERS.slice();
+      if (!current.includes(parsed.ngitRelay)) {
+        ident.graspServers = [...current, parsed.ngitRelay];
+      } else {
+        ident.graspServers = current;
+      }
+      try { writeIdentity(ident); } catch {}
+    } else if (parsed.ngitRelay !== undefined) {
+      // Empty / invalid legacy field — drop it without changing graspServers.
+      try { writeIdentity(ident); } catch {}
+    }
+    return ident;
   } catch {
     return { npub: '', readRelays: DEFAULT_READ_RELAYS.slice() };
   }
@@ -190,21 +208,6 @@ export function removeGraspServer(url: string): { ok: boolean; graspServers: str
   ident.graspServers = current.filter(s => s !== url);
   writeIdentity(ident);
   return { ok: true, graspServers: ident.graspServers };
-}
-
-export function setNgitRelay(url: string): { ok: boolean; error?: string; ngitRelay?: string } {
-  const trimmed = url.trim();
-  if (!trimmed) {
-    const ident = readIdentity();
-    delete ident.ngitRelay;
-    writeIdentity(ident);
-    return { ok: true, ngitRelay: '' };
-  }
-  if (!isValidRelayUrl(trimmed)) return { ok: false, error: 'url must start with ws:// or wss://' };
-  const ident = readIdentity();
-  ident.ngitRelay = trimmed;
-  writeIdentity(ident);
-  return { ok: true, ngitRelay: trimmed };
 }
 
 export function setNpub(npub: string): { ok: boolean; error?: string; npub?: string } {
