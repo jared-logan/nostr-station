@@ -1963,6 +1963,140 @@ input:focus, textarea:focus, select:focus {
 .config-row .v.on  { color: var(--success); }
 .config-row .v.off { color: var(--warn); }
 
+/* Collapsible Config section. <details> + <summary> drives expand/collapse
+   natively; we hide the default disclosure triangle and lay out the
+   summary as a header row with a custom chevron at the right. */
+details.config-section {
+  padding: 0;          /* summary + body provide their own padding */
+}
+details.config-section > summary {
+  list-style: none;    /* hide Firefox/WebKit default marker */
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  padding: 14px 18px;
+  user-select: none;
+  border-radius: var(--r);
+}
+details.config-section > summary::-webkit-details-marker { display: none; }
+details.config-section > summary::marker { content: ''; }
+details.config-section > summary:hover { background: var(--bg-hover); }
+details.config-section > summary > h3 {
+  margin: 0;
+  flex: 0 0 auto;
+}
+details.config-section > summary::after {
+  content: '▸';
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  transition: transform 140ms ease;
+  flex: 0 0 auto;
+}
+details.config-section[open] > summary::after { transform: rotate(90deg); }
+details.config-section .cfg-section-body {
+  padding: 4px 18px 16px;
+  border-top: 1px solid var(--border);
+}
+details.config-section .cfg-summary-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  margin-left: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Subsection inside a config-section (e.g. "Read relays" under Relay,
+   "NGIT" under Git, "Stacks AI" under AI). Compact divider + h4 header
+   keeps related-but-distinct settings visually grouped without a full
+   second nested <details>. */
+.cfg-subsection {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+}
+.cfg-subsection > h4 {
+  margin: 0 0 8px 0;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--accent-bright);
+  font-weight: 600;
+}
+
+/* Profile section — enlarged identity card with bio + stats. The shared
+   `.body` ramp from renderIdentityBody continues to apply; these rules
+   layer extra spacing + typography for the new bio / stats rows. */
+.cfg-profile-body { padding: 0; }
+.cfg-profile-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+.cfg-profile-avatar {
+  flex: 0 0 auto;
+}
+.cfg-profile-avatar img,
+.cfg-profile-avatar svg {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: block;
+  object-fit: cover;
+}
+.cfg-profile-namecol {
+  flex: 1;
+  min-width: 0;
+}
+.cfg-profile-name {
+  color: var(--text-bright);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.cfg-profile-role {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-top: 4px;
+}
+.cfg-profile-bio {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.55;
+  padding: 10px 12px;
+  margin: 0 0 10px 0;
+  background: var(--bg-elev);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--r) var(--r) 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.cfg-profile-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.cfg-profile-stats .cfg-stat b {
+  color: var(--text-bright);
+  font-weight: 600;
+  margin-right: 4px;
+}
+.cfg-profile-stats .cfg-stat-sep {
+  color: var(--muted);
+}
+
 /* Appearance section — theme picker swatches */
 .theme-picker {
   display: flex;
