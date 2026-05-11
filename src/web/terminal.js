@@ -444,6 +444,21 @@
       if (tabs[activeIdx] === tab) scheduleFit();
     });
 
+    // Coalesce incoming chunks into a per-frame flush. xterm.js parses each
+    // write() synchronously; high-rate streams (e.g. an ngit-login QR redraw,
+    // or a `cat` of a large file) used to land one xterm.write per WS message
+    // and starve the main thread, freezing the rest of the dashboard. Buffering
+    // by frame keeps xterm's parser pipeline full without paying per-message
+    // overhead, and each frame still draws the latest state.
+    let pending = '';
+    let pendingHandle = 0;
+    const flushPending = () => {
+      pendingHandle = 0;
+      if (!pending || tab.exited) { pending = ''; return; }
+      const out = pending;
+      pending = '';
+      try { tab.term.write(out); } catch {}
+    };
     ws.addEventListener('message', (ev) => {
       let data = ev.data;
       if (data instanceof ArrayBuffer) data = new TextDecoder().decode(data);
@@ -451,10 +466,15 @@
       // Control frames are NUL-prefixed JSON. See terminal.ts — we use NUL
       // because it never appears in a real TTY stream.
       if (data.length && data.charCodeAt(0) === 0) {
+        // Flush buffered output before the control side-effect so any
+        // "process exited" line lands after the prior chunk.
+        if (pending) flushPending();
         try { handleControl(tab, JSON.parse(data.slice(1))); } catch {}
         return;
       }
-      tab.term.write(data);
+      if (tab.exited) return;
+      pending += data;
+      if (!pendingHandle) pendingHandle = requestAnimationFrame(flushPending);
     });
 
     ws.addEventListener('close', () => {
@@ -593,6 +613,12 @@
 
     $('term-bar-toggle')?.addEventListener('click', toggleExpand);
     $('term-empty-shell')?.addEventListener('click', () => openKey('shell'));
+
+    // Warm the xterm bundle in the background so the first interactive
+    // open doesn't pay the ~300KB parse cost in the click handler. This
+    // is fire-and-forget; openKey() still awaits ensureXterm() and will
+    // dedupe against the in-flight load via xtermLoading.
+    ensureXterm().catch(() => {});
 
     await restoreTabs();
   }
