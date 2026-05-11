@@ -4480,6 +4480,11 @@ const ProjectsPanel = (() => {
       ? ` <span class="tab-count">${n}</span>` : '';
     const tabs = [
       { key: 'overview', label: 'Overview' },
+      // About — gitworkshop-style metadata page. Only meaningful for
+      // ngit-published projects (no 30617 → nothing to show). Sits
+      // before Code so it acts as the canonical "what is this repo?"
+      // landing for visitors after Overview.
+      (p.capabilities.ngit && p.remotes.ngit) && { key: 'about', label: 'About' },
       hasGitCheckout && { key: 'code', label: 'Code' },
       // Renamed from "Proposals" — every other Nostr-git client and
       // github itself call them "Pull requests" / "PRs". Matching
@@ -4562,6 +4567,7 @@ const ProjectsPanel = (() => {
     container.__cleanup = null;
     container.innerHTML = '';
     if (state.tab === 'overview') renderOverview(container, p);
+    else if (state.tab === 'about')     renderAboutTab(container, p);
     else if (state.tab === 'code')      renderCodeTab(container, p);
     else if (state.tab === 'proposals') renderProposalsTab(container, p);
     else if (state.tab === 'issues')    renderIssuesTab(container, p);
@@ -4695,6 +4701,264 @@ const ProjectsPanel = (() => {
         body: { cmd: 'git-status' },
       });
     });
+  }
+
+  // ── About tab ────────────────────────────────────────────────────────
+  //
+  // Gitworkshop-style metadata page for ngit-published projects.
+  // Consolidates everything the kind-30617 announcement(s) declare:
+  //
+  //   - Description + website
+  //   - Maintainers (anchor + verified + candidate-only)
+  //   - GRASP servers — hosts that serve BOTH a git endpoint AND a
+  //     nostr relay at the same domain (per ngit.dev/grasp). Detected
+  //     by intersecting an announcement's `clone` host set with its
+  //     `relays` host set.
+  //   - Other relays — relay URLs whose host doesn't appear in any
+  //     clone URL. Each labelled "via X" so the user can see which
+  //     co-maintainer's announcement contributed it.
+  //   - Clone URLs grouped by maintainer (per GRASP convention,
+  //     `https://<host>/<npub>/<identifier>.git` — the npub in the
+  //     path identifies which maintainer hosts that copy).
+  //   - "Raw announcement events (N)" — opens the inspector modal.
+  //
+  // All data comes from /api/projects/:id/repo (repo + maintainerSet).
+  // No new server work; the analysis is pure client-side derivation.
+  async function renderAboutTab(container, p) {
+    container.innerHTML = `<div class="muted">loading…</div>`;
+    let repoMeta;
+    try {
+      repoMeta = await api(`/api/projects/${p.id}/repo`);
+    } catch (e) {
+      container.innerHTML = `<div class="empty-state err">Failed to load repo metadata: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    const repo = repoMeta?.repo;
+    if (!repo) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="muted">This project hasn't been announced to nostr yet.</div>
+          <div class="muted" style="font-size:11px;margin-top:8px">Run <code>ngit init</code> to publish the kind-30617 announcement.</div>
+        </div>
+      `;
+      return;
+    }
+    const ms = repoMeta.maintainerSet;
+    const analysis = analyseAnnouncements(repo, ms);
+
+    container.innerHTML = `
+      <div class="about-tab">
+        ${repo.description ? `<div class="about-desc">${escapeHtml(repo.description)}</div>` : ''}
+
+        ${repo.web?.length ? `
+          <div class="about-section">
+            <div class="about-head muted">Website</div>
+            <div class="about-web">
+              ${repo.web.map(u => `<a href="${escapeHtml(u)}" target="_blank" rel="noreferrer noopener" class="about-web-link">${escapeHtml(u)}</a>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        <div class="about-section">
+          <div class="about-head muted">Maintainers</div>
+          <div class="about-maintainers">${renderAboutMaintainers(repo, ms, analysis)}</div>
+        </div>
+
+        ${analysis.graspHosts.size > 0 ? `
+          <div class="about-section">
+            <div class="about-head muted">GRASP servers</div>
+            <div class="about-pills">
+              ${[...analysis.graspHosts].map(h => `<code class="about-pill about-pill-grasp">${escapeHtml(h)}</code>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        ${analysis.otherRelays.size > 0 ? `
+          <div class="about-section">
+            <div class="about-head muted">Other relays</div>
+            <div class="about-pills">
+              ${[...analysis.otherRelays.entries()].map(([url, contributors]) => {
+                const host = (() => { try { return new URL(url).host; } catch { return url; } })();
+                const viaLabel = contributors.length > 0 && contributors[0] !== repo.pubkey
+                  ? ` <span class="about-pill-via">via ${escapeHtml(analysis.nameOf(contributors[0]))}</span>` : '';
+                return `<code class="about-pill">${escapeHtml(host)}${viaLabel}</code>`;
+              }).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        ${analysis.clonesByMaintainer.size > 0 ? `
+          <div class="about-section">
+            <div class="about-head muted">Clone URLs</div>
+            <div class="about-clones">
+              ${[...analysis.clonesByMaintainer.entries()].map(([owner, urls]) => `
+                <div class="about-clone-group">
+                  <div class="about-clone-owner">
+                    <span class="about-clone-owner-name">${escapeHtml(analysis.nameOf(owner))}</span>
+                    ${owner === repo.pubkey ? `<span class="about-clone-owner-badge">owner</span>` : ''}
+                  </div>
+                  ${urls.map(u => `
+                    <div class="about-clone-row">
+                      <code class="about-clone-url">${escapeHtml(u)}</code>
+                      <span class="copy-slot" data-copy="${escapeHtml(u)}"></span>
+                    </div>
+                  `).join('')}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        ${repo.hashtags?.length ? `
+          <div class="about-section">
+            <div class="about-head muted">Topics</div>
+            <div class="about-pills">
+              ${repo.hashtags.map(t => `<code class="about-pill about-pill-tag">#${escapeHtml(t)}</code>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        ${ms?.events?.length ? `
+          <div class="about-foot">
+            <button class="about-raw-events" type="button">{ } Raw announcement events (${ms.events.length})</button>
+          </div>
+        ` : ''}
+      </div>
+    `;
+
+    container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+    container.querySelector('.about-raw-events')?.addEventListener('click', () => {
+      openAnnouncementsModal(repo, ms);
+    });
+  }
+
+  // Render the maintainer rows on the About tab. Richer than the
+  // Code-tab strip: full row per maintainer with role badge, npub,
+  // and copy. Anchor first, then verified by the order MaintainerSet
+  // already establishes (anchor + verified-by-freshest), then any
+  // candidate-only pubkeys at the bottom under a "claimed but not
+  // announced" caption.
+  function renderAboutMaintainers(repo, ms, analysis) {
+    const anchor = repo.pubkey;
+    const verified = ms?.verified || [];
+    const candidate = ms?.candidatesOnly || [];
+    const selectedPubkey = ms?.display?.pubkey || anchor;
+    const seen = new Set([anchor]);
+    const verifiedRows = [{ pubkey: anchor, role: 'anchor' }];
+    for (const pk of verified) {
+      if (seen.has(pk)) continue;
+      seen.add(pk);
+      verifiedRows.push({ pubkey: pk, role: 'verified' });
+    }
+    const verifiedHtml = verifiedRows.map(({ pubkey, role }) => {
+      const isSelected = pubkey === selectedPubkey;
+      return `
+        <div class="about-maintainer-row">
+          <span class="maintainers-role maintainers-role-${role}" title="${escapeHtml(role === 'anchor' ? 'Trust anchor — published the repo announcement' : 'Verified — published their own kind-30617')}">${escapeHtml(role)}</span>
+          <code class="about-maintainer-pk">${escapeHtml(analysis.nameOf(pubkey))}</code>
+          ${isSelected ? `<span class="ann-selected">selected</span>` : ''}
+          <span class="copy-slot" data-copy="${escapeHtml(window.NostrTools?.nip19 ? window.NostrTools.nip19.npubEncode(pubkey) : pubkey)}"></span>
+        </div>
+      `;
+    }).join('');
+    const candidateHtml = candidate.length === 0 ? '' : `
+      <div class="about-maintainer-candidates">
+        <div class="about-head muted" style="font-size:10px;margin-top:8px">Claimed but not announced (${candidate.length})</div>
+        <div class="about-pills">
+          ${candidate.map(pk => `<code class="ann-candidate-pk">${escapeHtml(analysis.nameOf(pk))}</code>`).join('')}
+        </div>
+      </div>
+    `;
+    return verifiedHtml + candidateHtml;
+  }
+
+  // Pure analysis of the per-maintainer 30617 events. Returns the
+  // shape the About tab renderer consumes — GRASP hosts, attributed
+  // relays, clones grouped by hosting maintainer.
+  function analyseAnnouncements(repo, ms) {
+    const events = Array.isArray(ms?.events) ? ms.events : [];
+    const nameOf = (pk) => {
+      try {
+        if (window.NostrTools?.nip19) {
+          const n = window.NostrTools.nip19.npubEncode(pk);
+          return `${n.slice(0, 10)}…${n.slice(-4)}`;
+        }
+      } catch {}
+      return pk.slice(0, 16);
+    };
+    const safeHost = (url) => {
+      try { return new URL(url).host; } catch { return null; }
+    };
+    const ownerFromCloneUrl = (url) => {
+      try {
+        const m = new URL(url).pathname.match(/^\/(npub1[0-9a-z]+)\//);
+        if (!m) return null;
+        if (window.NostrTools?.nip19) {
+          const d = window.NostrTools.nip19.decode(m[1]);
+          if (d.type === 'npub' && typeof d.data === 'string') return d.data;
+        }
+      } catch {}
+      return null;
+    };
+    const tagsOf = (ev, name) => ev.tags
+      .filter(t => Array.isArray(t) && t[0] === name)
+      .flatMap(t => t.slice(1).filter(v => typeof v === 'string' && v.length > 0));
+
+    // Per-event extraction.
+    const perEvent = events.map(ev => {
+      const relays = tagsOf(ev, 'relays');
+      const clones = tagsOf(ev, 'clone');
+      const relayHosts = new Set(relays.map(safeHost).filter(Boolean));
+      const cloneHosts = new Set(clones.map(safeHost).filter(Boolean));
+      // GRASP: a host serving BOTH protocols at the same domain.
+      const graspHosts = [...relayHosts].filter(h => cloneHosts.has(h));
+      return { event: ev, pubkey: ev.pubkey, relays, clones, graspHosts };
+    });
+
+    // Aggregate GRASP hosts across all announcements.
+    const graspHosts = new Set();
+    for (const e of perEvent) for (const h of e.graspHosts) graspHosts.add(h);
+
+    // Other relays: relay URLs whose host is not a known GRASP host.
+    // Attribute to the contributing maintainer pubkeys (first-seen wins
+    // for the "via" label so we don't blink between attributions).
+    const otherRelays = new Map();
+    for (const e of perEvent) {
+      for (const url of e.relays) {
+        const host = safeHost(url);
+        if (host && graspHosts.has(host)) continue;
+        if (!otherRelays.has(url)) otherRelays.set(url, []);
+        otherRelays.get(url).push(e.pubkey);
+      }
+    }
+
+    // Clone URLs grouped by the maintainer whose npub is in the path.
+    // Falls back to the announcing maintainer when the path doesn't
+    // match the GRASP convention. Order: anchor first, then others
+    // by appearance in `events` (= anchor-first then freshest).
+    const clonesByMaintainer = new Map();
+    const seenClones = new Set();
+    for (const e of perEvent) {
+      for (const url of e.clones) {
+        if (seenClones.has(url)) continue;
+        seenClones.add(url);
+        const owner = ownerFromCloneUrl(url) || e.pubkey;
+        if (!clonesByMaintainer.has(owner)) clonesByMaintainer.set(owner, []);
+        clonesByMaintainer.get(owner).push(url);
+      }
+    }
+    // Re-sort the map so the anchor's clones appear first.
+    if (clonesByMaintainer.has(repo.pubkey)) {
+      const anchorClones = clonesByMaintainer.get(repo.pubkey);
+      clonesByMaintainer.delete(repo.pubkey);
+      const reordered = new Map();
+      reordered.set(repo.pubkey, anchorClones);
+      for (const [k, v] of clonesByMaintainer) reordered.set(k, v);
+      clonesByMaintainer.clear();
+      for (const [k, v] of reordered) clonesByMaintainer.set(k, v);
+    }
+
+    return { perEvent, graspHosts, otherRelays, clonesByMaintainer, nameOf };
   }
 
   async function renderGitTab(container, p) {
