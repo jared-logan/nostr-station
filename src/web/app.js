@@ -4575,10 +4575,12 @@ const ProjectsPanel = (() => {
       </div>
 
       ${noPath ? `
-        <div class="code-publish-warn">
-          This project doesn't have a local git repository yet. Initialize
-          one in <strong>Settings</strong> first — <code>git init</code>
-          + a first commit so there's something to publish.
+        <div class="code-publish-warn cp-needs-init">
+          This project doesn't have a local git repository yet. Click below
+          to run <code>git init</code> + an initial commit before publishing.
+          <div style="margin-top:10px">
+            <button class="primary cp-init-git">Initialize git</button>
+          </div>
         </div>
       ` : ''}
 
@@ -4632,7 +4634,28 @@ const ProjectsPanel = (() => {
       </div>
     `;
 
-    if (noPath) return wrap;
+    if (noPath) {
+      // Wire the Initialize-git button. After success, re-render the
+      // Code tab so the warn panel collapses and the publish form
+      // becomes interactive.
+      wrap.querySelector('.cp-init-git').addEventListener('click', () => {
+        openExecModal({
+          title:    `Initialize git · ${p.name}`,
+          subtitle: 'git init && git add -A && git commit -m "initial commit"',
+          endpoint: `/api/projects/${p.id}/git-init`,
+          body:     {},
+        }).then((r) => {
+          if (r.ok) {
+            toast('Git initialized', `${p.name} is ready to publish`, 'ok');
+            // Re-fetch + re-render Code tab so the form unlocks.
+            renderTab(document.querySelector('.project-tab-content'), p);
+          } else {
+            toast('git init failed', `exit ${r.code}`, 'err');
+          }
+        });
+      });
+      return wrap;
+    }
 
     wrap.querySelector('.cp-cli-escape').addEventListener('click', (e) => {
       e.preventDefault();
