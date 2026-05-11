@@ -41,6 +41,9 @@
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.1",
     "@types/ws": "^8.5.10",
+    "dompurify": "^3.4.2",
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.3",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0"
   },

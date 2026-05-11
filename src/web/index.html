@@ -491,6 +491,11 @@
 </aside>
 
 <script src="/terminal.js"></script>
+<!-- Vendored markdown stack — see src/web/vendor/README.md for refresh
+     procedure. Loaded as classic scripts (UMD) so they expose globals
+     consumed by the ESM markdown.js helper imported by app.js. -->
+<script src="/vendor/marked.umd.js"></script>
+<script src="/vendor/dompurify.min.js"></script>
 <script type="module" src="/app.js"></script>
 </body>
 </html>
