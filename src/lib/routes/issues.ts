@@ -348,7 +348,7 @@ export function buildCommentArgs(input: {
 
 const ISSUES_LIST_ROUTE   = /^\/api\/projects\/([a-f0-9-]{10,})\/issues$/;
 const ISSUES_DETAIL_ROUTE = /^\/api\/projects\/([a-f0-9-]{10,})\/issues\/([a-f0-9]{16,64})$/;
-const COMMENTS_POST_ROUTE = /^\/api\/projects\/([a-f0-9-]{10,})\/comments$/;
+const COMMENTS_ROUTE      = /^\/api\/projects\/([a-f0-9-]{10,})\/comments$/;
 
 export async function handleIssues(
   req: http.IncomingMessage,
@@ -359,7 +359,7 @@ export async function handleIssues(
   const u = new URL(url, 'http://localhost');
   const listMatch    = u.pathname.match(ISSUES_LIST_ROUTE);
   const detailMatch  = u.pathname.match(ISSUES_DETAIL_ROUTE);
-  const commentsMatch = u.pathname.match(COMMENTS_POST_ROUTE);
+  const commentsMatch = u.pathname.match(COMMENTS_ROUTE);
   if (!listMatch && !detailMatch && !commentsMatch) return false;
 
   const id = (listMatch || detailMatch || commentsMatch)![1];
@@ -411,6 +411,23 @@ export async function handleIssues(
       res, req, project.path,
     );
     return true;
+  }
+
+  // ── Comment thread fetch (GET) ───────────────────────────────────────
+  //
+  // Returns the NIP-22 comment tree for any root event id —
+  // typically a patch series root or a custom root, not just a
+  // kind-1621 issue. Drives the comment thread on the patch detail
+  // view (Phase 3c) where /issues/:id wouldn't apply.
+  if (commentsMatch && method === 'GET') {
+    const rootId = u.searchParams.get('rootId') || '';
+    if (!/^[a-f0-9]{16,64}$/.test(rootId)) {
+      return json(res, 400, { error: 'invalid rootId' });
+    }
+    const r = await fetchIssuesInbox(project, false);
+    const comments = r.events.filter((e) => e.kind === 1111 || e.kind === 1622);
+    const tree = buildCommentTree(rootId, comments);
+    return json(res, 200, { rootId, comments: tree, cached: r.cached });
   }
 
   // ── Comment create (SSE) ─────────────────────────────────────────────

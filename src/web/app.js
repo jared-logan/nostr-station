@@ -4231,6 +4231,7 @@ const ProjectsPanel = (() => {
       p.capabilities.git   && { key: 'git',   label: 'Git' },
       p.capabilities.ngit  && { key: 'ngit',  label: 'ngit' },
       (p.capabilities.ngit && p.remotes.ngit) && { key: 'proposals', label: 'Proposals' },
+      (p.capabilities.ngit && p.remotes.ngit) && { key: 'issues',    label: 'Issues' },
       p.capabilities.nsite && { key: 'nsite', label: 'nsite' },
       { key: 'settings', label: 'Settings' },
     ].filter(Boolean);
@@ -4298,6 +4299,7 @@ const ProjectsPanel = (() => {
     else if (state.tab === 'git')       renderGitTab(container, p);
     else if (state.tab === 'ngit')      renderNgitTab(container, p);
     else if (state.tab === 'proposals') renderProposalsTab(container, p);
+    else if (state.tab === 'issues')    renderIssuesTab(container, p);
     else if (state.tab === 'nsite')     renderNsiteTab(container, p);
     else if (state.tab === 'settings')  renderSettingsTab(container, p);
   }
@@ -5535,6 +5537,8 @@ const ProjectsPanel = (() => {
           <button class="primary pdetail-download">Download</button>
           <span class="pdetail-copy"></span>
         </div>
+        <div class="comment-thread" id="patch-comment-thread"></div>
+        <div class="comment-composer" id="patch-comment-composer"></div>
       `;
       // Wire interactions.
       body.querySelectorAll('.pdetail-version-pill').forEach(btn => {
@@ -5583,9 +5587,34 @@ const ProjectsPanel = (() => {
         });
       });
       body.querySelector('.pdetail-copy').appendChild(copyBtn(activeRev.rootId));
+
+      // Phase 3c: NIP-22 comment thread on the patch series. Threaded
+      // against the SERIES' v1 root id so a multi-revision PR keeps a
+      // single conversation across re-rolls (matches gitworkshop UX).
+      const threadEl = body.querySelector('#patch-comment-thread');
+      const composerEl = body.querySelector('#patch-comment-composer');
+      loadAndRenderPatchComments(threadEl, composerEl, p, detail.rootId);
     };
 
     renderDetail();
+  }
+
+  async function loadAndRenderPatchComments(threadEl, composerEl, p, rootId) {
+    threadEl.innerHTML = `<div class="comment-empty muted">Loading comments…</div>`;
+    let tree = [];
+    try {
+      const r = await api(`/api/projects/${p.id}/comments?rootId=${encodeURIComponent(rootId)}`);
+      tree = Array.isArray(r?.comments) ? r.comments : [];
+    } catch {
+      // Fall through to empty tree — the composer still works.
+    }
+    threadEl.innerHTML = renderCommentTree(tree);
+    wireCommentReplies(threadEl, p, rootId, () => {
+      loadAndRenderPatchComments(threadEl, composerEl, p, rootId);
+    });
+    mountCommentComposer(composerEl, p, rootId, () => {
+      loadAndRenderPatchComments(threadEl, composerEl, p, rootId);
+    });
   }
 
   // Render a ParsedDiff (Phase 2a wire shape) into a file-by-file
@@ -5632,6 +5661,275 @@ const ProjectsPanel = (() => {
       </div>
     `;
     return summary + filesHtml;
+  }
+
+  // ── Phase 3b: Issues tab ─────────────────────────────────────────────
+  //
+  // Kind 1621 issues for the repo, with NIP-22 comment counts and a
+  // "New issue" composer that shells through ngit issue_create.
+  // Click a row → openIssueDetail (Phase 3c) shows the full threaded
+  // conversation + a reply composer.
+  async function renderIssuesTab(container, p) {
+    container.innerHTML = `
+      <div class="tab-section">
+        <div class="proposals-head">
+          <h3 style="margin:0">Issues</h3>
+          <div class="proposals-head-actions">
+            <button class="primary issues-new">New issue</button>
+            <button class="issues-refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="muted" style="margin-bottom:12px">
+          NIP-34 kind-1621 issues for this repo, with NIP-22 comment
+          threads. Posting an issue runs <code>ngit issue_create</code>
+          locally — your Amber signer pops up to sign it.
+        </div>
+        <div class="issues-list" id="issues-list">
+          <div class="muted">loading…</div>
+        </div>
+      </div>
+    `;
+
+    const listEl = container.querySelector('#issues-list');
+
+    const renderList = (issues) => {
+      if (!Array.isArray(issues) || issues.length === 0) {
+        listEl.innerHTML = `<div class="muted">No issues found on configured relays.</div>`;
+        return;
+      }
+      listEl.innerHTML = issues.map(iss => {
+        const author = shortPubkey(iss.author?.pubkey || iss.pubkey || '');
+        const labelHtml = (iss.labels || []).slice(0, 6)
+          .map(l => `<span class="issue-label">${escapeHtml(l)}</span>`)
+          .join('');
+        return `
+          <div class="issue-row" data-id="${escapeHtml(iss.id)}" tabindex="0" role="button">
+            <div class="issue-status-icon" data-status="${escapeHtml(iss.status)}">●</div>
+            <div class="issue-main">
+              <div class="issue-title">${escapeHtml(iss.subject)}</div>
+              <div class="issue-meta muted">
+                <span class="k">opened by ${escapeHtml(author)}</span>
+                · <span class="k">${escapeHtml(fmtAgoIso(new Date((iss.createdAt || 0) * 1000).toISOString()))}</span>
+                ${iss.commentCount > 0
+                  ? `· <span class="k">${iss.commentCount} comment${iss.commentCount === 1 ? '' : 's'}</span>`
+                  : ''}
+              </div>
+              ${labelHtml ? `<div class="issue-labels">${labelHtml}</div>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+      listEl.querySelectorAll('.issue-row').forEach(row => {
+        const open = () => openIssueDetail(p, row.dataset.id);
+        row.addEventListener('click', open);
+        row.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+        });
+      });
+    };
+
+    const fetchAndRender = async (refresh = false) => {
+      try {
+        const r = await api(`/api/projects/${p.id}/issues${refresh ? '?refresh=1' : ''}`);
+        renderList(Array.isArray(r?.issues) ? r.issues : []);
+      } catch (e) {
+        listEl.innerHTML = `<div class="muted">Failed to load issues: ${escapeHtml(e?.message || String(e))}</div>`;
+      }
+    };
+
+    container.querySelector('.issues-refresh').addEventListener('click', () => {
+      listEl.innerHTML = `<div class="muted">refreshing…</div>`;
+      fetchAndRender(true);
+    });
+
+    container.querySelector('.issues-new').addEventListener('click', () => {
+      openNewIssueComposer(p, () => fetchAndRender(true));
+    });
+
+    fetchAndRender();
+  }
+
+  // ── New-issue composer (Phase 3b) ────────────────────────────────────
+  function openNewIssueComposer(p, onPublished) {
+    const body = document.createElement('div');
+    body.className = 'issue-composer';
+    body.innerHTML = `
+      <label class="field-label">Title</label>
+      <div class="field-row">
+        <input type="text" class="ni-title" maxlength="240" placeholder="Short subject">
+      </div>
+
+      <label class="field-label" style="margin-top:12px">Body (markdown)</label>
+      <textarea class="ni-body" rows="8" placeholder="Describe the issue…"></textarea>
+
+      <label class="field-label" style="margin-top:12px">Labels (optional)</label>
+      <div class="field-row">
+        <input type="text" class="ni-labels" placeholder="bug urgent enhancement">
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:4px">
+        Space-separated. Alphanumeric, dash, underscore. Max 32 chars each.
+      </div>
+    `;
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px'; foot.style.width = '100%';
+    const cancel = document.createElement('button'); cancel.textContent = 'Cancel';
+    const submit = document.createElement('button'); submit.className = 'primary'; submit.textContent = 'Open issue';
+    const spacer = document.createElement('div'); spacer.style.flex = '1';
+    foot.appendChild(cancel); foot.appendChild(spacer); foot.appendChild(submit);
+
+    const modal = openModal({ title: 'New issue', subtitle: p.name, body, footer: foot });
+    cancel.addEventListener('click', () => modal.close());
+    submit.addEventListener('click', () => {
+      const title = body.querySelector('.ni-title').value.trim();
+      if (!title) { toast('Title required', '', 'err'); return; }
+      const bodyText = body.querySelector('.ni-body').value;
+      const labels = body.querySelector('.ni-labels').value.trim()
+        .split(/\s+/).filter(Boolean).slice(0, 8);
+      modal.close();
+      openExecModal({
+        title:    `Open issue · ${p.name}`,
+        subtitle: `ngit issue_create --title ${title.slice(0, 32)}${title.length > 32 ? '…' : ''}`,
+        endpoint: `/api/projects/${p.id}/issues`,
+        body:     { title, body: bodyText, labels },
+      }).then((r) => {
+        if (r.ok) { toast('Issue opened', title, 'ok'); onPublished?.(); }
+        else      { toast('Failed to open issue', `exit ${r.code}`, 'err'); }
+      });
+    });
+  }
+
+  // ── Phase 3c: per-issue detail with threaded comments ────────────────
+  async function openIssueDetail(p, issueId) {
+    const body = document.createElement('div');
+    body.className = 'idetail-body';
+    body.innerHTML = `<div class="muted" style="padding:24px">Loading issue…</div>`;
+    const modal = openModal({
+      title:    'Issue',
+      subtitle: issueId.slice(0, 16) + '…',
+      body,
+    });
+
+    const load = async () => {
+      let detail;
+      try {
+        detail = await api(`/api/projects/${p.id}/issues/${issueId}`);
+      } catch (e) {
+        body.innerHTML = `<div class="pdetail-err">Failed to load issue: ${escapeHtml(e?.message || String(e))}</div>`;
+        return;
+      }
+      if (!detail || detail.error) {
+        body.innerHTML = `<div class="pdetail-err">${escapeHtml(detail?.error || 'issue not found')}</div>`;
+        return;
+      }
+      const author = shortPubkey(detail.author?.pubkey || detail.pubkey || '');
+      const labels = (detail.labels || []).map(l => `<span class="issue-label">${escapeHtml(l)}</span>`).join('');
+      body.innerHTML = `
+        <div class="idetail-head">
+          <h3>${escapeHtml(detail.subject)}</h3>
+          <div class="idetail-meta muted">
+            <span class="issue-status-icon" data-status="${escapeHtml(detail.status)}">●</span>
+            opened by ${escapeHtml(author)}
+            · ${escapeHtml(fmtAgoIso(new Date((detail.createdAt || 0) * 1000).toISOString()))}
+          </div>
+          ${labels ? `<div class="issue-labels" style="margin-top:6px">${labels}</div>` : ''}
+        </div>
+
+        ${detail.body
+          ? `<div class="idetail-body-md code-md">${renderMarkdown(detail.body)}</div>`
+          : ''}
+
+        <div class="comment-thread" id="comment-thread"></div>
+        <div class="comment-composer" id="comment-composer"></div>
+      `;
+      const threadEl = body.querySelector('#comment-thread');
+      threadEl.innerHTML = renderCommentTree(detail.comments || []);
+      wireCommentReplies(threadEl, p, issueId, load);
+      mountCommentComposer(
+        body.querySelector('#comment-composer'),
+        p, issueId, load,
+      );
+    };
+    load();
+  }
+
+  // ── Comment thread rendering + composer (Phase 3c, reused) ───────────
+  //
+  // The same renderer + composer pair is used for issue threads and
+  // (in 3c-tidy) patch detail threads — wherever a kind-1621 or 1617
+  // event needs a NIP-22 conversation surface.
+  function renderCommentTree(nodes, depth = 0) {
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+      return depth === 0
+        ? `<div class="comment-empty muted">No comments yet.</div>`
+        : '';
+    }
+    return nodes.map(n => {
+      const author = shortPubkey(n.pubkey);
+      const legacy = n.kind === 1622 ? ' <span class="comment-legacy">legacy</span>' : '';
+      return `
+        <div class="comment" data-id="${escapeHtml(n.id)}" style="--depth:${depth}">
+          <div class="comment-head">
+            <span class="comment-author">${escapeHtml(author)}</span>${legacy}
+            <span class="comment-time muted">${escapeHtml(fmtAgoIso(new Date((n.createdAt || 0) * 1000).toISOString()))}</span>
+          </div>
+          <div class="comment-body code-md">${renderMarkdown(n.content || '')}</div>
+          <div class="comment-actions">
+            <button class="comment-reply" data-id="${escapeHtml(n.id)}">reply</button>
+            <span class="copy-slot" data-copy="${escapeHtml(n.id)}"></span>
+          </div>
+          <div class="comment-children">
+            ${renderCommentTree(n.children || [], depth + 1)}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function wireCommentReplies(threadEl, p, rootId, onPublished) {
+    threadEl.querySelectorAll('.copy-slot').forEach(s => {
+      if (s.childElementCount === 0) s.appendChild(copyBtn(s.dataset.copy));
+    });
+    threadEl.querySelectorAll('.comment-reply').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const targetId = btn.dataset.id;
+        const wrap = btn.closest('.comment');
+        // Toggle: if an inline composer already exists, remove it.
+        const existing = wrap.querySelector(':scope > .comment-inline-composer');
+        if (existing) { existing.remove(); return; }
+        const composer = document.createElement('div');
+        composer.className = 'comment-inline-composer';
+        mountCommentComposer(composer, p, targetId, () => {
+          composer.remove();
+          onPublished?.();
+        });
+        wrap.appendChild(composer);
+      });
+    });
+  }
+
+  function mountCommentComposer(container, p, targetEventId, onPublished) {
+    container.innerHTML = `
+      <textarea class="comment-input" rows="3" placeholder="Write a comment…"></textarea>
+      <div class="comment-composer-foot">
+        <span class="muted" style="font-size:11px">
+          Replies to <code>${escapeHtml(targetEventId.slice(0, 12))}…</code>
+        </span>
+        <button class="primary comment-submit">Reply</button>
+      </div>
+    `;
+    container.querySelector('.comment-submit').addEventListener('click', () => {
+      const text = container.querySelector('.comment-input').value.trim();
+      if (!text) { toast('Empty comment', 'write something first', 'err'); return; }
+      openExecModal({
+        title:    `Comment · ${p.name}`,
+        subtitle: `ngit comment --on ${targetEventId.slice(0, 12)}…`,
+        endpoint: `/api/projects/${p.id}/comments`,
+        body:     { eventId: targetEventId, body: text },
+      }).then((r) => {
+        if (r.ok) { toast('Comment posted', '', 'ok'); onPublished?.(); }
+        else      { toast('Failed to post comment', `exit ${r.code}`, 'err'); }
+      });
+    });
   }
 
   // Strip the wss:// prefix for display so the picker stays scannable
