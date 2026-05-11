@@ -5509,6 +5509,59 @@ body.term-expanded .term-bar-toggle .term-chevron {
   border-color: rgba(230, 184, 0, 0.4);
   cursor: help;
 }
+.maintainers-panel {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+}
+.maintainers-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+.maintainers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.maintainers-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.maintainers-pk {
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+}
+.maintainers-role {
+  display: inline-flex;
+  padding: 1px 6px;
+  font-size: 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: help;
+  flex-shrink: 0;
+  min-width: 64px;
+  justify-content: center;
+}
+.maintainers-role-anchor {
+  color: var(--accent-bright, var(--accent));
+  border-color: var(--accent-dim, var(--border));
+}
+.maintainers-role-verified {
+  color: var(--accent-bright, var(--accent));
+  border-color: var(--accent-dim, var(--border));
+}
+.maintainers-role-candidate {
+  color: var(--warn, #e6b800);
+  border-color: rgba(230, 184, 0, 0.4);
+}
 .code-badge {
   display: inline-flex;
   gap: 6px;

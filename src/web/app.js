@@ -5334,6 +5334,15 @@ const ProjectsPanel = (() => {
       if (cloneUrls.length > 0) cloneDropdown = buildCloneDropdown(cloneUrls);
     }
 
+    // Phase 8 — read-only maintainers panel. Spike-confirmed approach
+    // before we add edit controls: the kind-30617 announcement IS the
+    // maintainer registry, so we render it as a real list (anchor +
+    // verified + candidate) instead of just the count chips. Edit
+    // (re-publish via `ngit init --other-maintainers`) lands in a
+    // follow-up commit; this one only surfaces who the repo currently
+    // recognises so users can compare against gitworkshop at a glance.
+    const maintainersPanel = repo ? buildMaintainersPanel(repo, repoMeta?.maintainerSet) : '';
+
     wrap.innerHTML = `
       <div class="code-title-row">
         <h2 class="code-title">${escapeHtml(name)}</h2>
@@ -5342,11 +5351,66 @@ const ProjectsPanel = (() => {
       </div>
       ${desc ? `<div class="code-desc">${escapeHtml(desc)}</div>` : ''}
       ${chips}
+      ${maintainersPanel}
     `;
     if (cloneDropdown) {
       wrap.querySelector('.code-clone-slot').appendChild(cloneDropdown);
     }
+    wrap.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
     return wrap;
+  }
+
+  // Render the maintainers list as `anchor` + verified + candidate rows.
+  // Repo `pubkey` is the trust anchor (always authoritative by definition);
+  // verified are pubkeys that re-announced under the same identifier;
+  // candidate-only are claimed by the anchor but haven't re-announced.
+  // Returns an HTML string — caller wires copy-slots after innerHTML.
+  function buildMaintainersPanel(repo, ms) {
+    const anchor = repo.pubkey;
+    const verified  = ms?.verified       || [];
+    const candidate = ms?.candidatesOnly || [];
+    // De-dupe: anchor is always shown explicitly first; verified set
+    // already contains it by construction so filter that out. Candidate
+    // pubkeys are disjoint from verified by computeMaintainerSet design.
+    const seen = new Set([anchor]);
+    const rows = [{ pubkey: anchor, role: 'anchor' }];
+    for (const pk of verified) {
+      if (seen.has(pk)) continue;
+      seen.add(pk);
+      rows.push({ pubkey: pk, role: 'verified' });
+    }
+    for (const pk of candidate) {
+      if (seen.has(pk)) continue;
+      seen.add(pk);
+      rows.push({ pubkey: pk, role: 'candidate' });
+    }
+    if (rows.length === 0) return '';
+    const roleLabel = {
+      anchor:    { text: 'owner',     title: 'Trust anchor — published the repo announcement; always authoritative.' },
+      verified:  { text: 'verified',  title: 'Published their own kind-30617 under this coordinate — fully authorised.' },
+      candidate: { text: 'candidate', title: 'Listed as a maintainer but has not published their own kind-30617 — accepted permissively for gitworkshop parity.' },
+    };
+    const rowHtml = rows.map(({ pubkey, role }) => {
+      let npub = pubkey;
+      try {
+        if (window.NostrTools?.nip19) npub = window.NostrTools.nip19.npubEncode(pubkey);
+      } catch { /* fall back to hex on encode failure */ }
+      const display = npub.startsWith('npub1') ? `${npub.slice(0, 12)}…${npub.slice(-6)}` : shortPubkey(pubkey);
+      const r = roleLabel[role];
+      return `
+        <div class="maintainers-row">
+          <span class="maintainers-role maintainers-role-${role}" title="${escapeHtml(r.title)}">${escapeHtml(r.text)}</span>
+          <code class="maintainers-pk">${escapeHtml(display)}</code>
+          <span class="copy-slot" data-copy="${escapeHtml(npub)}"></span>
+        </div>
+      `;
+    }).join('');
+    return `
+      <div class="maintainers-panel">
+        <div class="maintainers-head muted">Maintainers</div>
+        <div class="maintainers-list">${rowHtml}</div>
+      </div>
+    `;
   }
 
   // Phase 7: clone URLs grouped by transport (Nostr / HTTPS / SSH /
