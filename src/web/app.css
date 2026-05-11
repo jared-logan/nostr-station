@@ -5195,6 +5195,15 @@ body.term-expanded .term-bar-toggle .term-chevron {
   color: var(--accent);
   border-color: var(--accent-dim);
 }
+.code-chip-verified {
+  color: var(--accent-bright);
+  border-color: var(--accent-dim, var(--border));
+}
+.code-chip-candidate {
+  color: var(--warn, #e6b800);
+  border-color: rgba(230, 184, 0, 0.4);
+  cursor: help;
+}
 .code-badge {
   display: inline-flex;
   gap: 6px;

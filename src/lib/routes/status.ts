@@ -51,6 +51,7 @@ import {
   type NostrEvent,
 } from '../nostr-query.js';
 import { readBody, streamExec, streamExecError } from './_shared.js';
+import { resolveMaintainerSet } from '../maintainer-set.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -227,36 +228,23 @@ async function fetchStatusEvents(
   return { events: result.events, cached: false };
 }
 
-/** Fetch the 30617 announcement so we know who the maintainers are. */
+/** Fetch the 30617 announcement so we know who the maintainers are.
+ *
+ * Phase 5: now consults resolveMaintainerSet so authority is granted
+ * ONLY to verified maintainers (those who have published their own
+ * 30617 under the same coordinate). Candidate-only pubkeys — listed
+ * in the trust anchor's maintainers tag but with no own announcement
+ * — are deliberately excluded. This closes the "scam scenario" where
+ * a malicious anchor could grant authority to reputable strangers.
+ */
 async function fetchMaintainerSet(project: Project): Promise<Set<string>> {
   const coords = decodeNgitRemote(project);
   if (!coords) return new Set();
-  const grasp = getGraspServers();
-  const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
-  const relays = [...coords.relayHints, ...grasp, ...projRelays]
-    .filter(isValidRelayUrl)
-    .filter((r, i, a) => a.indexOf(r) === i)
-    .slice(0, 8);
-  const r = await queryRelays({
-    filter: { kinds: [30617], authors: [coords.pubkey], tags: { d: coords.identifier }, limit: 1 },
-    relays,
-    timeoutMs: 6_000,
-    stream:    false,
-    acceptUntil: (evs) => evs.length >= 1,
-  });
-  let chosen: NostrEvent | null = null;
-  for (const ev of r.events) {
-    if (ev.kind !== 30617) continue;
-    if (!chosen || ev.created_at > chosen.created_at) chosen = ev;
-  }
-  if (!chosen) return new Set([coords.pubkey]);     // fall back to the announcing pubkey
-  const maintainers = new Set<string>([chosen.pubkey]);
-  for (const t of getTags(chosen, 'maintainers')) {
-    for (const v of t.slice(1)) {
-      if (typeof v === 'string' && /^[0-9a-f]{64}$/.test(v)) maintainers.add(v);
-    }
-  }
-  return maintainers;
+  const ms = await resolveMaintainerSet(coords.pubkey, coords.identifier, coords.relayHints);
+  // Belt + braces: the trust anchor is always verified by construction,
+  // but guard the empty-result path so callers can still self-close.
+  if (ms.verified.size === 0) return new Set([coords.pubkey]);
+  return ms.verified;
 }
 
 /**

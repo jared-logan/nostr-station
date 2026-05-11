@@ -4465,7 +4465,9 @@ const ProjectsPanel = (() => {
     const view = state.codeView;
 
     // Fetch in parallel — the four endpoints are independent and the
-    // round-trip dominates rendering latency.
+    // round-trip dominates rendering latency. repoMeta now carries
+    // the Phase 5 maintainerSet alongside the parsed 30617 so chips
+    // can surface verified vs candidate-only status.
     const [pubState, refs, repoMeta, gitState] = await Promise.all([
       api(`/api/projects/${p.id}/publish-state`).catch(() => null),
       api(`/api/projects/${p.id}/repo/refs`).catch(() => null),
@@ -4855,17 +4857,32 @@ const ProjectsPanel = (() => {
     }
 
     // Maintainer + clone chips only for published projects.
+    // Phase 5: maintainer chip shows verified count with a check
+    // icon plus a separate warn chip for candidate-only co-maintainers
+    // (listed by the announcement but with no own 30617 — i.e.
+    // unverified per the NIP-34 anti-scam rule).
     let chips = '';
     if (repo) {
-      const maintCount = (repo.maintainers || []).length;
-      const cloneCount = (repo.clone || []).length;
+      const ms = repoMeta.maintainerSet;
+      const verifiedCount = ms ? ms.verified.length     : (repo.maintainers?.length || 0);
+      const candidateCount = ms ? ms.candidatesOnly.length : 0;
+      // Prefer the unioned clone list when the maintainerSet has one
+      // (covers co-maintainers' own clone URLs the trust anchor never
+      // listed); otherwise fall back to the trust anchor's clone tags.
+      const cloneCount = ms && ms.clone.length > 0 ? ms.clone.length : (repo.clone?.length || 0);
       const chipParts = [];
-      if (maintCount > 0) chipParts.push(`<span class="code-chip"><span class="k">maintainers</span><span class="v">${maintCount}</span></span>`);
-      if (cloneCount > 0) chipParts.push(`<span class="code-chip"><span class="k">clone URLs</span><span class="v">${cloneCount}</span></span>`);
-      if (Array.isArray(repo.hashtags)) {
-        for (const t of repo.hashtags.slice(0, 4)) {
-          chipParts.push(`<span class="code-chip code-chip-tag">#${escapeHtml(t)}</span>`);
-        }
+      if (verifiedCount > 0) {
+        chipParts.push(`<span class="code-chip code-chip-verified" title="Verified — published own kind-30617 under this coordinate"><span class="k">✓ verified</span><span class="v">${verifiedCount}</span></span>`);
+      }
+      if (candidateCount > 0) {
+        chipParts.push(`<span class="code-chip code-chip-candidate" title="Claimed as maintainer by the announcement but has not published their own kind-30617 — cannot grant authority on this repo"><span class="k">⚠ candidate</span><span class="v">${candidateCount}</span></span>`);
+      }
+      if (cloneCount > 0) {
+        chipParts.push(`<span class="code-chip"><span class="k">clone URLs</span><span class="v">${cloneCount}</span></span>`);
+      }
+      const hashtags = (ms && ms.hashtags.length > 0) ? ms.hashtags : (repo.hashtags || []);
+      for (const t of hashtags.slice(0, 4)) {
+        chipParts.push(`<span class="code-chip code-chip-tag">#${escapeHtml(t)}</span>`);
       }
       chips = `<div class="code-chips">${chipParts.join('')}</div>`;
     }

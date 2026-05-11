@@ -57,6 +57,7 @@ import {
   getTags,
   type NostrEvent,
 } from '../nostr-query.js';
+import { resolveMaintainerSet, type MaintainerSet } from '../maintainer-set.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -552,6 +553,21 @@ async function readReadme(project: Project, ref: string): Promise<any> {
 
 // ── error message helper ────────────────────────────────────────────────
 
+// Sets aren't JSON-serialisable; convert to arrays for the wire shape.
+// Keep field names identical to MaintainerSet for the parts that are
+// already arrays so the consumer doesn't fork its schema by route.
+function serialiseMaintainerSet(ms: MaintainerSet): any {
+  return {
+    verified:       Array.from(ms.verified),
+    candidatesOnly: Array.from(ms.candidatesOnly),
+    relays:         ms.relays,
+    clone:          ms.clone,
+    blossoms:       ms.blossoms,
+    hashtags:       ms.hashtags,
+    display:        ms.display,
+  };
+}
+
 function extractGitError(e: any): string {
   // execFile attaches stderr to the rejection — surface it (slimmed)
   // so the client gets an actionable message instead of "command failed".
@@ -599,9 +615,22 @@ export async function handleRepo(
     }
     if (sub === 'repo') {
       const result = await fetchRepoMeta(project, refresh);
+      // Phase 5: resolve verified vs candidate-only maintainers in
+      // parallel with the basic /repo lookup. resolveMaintainerSet
+      // queries the trust anchor + every claimed maintainer's own
+      // 30617, then applies the NIP-34 anti-scam rule.
+      let maintainerSet: ReturnType<typeof serialiseMaintainerSet> | null = null;
+      const coords = decodeNgitRemote(project);
+      if (coords) {
+        try {
+          const ms = await resolveMaintainerSet(coords.pubkey, coords.identifier, coords.relayHints);
+          maintainerSet = serialiseMaintainerSet(ms);
+        } catch { /* leave maintainerSet null on failure — UI falls back to repo.maintainers */ }
+      }
       return json(res, 200, {
         status: result.repo ? 'published' : 'local-only',
         repo:   result.repo,
+        maintainerSet,
         cached: result.cached,
         // Diagnostics on fresh queries only — cached returns are quiet.
         diagnostics: result.diagnostics,
