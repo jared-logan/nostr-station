@@ -85,6 +85,7 @@ import { handleDitto } from './routes/ditto.js';
 import { handleNgit } from './routes/ngit.js';
 import { handleRepo } from './routes/repo.js';
 import { handlePatches } from './routes/patches.js';
+import { handleIssues } from './routes/issues.js';
 import {
   handleAi,
   streamAnthropic, streamOpenAICompat,
@@ -1707,6 +1708,12 @@ export async function startWebServer(port: number): Promise<void> {
       // with revision threading. Drives the Proposals tab + per-patch
       // detail view. Same precedence rationale as handleRepo.
       if (await handlePatches(req, res, url, method)) return;
+
+      // ── Issues + NIP-22 comments (extracted to routes/issues.ts) ─────
+      // Kind 1621 issues with kind 1111 (and legacy 1622) comment trees,
+      // plus SSE POSTs to ngit issue_create / ngit comment. Drives the
+      // Issues tab + comment threading on both issues and patches.
+      if (await handleIssues(req, res, url, method)) return;
 
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
       if (await handleProjects(req, res, url, method)) return;
