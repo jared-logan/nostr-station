@@ -796,7 +796,7 @@ interface RelayPublishResult { relay: string; ok: boolean; reason?: string }
  * (or the timeout fires). Returns per-relay results so the client can
  * show which relays accepted vs. rejected.
  */
-async function publishEventToRelays(
+export async function publishEventToRelays(
   event:    any,
   relays:   string[],
   timeoutMs: number = 6000,

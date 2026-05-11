@@ -4905,7 +4905,10 @@ const ProjectsPanel = (() => {
       openEditRepositoryModal(p, repo, ms, () => {
         // After a successful save, re-fetch the repo metadata so the
         // About tab reflects the new announcement. The cache is busted
-        // server-side; passing refresh=1 just shortens the round-trip.
+        // server-side. Guard against the user having switched tabs
+        // during the round-trip — re-rendering into a detached
+        // container would leak DOM and orphan our cleanup hooks.
+        if (!container.isConnected) return;
         renderAboutTab(container, p);
       });
     });
@@ -5890,8 +5893,22 @@ const ProjectsPanel = (() => {
 
     const body = document.createElement('div');
     body.className = 'edit-repo-modal';
+    // Scoping note: a 30617 announcement is per-maintainer. Saving here
+    // republishes YOUR announcement only — co-maintainers' announcements
+    // are untouched. Important for multi-maintainer repos where the user
+    // could otherwise read this form as repo-global.
+    const isMultiMaintainer = (ms?.events?.length || 0) > 1;
     const renderBody = () => {
       body.innerHTML = `
+        ${isMultiMaintainer ? `
+          <div class="edit-repo-banner muted">
+            You're editing <strong>your own</strong> announcement event. Co-maintainers' announcements
+            are independent — fields like clone URLs and relays here are yours alone, and the
+            "Other relays" section on About will continue to surface other maintainers' contributions
+            via the union.
+          </div>
+        ` : ''}
+
         <div class="edit-repo-section">
           <label class="edit-repo-label" for="erm-name">Name</label>
           <input id="erm-name" class="edit-repo-input" type="text" value="${escapeHtml(state.name)}" />
@@ -6081,6 +6098,14 @@ const ProjectsPanel = (() => {
     });
     cancel.addEventListener('click', () => modal.close());
     save.addEventListener('click', async () => {
+      // Commit any pending text in the topic chip-input that the user
+      // didn't press Enter on. Otherwise typing a topic and clicking
+      // Save loses the topic silently — confusing.
+      const pendingTopic = body.querySelector('[data-input="topic"]')?.value?.trim().replace(/^#/, '');
+      if (pendingTopic && !state.topics.includes(pendingTopic)) {
+        state.topics.push(pendingTopic);
+      }
+
       save.disabled = true;
       save.textContent = 'Signing via Amber…';
       // GRASP and Other relays are treated as one `relays` list on
@@ -6119,11 +6144,14 @@ const ProjectsPanel = (() => {
         customTags,
       };
       try {
+        // silent: true so api() doesn't auto-toast on non-2xx — we
+        // produce a higher-quality, action-specific toast in the
+        // catch (with per-relay reasons or the bunker error).
         const r = await api(`/api/projects/${p.id}/announce`, {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify(payload),
-        });
+        }, { silent: true });
         if (r?.ok && r?.accepted > 0) {
           toast('Repository updated', `${r.accepted}/${r.targets} relays accepted the new announcement`, 'ok');
           modal.close();
@@ -6136,6 +6164,9 @@ const ProjectsPanel = (() => {
           save.textContent = 'Save changes';
         }
       } catch (e) {
+        // Stack trace into the console for actual debugging — toast is
+        // for the user, console.warn is for us when they paste a screenshot.
+        console.warn('[edit-repo] announce failed:', e);
         toast('Save failed', String(e?.message || e), 'err');
         save.disabled = false;
         save.textContent = 'Save changes';

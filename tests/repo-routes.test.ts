@@ -440,3 +440,92 @@ test('buildRepoAnnounceTemplate: r-euc tag emitted only when euc provided', () =
   );
   assert.deepEqual(withEuc.tags.find(t => t[0] === 'r'), ['r', sha, 'euc']);
 });
+
+// ── publishEventToRelays ────────────────────────────────────────────────
+//
+// Round-trip test against an in-process WebSocketServer mock. Stands up
+// two relays — one that ACK's the EVENT, one that NACK's — then asserts
+// the per-relay results.
+
+import { WebSocketServer } from 'ws';
+import { AddressInfo } from 'net';
+
+const { publishEventToRelays } = await import('../src/lib/routes/repo.ts');
+
+function startMockRelay(behavior: 'accept' | 'reject'): Promise<{ url: string; close: () => void }> {
+  return new Promise((resolve) => {
+    const wss = new WebSocketServer({ port: 0 });
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (Array.isArray(msg) && msg[0] === 'EVENT' && msg[1]?.id) {
+            const id = msg[1].id;
+            if (behavior === 'accept') ws.send(JSON.stringify(['OK', id, true, '']));
+            else                       ws.send(JSON.stringify(['OK', id, false, 'mock-rejected']));
+          }
+        } catch { /* ignore */ }
+      });
+    });
+    wss.on('listening', () => {
+      const port = (wss.address() as AddressInfo).port;
+      resolve({
+        url:   `ws://127.0.0.1:${port}`,
+        close: () => wss.close(),
+      });
+    });
+  });
+}
+
+test('publishEventToRelays: parses OK true → ok=true', async () => {
+  const relay = await startMockRelay('accept');
+  try {
+    const event = { id: 'a'.repeat(64), kind: 30617, tags: [], pubkey: 'b'.repeat(64), created_at: 1, content: '', sig: 'x' };
+    const results = await publishEventToRelays(event, [relay.url], 2000);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].relay, relay.url);
+    assert.equal(results[0].ok, true);
+  } finally { relay.close(); }
+});
+
+test('publishEventToRelays: parses OK false → ok=false with reason', async () => {
+  const relay = await startMockRelay('reject');
+  try {
+    const event = { id: 'c'.repeat(64), kind: 30617, tags: [], pubkey: 'd'.repeat(64), created_at: 1, content: '', sig: 'x' };
+    const results = await publishEventToRelays(event, [relay.url], 2000);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].ok, false);
+    assert.equal(results[0].reason, 'mock-rejected');
+  } finally { relay.close(); }
+});
+
+test('publishEventToRelays: parallel relays — mixed accept + reject reflected per-relay', async () => {
+  // Establishes that the per-relay results array preserves which relay
+  // returned what — important UX so we can list reasons in the toast.
+  const a = await startMockRelay('accept');
+  const r = await startMockRelay('reject');
+  try {
+    const event = { id: 'e'.repeat(64), kind: 30617, tags: [], pubkey: 'f'.repeat(64), created_at: 1, content: '', sig: 'x' };
+    const results = await publishEventToRelays(event, [a.url, r.url], 2000);
+    const byRelay = Object.fromEntries(results.map(x => [x.relay, x]));
+    assert.equal(byRelay[a.url].ok, true);
+    assert.equal(byRelay[r.url].ok, false);
+    assert.equal(byRelay[r.url].reason, 'mock-rejected');
+  } finally { a.close(); r.close(); }
+});
+
+test('publishEventToRelays: relay that never responds → ok=false reason="timeout"', async () => {
+  // Mock relay that accepts the connection but ignores EVENT — the
+  // helper must time out cleanly and surface "timeout" as the reason
+  // rather than hanging.
+  const wss = new WebSocketServer({ port: 0 });
+  wss.on('connection', () => { /* swallow */ });
+  await new Promise<void>(r => wss.on('listening', () => r()));
+  const port = (wss.address() as AddressInfo).port;
+  try {
+    const event = { id: 'g'.repeat(64), kind: 30617, tags: [], pubkey: 'h'.repeat(64), created_at: 1, content: '', sig: 'x' };
+    const results = await publishEventToRelays(event, [`ws://127.0.0.1:${port}`], 300);
+    assert.equal(results[0].ok, false);
+    assert.equal(results[0].reason, 'timeout');
+  } finally { wss.close(); }
+});

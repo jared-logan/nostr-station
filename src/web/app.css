@@ -5934,6 +5934,15 @@ body.term-expanded .term-bar-toggle .term-chevron {
 
 /* ── Edit Repository modal ────────────────────────────────────────────── */
 .edit-repo-modal { display: flex; flex-direction: column; gap: 16px; max-width: 640px; }
+.edit-repo-banner {
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-dim, var(--accent));
+  border-radius: 4px;
+}
 .edit-repo-section { display: flex; flex-direction: column; gap: 6px; }
 .edit-repo-section-head {
   font-size: 12px;
