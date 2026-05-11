@@ -4774,6 +4774,17 @@ const ProjectsPanel = (() => {
   function paintAboutTab(container, repo, ms) {
     const analysis = analyseAnnouncements(repo, ms);
 
+    // Section order matches gitworkshop: Topics → Maintainers → GRASP →
+    // Other relays → Clone (the nostr:// URL contributors actually use)
+    // → Raw git URLs (the per-maintainer https:// breakdown). Putting
+    // Topics first reads naturally because it's the "what is this?"
+    // signal; Clone before Raw git URLs because the nostr:// URL is the
+    // canonical entry point and the raw https:// URLs are a
+    // power-user view of the same data.
+    const ngitRemoteUrl = window.__projectsCache?.find?.(x => x.id === p.id)?.remotes?.ngit
+      ?? p.remotes?.ngit
+      ?? '';
+
     container.innerHTML = `
       <div class="about-tab">
         ${repo.description ? `<div class="about-desc">${escapeHtml(repo.description)}</div>` : ''}
@@ -4783,6 +4794,15 @@ const ProjectsPanel = (() => {
             <div class="about-head muted">Website</div>
             <div class="about-web">
               ${repo.web.map(u => `<a href="${escapeHtml(u)}" target="_blank" rel="noreferrer noopener" class="about-web-link">${escapeHtml(u)}</a>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        ${repo.hashtags?.length ? `
+          <div class="about-section">
+            <div class="about-head muted">Topics</div>
+            <div class="about-pills">
+              ${repo.hashtags.map(t => `<code class="about-pill about-pill-tag">${escapeHtml(t)}</code>`).join('')}
             </div>
           </div>
         ` : ''}
@@ -4815,9 +4835,22 @@ const ProjectsPanel = (() => {
           </div>
         ` : ''}
 
+        ${ngitRemoteUrl ? `
+          <div class="about-section">
+            <div class="about-head muted">Clone</div>
+            <div class="about-clone-ngit">
+              <div class="about-clone-ngit-label">ngit <span class="muted">(nostr git plugin)</span></div>
+              <div class="about-clone-row about-clone-row-primary">
+                <code class="about-clone-url">git clone ${escapeHtml(ngitRemoteUrl)}</code>
+                <span class="copy-slot" data-copy="${escapeHtml('git clone ' + ngitRemoteUrl)}"></span>
+              </div>
+            </div>
+          </div>
+        ` : ''}
+
         ${analysis.clonesByMaintainer.size > 0 ? `
           <div class="about-section">
-            <div class="about-head muted">Clone URLs</div>
+            <div class="about-head muted" title="Raw https:// URLs from each maintainer's announcement. Most users should clone via the nostr:// URL above instead — it discovers all of these automatically.">Raw git URLs</div>
             <div class="about-clones">
               ${[...analysis.clonesByMaintainer.entries()].map(([owner, urls]) => `
                 <div class="about-clone-group">
@@ -4837,26 +4870,40 @@ const ProjectsPanel = (() => {
           </div>
         ` : ''}
 
-        ${repo.hashtags?.length ? `
-          <div class="about-section">
-            <div class="about-head muted">Topics</div>
-            <div class="about-pills">
-              ${repo.hashtags.map(t => `<code class="about-pill about-pill-tag">#${escapeHtml(t)}</code>`).join('')}
-            </div>
-          </div>
-        ` : ''}
-
-        ${ms?.events?.length ? `
-          <div class="about-foot">
-            <button class="about-raw-events" type="button">{ } Raw announcement events (${ms.events.length})</button>
-          </div>
-        ` : ''}
+        <div class="about-footer-row">
+          <button class="about-action about-action-edit" type="button" title="Edit this repository's announcement (re-publishes a signed kind-30617 with your changes)">
+            <span class="about-action-icon">✎</span> Edit
+          </button>
+          <button class="about-action about-action-share" type="button" title="Copy share links (naddr / nostr:// URL)">
+            <span class="about-action-icon">↗</span> Share links
+          </button>
+          ${ms?.events?.length ? `
+            <button class="about-action about-action-raw" type="button" title="Inspect each maintainer's raw kind-30617 event">
+              <span class="about-action-icon">{ }</span> Raw announcement event${ms.events.length === 1 ? '' : 's'}${ms.events.length > 1 ? ` (${ms.events.length})` : ''}
+            </button>
+          ` : ''}
+          <button class="about-action about-action-delete" type="button" title="Unregister this project from your dashboard (the nostr events remain on relays — there is no on-chain delete)">
+            <span class="about-action-icon">🗑</span> Delete
+          </button>
+        </div>
       </div>
     `;
 
     container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
-    container.querySelector('.about-raw-events')?.addEventListener('click', () => {
+    container.querySelector('.about-action-raw')?.addEventListener('click', () => {
       openAnnouncementsModal(repo, ms);
+    });
+    container.querySelector('.about-action-edit')?.addEventListener('click', () => {
+      // Phase 3b lands the actual form. Stub for now so the affordance
+      // is present and the layout settles before the form work piles
+      // up on top.
+      toast('Edit coming next', 'The Edit Repository form lands in Phase 3b', 'info');
+    });
+    container.querySelector('.about-action-share')?.addEventListener('click', () => {
+      openShareLinksModal(p, repo);
+    });
+    container.querySelector('.about-action-delete')?.addEventListener('click', () => {
+      openDeleteProjectConfirm(p);
     });
   }
 
@@ -5765,6 +5812,78 @@ const ProjectsPanel = (() => {
   // sourced from. The "selected" badge marks the event whose fields
   // the dashboard currently treats as authoritative for display
   // (newest verified by created_at — matches MaintainerSet.display.pubkey).
+  // Share links — gitworkshop-style helper. The kind-30617 announcement
+  // is identified by an NIP-19 naddr that bundles the coordinate
+  // (30617:pubkey:identifier) plus the relay hints from the announcement,
+  // and by the nostr:// URL that ngit-aware git plugins consume. Both
+  // are useful: naddr for embedding/linking in other nostr clients, the
+  // nostr:// for "git clone …" from a terminal. Copy buttons on both.
+  function openShareLinksModal(p, repo) {
+    const naddr = (() => {
+      try {
+        if (!window.NostrTools?.nip19) return '';
+        return window.NostrTools.nip19.naddrEncode({
+          kind:       30617,
+          pubkey:     repo.pubkey,
+          identifier: repo.identifier,
+          // Cap relay hints so the encoded naddr stays compact — first
+          // few are usually the maintainer's own.
+          relays:     (repo.relays || []).slice(0, 4),
+        });
+      } catch { return ''; }
+    })();
+    const ngitRemote = window.__projectsCache?.find?.(x => x.id === p.id)?.remotes?.ngit
+      ?? p.remotes?.ngit
+      ?? '';
+    const gitworkshopUrl = naddr ? `https://gitworkshop.dev/${naddr}` : '';
+    const body = document.createElement('div');
+    body.className = 'share-modal';
+    const row = (label, value, hint) => value ? `
+      <div class="share-row">
+        <div class="share-label">${escapeHtml(label)}${hint ? ` <span class="muted">${escapeHtml(hint)}</span>` : ''}</div>
+        <div class="share-value">
+          <code>${escapeHtml(value)}</code>
+          <span class="copy-slot" data-copy="${escapeHtml(value)}"></span>
+        </div>
+      </div>
+    ` : '';
+    body.innerHTML = `
+      ${row('naddr', naddr, '(nostr address — NIP-19)')}
+      ${row('nostr:// URL', ngitRemote, '(ngit clone)')}
+      ${row('gitworkshop.dev', gitworkshopUrl, '(browser link)')}
+    `;
+    body.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+    openModal({
+      title:    'Share links',
+      subtitle: repo.name || repo.identifier,
+      body,
+    });
+  }
+
+  // Confirm + run the project-unregister flow. The nostr events stay
+  // on relays — that's an inherent property of NIP-34 announcements
+  // and out of scope for a dashboard. The tooltip on the Delete button
+  // states this explicitly so users don't expect a true delete.
+  async function openDeleteProjectConfirm(p) {
+    const ok = await confirmDestructive({
+      title: 'Remove from dashboard',
+      description:
+        `Unregisters "${p.name}" from nostr-station. The kind-30617 announcement and all related ` +
+        `nostr events remain on the relays they were published to — there is no on-chain delete in NIP-34. ` +
+        `Files on disk are not touched either; remove them manually if desired.`,
+      confirmLabel: 'Remove',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/projects/${p.id}`, { method: 'DELETE' });
+      toast('Project removed', p.name, 'ok');
+      state.view = 'list'; state.projectId = null;
+      reload();
+    } catch (e) {
+      toast('Remove failed', String(e?.message || e), 'err');
+    }
+  }
+
   function openAnnouncementsModal(repo, ms) {
     const events = Array.isArray(ms?.events) ? ms.events : [];
     const selectedPubkey = ms?.display?.pubkey || repo?.pubkey || '';

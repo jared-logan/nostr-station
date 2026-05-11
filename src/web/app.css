@@ -5849,24 +5849,82 @@ body.term-expanded .term-bar-toggle .term-chevron {
   word-break: break-all;
   font-size: 11px;
 }
-.about-foot {
+.about-clone-ngit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.about-clone-ngit-label {
+  font-size: 11px;
+  color: var(--text);
+}
+.about-clone-row-primary {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.about-clone-row-primary .about-clone-url {
+  font-size: 12px;
+}
+
+/* ── About tab footer row ─────────────────────────────────────────────── */
+.about-footer-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
   margin-top: 8px;
-  padding-top: 12px;
+  padding-top: 14px;
   border-top: 1px solid var(--border);
 }
-.about-raw-events {
-  font-size: 11px;
-  padding: 4px 10px;
+.about-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: 4px;
   color: var(--muted);
   cursor: pointer;
+}
+.about-action:hover {
+  color: var(--text);
+  background: var(--bg-card);
+  border-color: var(--border);
+}
+.about-action-icon {
+  font-size: 11px;
   font-family: var(--font-mono, monospace);
 }
-.about-raw-events:hover {
+.about-action-delete {
+  margin-left: auto;     /* push Delete to the far right, gitworkshop pattern */
+}
+.about-action-delete:hover {
+  color: var(--error, #ff5470);
+  border-color: rgba(255, 84, 112, 0.4);
+}
+
+/* ── Share links modal ────────────────────────────────────────────────── */
+.share-modal { display: flex; flex-direction: column; gap: 12px; }
+.share-row { display: flex; flex-direction: column; gap: 4px; }
+.share-label { font-size: 11px; color: var(--text); }
+.share-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.share-value code {
+  flex: 1;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  word-break: break-all;
   color: var(--text);
-  border-color: var(--accent-dim, var(--border));
 }
 .code-badge {
   display: inline-flex;
