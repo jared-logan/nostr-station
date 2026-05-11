@@ -5609,6 +5609,53 @@ body.term-expanded .term-bar-toggle .term-chevron {
 }
 .cpb-dismiss:hover { color: var(--text-bright); }
 
+/* ── Phase 6: scratch-checkout banner ─────────────────────────────────── */
+
+.code-scratch-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn, #e6b800);
+  border-radius: 4px;
+  background: var(--bg-card);
+}
+.csb-icon { font-size: 18px; flex-shrink: 0; }
+.csb-body { flex: 1; min-width: 0; }
+.csb-title {
+  color: var(--text-bright);
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+.csb-sub { font-size: 12px; line-height: 1.5; }
+.csb-path {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  background: var(--bg-elev, var(--bg-hover));
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+  word-break: break-all;
+}
+.csb-to-settings { color: var(--accent-bright); }
+
+.discover-card-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.browse-scratch {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.browse-scratch:hover {
+  border-color: var(--accent-dim, var(--border-strong, var(--border)));
+  color: var(--accent-bright);
+}
+
 /* ── Phase 2b: series cards (Proposals tab) ───────────────────────────── */
 
 .proposals-head {

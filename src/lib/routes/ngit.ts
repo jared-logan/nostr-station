@@ -560,6 +560,165 @@ export async function handleNgit(
     return true;
   }
 
+  // ── ngit explore (Phase 6: clone into a scratch dir) ──────────────
+  //
+  // Clones a discovered ngit repo into ~/.nostr-station/scratch/<name>-
+  // <8-char-hash>/ so a user can browse its files / patches / issues
+  // without committing it to their main project list.
+  //
+  // The path target is deterministic (sha1 prefix of the URL) so
+  // re-exploring the same repo reuses the existing checkout instead
+  // of accumulating duplicates. The Code tab detects the
+  // /.nostr-station/scratch/ path prefix and renders a banner so the
+  // user knows the clone is temporary.
+  //
+  // Reuses /api/ngit/clone's naddr→https resolution logic so the
+  // explore flow is exactly as robust as the regular clone path.
+  // /api/projects/detect (called by the client after the SSE
+  // completes) registers the scratch dir as a Project — the
+  // "scratchness" lives purely in the path, no schema change.
+  if (url === '/api/ngit/explore' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+    const rawUrl = String(parsed.url || '').trim();
+    if (!rawUrl || !(rawUrl.startsWith('nostr://') || rawUrl.startsWith('naddr1'))) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'url must be a nostr:// URL or naddr1… value' }));
+      return true;
+    }
+
+    // Derive a friendly directory name from the URL's last segment,
+    // sanitised the same way /api/ngit/clone validates repoName.
+    let derivedName = '';
+    if (rawUrl.startsWith('nostr://')) {
+      const m = rawUrl.match(/^nostr:\/\/[^/]+\/([A-Za-z0-9._-]{1,64})/);
+      if (m) derivedName = m[1];
+    } else {
+      // naddr — decode for the d-tag.
+      try {
+        const decoded = nip19.decode(rawUrl);
+        if (decoded.type === 'naddr' && decoded.data.kind === 30617) {
+          const ident = decoded.data.identifier;
+          if (typeof ident === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(ident)) {
+            derivedName = ident;
+          }
+        }
+      } catch { /* fall through — derivedName stays empty */ }
+    }
+    if (!derivedName) derivedName = 'repo';
+
+    // 8-char hex sha1 prefix of the full URL so re-exploring the
+    // same repo lands in the same dir.
+    const crypto = await import('crypto');
+    const hashSuffix = crypto.createHash('sha1').update(rawUrl).digest('hex').slice(0, 8);
+    const home = process.env.HOME || os.homedir();
+    const scratchRoot = path.join(home, '.nostr-station', 'scratch');
+    const target = path.join(scratchRoot, `${derivedName}-${hashSuffix}`);
+
+    // If the scratch checkout already exists (idempotent re-explore),
+    // skip the clone entirely and emit a synthetic SSE that points at
+    // the existing path so the client can navigate directly.
+    if (fs.existsSync(target)) {
+      res.writeHead(200, {
+        'Content-Type':  'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection':    'keep-alive',
+      });
+      try {
+        res.write(`data: ${JSON.stringify({ info: 'resolvedPath', value: target })}\n\n`);
+        res.write(`data: ${JSON.stringify({ line: '[scratch checkout already exists — opening]', stream: 'stdout' })}\n\n`);
+        res.write(`data: ${JSON.stringify({ done: true, code: 0 })}\n\n`);
+        res.end();
+      } catch {}
+      return true;
+    }
+
+    // Resolve to an https clone URL via the trust anchor's 30617 —
+    // same logic as /api/ngit/clone. Falls back to nostr:// when no
+    // 30617 is reachable and lets git-remote-nostr try its luck.
+    let cloneUrl = rawUrl;
+    if (rawUrl.startsWith('naddr1')) {
+      let pubkeyHex = '';
+      let dTag = '';
+      let relayHints: string[] = [];
+      try {
+        const decoded = nip19.decode(rawUrl);
+        if (decoded.type !== 'naddr' || decoded.data.kind !== 30617) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'naddr must reference a kind-30617 ngit repo announcement' }));
+          return true;
+        }
+        pubkeyHex = decoded.data.pubkey;
+        dTag = decoded.data.identifier;
+        relayHints = Array.isArray(decoded.data.relays) ? decoded.data.relays : [];
+      } catch (e: any) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `could not decode naddr: ${e?.message ?? 'invalid'}` }));
+        return true;
+      }
+      const graspServers = getGraspServers();
+      const relays = [...relayHints, ...graspServers]
+        .filter(isValidRelayUrl)
+        .filter((r, i, a) => a.indexOf(r) === i)
+        .slice(0, 6);
+      const httpsCloneUrl = await new Promise<string>((resolve) => {
+        if (relays.length === 0) { resolve(''); return; }
+        const args = ['req', '-k', '30617', '-a', pubkeyHex, '-t', `d=${dTag}`, '-l', '1', ...relays];
+        const child = spawn('nak', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let chunks = '';
+        let resolved = false;
+        const done = (u: string) => { if (resolved) return; resolved = true; clearTimeout(timer); try { child.kill('SIGTERM'); } catch {} resolve(u); };
+        const timer = setTimeout(() => done(''), 10_000);
+        child.stdout.on('data', (b: Buffer) => {
+          chunks += b.toString();
+          const lines = chunks.split('\n');
+          chunks = lines.pop() || '';
+          for (const line of lines) {
+            const s = line.trim();
+            if (!s) continue;
+            let ev: any;
+            try { ev = JSON.parse(s); } catch { continue; }
+            if (!ev || ev.kind !== 30617 || !Array.isArray(ev.tags)) continue;
+            const cloneTags = ev.tags
+              .filter((t: any[]) => t[0] === 'clone')
+              .flatMap((t: any[]) => t.slice(1).filter((x: any) => typeof x === 'string' && x));
+            const https = cloneTags.find((u: string) => /^https:\/\//i.test(u));
+            if (https) { done(https); return; }
+            const anyGit = cloneTags.find((u: string) => /^(git|https?|ssh):\/\//i.test(u));
+            if (anyGit) { done(anyGit); return; }
+          }
+        });
+        child.on('error', () => done(''));
+        child.on('close', () => done(''));
+      });
+      if (httpsCloneUrl) {
+        cloneUrl = httpsCloneUrl;
+      } else {
+        try {
+          const npub = nip19.npubEncode(pubkeyHex);
+          cloneUrl = `nostr://${npub}/${dTag}`;
+        } catch { /* leave cloneUrl = rawUrl */ }
+      }
+    }
+
+    try { fs.mkdirSync(scratchRoot, { recursive: true, mode: 0o755 }); } catch {}
+    streamExec(
+      { bin: 'git', args: ['clone', cloneUrl, target], env: { NO_COLOR: '1', TERM: 'dumb' } },
+      res, req, undefined,
+      { info: 'resolvedPath', value: target },
+      (code) => {
+        if (code !== 0) return;
+        if (!fs.existsSync(target)) return;
+        try {
+          const ident = readIdentity();
+          seedRepoGitIdentityIfMissing(target, ident);
+        } catch { /* best-effort */ }
+      },
+    );
+    return true;
+  }
+
   // ── ngit account (signer) status + login/logout ────────────────────
   //
   // ngit stores the signer session in global git config under

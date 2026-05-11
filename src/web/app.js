@@ -4484,6 +4484,16 @@ const ProjectsPanel = (() => {
 
     container.innerHTML = '';
 
+    // Phase 6: scratch-checkout banner. Pinned by the path prefix —
+    // when a project lives under ~/.nostr-station/scratch/ it's a
+    // temporary clone from the Discover → Browse flow. The banner
+    // tells the user it's not persisted into their normal project
+    // list and points to Settings (where they can edit `path` to
+    // promote it to a regular project).
+    if (isScratchProject(p)) {
+      container.appendChild(renderScratchBanner(p));
+    }
+
     // Local-only fork: full-tab publish wizard. We deliberately skip
     // the file browser / commits in this state because (a) there's
     // no nostr context to anchor them in and (b) the publish form
@@ -4808,6 +4818,39 @@ const ProjectsPanel = (() => {
       toast('Post-publish sync failed', e?.message || '', 'warn');
     }
     reload();
+  }
+
+  // Phase 6: scratch checkout heuristic. The /api/ngit/explore
+  // endpoint always lands in ~/.nostr-station/scratch/<...>, so a
+  // simple substring match is unambiguous. (We don't need an
+  // absolute path check because the server only ever writes under
+  // HOME, and the path comparison happens client-side on a string
+  // the server emitted.)
+  function isScratchProject(p) {
+    return typeof p?.path === 'string' && p.path.includes('/.nostr-station/scratch/');
+  }
+
+  function renderScratchBanner(p) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-scratch-banner';
+    wrap.innerHTML = `
+      <div class="csb-icon">🧪</div>
+      <div class="csb-body">
+        <div class="csb-title">Temporary clone</div>
+        <div class="csb-sub muted">
+          You're browsing this repo from a scratch checkout at
+          <code class="csb-path">${escapeHtml(p.path)}</code>.
+          Edit the project's <a href="#" class="csb-to-settings">path in Settings</a>
+          to promote it to a regular project, or remove it when you're done.
+        </div>
+      </div>
+    `;
+    wrap.querySelector('.csb-to-settings').addEventListener('click', (e) => {
+      e.preventDefault();
+      state.tab = 'settings';
+      render();
+    });
+    return wrap;
   }
 
   function renderJustPublishedBanner(p, repoMeta) {
@@ -6948,6 +6991,54 @@ const ProjectsPanel = (() => {
             remotes: { github: gitUrl, ngit: nostrUrl },
           });
         });
+        // Phase 6: Browse button — clones into ~/.nostr-station/scratch/
+        // for one-tap exploration without committing the repo to the
+        // main project list. After clone succeeds the client calls
+        // /api/projects/detect to register the scratch path; the Code
+        // tab detects the path prefix and renders a "temporary clone"
+        // banner with a path to make it permanent.
+        const browseBtn = card.querySelector('.browse-scratch');
+        if (browseBtn) browseBtn.addEventListener('click', async () => {
+          modal.close();
+          const nostrUrl = repo.cloneUrl
+            || (repo.naddr ? repo.naddr : (repo.clone || []).find(u => u.startsWith('nostr://')))
+            || '';
+          if (!nostrUrl) {
+            toast('Cannot browse', 'no nostr:// URL or naddr available for this repo', 'err');
+            return;
+          }
+          const r = await openExecModal({
+            title:    `Browse · ${repo.name}`,
+            subtitle: `git clone ${nostrUrl.slice(0, 32)}…  →  ~/.nostr-station/scratch/`,
+            endpoint: `/api/ngit/explore`,
+            body:     { url: nostrUrl },
+          });
+          const resolvedPath = r.info?.resolvedPath;
+          if (!r.ok || !resolvedPath) {
+            if (!r.ok) toast('Browse failed', `exit ${r.code}`, 'err');
+            return;
+          }
+          // Register the scratch path as a Project so the Code tab
+          // can open against it. If a project already lives at this
+          // path (re-explore), just navigate to it.
+          try {
+            const existing = projects.find(x => x.path === resolvedPath);
+            if (!existing) {
+              const identity = { useDefault: true, npub: '', bunkerUrl: '' };
+              await registerAfterNgitClone(resolvedPath, repo.name, nostrUrl, identity);
+            }
+            await reload();
+            const fresh = projects.find(x => x.path === resolvedPath);
+            if (fresh) {
+              state.view = 'detail';
+              state.projectId = fresh.id;
+              state.tab = 'code';
+              render();
+            }
+          } catch (e) {
+            toast('Could not register scratch checkout', e?.message || '', 'err');
+          }
+        });
       });
       queriedEl.textContent = `Queried: ${queried}`;
     }).catch((e) => {
@@ -6978,7 +7069,10 @@ const ProjectsPanel = (() => {
       <div class="discover-card" data-idx="${idx}">
         <div class="discover-card-head">
           <div class="discover-name">${escapeHtml(r.name)}</div>
-          <button class="primary add-to-projects" title="Open the Add Project drawer pre-filled with this repo's metadata">Add to Projects</button>
+          <div class="discover-card-actions">
+            <button class="browse-scratch" title="Clone into a scratch directory and browse without committing to your project list">Browse</button>
+            <button class="primary add-to-projects" title="Open the Add Project drawer pre-filled with this repo's metadata">Add to Projects</button>
+          </div>
         </div>
         ${desc ? `<div class="discover-desc muted">${escapeHtml(desc)}</div>` : ''}
         ${cloneRows ? `<div class="discover-clones">${cloneRows}</div>` : ''}
