@@ -180,7 +180,8 @@ interface ProfileLite {
   name?:        string;
   displayName?: string;     // kind-0 `display_name` field
   picture?:     string;
-  nip05?:       string;     // raw claim — not verified in the batch path
+  nip05?:       string;     // raw claim
+  nip05Verified?: boolean;  // true when the NIP-05's well-known JSON resolves back to this hex
   cachedAt:     number;
 }
 
@@ -229,21 +230,40 @@ function fetchKind0BatchFromRelay(
 async function lookupProfilesBatch(
   pubkeys: string[],
   relays: string[],
+  verifyNip05: boolean = false,
 ): Promise<Map<string, ProfileLite>> {
   const result = new Map<string, ProfileLite>();
   const need: string[] = [];
-  // Cache hot-path: skip pubkeys whose entry is fresh.
+  // Cache hot-path: skip pubkeys whose entry is fresh. We re-fetch
+  // (move to `need`) when verification was requested but we don't have
+  // a verification result yet — otherwise the verified ✓ wouldn't
+  // appear on a re-paint that arrived from cache.
   for (const hex of pubkeys) {
     if (!/^[0-9a-f]{64}$/.test(hex)) continue;
     const cached = PROFILE_CACHE.get(hex);
-    if (cached && Date.now() - cached.cachedAt < PROFILE_TTL_MS) {
+    const isFresh = cached && Date.now() - cached.cachedAt < PROFILE_TTL_MS;
+    const needsVerification = verifyNip05 && cached?.nip05 && cached.nip05Verified === undefined;
+    if (isFresh && !needsVerification) {
       result.set(hex, {
-        hex:         cached.hex,
-        npub:        cached.npub,
-        name:        cached.name,
-        picture:     cached.picture,
-        nip05:       cached.nip05,
-        cachedAt:    cached.cachedAt,
+        hex:           cached!.hex,
+        npub:          cached!.npub,
+        name:          cached!.name,
+        picture:       cached!.picture,
+        nip05:         cached!.nip05,
+        nip05Verified: cached!.nip05Verified,
+        cachedAt:      cached!.cachedAt,
+      });
+    } else if (isFresh && needsVerification) {
+      // Skip the relay roundtrip but include this hex in the
+      // verification pass below by seeding `result` with the cached
+      // profile values.
+      result.set(hex, {
+        hex:           cached!.hex,
+        npub:          cached!.npub,
+        name:          cached!.name,
+        picture:       cached!.picture,
+        nip05:         cached!.nip05,
+        cachedAt:      cached!.cachedAt,
       });
     } else {
       need.push(hex);
@@ -291,15 +311,54 @@ async function lookupProfilesBatch(
       } catch {}
     }
     result.set(hex, profile);
-    // Mirror into the owner-profile cache so subsequent single lookups
-    // for the same pubkey are free.
+  }
+
+  // NIP-05 verification — opt-in via `verifyNip05` arg. Each lookup is
+  // a DNS + HTTPS GET so it's not free; we cap parallelism so we don't
+  // open 50 DNS lookups + sockets at once. Failures (network, 4xx,
+  // mismatch) leave nip05Verified === false. Successes set true.
+  if (verifyNip05) {
+    const withClaim = [...result.values()].filter(p => typeof p.nip05 === 'string' && p.nip05.includes('@'));
+    // Cap at 8 in flight at a time. The total wall-clock for, say, 12
+    // claims is 2× the slowest fetch instead of all serialised.
+    const queue = withClaim.slice();
+    const inFlight: Promise<void>[] = [];
+    const runOne = async (p: ProfileLite): Promise<void> => {
+      const at = p.nip05!.indexOf('@');
+      const name   = at >= 0 ? p.nip05!.slice(0, at) : '_';
+      const domain = at >= 0 ? p.nip05!.slice(at + 1) : p.nip05!;
+      try { p.nip05Verified = await fetchNip05(name, domain, p.hex); }
+      catch { p.nip05Verified = false; }
+    };
+    const tick = async () => {
+      while (queue.length > 0 && inFlight.length < 8) {
+        const next = queue.shift()!;
+        const promise = runOne(next).finally(() => {
+          const idx = inFlight.indexOf(promise);
+          if (idx >= 0) inFlight.splice(idx, 1);
+        });
+        inFlight.push(promise);
+      }
+    };
+    while (queue.length > 0 || inFlight.length > 0) {
+      await tick();
+      if (inFlight.length > 0) await Promise.race(inFlight);
+    }
+  }
+
+  // Mirror into the owner-profile cache so subsequent single lookups
+  // for the same pubkey are free. Done after verification so the
+  // verified flag is persisted alongside the rest.
+  for (const hex of need) {
+    const profile = result.get(hex)!;
     PROFILE_CACHE.set(hex, {
       hex,
-      npub:     profile.npub,
-      name:     profile.name,
-      picture:  profile.picture,
-      nip05:    profile.nip05,
-      cachedAt: profile.cachedAt,
+      npub:          profile.npub,
+      name:          profile.name,
+      picture:       profile.picture,
+      nip05:         profile.nip05,
+      nip05Verified: profile.nip05Verified,
+      cachedAt:      profile.cachedAt,
     });
   }
   return result;
@@ -547,8 +606,14 @@ export async function handleIdentity(
       ? ident.readRelays
       : DEFAULT_READ_RELAYS;
     const relays = [...new Set([...relaysParam, ...ownerRelays])].slice(0, 8);
+    // verify=1 opts in to NIP-05 well-known verification per profile.
+    // Off by default because it's DNS + HTTPS per claim — fine for the
+    // owner profile but expensive on a 10-row maintainers panel. The
+    // client invokes verify=1 in a follow-up async request after the
+    // initial paint so the unverified state never blocks the UI.
+    const verify = u.searchParams.get('verify') === '1';
     try {
-      const map = await lookupProfilesBatch(pubkeys, relays);
+      const map = await lookupProfilesBatch(pubkeys, relays, verify);
       const profiles: Record<string, any> = {};
       for (const [k, v] of map) profiles[k] = v;
       res.writeHead(200, { 'Content-Type': 'application/json' });

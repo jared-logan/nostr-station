@@ -4765,6 +4765,14 @@ const ProjectsPanel = (() => {
       // user is still on this tab and the container is in the DOM.
       if (!container.isConnected) return;
       paintAboutTab(container, repo, ms);
+      // Kick off NIP-05 verification asynchronously. This adds DNS +
+      // HTTPS per claim — slower than the kind-0 fetch, hence a third
+      // paint when it completes. Non-blocking; the tab is fully
+      // usable after the second paint without verification.
+      resolveProfilesVerified(allPubkeys, { relays }).then(() => {
+        if (!container.isConnected) return;
+        paintAboutTab(container, repo, ms);
+      });
     });
   }
 
@@ -4933,12 +4941,31 @@ const ProjectsPanel = (() => {
       const avatar = pic
         ? `<img class="about-avatar" src="${escapeHtml(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
         : `<div class="about-avatar-placeholder" aria-hidden="true">${escapeHtml(profileNameOf(pubkey).slice(0, 1).toUpperCase())}</div>`;
+      // NIP-05 row when the profile has a claim. Verified === true →
+      // green ✓; verified === false → muted ✗ (claim doesn't resolve);
+      // verified === undefined → no marker (verification still running
+      // or never requested). Hover reveals the full claim.
+      const { nip05, verified } = profileNip05Of(pubkey);
+      let nip05Html = '';
+      if (nip05) {
+        const marker = verified === true
+          ? '<span class="about-nip05-mark about-nip05-mark-ok" title="NIP-05 verified — well-known JSON resolves back to this pubkey">✓</span>'
+          : verified === false
+            ? '<span class="about-nip05-mark about-nip05-mark-bad" title="NIP-05 claim does not verify — the well-known JSON points elsewhere">✗</span>'
+            : '';
+        nip05Html = `<span class="about-nip05" title="${escapeHtml(nip05)}">${escapeHtml(nip05)}${marker}</span>`;
+      }
       return `
         <div class="about-maintainer-row">
           ${avatar}
           <span class="maintainers-role maintainers-role-${role}" title="${escapeHtml(role === 'anchor' ? 'Trust anchor — published the repo announcement' : 'Verified — published their own kind-30617')}">${escapeHtml(role)}</span>
-          <code class="about-maintainer-pk">${escapeHtml(analysis.nameOf(pubkey))}</code>
-          ${isSelected ? `<span class="ann-selected">selected</span>` : ''}
+          <div class="about-maintainer-main">
+            <div class="about-maintainer-name-row">
+              <code class="about-maintainer-pk">${escapeHtml(analysis.nameOf(pubkey))}</code>
+              ${isSelected ? `<span class="ann-selected">selected</span>` : ''}
+            </div>
+            ${nip05Html}
+          </div>
           <span class="copy-slot" data-copy="${escapeHtml(window.NostrTools?.nip19 ? window.NostrTools.nip19.npubEncode(pubkey) : pubkey)}"></span>
         </div>
       `;
@@ -6903,7 +6930,7 @@ const ProjectsPanel = (() => {
     if (need.length === 0) return out;
 
     // Dedupe concurrent requests for the same missing set.
-    const key = need.slice().sort().join(',');
+    const key = need.slice().sort().join(',') + (opts.verify ? '|v' : '');
     let promise = profileInFlight.get(key);
     if (!promise) {
       const qs = new URLSearchParams();
@@ -6911,6 +6938,7 @@ const ProjectsPanel = (() => {
       if (Array.isArray(opts.relays) && opts.relays.length > 0) {
         qs.set('relays', opts.relays.join(','));
       }
+      if (opts.verify) qs.set('verify', '1');
       promise = api(`/api/profiles?${qs.toString()}`)
         .then(r => {
           const profiles = (r && r.profiles) || {};
@@ -6934,6 +6962,45 @@ const ProjectsPanel = (() => {
     return out;
   }
 
+  // Same as resolveProfiles but FORCES a re-fetch so the caller can
+  // request verification on profiles that were already cached without
+  // it. Used by the About tab to do its async upgrade pass without
+  // waiting for the 5min server cache TTL to expire.
+  async function resolveProfilesVerified(pubkeys, opts = {}) {
+    const hexes = Array.from(new Set(
+      (pubkeys || []).filter(p => typeof p === 'string' && /^[0-9a-f]{64}$/.test(p))
+    ));
+    const candidates = hexes.filter(h => {
+      const p = profileCache.get(h);
+      // Skip pubkeys we already have a verification result for, AND
+      // pubkeys that don't have a nip05 claim to verify.
+      return !p || (p.nip05 && p.nip05Verified === undefined);
+    });
+    if (candidates.length === 0) return;
+    const key = candidates.slice().sort().join(',') + '|v';
+    let promise = profileInFlight.get(key);
+    if (!promise) {
+      const qs = new URLSearchParams();
+      qs.set('pubkeys', candidates.join(','));
+      if (Array.isArray(opts.relays) && opts.relays.length > 0) {
+        qs.set('relays', opts.relays.join(','));
+      }
+      qs.set('verify', '1');
+      promise = api(`/api/profiles?${qs.toString()}`)
+        .then(r => {
+          const profiles = (r && r.profiles) || {};
+          for (const h of candidates) {
+            const p = profiles[h];
+            if (p) profileCache.set(h, p);
+          }
+        })
+        .catch(() => { /* best-effort */ })
+        .finally(() => profileInFlight.delete(key));
+      profileInFlight.set(key, promise);
+    }
+    await promise;
+  }
+
   // Render-time name resolver. Pure synchronous lookup against the client
   // cache; falls back to the npub-truncated form when no profile is loaded
   // yet. Call sites kick off resolveProfiles(...) and re-render to upgrade.
@@ -6954,6 +7021,15 @@ const ProjectsPanel = (() => {
   function profilePictureOf(hex) {
     const p = profileCache.get(hex);
     return p?.picture || '';
+  }
+
+  // Returns { nip05, verified } where verified is true / false / undefined.
+  // Undefined = verification hasn't run yet (the UI shows the raw claim
+  // without a marker until a verify=1 round-trip completes and re-paints).
+  function profileNip05Of(hex) {
+    const p = profileCache.get(hex);
+    if (!p?.nip05) return { nip05: '', verified: undefined };
+    return { nip05: p.nip05, verified: p.nip05Verified };
   }
 
   // Cache the latest proposals payload per project so re-rendering the
