@@ -22,10 +22,12 @@ const { renderMarkdown, renderCodeBlock, escapeHtml } =
 beforeEach(() => {
   delete g.window.marked;
   delete g.window.DOMPurify;
+  delete g.window.hljs;
 });
 afterEach(() => {
   delete g.window.marked;
   delete g.window.DOMPurify;
+  delete g.window.hljs;
 });
 
 // ── escapeHtml ──────────────────────────────────────────────────────────
@@ -121,10 +123,8 @@ test('renderMarkdown: pipes marked output through DOMPurify.sanitize', () => {
 
 // ── renderCodeBlock ─────────────────────────────────────────────────────
 
-test('renderCodeBlock: wraps escaped code in <pre><code>', () => {
-  // No highlight.js in Phase 1b — output is structural only.
-  // Pinning the markup so the next phase's hljs swap is a deliberate
-  // change, not a silent transformation.
+test('renderCodeBlock: no hljs → escaped <pre><code>', () => {
+  // Plain-text fallback when the syntax-highlight global is absent.
   assert.equal(
     renderCodeBlock(`const x = "<b>"`, 'js'),
     '<pre><code>const x = &quot;&lt;b&gt;&quot;</code></pre>',
@@ -134,4 +134,77 @@ test('renderCodeBlock: wraps escaped code in <pre><code>', () => {
 test('renderCodeBlock: empty input produces empty string', () => {
   assert.equal(renderCodeBlock('',  'js'),         '');
   assert.equal(renderCodeBlock(undefined as any),  '');
+});
+
+// ── renderCodeBlock: hljs branches ──────────────────────────────────────
+
+test('renderCodeBlock: hljs.highlight when language is known', () => {
+  // Pin the contract: known language → explicit highlight() call,
+  // language- class on the wrapper for downstream CSS targeting.
+  let calledWith: any = null;
+  g.window.hljs = {
+    getLanguage:    (l: string) => (l === 'js' ? { name: 'JavaScript' } : null),
+    highlight:      (code: string, opts: any) => {
+      calledWith = { code, opts };
+      return { value: '<span class="hljs-keyword">const</span> x' };
+    },
+    highlightAuto:  () => ({ value: 'should-not-be-called' }),
+  };
+  const out = renderCodeBlock('const x = 1', 'js');
+  assert.equal(calledWith.code,                  'const x = 1');
+  assert.equal(calledWith.opts.language,         'js');
+  assert.equal(calledWith.opts.ignoreIllegals,   true);
+  assert.equal(out,
+    '<pre><code class="hljs language-js"><span class="hljs-keyword">const</span> x</code></pre>',
+  );
+});
+
+test('renderCodeBlock: hljs.highlightAuto when language is unknown / missing', () => {
+  // Unknown language strings should NOT throw — fall back to
+  // heuristic detection so the user still gets some highlighting.
+  let highlightCalled = false;
+  g.window.hljs = {
+    getLanguage:   () => null,
+    highlight:     () => { highlightCalled = true; throw new Error('should not be called'); },
+    highlightAuto: (code: string) => ({ value: `auto:${code}` }),
+  };
+  assert.equal(
+    renderCodeBlock('something', 'klingon'),
+    '<pre><code class="hljs">auto:something</code></pre>',
+  );
+  // Same path for empty/undefined language hint.
+  assert.equal(
+    renderCodeBlock('something', ''),
+    '<pre><code class="hljs">auto:something</code></pre>',
+  );
+  assert.equal(highlightCalled, false);
+});
+
+test('renderCodeBlock: hljs throwing falls back to escaped <pre><code>', () => {
+  // The whole point of the try/catch — a buggy grammar (or a future
+  // hljs version that changes return shape) must not corrupt the
+  // page. Worst case is unstyled-but-readable output.
+  g.window.hljs = {
+    getLanguage:   (l: string) => (l === 'js' ? {} : null),
+    highlight:     () => { throw new Error('boom'); },
+    highlightAuto: () => { throw new Error('boom'); },
+  };
+  assert.equal(
+    renderCodeBlock('<x>', 'js'),
+    '<pre><code>&lt;x&gt;</code></pre>',
+  );
+});
+
+test('renderCodeBlock: hljs returning malformed result falls back to escaped <pre><code>', () => {
+  // Defence-in-depth: future hljs change returning a non-string `value`
+  // must not pass an undefined into innerHTML.
+  g.window.hljs = {
+    getLanguage:   (l: string) => (l === 'js' ? {} : null),
+    highlight:     () => ({ value: undefined }),
+    highlightAuto: () => ({ value: undefined }),
+  };
+  assert.equal(
+    renderCodeBlock('<x>', 'js'),
+    '<pre><code>&lt;x&gt;</code></pre>',
+  );
 });

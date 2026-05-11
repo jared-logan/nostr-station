@@ -17,6 +17,8 @@
 // Globals consumed:
 //   - window.marked      (vendor/marked.umd.js)
 //   - window.DOMPurify   (vendor/dompurify.min.js)
+//   - window.hljs        (vendor/highlight.min.js — optional; absent
+//                         means code blocks render as plain <pre><code>)
 //
 // All exports degrade gracefully when a global is missing — the
 // returned HTML is escaped plain-text rather than raw markdown, so
@@ -33,9 +35,19 @@ function ensureMarkedConfigured() {
   // preserves CommonMark behaviour for single newlines (treat as
   // space) — chat clients sometimes flip this on, but a README
   // viewer should mirror what the author sees on github / gitea.
+  //
+  // The custom renderer.code() routes fenced code through
+  // renderCodeBlock so highlight.js (when present) styles README
+  // code blocks the same way it styles standalone file previews.
+  // Marked v15+ passes an object; we destructure to handle that.
   window.marked.use({
     gfm:    true,
     breaks: false,
+    renderer: {
+      code({ text, lang }) {
+        return renderCodeBlock(text, lang);
+      },
+    },
   });
   markedConfigured = true;
 }
@@ -77,13 +89,35 @@ export function renderMarkdown(input) {
 }
 
 /**
- * Render a single code block. No syntax highlighting in Phase 1b —
- * Phase 1c will add highlight.js once we have a browser-ready bundle.
- * The escaped <pre><code> output is the standard graceful-degradation
- * shape every git web UI shows when a language tag is unrecognised.
+ * Render a single code block, with syntax highlighting via
+ * highlight.js when the global is loaded. Three tiers of degradation:
+ *   1. hljs + known language  → hljs.highlight (explicit grammar)
+ *   2. hljs + unknown language → hljs.highlightAuto (heuristic)
+ *   3. no hljs OR hljs throws  → escaped <pre><code>
+ *
+ * The plain-text escape path is the safety net: if every other branch
+ * fails the worst case is a structurally-correct, unhighlighted block —
+ * never raw HTML escaping into the page.
  */
-export function renderCodeBlock(code, _lang) {
+export function renderCodeBlock(code, lang) {
   if (typeof code !== 'string' || !code) return '';
+  if (window.hljs) {
+    try {
+      const known = lang && typeof window.hljs.getLanguage === 'function'
+        && window.hljs.getLanguage(lang);
+      let result;
+      let cls = 'hljs';
+      if (known) {
+        result = window.hljs.highlight(code, { language: lang, ignoreIllegals: true });
+        cls = `hljs language-${escapeHtml(lang)}`;
+      } else if (typeof window.hljs.highlightAuto === 'function') {
+        result = window.hljs.highlightAuto(code);
+      }
+      if (result && typeof result.value === 'string') {
+        return `<pre><code class="${cls}">${result.value}</code></pre>`;
+      }
+    } catch (_) { /* fall through to plain rendering */ }
+  }
   return `<pre><code>${escapeHtml(code)}</code></pre>`;
 }
 

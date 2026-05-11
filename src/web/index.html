@@ -492,10 +492,14 @@
 
 <script src="/terminal.js"></script>
 <!-- Vendored markdown stack — see src/web/vendor/README.md for refresh
-     procedure. Loaded as classic scripts (UMD) so they expose globals
-     consumed by the ESM markdown.js helper imported by app.js. -->
+     procedure. Loaded as classic scripts (UMD/IIFE) so they expose
+     globals consumed by the ESM markdown.js helper imported by app.js.
+     hljs is optional; markdown.js degrades to plain <pre><code> if it
+     fails to load. -->
+<link rel="stylesheet" href="/vendor/highlight-theme.css">
 <script src="/vendor/marked.umd.js"></script>
 <script src="/vendor/dompurify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
 <script type="module" src="/app.js"></script>
 </body>
 </html>
