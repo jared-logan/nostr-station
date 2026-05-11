@@ -446,6 +446,39 @@ async function api(path, init, opts) {
   return ct.includes('json') ? res.json() : res.text();
 }
 
+// Short-TTL GET cache shared across panels. Several panels (header chip,
+// dashboard cards, Config) all want the same identity / profile / config
+// data; without coalescing, navigating around or rebuilding the Config
+// panel fans out 3-4 duplicate fetches that hammer the local server and
+// (for /api/identity/profile) the user's read-relays. apiCached() dedupes
+// concurrent calls and returns the cached value within ttlMs. `force`
+// invalidates and refetches; mutators should call apiInvalidate(path).
+const __apiCache = new Map(); // path -> { value, at }
+const __apiInflight = new Map(); // path -> Promise
+async function apiCached(path, ttlMs, opts = {}) {
+  const now = Date.now();
+  if (!opts.force) {
+    const hit = __apiCache.get(path);
+    if (hit && (now - hit.at) < ttlMs) return hit.value;
+    const inflight = __apiInflight.get(path);
+    if (inflight) return inflight;
+  }
+  const p = api(path, undefined, opts).then(value => {
+    __apiCache.set(path, { value, at: Date.now() });
+    __apiInflight.delete(path);
+    return value;
+  }).catch(e => {
+    __apiInflight.delete(path);
+    throw e;
+  });
+  __apiInflight.set(path, p);
+  return p;
+}
+function apiInvalidate(path) {
+  __apiCache.delete(path);
+  __apiInflight.delete(path);
+}
+
 // Forward declaration: assigned below once AuthScreen is defined. api() needs
 // to reference it during 401 handling but AuthScreen itself uses api().
 let AuthScreen = null;
@@ -784,6 +817,22 @@ async function refreshHeader() {
 // in sync without each call site having to remember to call us.
 document.addEventListener('api-config-changed', () => { refreshHeader(); });
 
+// Coarse cache invalidation: any config-shaped mutation drops the cached
+// snapshots so the next panel render sees fresh data. This is the contract
+// that lets apiCached() use a long TTL — readers stay cheap, writers stay
+// authoritative. Keep this list in sync with apiCached() callers.
+document.addEventListener('api-config-changed', () => {
+  apiInvalidate('/api/identity/config');
+  apiInvalidate('/api/identity/profile');
+  apiInvalidate('/api/config');
+  apiInvalidate('/api/config?scope=global');
+  apiInvalidate('/api/relay-config');
+  apiInvalidate('/api/auth/session');
+  apiInvalidate('/api/ngit/account');
+  apiInvalidate('/api/ai/providers');
+  apiInvalidate('/api/git-identity/global');
+});
+
 // Single source of truth for the human-readable context label used by the
 // chat header and the Config panel row. The /api/config response carries
 // a `contextSource` of 'project' | 'station' plus a `hasContextFile`
@@ -919,7 +968,7 @@ async function refreshIdentityChip() {
   const subEl  = $('identity-sub');
 
   let cfg;
-  try { cfg = await api('/api/identity/config'); } catch { return; }
+  try { cfg = await apiCached('/api/identity/config', 30_000); } catch { return; }
   __identity = cfg;
 
   if (!cfg.npub) {
@@ -959,7 +1008,7 @@ async function refreshIdentityChip() {
   // Kick off profile fetch (served from cache when warm) to populate the
   // richer name + picture asynchronously. Silent on failure.
   try {
-    const p = await api('/api/identity/profile');
+    const p = await apiCached('/api/identity/profile', 30_000);
     if (p && !p.empty) {
       __profile = p;
       if (p.picture) {
@@ -1305,12 +1354,34 @@ function healthTooltip(s) {
   return `${s.label} running`;
 }
 
+// Cheap signature for the sidebar rebuild guard. The set of services and
+// their states is what we render; if neither changes between ticks we
+// can skip the full innerHTML rebuild (which was tearing through ~20 DOM
+// nodes every 5s for no visible reason and competing with the terminal
+// for main-thread time during heavy scrollback).
+function statusSignature(status) {
+  let sig = '';
+  for (const s of status) sig += s.id + ':' + s.state + ':' + (s.value || '') + '|';
+  return sig;
+}
+let __lastHealthSig = '';
+
 async function refreshHealth() {
   try {
     const status = await api('/api/status');
     const relay = status.find(s => s.id === 'relay');
     $('hdr-relay-dot').className = 'dot ' + stateClass(relay?.state || 'err');
     $('hdr-relay').textContent   = relay?.state === 'ok' ? 'relay up' : relay?.state === 'warn' ? 'relay down' : 'not installed';
+
+    const sig = statusSignature(status);
+    if (sig === __lastHealthSig) {
+      // Nothing visible changed since the last tick — skip the sidebar
+      // rebuild. Status panel signature-checks separately at line ~1700.
+      if (currentPanel() === 'status') Panels.status.render(status);
+      window.__lastStatus = status;
+      return;
+    }
+    __lastHealthSig = sig;
 
     const health = $('health');
     health.innerHTML = '';
@@ -1720,8 +1791,8 @@ const StatusPanel = {
     if (!el) return;
     try {
       const [ident, profile] = await Promise.all([
-        api('/api/identity/config'),
-        api('/api/identity/profile').catch(() => null),
+        apiCached('/api/identity/config', 30_000),
+        apiCached('/api/identity/profile', 30_000).catch(() => null),
       ]);
       if (!ident?.npub) {
         el.innerHTML = `<span class="warn">no identity configured</span>`;
@@ -1746,17 +1817,13 @@ const StatusPanel = {
           </div>
         </div>
       `;
-      // Stats reuse the helper added for the Config panel. Cache the
-      // result for 5 minutes so dashboard refreshes don't re-query the
-      // user's relays on every panel visit.
+      // Stats reuse the helper from the Config panel; the helper itself
+      // memoises by (pubkey, relay-set) for 5 min, so dashboard reloads
+      // and Config panel opens share one round-trip across the user's
+      // read-relays instead of re-querying both surfaces independently.
       if (profile?.hex && Array.isArray(ident.readRelays) && ident.readRelays.length) {
         const statsEl = $('dash-id-stats');
-        const fresh = this._idStats && (Date.now() - this._idStatsAt < 5 * 60 * 1000);
-        const promise = fresh
-          ? Promise.resolve(this._idStats)
-          : ConfigPanel.fetchProfileStats(profile.hex, ident.readRelays)
-              .then(r => { this._idStats = r; this._idStatsAt = Date.now(); return r; });
-        promise.then(({ followers, following }) => {
+        ConfigPanel.fetchProfileStats(profile.hex, ident.readRelays).then(({ followers, following }) => {
           if (!statsEl) return;
           if (followers == null && following == null) {
             statsEl.innerHTML = `<span class="muted">stats unavailable</span>`;
@@ -2165,8 +2232,12 @@ $('status-refresh').addEventListener('click', () => {
   refreshHealth();
   // Bust the identity-stats cache so the user gets a true refresh of
   // follower/following counts when they hit the button (otherwise the
-  // 5-min memoize would mask whatever they wanted to re-check).
-  StatusPanel._idStatsAt = 0;
+  // 5-min memoize would mask whatever they wanted to re-check). The
+  // cache moved into ConfigPanel so both panels share one round-trip;
+  // the explicit refresh button is the only path that needs to bust it.
+  ConfigPanel.clearProfileStatsCache?.();
+  apiInvalidate('/api/identity/config');
+  apiInvalidate('/api/identity/profile');
   StatusPanel.renderDashboardCards();
 });
 
@@ -10411,29 +10482,49 @@ const VpnPanel = (() => {
 const ConfigPanel = (() => {
   const container = $('config-sections');
 
+  // The Config panel reload is heavy: 8 parallel fetches, full innerHTML
+  // rebuild, plus follower-stat sockets. When the user isn't looking at it,
+  // we don't need to do that work — the next onEnter() will pick up fresh
+  // data. Background callers (e.g. the ngit-login retry schedule that polls
+  // for ~2min after launching the QR scan) call loadIfVisible() and the
+  // panel reloads only when the user is actually on it. Otherwise we set
+  // dirty so the next onEnter() refreshes instead of serving stale state.
+  let dirty = false;
+  function loadIfVisible() {
+    if (currentPanel() === 'config') return load();
+    dirty = true;
+    return Promise.resolve();
+  }
+
   async function load() {
+    dirty = false;
     container.innerHTML = '<div class="config-section"><div style="color:var(--muted)">loading…</div></div>';
     try {
       // Session fetch is best-effort: the localhost-exemption path has no
       // backing session, and we still want the rest of the panel to render.
+      // Most of these are also fetched by the header chip and the dashboard
+      // cards. apiCached() coalesces concurrent calls and serves repeats
+      // within the TTL, which collapses what used to be 3-4 duplicate
+      // round-trips per panel switch into one. Mutators dispatch
+      // 'api-config-changed', which clears the cache (see listener below).
       const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent] = await Promise.all([
-        api('/api/relay-config'),
+        apiCached('/api/relay-config', 30_000),
         // scope=global so the Context row reflects the station setup
         // regardless of which project is currently open in chat. The
         // chat header still uses the default scope (active project).
-        api('/api/config?scope=global'),
-        api('/api/identity/config'),
-        api('/api/auth/session').catch(() => null),
-        api('/api/identity/profile').catch(() => null),
-        api('/api/ngit/account').catch(() => ({ loggedIn: false, relays: [] })),
+        apiCached('/api/config?scope=global', 30_000),
+        apiCached('/api/identity/config', 30_000),
+        apiCached('/api/auth/session', 30_000).catch(() => null),
+        apiCached('/api/identity/profile', 30_000).catch(() => null),
+        apiCached('/api/ngit/account', 30_000).catch(() => ({ loggedIn: false, relays: [] })),
         // /api/ai/providers returns the registry + per-provider state.
         // Pre-4.x servers won't have this endpoint; a catch keeps the
         // panel renderable against a stale backend (providers list hides).
-        api('/api/ai/providers').catch(() => null),
+        apiCached('/api/ai/providers', 30_000).catch(() => null),
         // Global git identity + presets. Lets the new Git Identity
         // config section render the user's current values + offer
         // npub-synthetic / nip-05 presets without a second round-trip.
-        api('/api/git-identity/global').catch(() => null),
+        apiCached('/api/git-identity/global', 30_000).catch(() => null),
       ]);
       // Augment presets with the nip-05 from the cached profile if
       // we have one. The backend stays focused on git config; the
@@ -10671,57 +10762,115 @@ const ConfigPanel = (() => {
   // figure we also fetch the user's own kind-3 and count p-tags as a
   // fallback when COUNT isn't supported by any relay. Each relay gets a
   // short budget so a slow relay can't stall the section.
+  //
+  // Module-level cache keyed by (hex, relay set) coalesces calls from the
+  // dashboard Identity card and the Config Profile section so they don't
+  // independently open 5 sockets each whenever either panel is opened.
+  // 5-min TTL matches the previous StatusPanel-local cache.
+  const PROFILE_STATS_TTL_MS = 5 * 60 * 1000;
+  const _profileStatsCache = new Map(); // key -> { value, at }
+  const _profileStatsInflight = new Map(); // key -> Promise
   function fetchProfileStats(hex, relays) {
     if (!hex || !Array.isArray(relays) || relays.length === 0) {
       return Promise.resolve({ followers: null, following: null });
     }
-    return Promise.all([
+    const key = hex + '|' + [...relays].sort().join(',');
+    const hit = _profileStatsCache.get(key);
+    if (hit && (Date.now() - hit.at) < PROFILE_STATS_TTL_MS) {
+      return Promise.resolve(hit.value);
+    }
+    const inflight = _profileStatsInflight.get(key);
+    if (inflight) return inflight;
+    const p = Promise.all([
       queryCount(relays, { kinds: [3], '#p': [hex] }),
       queryFollowingCount(relays, hex),
-    ]).then(([followers, following]) => ({ followers, following }));
+    ]).then(([followers, following]) => {
+      const value = { followers, following };
+      _profileStatsCache.set(key, { value, at: Date.now() });
+      _profileStatsInflight.delete(key);
+      return value;
+    }).catch(e => {
+      _profileStatsInflight.delete(key);
+      throw e;
+    });
+    _profileStatsInflight.set(key, p);
+    return p;
   }
 
   // NIP-45 COUNT across multiple relays. Returns the max non-null count
   // (different relays see different slices of the network — the largest
   // is the best approximation for "global"). null if no relay answered.
+  // Resolves early once the first relay has answered + a short coalescing
+  // window has passed, instead of waiting for every relay's per-socket
+  // budget — the previous Promise.all + 5s timeout meant a single slow
+  // relay would freeze the whole stats render for 5s.
   function queryCount(relays, filter) {
-    const PER_RELAY_MS = 5000;
-    return Promise.all(relays.map(url => new Promise((resolve) => {
-      let ws;
-      try { ws = new WebSocket(url); }
-      catch { resolve(null); return; }
-      const subId = 'cnt-' + Math.random().toString(36).slice(2, 8);
-      let settled = false;
-      const finish = (val) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        try { ws.close(); } catch {}
-        resolve(val);
+    const PER_RELAY_MS = 2500;
+    const COALESCE_AFTER_FIRST_MS = 400;
+    return new Promise((outerResolve) => {
+      const results = [];
+      let firstAt = 0;
+      let coalesceTimer = 0;
+      let outerSettled = false;
+      const settleOuter = () => {
+        if (outerSettled) return;
+        outerSettled = true;
+        clearTimeout(hardTimer);
+        if (coalesceTimer) clearTimeout(coalesceTimer);
+        const nums = results.filter(n => typeof n === 'number');
+        outerResolve(nums.length ? Math.max(...nums) : null);
       };
-      const timer = setTimeout(() => finish(null), PER_RELAY_MS);
-      ws.addEventListener('open', () => {
-        try { ws.send(JSON.stringify(['COUNT', subId, filter])); }
-        catch { finish(null); }
+      // Hard cap so the outer Promise always resolves even if every relay
+      // accepts the WS but never responds to COUNT.
+      const hardTimer = setTimeout(settleOuter, PER_RELAY_MS);
+      let pendingRelays = relays.length;
+      relays.forEach(url => {
+        let ws;
+        try { ws = new WebSocket(url); }
+        catch { onRelayDone(null); return; }
+        const subId = 'cnt-' + Math.random().toString(36).slice(2, 8);
+        let settled = false;
+        const finish = (val) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          try { ws.close(); } catch {}
+          onRelayDone(val);
+        };
+        const timer = setTimeout(() => finish(null), PER_RELAY_MS);
+        ws.addEventListener('open', () => {
+          try { ws.send(JSON.stringify(['COUNT', subId, filter])); }
+          catch { finish(null); }
+        });
+        ws.addEventListener('message', (e) => {
+          try {
+            const data = typeof e.data === 'string' ? e.data : e.data.toString();
+            const msg  = JSON.parse(data);
+            if (Array.isArray(msg) && msg[0] === 'COUNT' && msg[1] === subId) {
+              const c = Number(msg[2]?.count);
+              finish(Number.isFinite(c) ? c : null);
+            } else if (Array.isArray(msg) && (msg[0] === 'CLOSED' || msg[0] === 'NOTICE')) {
+              // Relay rejected the verb — fall through to timeout/close.
+              finish(null);
+            }
+          } catch {}
+        });
+        ws.addEventListener('error', () => finish(null));
+        ws.addEventListener('close', () => finish(null));
       });
-      ws.addEventListener('message', (e) => {
-        try {
-          const data = typeof e.data === 'string' ? e.data : e.data.toString();
-          const msg  = JSON.parse(data);
-          if (Array.isArray(msg) && msg[0] === 'COUNT' && msg[1] === subId) {
-            const c = Number(msg[2]?.count);
-            finish(Number.isFinite(c) ? c : null);
-          } else if (Array.isArray(msg) && (msg[0] === 'CLOSED' || msg[0] === 'NOTICE')) {
-            // Relay rejected the verb — fall through to timeout/close.
-            finish(null);
-          }
-        } catch {}
-      });
-      ws.addEventListener('error', () => finish(null));
-      ws.addEventListener('close', () => finish(null));
-    }))).then(results => {
-      const nums = results.filter(n => typeof n === 'number');
-      return nums.length ? Math.max(...nums) : null;
+
+      function onRelayDone(val) {
+        results.push(val);
+        pendingRelays--;
+        if (pendingRelays <= 0) { settleOuter(); return; }
+        // First non-null result starts a short coalescing window so a
+        // second-fastest relay with a slightly larger figure still gets
+        // a chance, but we don't wait for stragglers.
+        if (typeof val === 'number' && !firstAt) {
+          firstAt = Date.now();
+          coalesceTimer = setTimeout(settleOuter, COALESCE_AFTER_FIRST_MS);
+        }
+      }
     });
   }
 
@@ -10731,12 +10880,42 @@ const ConfigPanel = (() => {
   // its tags. Replaceable-event semantics mean we want the freshest copy.
   function queryFollowingCount(relays, hex) {
     return new Promise((resolve) => {
-      const PER_RELAY_MS = 5000;
+      // Tighter per-relay budget than the original 5s — for a kind-3 fetch
+      // a healthy relay answers in well under a second, and a slow relay
+      // shouldn't hold the whole stats panel hostage.
+      const PER_RELAY_MS = 2500;
       let bestCount = null;
       let bestAt    = -1;
       let remaining = relays.length;
+      let outerDone = false;
       const finalize = () => {
-        if (remaining <= 0) resolve(bestCount);
+        if (outerDone) return;
+        if (remaining <= 0) {
+          outerDone = true;
+          clearTimeout(coalesceTimer);
+          clearTimeout(hardTimer);
+          resolve(bestCount);
+        }
+      };
+      // Hard cap mirrors the per-relay budget so a hung WS doesn't pin
+      // the outer promise forever.
+      const hardTimer = setTimeout(() => {
+        outerDone = true;
+        clearTimeout(coalesceTimer);
+        resolve(bestCount);
+      }, PER_RELAY_MS);
+      // Once we have any answer, give the rest a brief grace window then
+      // resolve — this turns "wait for the slowest relay" into "answer
+      // as soon as the network is sure".
+      let coalesceTimer = 0;
+      const armCoalesce = () => {
+        if (coalesceTimer || outerDone) return;
+        coalesceTimer = setTimeout(() => {
+          if (outerDone) return;
+          outerDone = true;
+          clearTimeout(hardTimer);
+          resolve(bestCount);
+        }, 400);
       };
       relays.forEach(url => {
         let ws;
@@ -10770,13 +10949,14 @@ const ConfigPanel = (() => {
               }
             } else if (Array.isArray(msg) && msg[0] === 'EOSE' && msg[1] === subId) {
               clearTimeout(timer); close();
+              if (bestCount != null) armCoalesce();
             }
           } catch {}
         });
         ws.addEventListener('error', () => { clearTimeout(timer); close(); });
         ws.addEventListener('close', () => { clearTimeout(timer); close(); });
       });
-      if (remaining === 0) resolve(null);
+      if (remaining === 0) { outerDone = true; clearTimeout(hardTimer); resolve(null); }
     });
   }
 
@@ -11299,7 +11479,18 @@ const ConfigPanel = (() => {
           // know exactly when that is (PTY process lifecycle is owned by
           // the server), so kick off a few polls over the next ~2min —
           // enough to cover the typical scan + approve round trip.
-          const refetch = () => { load(); refreshHealth(); };
+          //
+          // Crucially these polls invalidate the cached snapshots and call
+          // loadIfVisible(), so the heavy Config rebuild only happens when
+          // the user is actually on the Config panel. While they're staring
+          // at the QR in the terminal, we don't churn the panel underneath.
+          const refetch = () => {
+            apiInvalidate('/api/ngit/account');
+            apiInvalidate('/api/identity/config');
+            apiInvalidate('/api/identity/profile');
+            loadIfVisible();
+            refreshHealth();
+          };
           [5_000, 15_000, 45_000, 120_000].forEach(ms => setTimeout(refetch, ms));
           return;
         }
@@ -11312,7 +11503,7 @@ const ConfigPanel = (() => {
           title: 'ngit account login',
           subtitle: 'Streams ngit account login — scan the nostrconnect URL with Amber',
           endpoint: '/api/ngit/account/login',
-        }).then(() => { load(); refreshHealth(); });
+        }).then(() => { apiInvalidate('/api/ngit/account'); load(); refreshHealth(); });
       });
     }
     if (logoutBtn) {
@@ -11327,7 +11518,7 @@ const ConfigPanel = (() => {
           title: 'ngit account logout',
           subtitle: 'Streaming ngit account logout',
           endpoint: '/api/ngit/account/logout',
-        }).then(() => { load(); refreshHealth(); });
+        }).then(() => { apiInvalidate('/api/ngit/account'); load(); refreshHealth(); });
       });
     }
 
@@ -12037,9 +12228,20 @@ const ConfigPanel = (() => {
   return {
     onEnter() { load(); },
     reload: load,
+    // Background callers that mutate Config-shaped state (e.g. the
+    // ngit-login terminal-flow retry schedule) use this to defer the
+    // panel rebuild until the user is actually on Config. See loadIfVisible.
+    reloadIfVisible: loadIfVisible,
+    isDirty() { return dirty; },
     // Re-exported so the Dashboard's Identity card can drive the same
     // follower / following lookup without duplicating the helper.
     fetchProfileStats,
+    // Lets callers bust the (hex, relay-set) memoize — the Status panel's
+    // explicit refresh button uses this so a click actually re-queries.
+    clearProfileStatsCache() {
+      _profileStatsCache.clear();
+      _profileStatsInflight.clear();
+    },
   };
 })();
 
