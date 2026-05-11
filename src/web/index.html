@@ -137,7 +137,7 @@
       <nav class="nav" id="nav">
         <a href="#status" data-panel="status">
           <span class="nav-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
-          Status
+          Dashboard
         </a>
         <a href="#chat" data-panel="chat">
           <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/></svg></span>
@@ -179,19 +179,33 @@
 
   <main class="main">
 
-    <!-- STATUS -->
+    <!-- DASHBOARD (hash + data-panel stay "status" for back-compat with
+         existing bookmarks; the title + nav label render as "Dashboard"). -->
     <section class="panel" data-panel="status">
       <div class="panel-head">
         <div>
-          <div class="title">Status</div>
-          <div class="subtitle">Service health · click Install or Configure to act</div>
+          <div class="title">Dashboard</div>
+          <div class="subtitle">At-a-glance station overview · click any card to jump to its panel</div>
         </div>
         <div class="panel-head-actions">
           <button id="status-refresh">refresh</button>
         </div>
       </div>
       <div class="panel-body">
-        <div class="status-list" id="status-cards"></div>
+        <!-- Quick-glance cards (identity / projects / relay / AI). Filled
+             asynchronously by DashboardPanel — see app.js. -->
+        <div class="dashboard-cards" id="dashboard-cards"></div>
+
+        <!-- Service health collapses underneath the cards. The status-cards
+             id + structure is preserved so the existing render path
+             (buildStatusRow → SERVICE_CTAS) keeps working unchanged. -->
+        <details class="dashboard-health" id="dashboard-health" open>
+          <summary>
+            <span class="dashboard-health-title">Service health</span>
+            <span class="dashboard-health-sub">Daemons, binaries, plugins</span>
+          </summary>
+          <div class="status-list" id="status-cards"></div>
+        </details>
       </div>
     </section>
 
