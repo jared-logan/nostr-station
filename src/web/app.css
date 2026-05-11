@@ -6626,6 +6626,24 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
 }
 .list-empty-cta { margin-top: 14px; }
 
+/* Top-of-Settings banner pointing users to the About tab for the
+   public-facing announcement fields (Phase 3 follow-up). */
+.settings-banner {
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-dim, var(--accent));
+  border-radius: 4px;
+}
+.settings-banner-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+.settings-banner-link:hover { text-decoration: underline; }
+
 /* Settings tab sections (folded-in Git + ngit content). */
 .settings-section {
   margin-top: 16px;

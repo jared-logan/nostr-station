@@ -8292,7 +8292,23 @@ const ProjectsPanel = (() => {
   }
 
   function renderSettingsTabBody(container, p) {
+    // Phase 3 follow-up — once the About tab landed with full Edit
+    // Repository support, Settings is exclusively for *local* dashboard
+    // config (path, capabilities, AI overrides, etc). The banner orients
+    // users who reach Settings looking to edit the public-facing repo
+    // metadata (name/description/website/topics/relays/maintainers).
+    const aboutAvailable = p.capabilities.ngit && p.remotes.ngit;
+    const aboutBanner = aboutAvailable ? `
+      <div class="settings-banner">
+        <span class="muted">This tab manages how nostr-station handles this project locally
+        — path, capabilities, signing identity, AI config.
+        Edit the repository's public announcement (name, description, website, topics,
+        relays, maintainers) on the
+        <a href="#" class="settings-banner-link" data-go="about">About</a> tab.</span>
+      </div>
+    ` : '';
     container.innerHTML = `
+      ${aboutBanner}
       <div class="tab-section">
         <h3>Details</h3>
         <label class="field-label">Name</label>
@@ -8378,7 +8394,10 @@ const ProjectsPanel = (() => {
         <div class="row">
           <div>
             <div>Remove project</div>
-            <div class="desc">Removes the project from nostr-station. Does not delete any files.</div>
+            <div class="desc">
+              Removes the project from nostr-station. Does not delete any files.
+              ${aboutAvailable ? `Same action is also available on the About tab footer.` : ''}
+            </div>
           </div>
           <button class="danger remove-btn">remove</button>
         </div>
@@ -8410,6 +8429,18 @@ const ProjectsPanel = (() => {
       const gid = container.querySelector('#git-identity-section .git-identity-body');
       if (gid) gid.innerHTML = '<div class="muted">Project has no local path — git identity requires a path.</div>';
     }
+
+    // Banner link: switch to About without a full page navigation.
+    container.querySelector('.settings-banner-link')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      state.tab = 'about';
+      renderTab(document.querySelector('.project-tab-content'), p);
+      // Highlight the About tab in the strip — render() rebuilds the
+      // strip but renderTab alone doesn't, so set the visual state too.
+      document.querySelectorAll('.project-tabs .tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === 'about');
+      });
+    });
 
     container.querySelector('.save-name').addEventListener('click', async () => {
       const v = container.querySelector('.s-name').value.trim();
