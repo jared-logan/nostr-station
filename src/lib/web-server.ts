@@ -87,6 +87,7 @@ import { handleRepo } from './routes/repo.js';
 import { handlePatches } from './routes/patches.js';
 import { handleIssues } from './routes/issues.js';
 import { handleStatus } from './routes/status.js';
+import { runScratchGc } from './scratch-gc.js';
 import {
   handleAi,
   streamAnthropic, streamOpenAICompat,
@@ -747,6 +748,21 @@ export async function startWebServer(port: number): Promise<void> {
         }
       })
       .catch(e => process.stderr.write(`[ai-config] migration failed: ${e?.message || e}\n`));
+    // Phase 6-tidy: GC stale scratch checkouts from
+    // ~/.nostr-station/scratch/. Best-effort, runs once per server
+    // boot; never throws (any per-entry error is captured in the
+    // returned summary and logged). 7-day TTL by default — see
+    // src/lib/scratch-gc.ts.
+    try {
+      const gc = runScratchGc();
+      if (gc.removed.length > 0 || gc.errors.length > 0) {
+        process.stderr.write(
+          `[scratch-gc] removed=${gc.removed.length} projects-removed=${gc.projectsRemoved.length} errors=${gc.errors.length}\n`,
+        );
+      }
+    } catch (e: any) {
+      process.stderr.write(`[scratch-gc] skipped: ${e?.message || e}\n`);
+    }
   };
 
   // Loopback host:port variants we accept for Host / Origin / Referer.

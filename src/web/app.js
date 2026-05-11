@@ -4863,17 +4863,84 @@ const ProjectsPanel = (() => {
         <div class="csb-sub muted">
           You're browsing this repo from a scratch checkout at
           <code class="csb-path">${escapeHtml(p.path)}</code>.
-          Edit the project's <a href="#" class="csb-to-settings">path in Settings</a>
-          to promote it to a regular project, or remove it when you're done.
+          Scratch checkouts older than 7 days are cleaned up
+          automatically.
         </div>
       </div>
+      <div class="csb-actions">
+        <button class="primary csb-save">Save to project list</button>
+      </div>
     `;
-    wrap.querySelector('.csb-to-settings').addEventListener('click', (e) => {
-      e.preventDefault();
-      state.tab = 'settings';
-      render();
-    });
+    wrap.querySelector('.csb-save').addEventListener('click', () => openSavePathModal(p));
     return wrap;
+  }
+
+  // Phase 6-tidy: prompt for a target path + POST /save. Pre-fills
+  // ~/projects/<basename> so the common case is one click. The
+  // server validates the path is under HOME and atomic-moves the
+  // directory; on success the project record is updated and we
+  // re-render to drop the scratch banner.
+  function openSavePathModal(p) {
+    const base = (p.path || '').split('/').pop() || p.name;
+    // Strip the scratch-hash suffix from the directory name when
+    // pre-filling so the saved location reads as `<name>` not
+    // `<name>-<hash>`.
+    const cleanName = base.replace(/-[a-f0-9]{8}$/, '');
+    const homeHint  = window.__homeDir || '~';
+    const defaultTarget = `${homeHint}/projects/${cleanName}`;
+
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div class="muted" style="margin-bottom:10px">
+        Moves <code>${escapeHtml(p.path)}</code> to a permanent
+        location under your home directory. The project record is
+        updated so the dashboard keeps tracking it.
+      </div>
+      <label class="field-label">Target path</label>
+      <input type="text" class="csm-target" value="${escapeHtml(defaultTarget)}"
+             style="width:100%" autofocus>
+      <div class="muted" style="font-size:11px;margin-top:4px">
+        Must be under your home directory. Parent dirs are created
+        automatically. Cancel if you'd rather pick the path manually
+        from Settings.
+      </div>
+    `;
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px'; foot.style.width = '100%';
+    const cancel = document.createElement('button'); cancel.textContent = 'Cancel';
+    const submit = document.createElement('button');
+    submit.className = 'primary'; submit.textContent = 'Save';
+    const spacer = document.createElement('div'); spacer.style.flex = '1';
+    foot.appendChild(cancel); foot.appendChild(spacer); foot.appendChild(submit);
+
+    const modal = openModal({ title: 'Save to project list', subtitle: p.name, body, footer: foot });
+    cancel.addEventListener('click', () => modal.close());
+    submit.addEventListener('click', async () => {
+      const target = body.querySelector('.csm-target').value.trim();
+      if (!target) { toast('Target path required', '', 'err'); return; }
+      submit.disabled = true; submit.textContent = 'Saving…';
+      try {
+        const r = await api(`/api/projects/${p.id}/save`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ targetPath: target }),
+        });
+        if (r?.ok) {
+          toast('Saved', `Moved to ${r.project.path}`, 'ok');
+          modal.close();
+          await reload();
+          // Re-render the now-non-scratch project — banner will be
+          // gone, Code tab unchanged otherwise.
+          renderTab(document.querySelector('.project-tab-content'), r.project);
+        } else {
+          toast('Save failed', r?.error || 'unknown error', 'err');
+          submit.disabled = false; submit.textContent = 'Save';
+        }
+      } catch (e) {
+        toast('Save failed', e?.message || String(e), 'err');
+        submit.disabled = false; submit.textContent = 'Save';
+      }
+    });
   }
 
   function renderJustPublishedBanner(p, repoMeta) {

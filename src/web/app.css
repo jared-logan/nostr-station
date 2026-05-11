@@ -5638,7 +5638,19 @@ body.term-expanded .term-bar-toggle .term-chevron {
   font-size: 11px;
   word-break: break-all;
 }
-.csb-to-settings { color: var(--accent-bright); }
+.csb-actions { flex-shrink: 0; }
+
+input.csm-target {
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+input.csm-target:focus { border-color: var(--accent); outline: none; }
 
 .discover-card-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .browse-scratch {
