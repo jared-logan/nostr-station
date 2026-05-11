@@ -4480,7 +4480,24 @@ const ProjectsPanel = (() => {
 
     container.innerHTML = '';
 
-    // 1 — Header
+    // Local-only fork: full-tab publish wizard. We deliberately skip
+    // the file browser / commits in this state because (a) there's
+    // no nostr context to anchor them in and (b) the publish form
+    // becomes the obvious next step rather than a side-panel.
+    // Phase 1c rendered a tiny stub here; 1d turns it into the real
+    // first-publish experience.
+    if (pubState && pubState.status === 'local-only') {
+      container.appendChild(renderPublishPanel(p, pubState));
+      return;
+    }
+
+    // 1 — Header (with one-time post-publish banner if the user just
+    // came back from a successful publish on this project)
+    if (state.justPublishedProjectId === p.id) {
+      container.appendChild(renderJustPublishedBanner(p, repoMeta));
+      // Clear the flag so the banner only appears once.
+      state.justPublishedProjectId = null;
+    }
     container.appendChild(renderCodeHeader(p, pubState, repoMeta, gitState));
 
     // 2 — Ref selector + breadcrumb
@@ -4505,6 +4522,315 @@ const ProjectsPanel = (() => {
     renderCodeCommits(commitsEl, p, view);
   }
 
+  // ── First-publish wizard (Phase 1d) ────────────────────────────────
+  //
+  // Renders an inline panel (full-tab) when a project hasn't been
+  // published to ngit yet. The Review step inserts a confirmation
+  // sheet between the form and the actual `ngit init` SSE so the
+  // user sees exactly what event will be signed and where the repo
+  // will be reachable, plus an opt-in for auto-sync.
+  //
+  // The panel is intentionally a sibling implementation of the
+  // long-standing ngit-tab init form rather than a refactor: the
+  // ngit-tab form is reachable from a different mental model (Init
+  // panel for power-users) and changing both at once would tangle
+  // the diff. They converge on the same /api/projects/:id/ngit/init
+  // endpoint, so they stay behaviourally consistent.
+
+  function renderPublishPanel(p, pubState) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-publish-panel';
+
+    const name = pubState.detectedName || p.name || '';
+    const desc = pubState.detectedDescription || '';
+    const tags = (pubState.suggestedHashtags || []).join(', ');
+    const noPath  = !pubState.isGitRepo;
+    const hasOriginNonNostr = pubState.hasOrigin
+      && pubState.originUrl
+      && !/^nostr:/i.test(pubState.originUrl);
+
+    wrap.innerHTML = `
+      <div class="code-publish-head">
+        <h2>Publish this project to ngit</h2>
+        <p class="muted">
+          Publishes a kind-30617 announcement so collaborators can
+          <code>git clone nostr://…</code> your repo and submit patches
+          directly. You'll review the exact event before anything is
+          signed.
+        </p>
+      </div>
+
+      ${noPath ? `
+        <div class="code-publish-warn">
+          This project doesn't have a local git repository yet. Initialize
+          one in <strong>Settings</strong> first — <code>git init</code>
+          + a first commit so there's something to publish.
+        </div>
+      ` : ''}
+
+      ${hasOriginNonNostr ? `
+        <div class="code-publish-warn">
+          This project already has an <code>origin</code> remote
+          (<code>${escapeHtml(pubState.originUrl || '')}</code>).
+          Publishing will replace it with a <code>nostr://</code> URL.
+          The original is preserved as a local backup branch by
+          <code>ngit init</code>.
+        </div>
+      ` : ''}
+
+      <div class="code-publish-form">
+        <label class="field-label">Repository name</label>
+        <div class="field-row">
+          <input type="text" class="cp-name" value="${escapeHtml(name)}"
+                 placeholder="my-repo" ${noPath ? 'disabled' : ''}>
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:4px">
+          Letters, digits, dot, dash, underscore. 1–64 chars. This becomes
+          the repo's <code>d</code> tag and the path in the clone URL.
+        </div>
+
+        <label class="field-label" style="margin-top:12px">Description</label>
+        <div class="field-row">
+          <input type="text" class="cp-description" value="${escapeHtml(desc)}"
+                 placeholder="What does this project do?" ${noPath ? 'disabled' : ''}>
+        </div>
+
+        <label class="field-label" style="margin-top:12px">Hashtags (optional, space-separated)</label>
+        <div class="field-row">
+          <input type="text" class="cp-hashtags" value="${escapeHtml(tags)}"
+                 placeholder="nostr  app  rust" ${noPath ? 'disabled' : ''}>
+        </div>
+
+        <label class="field-label" style="margin-top:12px">GRASP server</label>
+        <div class="field-row">
+          <input type="text" class="cp-grasp" value="${escapeHtml(pubState.suggestedGraspServer || 'wss://relay.ngit.dev')}"
+                 placeholder="wss://relay.ngit.dev" ${noPath ? 'disabled' : ''}>
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:4px">
+          Where your git data lives. Anyone can host one;
+          <a href="https://gitgrasp.com" target="_blank" rel="noreferrer">learn more</a>.
+        </div>
+
+        <div class="step-actions" style="margin-top:16px">
+          <button class="primary cp-review" ${noPath ? 'disabled' : ''}>Review announcement</button>
+          <a href="#" class="cp-cli-escape muted">Use the ngit CLI instead →</a>
+        </div>
+      </div>
+    `;
+
+    if (noPath) return wrap;
+
+    wrap.querySelector('.cp-cli-escape').addEventListener('click', (e) => {
+      e.preventDefault();
+      state.tab = 'ngit';
+      render();
+    });
+
+    wrap.querySelector('.cp-review').addEventListener('click', async () => {
+      const formData = readPublishFormData(wrap);
+      if (!formData) return;
+      // Fetch identity + signer state up-front so the Review sheet can
+      // accurately reflect "this will sign as <npub>" / "Amber not paired".
+      const [owner, account] = await Promise.all([
+        api('/api/identity/config').catch(() => ({ npub: '' })),
+        api('/api/ngit/account').catch(() => ({ loggedIn: false })),
+      ]);
+      openPublishReview(p, formData, owner, account, pubState);
+    });
+
+    return wrap;
+  }
+
+  function readPublishFormData(wrap) {
+    const name        = wrap.querySelector('.cp-name').value.trim();
+    const description = wrap.querySelector('.cp-description').value.trim();
+    const grasp       = wrap.querySelector('.cp-grasp').value.trim();
+    const hashtags    = wrap.querySelector('.cp-hashtags').value.trim()
+      .split(/[\s,]+/).filter(Boolean).slice(0, 8);
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+      toast('Invalid name', '1-64 chars: alphanumerics, dot, dash, underscore', 'err');
+      return null;
+    }
+    if (grasp && !/^wss?:\/\//i.test(grasp)) {
+      toast('Invalid GRASP server URL', 'must start with wss:// or ws://', 'err');
+      return null;
+    }
+    return { name, description, hashtags, graspServers: grasp ? [grasp] : [] };
+  }
+
+  function openPublishReview(p, formData, owner, account, pubState) {
+    const npub = owner?.npub || '(no npub configured)';
+    const grasp = formData.graspServers[0] || 'wss://relay.ngit.dev';
+    const graspHost = String(grasp).replace(/^wss?:\/\//, '');
+    const cloneUrl  = `https://${graspHost}/${npub}/${formData.name}.git`;
+    const shareUrl  = `nostr://${npub}/${formData.name}`;
+
+    // Tag rows pinned to NIP-34 §1.2 — this is the contract the user
+    // is reviewing. Keep field names verbatim so a curious reader can
+    // cross-check against the spec.
+    const tagRows = [
+      ['d',           formData.name],
+      ['name',        formData.name],
+      formData.description ? ['description', formData.description] : null,
+      ['clone',       cloneUrl],
+      ['relays',      grasp],
+      ...formData.hashtags.map(t => ['t', t]),
+    ].filter(Boolean);
+
+    const tagHtml = tagRows.map(([k, v]) =>
+      `<div class="rev-tag-row">
+         <code class="rev-tag-key">${escapeHtml(k)}</code>
+         <code class="rev-tag-val">${escapeHtml(v)}</code>
+       </div>`,
+    ).join('');
+
+    const branchLine = pubState.detectedBranch
+      ? `Push branch <code>${escapeHtml(pubState.detectedBranch)}</code> to the GRASP server`
+      : 'Push current branch to the GRASP server';
+
+    const body = document.createElement('div');
+    body.className = 'rev-body';
+    body.innerHTML = `
+      <div class="rev-section">
+        <h4>Event to publish</h4>
+        <div class="rev-meta">
+          <span class="rev-pill"><span class="k">kind</span><span class="v">30617</span></span>
+          <span class="rev-pill"><span class="k">signed by</span><span class="v">${escapeHtml(shortPubkey(npub))}</span></span>
+        </div>
+        <div class="rev-tags">${tagHtml}</div>
+      </div>
+
+      <div class="rev-section">
+        <h4>After publishing</h4>
+        <ul class="rev-list">
+          <li>${branchLine}</li>
+          <li>Configure git remote <code>origin</code> → <code>${escapeHtml(shareUrl)}</code></li>
+          <li>Anyone can clone with <code>git clone ${escapeHtml(shareUrl)}</code></li>
+        </ul>
+      </div>
+
+      <div class="rev-section">
+        <h4>Continuous sync</h4>
+        <label class="rev-autosync">
+          <input type="checkbox" class="rev-autosync-toggle" checked>
+          <span>
+            <strong>Enable auto-sync after publishing</strong>
+            <div class="muted" style="font-size:12px;margin-top:2px">
+              Pulls remote changes and pushes local commits every few minutes.
+              Toggle later in Settings.
+            </div>
+          </span>
+        </label>
+      </div>
+
+      ${!account?.loggedIn ? `
+        <div class="rev-warn">
+          <strong>Amber not paired.</strong> ngit init publishes a signed
+          event; without a signer, publishing will fail. Pair Amber in
+          Config → ngit and try again.
+        </div>
+      ` : ''}
+    `;
+
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px'; foot.style.width = '100%';
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    const publish = document.createElement('button');
+    publish.className = 'primary';
+    publish.textContent = 'Publish';
+    publish.disabled = !account?.loggedIn;
+    if (!account?.loggedIn) publish.title = 'Pair Amber first';
+    const spacer = document.createElement('div');
+    spacer.style.flex = '1';
+    foot.appendChild(cancel); foot.appendChild(spacer); foot.appendChild(publish);
+
+    const modal = openModal({
+      title:    'Review announcement',
+      subtitle: `${p.name} → ${shareUrl}`,
+      body,
+      footer:   foot,
+    });
+
+    cancel.addEventListener('click', () => modal.close());
+    publish.addEventListener('click', () => {
+      const enableAutoSync = body.querySelector('.rev-autosync-toggle').checked;
+      modal.close();
+      runPublishFlow(p, formData, enableAutoSync);
+    });
+  }
+
+  async function runPublishFlow(p, formData, enableAutoSync) {
+    const r = await openExecModal({
+      title:    `Publish ${p.name}`,
+      subtitle: `ngit init --name ${formData.name}`,
+      endpoint: `/api/projects/${p.id}/ngit/init`,
+      body:     {
+        name:         formData.name,
+        description:  formData.description,
+        graspServers: formData.graspServers,
+      },
+    });
+    if (!r.ok) return;  // exec modal stays open with the error stream
+
+    // Sync the project record so the new ngit remote + autoSync flag
+    // land before the next render. We re-detect first (picks up the
+    // ngit URL ngit init wrote into git config), then PATCH any
+    // additional flags the user opted into.
+    try {
+      const det = await api('/api/projects/detect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: p.path }),
+      });
+      const patch = {};
+      if (det.ngitRemote) {
+        patch.remotes = { github: p.remotes.github || null, ngit: det.ngitRemote };
+      }
+      if (enableAutoSync) patch.autoSync = true;
+      if (Object.keys(patch).length > 0) {
+        await api(`/api/projects/${p.id}`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(patch),
+        });
+      }
+      // Mark for the one-time success banner; cleared on the next
+      // renderCodeTab pass so it doesn't reappear on tab switches.
+      state.justPublishedProjectId = p.id;
+      toast('Published to ngit',
+            enableAutoSync ? 'auto-sync enabled' : 'manual sync', 'ok');
+    } catch (e) {
+      toast('Post-publish sync failed', e?.message || '', 'warn');
+    }
+    reload();
+  }
+
+  function renderJustPublishedBanner(p, repoMeta) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-published-banner';
+    const shareUrl = repoMeta?.repo
+      ? `nostr://${shortPubkey(repoMeta.repo.pubkey)}/${repoMeta.repo.identifier}`
+      : '';
+    wrap.innerHTML = `
+      <div class="cpb-icon">✓</div>
+      <div class="cpb-body">
+        <div class="cpb-title">Published to ngit</div>
+        <div class="cpb-sub muted">
+          Anyone can now clone with this URL:
+          ${shareUrl ? `<code class="cpb-url">${escapeHtml(shareUrl)}</code>` : '<em>(detecting clone URL…)</em>'}
+        </div>
+      </div>
+      ${shareUrl ? `<span class="cpb-copy"></span>` : ''}
+      <button class="cpb-dismiss" aria-label="Dismiss">×</button>
+    `;
+    if (shareUrl) {
+      wrap.querySelector('.cpb-copy').appendChild(copyBtn(shareUrl));
+    }
+    wrap.querySelector('.cpb-dismiss').addEventListener('click', () => wrap.remove());
+    return wrap;
+  }
+
   function renderCodeHeader(p, pubState, repoMeta, gitState) {
     const wrap = document.createElement('div');
     wrap.className = 'code-header';
@@ -4524,18 +4850,6 @@ const ProjectsPanel = (() => {
       if (parts.length) {
         badge = `<span class="code-badge" title="working tree status — open Workbench tab for details">${parts.join(' ')}</span>`;
       }
-    }
-
-    // Local-only stub: clear, friendly, points to where the publish
-    // wizard will live in Phase 1d.
-    let publishStub = '';
-    if (pubState?.status === 'local-only') {
-      publishStub = `
-        <div class="code-publish-stub muted">
-          Not yet published to ngit. Phase 1d will add a one-click publish here.
-          For now, use the <strong>ngit</strong> tab to initialize the announcement.
-        </div>
-      `;
     }
 
     // Maintainer + clone chips only for published projects.
@@ -4561,7 +4875,6 @@ const ProjectsPanel = (() => {
       </div>
       ${desc ? `<div class="code-desc">${escapeHtml(desc)}</div>` : ''}
       ${chips}
-      ${publishStub}
     `;
     return wrap;
   }
