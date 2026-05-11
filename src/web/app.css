@@ -5272,7 +5272,7 @@ body.term-expanded .term-bar-toggle .term-chevron {
 }
 .code-file-row {
   display: grid;
-  grid-template-columns: 24px 1fr 80px;
+  grid-template-columns: 24px minmax(0, 1fr) minmax(0, 2fr) 80px;
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
@@ -5289,6 +5289,40 @@ body.term-expanded .term-bar-toggle .term-chevron {
 .code-file-icon { font-size: 14px; opacity: 0.8; }
 .code-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .code-file-size { text-align: right; font-size: 11px; }
+
+/* Phase 7: per-entry last-commit info in the file browser. Subject +
+ * relative time, both truncated to keep the row compact. Mirrors
+ * github / gitea — the commit message gives context faster than
+ * the filename alone. Empty cells when the backend couldn't find a
+ * commit (file is older than the 200-commit window). */
+.code-file-commit {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 11px;
+  overflow: hidden;
+  min-width: 0;
+}
+.code-file-commit-subject {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.code-file-commit-time {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+/* Mobile: drop the commit cell and revert to two columns. */
+@media (max-width: 640px) {
+  .code-file-row {
+    grid-template-columns: 24px 1fr 80px;
+  }
+  .code-file-commit { display: none; }
+}
 
 .code-preview {
   margin-bottom: 16px;
@@ -5771,6 +5805,142 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
 /* Stop the existing .tab-section margins from compounding inside
  * Settings — the wrapper already supplies the framing. */
 .settings-section-body > .tab-section:first-child { margin-top: 0; }
+
+/* List toolbar (filter pills + search box on the right). Wraps to a
+ * stacked layout on narrow viewports so the search box gets its own
+ * row rather than squeezing the filter pills. */
+.list-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.list-toolbar .list-filter { margin-bottom: 0; }
+.list-search {
+  flex: 1;
+  min-width: 160px;
+  max-width: 280px;
+  padding: 5px 10px;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.list-search:focus { border-color: var(--accent); outline: none; }
+.list-search::-webkit-search-cancel-button { cursor: pointer; }
+
+/* Clone-URL dropdown (Code tab header). Toggle button styled like
+ * the other chips; menu is a small popover with one group per
+ * protocol. */
+.clone-dropdown { position: relative; display: inline-block; }
+.clone-toggle {
+  padding: 3px 12px;
+  font-size: 11px;
+  border: 1px solid var(--accent-dim, var(--border));
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--accent-bright);
+  cursor: pointer;
+  font: inherit;
+}
+.clone-toggle:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+.clone-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 320px;
+  max-width: 480px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.32);
+  padding: 8px 4px;
+  z-index: 20;
+}
+.clone-group { padding: 4px 8px; }
+.clone-group + .clone-group { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; }
+.clone-group-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.clone-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px;
+}
+.clone-row:hover { background: var(--bg-hover); border-radius: 3px; }
+.clone-url {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text);
+  word-break: break-all;
+  cursor: pointer;
+}
+.clone-url:hover { color: var(--accent-bright); }
+
+/* Status control (badge IS the trigger). Replaces the old
+ * static-label + <select> pair. */
+.status-control { position: relative; display: inline-block; }
+.status-control-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.status-control-chevron {
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-left: 2px;
+}
+.status-control-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.32);
+  padding: 4px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+}
+.status-control-option {
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+  font: inherit;
+}
+.status-control-option:hover { background: var(--bg-hover); }
+.status-control-option.current { background: var(--bg-hover); }
+.status-control-option.current::after {
+  content: ' ✓';
+  color: var(--accent);
+  margin-left: 4px;
+}
 
 .discover-card-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .browse-scratch {

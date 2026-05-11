@@ -5049,33 +5049,34 @@ const ProjectsPanel = (() => {
     const name = repo?.name || pubState?.detectedName || p.name;
     const desc = repo?.description || pubState?.detectedDescription || '';
 
-    // Working-tree status badge — M·N (modified) ↑N (ahead) ↓N (behind).
-    // Hidden entirely when there's nothing to report (clean + sync'd).
+    // Working-tree status badge. Phase 7: plain English replaces the
+    // M·N ↑N ↓N glyphs — friendlier for non-developer users and
+    // still scannable for power users. Hidden entirely when there's
+    // nothing to report (clean + in-sync).
     let badge = '';
     if (gitState && gitState.backend !== 'local-only') {
       const parts = [];
-      if (gitState.dirty)         parts.push(`<span class="code-badge-warn">●</span>`);
-      if (gitState.ahead  > 0)    parts.push(`<span class="code-badge-up">↑${gitState.ahead}</span>`);
-      if (gitState.behind > 0)    parts.push(`<span class="code-badge-down">↓${gitState.behind}</span>`);
+      if (gitState.dirty)        parts.push(`<span class="code-badge-warn">unsaved changes</span>`);
+      if (gitState.ahead  > 0)   parts.push(`<span class="code-badge-up">${gitState.ahead} ahead</span>`);
+      if (gitState.behind > 0)   parts.push(`<span class="code-badge-down">${gitState.behind} behind</span>`);
       if (parts.length) {
-        badge = `<span class="code-badge" title="working tree status — open Workbench tab for details">${parts.join(' ')}</span>`;
+        badge = `<span class="code-badge" title="working tree state relative to the remote">${parts.join(' · ')}</span>`;
       }
     }
 
     // Maintainer + clone chips only for published projects.
-    // Phase 5: maintainer chip shows verified count with a check
-    // icon plus a separate warn chip for candidate-only co-maintainers
-    // (listed by the announcement but with no own 30617 — i.e.
-    // unverified per the NIP-34 anti-scam rule).
+    // Phase 5: verified vs candidate maintainer split.
+    // Phase 7: clone URLs become a real dropdown (grouped by
+    // protocol) rather than a count chip — copy-to-clipboard from
+    // the dropdown menu so the user can grab a URL without
+    // leaving the Code tab.
     let chips = '';
+    let cloneDropdown = null;
     if (repo) {
       const ms = repoMeta.maintainerSet;
       const verifiedCount = ms ? ms.verified.length     : (repo.maintainers?.length || 0);
       const candidateCount = ms ? ms.candidatesOnly.length : 0;
-      // Prefer the unioned clone list when the maintainerSet has one
-      // (covers co-maintainers' own clone URLs the trust anchor never
-      // listed); otherwise fall back to the trust anchor's clone tags.
-      const cloneCount = ms && ms.clone.length > 0 ? ms.clone.length : (repo.clone?.length || 0);
+      const cloneUrls = (ms && ms.clone.length > 0) ? ms.clone : (repo.clone || []);
       const chipParts = [];
       if (verifiedCount > 0) {
         chipParts.push(`<span class="code-chip code-chip-verified" title="Verified — published own kind-30617 under this coordinate"><span class="k">✓ verified</span><span class="v">${verifiedCount}</span></span>`);
@@ -5083,24 +5084,100 @@ const ProjectsPanel = (() => {
       if (candidateCount > 0) {
         chipParts.push(`<span class="code-chip code-chip-candidate" title="Claimed as maintainer by the announcement but has not published their own kind-30617 — cannot grant authority on this repo"><span class="k">⚠ candidate</span><span class="v">${candidateCount}</span></span>`);
       }
-      if (cloneCount > 0) {
-        chipParts.push(`<span class="code-chip"><span class="k">clone URLs</span><span class="v">${cloneCount}</span></span>`);
-      }
       const hashtags = (ms && ms.hashtags.length > 0) ? ms.hashtags : (repo.hashtags || []);
       for (const t of hashtags.slice(0, 4)) {
         chipParts.push(`<span class="code-chip code-chip-tag">#${escapeHtml(t)}</span>`);
       }
       chips = `<div class="code-chips">${chipParts.join('')}</div>`;
+      if (cloneUrls.length > 0) cloneDropdown = buildCloneDropdown(cloneUrls);
     }
 
     wrap.innerHTML = `
       <div class="code-title-row">
         <h2 class="code-title">${escapeHtml(name)}</h2>
         ${badge}
+        <span class="code-clone-slot"></span>
       </div>
       ${desc ? `<div class="code-desc">${escapeHtml(desc)}</div>` : ''}
       ${chips}
     `;
+    if (cloneDropdown) {
+      wrap.querySelector('.code-clone-slot').appendChild(cloneDropdown);
+    }
+    return wrap;
+  }
+
+  // Phase 7: clone URLs grouped by transport (Nostr / HTTPS / SSH /
+  // Git / Other) — mirrors nostrhub's pattern. Click any row to copy
+  // that URL; click the toggle to open/close. Closes on outside
+  // click. Returns a DOM node; caller decides where to mount it.
+  function buildCloneDropdown(urls) {
+    const wrap = document.createElement('div');
+    wrap.className = 'clone-dropdown';
+    const groups = {
+      Nostr:  urls.filter(u => /^nostr:/i.test(u)),
+      HTTPS:  urls.filter(u => /^https:/i.test(u)),
+      HTTP:   urls.filter(u => /^http:/i.test(u)),
+      SSH:    urls.filter(u => /^(ssh|git\+ssh):/i.test(u) || /^[^/]+@[^:]+:/.test(u)),
+      Git:    urls.filter(u => /^git:/i.test(u)),
+    };
+    // Catch-all for anything that didn't slot into the named groups.
+    const classified = new Set([
+      ...groups.Nostr, ...groups.HTTPS, ...groups.HTTP,
+      ...groups.SSH, ...groups.Git,
+    ]);
+    const other = urls.filter(u => !classified.has(u));
+    if (other.length) groups.Other = other;
+
+    const groupRows = Object.entries(groups)
+      .filter(([, list]) => list.length > 0)
+      .map(([label, list]) => `
+        <div class="clone-group">
+          <div class="clone-group-head">${escapeHtml(label)}</div>
+          ${list.map((u) => `
+            <div class="clone-row">
+              <code class="clone-url" title="Click to copy">${escapeHtml(u)}</code>
+              <span class="copy-slot" data-copy="${escapeHtml(u)}"></span>
+            </div>
+          `).join('')}
+        </div>
+      `).join('');
+
+    wrap.innerHTML = `
+      <button class="clone-toggle" aria-haspopup="true" aria-expanded="false">
+        ⌥ Clone ▾
+      </button>
+      <div class="clone-menu" hidden>${groupRows}</div>
+    `;
+    const toggle = wrap.querySelector('.clone-toggle');
+    const menu   = wrap.querySelector('.clone-menu');
+    const close = () => {
+      menu.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+    };
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      menu.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+      if (open) {
+        // Wire copy buttons + URL click-to-copy on first open.
+        wrap.querySelectorAll('.copy-slot').forEach(s => {
+          if (s.childElementCount === 0) s.appendChild(copyBtn(s.dataset.copy));
+        });
+        wrap.querySelectorAll('.clone-url').forEach(el => {
+          el.onclick = () => {
+            navigator.clipboard?.writeText(el.textContent || '').then(
+              () => toast('Copied', el.textContent, 'ok'),
+            ).catch(() => {});
+          };
+        });
+      }
+    });
+    // Outside click closes the menu.
+    document.addEventListener('click', (e) => {
+      if (!wrap.contains(e.target)) close();
+    });
     return wrap;
   }
 
@@ -5176,7 +5253,11 @@ const ProjectsPanel = (() => {
 
   async function renderCodeFiles(el, p, view) {
     el.innerHTML = `<div class="muted">Loading files…</div>`;
-    const qs = new URLSearchParams({ ref: view.ref, path: view.path });
+    // Phase 7: withLog=1 asks the backend for per-entry last-commit
+    // info. One bounded `git log` walk inside /repo/tree returns
+    // file → most-recent-commit map; entries get a lastCommit field
+    // for the file browser to display alongside name + size.
+    const qs = new URLSearchParams({ ref: view.ref, path: view.path, withLog: '1' });
     let r;
     try {
       r = await api(`/api/projects/${p.id}/repo/tree?${qs}`);
@@ -5198,10 +5279,22 @@ const ProjectsPanel = (() => {
       const sizeCell = e.type === 'blob' && Number.isFinite(e.size)
         ? `<span class="code-file-size muted">${fmtBytes(e.size)}</span>`
         : '<span class="code-file-size muted"></span>';
+      // lastCommit cell — subject (truncated) + relative time. Blank
+      // when the backend couldn't find a commit within the 200-commit
+      // window. Click forwards to the relevant commit page (Phase 8
+      // future hook — for now just shows the info).
+      const lc = e.lastCommit;
+      const commitCell = lc
+        ? `<span class="code-file-commit muted" title="${escapeHtml(lc.subject)} (${escapeHtml(lc.abbrev)})">
+             <span class="code-file-commit-subject">${escapeHtml(truncateSubject(lc.subject, 60))}</span>
+             <span class="code-file-commit-time">${escapeHtml(fmtAgoIso(new Date((lc.timestamp || 0) * 1000).toISOString()))}</span>
+           </span>`
+        : '<span class="code-file-commit muted"></span>';
       return `
         <button class="code-file-row" data-name="${escapeHtml(e.name)}" data-type="${e.type}">
           <span class="code-file-icon">${icon}</span>
           <span class="code-file-name">${escapeHtml(e.name)}</span>
+          ${commitCell}
           ${sizeCell}
         </button>
       `;
@@ -5226,6 +5319,11 @@ const ProjectsPanel = (() => {
         // can render submodule metadata).
       });
     });
+  }
+
+  function truncateSubject(s, max) {
+    s = String(s || '');
+    return s.length > max ? s.slice(0, max - 1) + '…' : s;
   }
 
   async function renderCodePreview(el, p, view) {
@@ -5551,6 +5649,7 @@ const ProjectsPanel = (() => {
     // The legacy /api/projects/:id/ngit/proposals endpoint still exists
     // for back-compat but isn't called from the UI anymore.
     if (!state.prsFilter) state.prsFilter = 'open';
+    if (typeof state.prsSearch !== 'string') state.prsSearch = '';
     container.innerHTML = `
       <div class="tab-section">
         <div class="proposals-head">
@@ -5560,10 +5659,14 @@ const ProjectsPanel = (() => {
             <button class="proposals-refresh">Refresh</button>
           </div>
         </div>
-        <div class="list-filter" role="tablist" aria-label="PR status filter">
-          <button class="filter-pill ${state.prsFilter === 'open'   ? 'active' : ''}" data-filter="open"   role="tab">Open</button>
-          <button class="filter-pill ${state.prsFilter === 'all'    ? 'active' : ''}" data-filter="all"    role="tab">All</button>
-          <button class="filter-pill ${state.prsFilter === 'closed' ? 'active' : ''}" data-filter="closed" role="tab">Closed</button>
+        <div class="list-toolbar">
+          <div class="list-filter" role="tablist" aria-label="PR status filter">
+            <button class="filter-pill ${state.prsFilter === 'open'   ? 'active' : ''}" data-filter="open"   role="tab">Open</button>
+            <button class="filter-pill ${state.prsFilter === 'all'    ? 'active' : ''}" data-filter="all"    role="tab">All</button>
+            <button class="filter-pill ${state.prsFilter === 'closed' ? 'active' : ''}" data-filter="closed" role="tab">Closed</button>
+          </div>
+          <input type="search" class="list-search" placeholder="Search subjects + authors"
+                 value="${escapeHtml(state.prsSearch)}" aria-label="Search PRs">
         </div>
         <div class="muted" style="margin-bottom:12px;font-size:11px">
           NIP-34 patch series threaded by root + revision.
@@ -5579,6 +5682,14 @@ const ProjectsPanel = (() => {
         state.prsFilter = btn.dataset.filter;
         renderTab(document.querySelector('.project-tab-content'), p);
       });
+    });
+    const prSearchEl = container.querySelector('.list-search');
+    prSearchEl.addEventListener('input', () => {
+      state.prsSearch = prSearchEl.value;
+      // Debounce-free: list filter is cheap and runs client-side, so
+      // re-rendering on each keystroke feels snappier than waiting.
+      const cached = proposalsCache.get(p.id);
+      if (Array.isArray(cached)) renderSeries(cached);
     });
 
     const listEl = container.querySelector('#proposals-series-list');
@@ -5603,11 +5714,17 @@ const ProjectsPanel = (() => {
       // Phase 7 status filter — applied client-side so the toggle is
       // instant. Open = open or draft (anything still actionable);
       // Closed = closed, merged, or resolved.
+      const q = (state.prsSearch || '').trim().toLowerCase();
       const visible = series.filter(s => {
         const st = s.effectiveStatus || 'open';
-        if (state.prsFilter === 'open')   return st === 'open' || st === 'draft';
-        if (state.prsFilter === 'closed') return st === 'closed' || st === 'merged' || st === 'resolved';
-        return true;     // 'all'
+        const statusOk =
+          state.prsFilter === 'open'   ? (st === 'open' || st === 'draft') :
+          state.prsFilter === 'closed' ? (st === 'closed' || st === 'merged' || st === 'resolved') :
+          true;
+        if (!statusOk) return false;
+        if (!q) return true;
+        const hay = `${s.subject || ''} ${s.author?.name || ''} ${s.author?.pubkey || ''}`.toLowerCase();
+        return hay.includes(q);
       });
       if (visible.length === 0) {
         listEl.innerHTML = renderListEmptyState({
@@ -5883,8 +6000,17 @@ const ProjectsPanel = (() => {
         });
       });
 
+      // Phase 7: client-side authority check — show the status
+      // dropdown only when the user can legitimately publish a
+      // status change. Server still enforces; this hides options
+      // the user can't act on.
+      const [userPubkey, repoMeta] = await Promise.all([
+        getOwnerPubkey(),
+        api(`/api/projects/${p.id}/repo`).catch(() => null),
+      ]);
+      const canEdit = canEditStatus(userPubkey, detail.author?.pubkey, repoMeta?.maintainerSet);
       const statusSlot = body.querySelector('.pdetail-status-slot');
-      statusSlot.appendChild(renderStatusDropdown('patch', 'open', (newStatus) => {
+      statusSlot.appendChild(renderStatusControl('patch', 'open', canEdit, (newStatus) => {
         openExecModal({
           title:    `${newStatus} · ${p.name}`,
           subtitle: `ngit pr_status --${newStatus} ${detail.rootId.slice(0, 12)}…`,
@@ -6026,27 +6152,96 @@ const ProjectsPanel = (() => {
     }
   }
 
-  // Status-change dropdown button for the issue/patch detail modal.
-  // Phase 4 ships a simple dropdown (open/closed/draft for patches;
-  // open/resolved/closed for issues). Authority is enforced server-
-  // side; the dropdown shows all options because we don't yet know
-  // the user's pubkey context here (would require an /account call).
-  function renderStatusDropdown(kind, currentStatus, onChange) {
+  // Phase 7: the status BADGE is the dropdown trigger (gitworkshop
+  // pattern). Click the green "open" pill → menu opens with allowed
+  // transitions. When the user isn't authorised to change status
+  // (not the root author, not a verified maintainer), the badge is
+  // rendered static — the menu never opens, no buttons to mislead
+  // the user. The server still enforces authority either way; this
+  // is UX hygiene, not security.
+  //
+  // kind:        'patch' | 'issue'
+  // currentStatus: 'open' | 'draft' | 'closed' | 'merged' | 'resolved'
+  // canEdit:     boolean — caller pre-computes the authority check
+  // onChange:    (newStatus) => void
+  function renderStatusControl(kind, currentStatus, canEdit, onChange) {
     const allowed = kind === 'patch'
       ? ['open', 'draft', 'closed']
       : ['open', 'resolved', 'closed'];
+    // Static badge when the user can't edit — no menu, no chevron,
+    // just the status pill the rest of the UI already shows.
+    if (!canEdit) {
+      const span = document.createElement('span');
+      span.innerHTML = renderStatusBadge(currentStatus);
+      return span;
+    }
     const wrap = document.createElement('div');
-    wrap.className = 'status-dropdown';
+    wrap.className = 'status-control';
     wrap.innerHTML = `
-      <label class="muted" style="font-size:11px">Status</label>
-      <select class="status-dropdown-select">
-        ${allowed.map(s =>
-          `<option value="${escapeHtml(s)}" ${s === currentStatus ? 'selected' : ''}>${escapeHtml(s)}</option>`,
-        ).join('')}
-      </select>
+      <button class="status-control-toggle" aria-haspopup="true" aria-expanded="false"
+              title="Click to change status">
+        ${renderStatusBadge(currentStatus)}
+        <span class="status-control-chevron">▾</span>
+      </button>
+      <div class="status-control-menu" hidden>
+        ${allowed.map(s => `
+          <button class="status-control-option ${s === currentStatus ? 'current' : ''}"
+                  data-status="${escapeHtml(s)}">
+            ${renderStatusBadge(s)}
+          </button>
+        `).join('')}
+      </div>
     `;
-    wrap.querySelector('select').addEventListener('change', (e) => onChange(e.target.value));
+    const toggle = wrap.querySelector('.status-control-toggle');
+    const menu   = wrap.querySelector('.status-control-menu');
+    const close = () => { menu.hidden = true; toggle.setAttribute('aria-expanded', 'false'); };
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      menu.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+    });
+    menu.querySelectorAll('.status-control-option').forEach(opt => {
+      opt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        close();
+        const next = opt.dataset.status;
+        if (next && next !== currentStatus) onChange(next);
+      });
+    });
+    document.addEventListener('click', (e) => {
+      if (!wrap.contains(e.target)) close();
+    });
     return wrap;
+  }
+
+  // Phase 7: client-side authority check. Cached owner identity +
+  // resolved maintainer set let us decide whether to render the
+  // status badge as an editable dropdown or a static pill. The
+  // server check is the source of truth; this exists purely to
+  // stop us showing the user options they can't actually use.
+  let cachedOwnerPubkey = null;
+  async function getOwnerPubkey() {
+    if (cachedOwnerPubkey !== null) return cachedOwnerPubkey;
+    try {
+      const c = await api('/api/identity/config');
+      let pk = c?.npub || '';
+      if (/^npub1[0-9a-z]+$/.test(pk) && window.NostrTools?.nip19) {
+        // Decode npub → hex if nostr-tools is available; fall back
+        // to a quick regex check otherwise (most callers receive
+        // hex already, but defence-in-depth keeps the API tolerant).
+        try { pk = window.NostrTools.nip19.decode(pk).data; } catch {}
+      }
+      cachedOwnerPubkey = (typeof pk === 'string' && /^[0-9a-f]{64}$/.test(pk)) ? pk : '';
+    } catch { cachedOwnerPubkey = ''; }
+    return cachedOwnerPubkey;
+  }
+
+  function canEditStatus(userPubkey, rootAuthorPubkey, maintainerSet) {
+    if (!userPubkey) return false;
+    if (userPubkey === rootAuthorPubkey) return true;
+    if (Array.isArray(maintainerSet?.verified) && maintainerSet.verified.includes(userPubkey)) return true;
+    return false;
   }
 
   // ── Phase 3b: Issues tab ─────────────────────────────────────────────
@@ -6058,6 +6253,8 @@ const ProjectsPanel = (() => {
   // filter row at the top.
   async function renderIssuesTab(container, p) {
     if (!state.issuesFilter) state.issuesFilter = 'open';
+    if (typeof state.issuesSearch !== 'string') state.issuesSearch = '';
+    let issuesCache = [];
     container.innerHTML = `
       <div class="tab-section">
         <div class="proposals-head">
@@ -6067,10 +6264,14 @@ const ProjectsPanel = (() => {
             <button class="issues-refresh">Refresh</button>
           </div>
         </div>
-        <div class="list-filter" role="tablist" aria-label="Issue status filter">
-          <button class="filter-pill ${state.issuesFilter === 'open'   ? 'active' : ''}" data-filter="open"   role="tab">Open</button>
-          <button class="filter-pill ${state.issuesFilter === 'all'    ? 'active' : ''}" data-filter="all"    role="tab">All</button>
-          <button class="filter-pill ${state.issuesFilter === 'closed' ? 'active' : ''}" data-filter="closed" role="tab">Closed</button>
+        <div class="list-toolbar">
+          <div class="list-filter" role="tablist" aria-label="Issue status filter">
+            <button class="filter-pill ${state.issuesFilter === 'open'   ? 'active' : ''}" data-filter="open"   role="tab">Open</button>
+            <button class="filter-pill ${state.issuesFilter === 'all'    ? 'active' : ''}" data-filter="all"    role="tab">All</button>
+            <button class="filter-pill ${state.issuesFilter === 'closed' ? 'active' : ''}" data-filter="closed" role="tab">Closed</button>
+          </div>
+          <input type="search" class="list-search" placeholder="Search subjects + labels + authors"
+                 value="${escapeHtml(state.issuesSearch)}" aria-label="Search issues">
         </div>
         <div class="issues-list" id="issues-list">
           <div class="muted">loading…</div>
@@ -6083,17 +6284,30 @@ const ProjectsPanel = (() => {
         renderTab(document.querySelector('.project-tab-content'), p);
       });
     });
+    const issueSearchEl = container.querySelector('.list-search');
+    issueSearchEl.addEventListener('input', () => {
+      state.issuesSearch = issueSearchEl.value;
+      if (issuesCache.length > 0) renderList(issuesCache);
+    });
 
     const listEl = container.querySelector('#issues-list');
 
     const renderList = (issues) => {
       if (!Array.isArray(issues)) issues = [];
       // Phase 7 status filter — Open = anything not yet closed/resolved.
+      issuesCache = issues;
+      const q = (state.issuesSearch || '').trim().toLowerCase();
       const visible = issues.filter(i => {
         const st = i.status || 'open';
-        if (state.issuesFilter === 'open')   return st === 'open' || st === 'draft';
-        if (state.issuesFilter === 'closed') return st === 'closed' || st === 'resolved';
-        return true;
+        const statusOk =
+          state.issuesFilter === 'open'   ? (st === 'open' || st === 'draft') :
+          state.issuesFilter === 'closed' ? (st === 'closed' || st === 'resolved') :
+          true;
+        if (!statusOk) return false;
+        if (!q) return true;
+        const labelsStr = Array.isArray(i.labels) ? i.labels.join(' ') : '';
+        const hay = `${i.subject || ''} ${labelsStr} ${i.author?.pubkey || ''}`.toLowerCase();
+        return hay.includes(q);
       });
       if (visible.length === 0) {
         listEl.innerHTML = renderListEmptyState({
@@ -6266,8 +6480,15 @@ const ProjectsPanel = (() => {
         <div class="comment-thread" id="comment-thread"></div>
         <div class="comment-composer" id="comment-composer"></div>
       `;
+      const [issueOwnerPk, issueRepoMeta] = await Promise.all([
+        getOwnerPubkey(),
+        api(`/api/projects/${p.id}/repo`).catch(() => null),
+      ]);
+      const issueCanEdit = canEditStatus(
+        issueOwnerPk, detail.author?.pubkey || detail.pubkey, issueRepoMeta?.maintainerSet,
+      );
       body.querySelector('.idetail-status-slot').appendChild(
-        renderStatusDropdown('issue', effective, (newStatus) => {
+        renderStatusControl('issue', effective, issueCanEdit, (newStatus) => {
           openExecModal({
             title:    `${newStatus} · ${p.name}`,
             subtitle: `ngit issue_status --${newStatus} ${detail.id.slice(0, 12)}…`,

@@ -409,7 +409,9 @@ async function readRefs(project: Project): Promise<any> {
 
 // ── tree ─────────────────────────────────────────────────────────────────
 
-async function readTree(project: Project, ref: string, treePath: string): Promise<any> {
+async function readTree(
+  project: Project, ref: string, treePath: string, withLog: boolean,
+): Promise<any> {
   if (!project.path) return { ref, path: treePath, entries: [] };
   // `git ls-tree -l <ref> <path>/` lists one level. Trailing slash is
   // important: without it you'd get just the entry FOR the path.
@@ -452,7 +454,85 @@ async function readTree(project: Project, ref: string, treePath: string): Promis
     if (a.type !== b.type) return a.type === 'tree' ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+
+  // Phase 7: per-entry last-commit info. Bounded ONE `git log` over
+  // recent history (200 commits at this path) — much cheaper than
+  // one spawn per entry. The walk parses interleaved commit headers
+  // and changed-file lists, building a path → first-seen-commit map.
+  // Entries whose subtree appears in that history get a lastCommit;
+  // older / never-touched entries return null lastCommit and the
+  // client renders a blank cell.
+  if (withLog) {
+    try {
+      const logOut = await gitRun(project.path, [
+        'log',
+        '-n', '200',
+        '--name-only',
+        '--pretty=format:NS_COMMIT\x00%H\x00%h\x00%at\x00%s',
+        ref,
+        '--', target || '.',
+      ], 8000);
+      const fileToCommit = parseLogForLastCommits(logOut);
+      for (const e of entries) {
+        // Match by entry's absolute repo-path; for trees, ANY file
+        // under that subdir counts (we look for the first commit
+        // that touches a file with the entry prefix).
+        const prefix = target + e.name + (e.type === 'tree' ? '/' : '');
+        const found = lookupLastCommit(fileToCommit, prefix, e.type === 'tree');
+        if (found) e.lastCommit = found;
+      }
+    } catch { /* lastCommit annotation is best-effort */ }
+  }
   return { ref, path: treePath, entries };
+}
+
+interface CommitMeta {
+  sha:       string;
+  abbrev:    string;
+  timestamp: number;
+  subject:   string;
+}
+
+/**
+ * Parse `git log --name-only --pretty=format:'NS_COMMIT\x00…'` output
+ * into a Map<filepath, firstCommitInHistory>. Because log iterates
+ * newest-first, the FIRST time we see a path is its most recent
+ * touch — that's what we record.
+ */
+function parseLogForLastCommits(out: string): Map<string, CommitMeta> {
+  const map = new Map<string, CommitMeta>();
+  let cur: CommitMeta | null = null;
+  for (const rawLine of out.split('\n')) {
+    const line = rawLine;
+    if (!line) continue;
+    if (line.startsWith('NS_COMMIT\x00')) {
+      const parts = line.split('\x00');
+      // parts[0] = "NS_COMMIT", parts[1..] = sha/abbrev/ts/subject
+      if (parts.length < 5) { cur = null; continue; }
+      cur = {
+        sha:       parts[1],
+        abbrev:    parts[2],
+        timestamp: Number(parts[3]) || 0,
+        subject:   parts[4],
+      };
+      continue;
+    }
+    if (cur && !map.has(line)) map.set(line, cur);
+  }
+  return map;
+}
+
+function lookupLastCommit(
+  map: Map<string, CommitMeta>, prefix: string, isTree: boolean,
+): CommitMeta | null {
+  if (!isTree) return map.get(prefix) || null;
+  // For trees, find ANY file whose path starts with the prefix and
+  // return its commit. The map's iteration order is insertion order
+  // (most recent first), so the first matching prefix is correct.
+  for (const [filePath, meta] of map) {
+    if (filePath.startsWith(prefix)) return meta;
+  }
+  return null;
 }
 
 // ── blob ────────────────────────────────────────────────────────────────
@@ -640,7 +720,8 @@ export async function handleRepo(
       return json(res, 200, await readRefs(project));
     }
     if (sub === 'repo/tree') {
-      return json(res, 200, await readTree(project, ref, treePath));
+      const withLog = u.searchParams.get('withLog') === '1';
+      return json(res, 200, await readTree(project, ref, treePath, withLog));
     }
     if (sub === 'repo/blob') {
       if (!treePath) return json(res, 400, { error: 'path required' });
