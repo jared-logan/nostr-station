@@ -4894,10 +4894,12 @@ const ProjectsPanel = (() => {
       openAnnouncementsModal(repo, ms);
     });
     container.querySelector('.about-action-edit')?.addEventListener('click', () => {
-      // Phase 3b lands the actual form. Stub for now so the affordance
-      // is present and the layout settles before the form work piles
-      // up on top.
-      toast('Edit coming next', 'The Edit Repository form lands in Phase 3b', 'info');
+      openEditRepositoryModal(p, repo, ms, () => {
+        // After a successful save, re-fetch the repo metadata so the
+        // About tab reflects the new announcement. The cache is busted
+        // server-side; passing refresh=1 just shortens the round-trip.
+        renderAboutTab(container, p);
+      });
     });
     container.querySelector('.about-action-share')?.addEventListener('click', () => {
       openShareLinksModal(p, repo);
@@ -5812,6 +5814,367 @@ const ProjectsPanel = (() => {
   // sourced from. The "selected" badge marks the event whose fields
   // the dashboard currently treats as authoritative for display
   // (newest verified by created_at — matches MaintainerSet.display.pubkey).
+  // ── Edit Repository form modal (Phase 3b) ────────────────────────────
+  //
+  // Republishes the kind-30617 announcement via POST /announce. Server
+  // constructs the event template, signs via the persisted Amber pairing
+  // (signEventWithSavedBunker), publishes to the relay union, and busts
+  // the repo-30617 cache. Form is pre-populated from the current
+  // announcement; submit sends the FULL new value of every field (not a
+  // delta) because the server replaces the announcement wholesale —
+  // omitted fields would otherwise be lost on the next render.
+  //
+  // Field parity with gitworkshop's edit form (per the screenshots):
+  //   - Name, Description
+  //   - Website (multi-value)
+  //   - Topics (chip-based)
+  //   - Earliest unique commit
+  //   - GRASP servers (multi-value; server treats as a relay subset)
+  //   - Other relays (multi-value, wss://)
+  //   - Other git servers (clone URLs, multi-value, https://)
+  //   - Other maintainers — npub or hex, hex-decoded server-side
+  //   - Custom tags (advanced) — preserves forward-compat tags
+  function openEditRepositoryModal(p, repo, ms, onSaved) {
+    // Pre-fill arrays mutated by add/remove buttons in-modal. The
+    // confirmed value is the array state at submit time.
+    const state = {
+      name:        repo.name        || '',
+      description: repo.description || '',
+      web:         (repo.web || []).slice(),
+      topics:      (repo.hashtags || []).slice(),
+      euc:         repo.euc || '',
+      // The 30617 doesn't distinguish GRASP from other relays — that's
+      // a derived UI grouping. For the form we recompute the GRASP set
+      // (hosts appearing in both relays + clone of any announcement) so
+      // the user can edit each group independently. On submit we
+      // collapse back to a single relays list + clone list.
+      graspServers: deriveGraspHostsForEdit(ms),
+      otherRelays:  deriveOtherRelaysForEdit(ms),
+      cloneUrls:    (repo.clone || []).slice(),
+      otherMaintainers: ((ms?.events || [])
+        // Include the anchor's own maintainers tag — that's whose
+        // endorsement list the user is editing.
+        .find(e => e.pubkey === repo.pubkey)?.tags || [])
+        .filter(t => Array.isArray(t) && t[0] === 'maintainers')
+        .flatMap(t => t.slice(1))
+        .filter(p => /^[0-9a-f]{64}$/.test(p) && p !== repo.pubkey),
+      customTags: extractEditableCustomTags(ms, repo),
+    };
+
+    const body = document.createElement('div');
+    body.className = 'edit-repo-modal';
+    const renderBody = () => {
+      body.innerHTML = `
+        <div class="edit-repo-section">
+          <label class="edit-repo-label" for="erm-name">Name</label>
+          <input id="erm-name" class="edit-repo-input" type="text" value="${escapeHtml(state.name)}" />
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label" for="erm-desc">Description</label>
+          <textarea id="erm-desc" class="edit-repo-textarea" rows="3">${escapeHtml(state.description)}</textarea>
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label">Website</label>
+          ${multiValueRows(state.web, 'web', 'https://example.com')}
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label">Topics</label>
+          <div class="edit-repo-chips">
+            ${state.topics.map((t, i) => `<span class="edit-repo-chip"><span>${escapeHtml(t)}</span><button type="button" class="edit-repo-chip-x" data-topic-idx="${i}" aria-label="remove">×</button></span>`).join('')}
+            <input class="edit-repo-input edit-repo-chip-input" type="text" placeholder="Add topic and press Enter" data-input="topic" />
+          </div>
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label" for="erm-euc">Earliest unique commit
+            <span class="muted">(40-char git SHA — set automatically by ngit init; rarely needs editing)</span>
+          </label>
+          <input id="erm-euc" class="edit-repo-input" type="text" maxlength="40" value="${escapeHtml(state.euc)}" />
+        </div>
+
+        <div class="edit-repo-section">
+          <div class="edit-repo-section-head">Infrastructure</div>
+          <div class="muted edit-repo-help">
+            GRASP servers serve both git hosting and a nostr relay at the same domain
+            (e.g. <code>git.shakespeare.diy</code>). Other relays are nostr-only.
+          </div>
+
+          <label class="edit-repo-label">GRASP servers <span class="muted">(wss://)</span></label>
+          ${multiValueRows(state.graspServers, 'grasp', 'wss://git.example.com')}
+
+          <label class="edit-repo-label" style="margin-top:8px">Other relays <span class="muted">(wss://)</span></label>
+          ${multiValueRows(state.otherRelays, 'relay', 'wss://relay.example.com')}
+
+          <label class="edit-repo-label" style="margin-top:8px">Clone URLs <span class="muted">(https:// or git://)</span></label>
+          ${multiValueRows(state.cloneUrls, 'clone', 'https://git.example.com/npub.../repo.git')}
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label">Other maintainers <span class="muted">(your acknowledged co-maintainers — they need to publish their own 30617 to count as authoritative)</span></label>
+          ${multiValueRows(state.otherMaintainers, 'maintainer', 'npub1… or 64-char hex')}
+        </div>
+
+        <details class="edit-repo-section edit-repo-advanced">
+          <summary>Custom tags <span class="muted">(advanced)</span></summary>
+          <div class="muted edit-repo-help">
+            Tags not recognised by this form are preserved here. Editing them lets you
+            attach forward-compat data — nostr-station auto-includes <code>client = nostr-station</code>
+            on save unless you set a different <code>client</code> value yourself.
+          </div>
+          ${state.customTags.map((tag, i) => `
+            <div class="edit-repo-tag-row">
+              <input class="edit-repo-input edit-repo-tag-name" data-tag-idx="${i}" data-field="name" value="${escapeHtml(tag[0] || '')}" placeholder="tag name" />
+              <input class="edit-repo-input edit-repo-tag-value" data-tag-idx="${i}" data-field="value" value="${escapeHtml((tag.slice(1)).join(' '))}" placeholder="value (space-separated for multi-value)" />
+              <button type="button" class="edit-repo-row-x" data-tag-idx="${i}" aria-label="remove">×</button>
+            </div>
+          `).join('')}
+          <button type="button" class="edit-repo-add" data-add="tag">+ add custom tag</button>
+        </details>
+      `;
+      wireBody();
+    };
+
+    function multiValueRows(values, kind, placeholder) {
+      const rows = values.map((v, i) => `
+        <div class="edit-repo-row">
+          <input class="edit-repo-input" type="text" data-kind="${kind}" data-idx="${i}" value="${escapeHtml(v)}" placeholder="${escapeHtml(placeholder)}" />
+          <button type="button" class="edit-repo-row-x" data-kind="${kind}" data-idx="${i}" aria-label="remove">×</button>
+        </div>
+      `).join('');
+      return rows + `<button type="button" class="edit-repo-add" data-add="${kind}">+ add</button>`;
+    }
+
+    function wireBody() {
+      // Plain inputs — debounced to avoid thrashing state on every keystroke.
+      body.querySelector('#erm-name').addEventListener('input', e => { state.name = e.target.value; });
+      body.querySelector('#erm-desc').addEventListener('input', e => { state.description = e.target.value; });
+      body.querySelector('#erm-euc').addEventListener('input', e => { state.euc = e.target.value.trim().toLowerCase(); });
+
+      // Multi-value rows: editing an entry updates the array; remove
+      // button drops it; add button appends a blank.
+      body.querySelectorAll('input[data-kind]').forEach(el => {
+        el.addEventListener('input', () => {
+          const kind = el.dataset.kind;
+          const idx = Number(el.dataset.idx);
+          const list = listForKind(kind);
+          list[idx] = el.value;
+        });
+      });
+      body.querySelectorAll('.edit-repo-row-x[data-kind]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const list = listForKind(btn.dataset.kind);
+          list.splice(Number(btn.dataset.idx), 1);
+          renderBody();
+        });
+      });
+      body.querySelectorAll('.edit-repo-add[data-add]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const kind = btn.dataset.add;
+          if (kind === 'tag') state.customTags.push(['', '']);
+          else listForKind(kind).push('');
+          renderBody();
+        });
+      });
+
+      // Topics chip-input — Enter to commit, click × to remove.
+      body.querySelectorAll('.edit-repo-chip-x[data-topic-idx]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.topics.splice(Number(btn.dataset.topicIdx), 1);
+          renderBody();
+        });
+      });
+      const topicInput = body.querySelector('[data-input="topic"]');
+      if (topicInput) {
+        topicInput.addEventListener('keydown', e => {
+          if (e.key === 'Enter' && topicInput.value.trim()) {
+            e.preventDefault();
+            const v = topicInput.value.trim().replace(/^#/, '');
+            if (v && !state.topics.includes(v)) state.topics.push(v);
+            renderBody();
+            // Re-focus into the input after re-render for fast multi-add.
+            setTimeout(() => body.querySelector('[data-input="topic"]')?.focus(), 0);
+          }
+        });
+      }
+
+      // Custom tag rows: name + value (space-separated) edits.
+      body.querySelectorAll('.edit-repo-tag-row input[data-tag-idx]').forEach(el => {
+        el.addEventListener('input', () => {
+          const idx = Number(el.dataset.tagIdx);
+          const field = el.dataset.field;
+          const row = state.customTags[idx];
+          if (!row) return;
+          if (field === 'name') row[0] = el.value;
+          else {
+            const values = el.value.split(/\s+/).filter(Boolean);
+            row.splice(1, row.length - 1, ...values);
+          }
+        });
+      });
+      body.querySelectorAll('.edit-repo-row-x[data-tag-idx]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.customTags.splice(Number(btn.dataset.tagIdx), 1);
+          renderBody();
+        });
+      });
+    }
+
+    function listForKind(kind) {
+      switch (kind) {
+        case 'web':        return state.web;
+        case 'grasp':      return state.graspServers;
+        case 'relay':      return state.otherRelays;
+        case 'clone':      return state.cloneUrls;
+        case 'maintainer': return state.otherMaintainers;
+        default: return [];
+      }
+    }
+
+    renderBody();
+
+    const foot = document.createElement('div');
+    foot.className = 'edit-repo-foot';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'primary';
+    save.textContent = 'Save changes';
+    foot.appendChild(save); foot.appendChild(cancel);
+
+    const modal = openModal({
+      title:    'Edit repository',
+      subtitle: repo.name || repo.identifier,
+      body,
+      footer:   foot,
+    });
+    cancel.addEventListener('click', () => modal.close());
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      save.textContent = 'Signing via Amber…';
+      // GRASP and Other relays are treated as one `relays` list on
+      // submit — server stores them as a single relays tag. The split
+      // is purely a UI affordance.
+      const allRelays = [...state.graspServers, ...state.otherRelays]
+        .map(s => s.trim()).filter(Boolean)
+        .filter((v, i, a) => a.indexOf(v) === i);
+      // Decode npub → hex for any maintainer entered as npub.
+      const decodeMaintainer = (v) => {
+        v = v.trim();
+        if (!v) return null;
+        if (/^[0-9a-f]{64}$/i.test(v)) return v.toLowerCase();
+        if (/^npub1[0-9a-z]+$/.test(v) && window.NostrTools?.nip19) {
+          try {
+            const d = window.NostrTools.nip19.decode(v);
+            if (d.type === 'npub' && typeof d.data === 'string') return d.data;
+          } catch {}
+        }
+        return null;
+      };
+      const maintainers = state.otherMaintainers.map(decodeMaintainer).filter(Boolean);
+      const customTags = state.customTags
+        .filter(t => Array.isArray(t) && typeof t[0] === 'string' && t[0].trim())
+        .map(t => [t[0].trim(), ...t.slice(1).filter(v => typeof v === 'string' && v.length > 0)]);
+
+      const payload = {
+        name:        state.name.trim(),
+        description: state.description,
+        web:         state.web.map(s => s.trim()).filter(Boolean),
+        clone:       state.cloneUrls.map(s => s.trim()).filter(Boolean),
+        relays:      allRelays,
+        hashtags:    state.topics.map(s => s.trim().replace(/^#/, '')).filter(Boolean),
+        maintainers,
+        euc:         state.euc || null,
+        customTags,
+      };
+      try {
+        const r = await api(`/api/projects/${p.id}/announce`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(payload),
+        });
+        if (r?.ok && r?.accepted > 0) {
+          toast('Repository updated', `${r.accepted}/${r.targets} relays accepted the new announcement`, 'ok');
+          modal.close();
+          if (typeof onSaved === 'function') onSaved();
+        } else {
+          // Partial failure: at least we signed. Surface relay reasons.
+          const reasons = (r?.publish || []).filter(x => !x.ok).map(x => `${x.relay}: ${x.reason || 'no OK'}`).slice(0, 3).join('\n');
+          toast('No relays accepted', reasons || r?.error || 'unknown error', 'err');
+          save.disabled = false;
+          save.textContent = 'Save changes';
+        }
+      } catch (e) {
+        toast('Save failed', String(e?.message || e), 'err');
+        save.disabled = false;
+        save.textContent = 'Save changes';
+      }
+    });
+  }
+
+  // Derive the GRASP-host subset for the edit form. Same heuristic as
+  // analyseAnnouncements but operating per-announcement: a host is GRASP
+  // if any verified maintainer's 30617 lists it as BOTH a relay and a
+  // clone URL host. Returns the raw wss:// URLs from the relays tag so
+  // editing preserves the exact value (port, path) the user originally
+  // had.
+  function deriveGraspHostsForEdit(ms) {
+    const events = Array.isArray(ms?.events) ? ms.events : [];
+    const safeHost = (url) => { try { return new URL(url).host; } catch { return null; } };
+    const graspHosts = new Set();
+    for (const ev of events) {
+      const relays = (ev.tags || []).filter(t => t[0] === 'relays').flatMap(t => t.slice(1));
+      const clones = (ev.tags || []).filter(t => t[0] === 'clone').flatMap(t => t.slice(1));
+      const relayHosts = new Set(relays.map(safeHost).filter(Boolean));
+      const cloneHosts = new Set(clones.map(safeHost).filter(Boolean));
+      for (const h of relayHosts) if (cloneHosts.has(h)) graspHosts.add(h);
+    }
+    // From the anchor's own announcement (events[0]), surface the
+    // wss:// URLs whose host is in the GRASP set.
+    const anchorRelays = events[0]
+      ? (events[0].tags || []).filter(t => t[0] === 'relays').flatMap(t => t.slice(1))
+      : [];
+    return anchorRelays.filter(u => {
+      const h = safeHost(u); return h && graspHosts.has(h);
+    });
+  }
+
+  function deriveOtherRelaysForEdit(ms) {
+    const events = Array.isArray(ms?.events) ? ms.events : [];
+    const safeHost = (url) => { try { return new URL(url).host; } catch { return null; } };
+    const graspHosts = new Set();
+    for (const ev of events) {
+      const relays = (ev.tags || []).filter(t => t[0] === 'relays').flatMap(t => t.slice(1));
+      const clones = (ev.tags || []).filter(t => t[0] === 'clone').flatMap(t => t.slice(1));
+      const relayHosts = new Set(relays.map(safeHost).filter(Boolean));
+      const cloneHosts = new Set(clones.map(safeHost).filter(Boolean));
+      for (const h of relayHosts) if (cloneHosts.has(h)) graspHosts.add(h);
+    }
+    const anchorRelays = events[0]
+      ? (events[0].tags || []).filter(t => t[0] === 'relays').flatMap(t => t.slice(1))
+      : [];
+    return anchorRelays.filter(u => {
+      const h = safeHost(u); return h && !graspHosts.has(h);
+    });
+  }
+
+  // The "advanced" custom-tags editor only surfaces tags the form
+  // doesn't already cover. The server-side template builder is the
+  // source of truth for which names are emitted natively — this is a
+  // copy of that set so the user doesn't see duplicates in the form.
+  function extractEditableCustomTags(ms, repo) {
+    const KNOWN = new Set(['d', 'r', 'name', 'description', 'clone', 'web', 'relays', 't', 'maintainers', 'alt', 'blossoms']);
+    const anchor = (ms?.events || []).find(e => e.pubkey === repo.pubkey);
+    if (!anchor || !Array.isArray(anchor.tags)) return [];
+    return anchor.tags
+      .filter(t => Array.isArray(t) && typeof t[0] === 'string' && !KNOWN.has(t[0]))
+      .map(t => t.map(v => typeof v === 'string' ? v : ''));
+  }
+
   // Share links — gitworkshop-style helper. The kind-30617 announcement
   // is identified by an NIP-19 naddr that bundles the coordinate
   // (30617:pubkey:identifier) plus the relay hints from the announcement,
