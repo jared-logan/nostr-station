@@ -83,6 +83,7 @@ import { handleProjects } from './routes/projects.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleDitto } from './routes/ditto.js';
 import { handleNgit } from './routes/ngit.js';
+import { handleRepo } from './routes/repo.js';
 import {
   handleAi,
   streamAnthropic, streamOpenAICompat,
@@ -1692,6 +1693,13 @@ export async function startWebServer(port: number): Promise<void> {
         res.on('close', cleanup);
         return;
       }
+
+      // ── Repo views (extracted to routes/repo.ts) ──────────────────────
+      // Per-project read-only views of the local git checkout + the
+      // project's NIP-34 30617 announcement. Drives the Code tab.
+      // Matched BEFORE handleProjects because the URL shape overlaps
+      // (`/api/projects/:id/repo/...`) and we want repo.ts to win.
+      if (await handleRepo(req, res, url, method)) return;
 
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
       if (await handleProjects(req, res, url, method)) return;
