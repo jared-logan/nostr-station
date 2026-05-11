@@ -5652,6 +5652,126 @@ input.csm-target {
 }
 input.csm-target:focus { border-color: var(--accent); outline: none; }
 
+/* ── Phase 7: UX polish ───────────────────────────────────────────────── */
+
+/* Tab count badges (Issues 3 · Pull requests 5). Inline span so the
+ * existing .tab button layout doesn't break — extra padding inside
+ * the pill keeps it from hugging the label. */
+.tab .tab-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 16px;
+  min-width: 16px;
+  text-align: center;
+  border-radius: 999px;
+  background: var(--accent-dim, var(--bg-elev, var(--bg-card)));
+  color: var(--text-bright);
+  font-weight: 500;
+  vertical-align: 1px;
+}
+.tab.active .tab-count {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+/* Status filter row above Issues / PR lists. Three-pill toggle that
+ * defaults to Open. Inline-flex so it sits inside the tab body's
+ * margin without consuming the full width. */
+.list-filter {
+  display: inline-flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+}
+.filter-pill {
+  padding: 4px 14px;
+  font-size: 12px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  border-radius: 999px;
+  cursor: pointer;
+  font: inherit;
+}
+.filter-pill:hover { color: var(--text); }
+.filter-pill.active {
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 500;
+}
+
+/* Empty-state block — icon + title + body + optional CTA. */
+.list-empty-state {
+  padding: 32px 24px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+.list-empty-icon {
+  font-size: 36px;
+  margin-bottom: 8px;
+  opacity: 0.85;
+}
+.list-empty-title {
+  color: var(--text-bright);
+  font-size: 15px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.list-empty-body {
+  font-size: 12px;
+  max-width: 420px;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+.list-empty-body code {
+  background: var(--bg-elev, var(--bg-hover));
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.list-empty-cta { margin-top: 14px; }
+
+/* Settings tab sections (folded-in Git + ngit content). */
+.settings-section {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+}
+.settings-section > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 14px;
+  font-weight: 500;
+  color: var(--text-bright);
+  user-select: none;
+}
+.settings-section > summary::before {
+  content: '▸ ';
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+}
+.settings-section[open] > summary::before {
+  content: '▾ ';
+}
+.settings-section > summary:hover { background: var(--bg-hover); }
+.settings-section-body {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+}
+/* Stop the existing .tab-section margins from compounding inside
+ * Settings — the wrapper already supplies the framing. */
+.settings-section-body > .tab-section:first-child { margin-top: 0; }
+
 .discover-card-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .browse-scratch {
   background: var(--bg-card);

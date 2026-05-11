@@ -4177,6 +4177,11 @@ const ProjectsPanel = (() => {
     state.tab = 'overview';
     projectStatus = null; projectGitLog = null;
     render();
+    // Phase 7: fire-and-forget counts fetch so tab badges populate
+    // shortly after the tabs first paint. Doesn't block the initial
+    // render — failure just means tabs without counts.
+    const p = projects.find(x => x.id === id);
+    if (p) refreshTabCounts(p);
   }
 
   function backToList() {
@@ -4220,18 +4225,38 @@ const ProjectsPanel = (() => {
     // existing `ngit` tab already swaps to an Initialize form in that
     // state. Surfacing a separate Proposals tab keeps the list-y view
     // distinct from the operations tab (push / settings).
+    // Tab structure follows the github / gitworkshop pattern: a small,
+    // discoverable set focused on what the user reads (Code, PRs,
+    // Issues), with operational chrome (git remotes, ngit signer +
+    // sync controls) folded into Settings as sections. Reduces the
+    // top-level tab strip from 8 → 6.
+    //
     // The Code tab is gated on having a local git checkout — its
     // backing endpoints (refs/tree/blob/log/readme) all shell out to
     // `git` against project.path. Local-only projects without a repo
-    // (e.g. nsite-only) keep their existing tab set.
+    // (e.g. nsite-only) skip Code but still see Settings.
     const hasGitCheckout = !!p.path && (p.capabilities.git || p.capabilities.ngit);
+    const counts = (state.tabCounts && state.tabCounts[p.id]) || {};
+    const issueCount = counts.issues;
+    const prCount    = counts.prs;
+    const fmtCount = (n) => (typeof n === 'number' && n > 0)
+      ? ` <span class="tab-count">${n}</span>` : '';
     const tabs = [
       { key: 'overview', label: 'Overview' },
-      hasGitCheckout       && { key: 'code',  label: 'Code' },
-      p.capabilities.git   && { key: 'git',   label: 'Git' },
-      p.capabilities.ngit  && { key: 'ngit',  label: 'ngit' },
-      (p.capabilities.ngit && p.remotes.ngit) && { key: 'proposals', label: 'Proposals' },
-      (p.capabilities.ngit && p.remotes.ngit) && { key: 'issues',    label: 'Issues' },
+      hasGitCheckout && { key: 'code', label: 'Code' },
+      // Renamed from "Proposals" — every other Nostr-git client and
+      // github itself call them "Pull requests" / "PRs". Matching
+      // saves new users a beat of mental translation.
+      (p.capabilities.ngit && p.remotes.ngit) && {
+        key: 'proposals',
+        label: `Pull requests${fmtCount(prCount)}`,
+        labelHtml: true,
+      },
+      (p.capabilities.ngit && p.remotes.ngit) && {
+        key: 'issues',
+        label: `Issues${fmtCount(issueCount)}`,
+        labelHtml: true,
+      },
       p.capabilities.nsite && { key: 'nsite', label: 'nsite' },
       { key: 'settings', label: 'Settings' },
     ].filter(Boolean);
@@ -4248,7 +4273,7 @@ const ProjectsPanel = (() => {
     const tabsEl = document.createElement('div');
     tabsEl.className = 'tabs project-tabs';
     tabsEl.innerHTML = tabs.map(t =>
-      `<button class="tab ${t.key === state.tab ? 'active' : ''}" data-tab="${t.key}">${escapeHtml(t.label)}</button>`
+      `<button class="tab ${t.key === state.tab ? 'active' : ''}" data-tab="${t.key}">${t.labelHtml ? t.label : escapeHtml(t.label)}</button>`
     ).join('');
     body.appendChild(tabsEl);
     tabsEl.addEventListener('click', (e) => {
@@ -4296,12 +4321,60 @@ const ProjectsPanel = (() => {
     container.innerHTML = '';
     if (state.tab === 'overview') renderOverview(container, p);
     else if (state.tab === 'code')      renderCodeTab(container, p);
-    else if (state.tab === 'git')       renderGitTab(container, p);
-    else if (state.tab === 'ngit')      renderNgitTab(container, p);
     else if (state.tab === 'proposals') renderProposalsTab(container, p);
     else if (state.tab === 'issues')    renderIssuesTab(container, p);
     else if (state.tab === 'nsite')     renderNsiteTab(container, p);
     else if (state.tab === 'settings')  renderSettingsTab(container, p);
+  }
+
+  // Phase 7: shared empty-state renderer for Issues / PRs lists.
+  // Big icon + title + explanation + optional CTA — matches the
+  // pattern github/gitworkshop both use to onboard first-time users.
+  function renderListEmptyState(opts) {
+    const cta = opts.cta
+      ? `<button class="primary ${escapeHtml(opts.cta.className || '')}">${escapeHtml(opts.cta.label)}</button>`
+      : '';
+    return `
+      <div class="list-empty-state">
+        <div class="list-empty-icon">${escapeHtml(opts.icon || '·')}</div>
+        <div class="list-empty-title">${escapeHtml(opts.title || '')}</div>
+        <div class="list-empty-body muted">${opts.body || ''}</div>
+        ${cta ? `<div class="list-empty-cta">${cta}</div>` : ''}
+      </div>
+    `;
+  }
+
+  // Phase 7: bulk-fetch the issue + PR counts so the tab strip can
+  // show "Pull requests (N)" / "Issues (N)" at-a-glance. Both
+  // endpoints already exist and are cached; one round trip each.
+  // Failures degrade silently — tabs render without the count.
+  async function refreshTabCounts(p) {
+    if (!p.capabilities.ngit || !p.remotes.ngit) return;
+    state.tabCounts = state.tabCounts || {};
+    state.tabCounts[p.id] = state.tabCounts[p.id] || {};
+    try {
+      const [iss, prs] = await Promise.all([
+        api(`/api/projects/${p.id}/issues`).catch(() => null),
+        api(`/api/projects/${p.id}/patches`).catch(() => null),
+      ]);
+      const issues = Array.isArray(iss?.issues) ? iss.issues : [];
+      const series = Array.isArray(prs?.series) ? prs.series : [];
+      // Phase 4 already computes status; pre-annotate so the tab
+      // count reflects ONLY open items (closed / merged / resolved
+      // don't need user attention).
+      await Promise.all([
+        annotateIssuesWithStatus(p.id, issues),
+        annotateSeriesWithStatus(p.id, series),
+      ]);
+      state.tabCounts[p.id].issues = issues.filter(i => (i.status || 'open') === 'open').length;
+      state.tabCounts[p.id].prs    = series.filter(s => (s.effectiveStatus || 'open') === 'open').length;
+      // Refresh ONLY the tab strip (don't re-render the active tab
+      // body — would re-fire its data fetches needlessly).
+      const tabsEl = document.querySelector('.project-tabs');
+      if (tabsEl && state.view === 'detail' && state.projectId === p.id) {
+        renderDetail();
+      }
+    } catch { /* silent */ }
   }
 
   async function renderOverview(container, p) {
@@ -5472,31 +5545,41 @@ const ProjectsPanel = (() => {
 
   async function renderProposalsTab(container, p) {
     // Phase 2b: PR-shaped series cards driven by /api/projects/:id/patches
-    // (Phase 2a backend). Replaces the flat 1617-row table with a list
-    // grouped by series, version pills (v1 / v2 / …), patch counts, and
-    // a click target that opens the per-series detail view (Phase 2c).
+    // (Phase 2a backend). Phase 7 adds a status filter row at the top
+    // so closed / merged PRs don't pollute the work-to-do view.
     //
     // The legacy /api/projects/:id/ngit/proposals endpoint still exists
     // for back-compat but isn't called from the UI anymore.
+    if (!state.prsFilter) state.prsFilter = 'open';
     container.innerHTML = `
       <div class="tab-section">
         <div class="proposals-head">
-          <h3 style="margin:0">Open proposals</h3>
+          <h3 style="margin:0">Pull requests</h3>
           <div class="proposals-head-actions">
             <button class="proposals-view-patch">View latest patch</button>
             <button class="proposals-refresh">Refresh</button>
           </div>
         </div>
-        <div class="muted" style="margin-bottom:12px">
-          NIP-34 patch series for this repo, threaded by root + revision.
-          Click a series to inspect commits and the unified diff.
-          Downloading runs <code>ngit pr checkout &lt;id&gt;</code> locally.
+        <div class="list-filter" role="tablist" aria-label="PR status filter">
+          <button class="filter-pill ${state.prsFilter === 'open'   ? 'active' : ''}" data-filter="open"   role="tab">Open</button>
+          <button class="filter-pill ${state.prsFilter === 'all'    ? 'active' : ''}" data-filter="all"    role="tab">All</button>
+          <button class="filter-pill ${state.prsFilter === 'closed' ? 'active' : ''}" data-filter="closed" role="tab">Closed</button>
+        </div>
+        <div class="muted" style="margin-bottom:12px;font-size:11px">
+          NIP-34 patch series threaded by root + revision.
+          Click a card to inspect commits + the unified diff.
         </div>
         <div class="proposals-series-list" id="proposals-series-list">
           <div class="muted">loading…</div>
         </div>
       </div>
     `;
+    container.querySelectorAll('.filter-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.prsFilter = btn.dataset.filter;
+        renderTab(document.querySelector('.project-tab-content'), p);
+      });
+    });
 
     const listEl = container.querySelector('#proposals-series-list');
 
@@ -5516,11 +5599,32 @@ const ProjectsPanel = (() => {
     };
 
     const renderSeries = (series) => {
-      if (!Array.isArray(series) || series.length === 0) {
-        listEl.innerHTML = `<div class="muted">No proposals found on configured relays.</div>`;
+      if (!Array.isArray(series)) series = [];
+      // Phase 7 status filter — applied client-side so the toggle is
+      // instant. Open = open or draft (anything still actionable);
+      // Closed = closed, merged, or resolved.
+      const visible = series.filter(s => {
+        const st = s.effectiveStatus || 'open';
+        if (state.prsFilter === 'open')   return st === 'open' || st === 'draft';
+        if (state.prsFilter === 'closed') return st === 'closed' || st === 'merged' || st === 'resolved';
+        return true;     // 'all'
+      });
+      if (visible.length === 0) {
+        listEl.innerHTML = renderListEmptyState({
+          icon: state.prsFilter === 'open' ? '🌱' : '✓',
+          title: state.prsFilter === 'open'
+            ? 'No open pull requests'
+            : state.prsFilter === 'closed'
+              ? 'No closed pull requests yet'
+              : 'No pull requests yet',
+          body: state.prsFilter === 'open' && series.length > 0
+            ? `${series.length} pull request${series.length === 1 ? '' : 's'} found — all are closed, merged, or resolved.`
+            : 'Pull requests are NIP-34 patch series proposing changes to this repo. Contributors create them with <code>ngit send</code> from their local checkout.',
+          cta: state.prsFilter !== 'open' ? null : null,
+        });
         return;
       }
-      listEl.innerHTML = series.map(s => {
+      listEl.innerHTML = visible.map(s => {
         // Latest revision drives the "patches in this series" badge —
         // older revisions are shown as v1 / v2 pills but the action
         // button defaults to the freshest version.
@@ -5950,8 +6054,10 @@ const ProjectsPanel = (() => {
   // Kind 1621 issues for the repo, with NIP-22 comment counts and a
   // "New issue" composer that shells through ngit issue_create.
   // Click a row → openIssueDetail (Phase 3c) shows the full threaded
-  // conversation + a reply composer.
+  // conversation + a reply composer. Phase 7 adds an Open/All/Closed
+  // filter row at the top.
   async function renderIssuesTab(container, p) {
+    if (!state.issuesFilter) state.issuesFilter = 'open';
     container.innerHTML = `
       <div class="tab-section">
         <div class="proposals-head">
@@ -5961,25 +6067,52 @@ const ProjectsPanel = (() => {
             <button class="issues-refresh">Refresh</button>
           </div>
         </div>
-        <div class="muted" style="margin-bottom:12px">
-          NIP-34 kind-1621 issues for this repo, with NIP-22 comment
-          threads. Posting an issue runs <code>ngit issue_create</code>
-          locally — your Amber signer pops up to sign it.
+        <div class="list-filter" role="tablist" aria-label="Issue status filter">
+          <button class="filter-pill ${state.issuesFilter === 'open'   ? 'active' : ''}" data-filter="open"   role="tab">Open</button>
+          <button class="filter-pill ${state.issuesFilter === 'all'    ? 'active' : ''}" data-filter="all"    role="tab">All</button>
+          <button class="filter-pill ${state.issuesFilter === 'closed' ? 'active' : ''}" data-filter="closed" role="tab">Closed</button>
         </div>
         <div class="issues-list" id="issues-list">
           <div class="muted">loading…</div>
         </div>
       </div>
     `;
+    container.querySelectorAll('.filter-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.issuesFilter = btn.dataset.filter;
+        renderTab(document.querySelector('.project-tab-content'), p);
+      });
+    });
 
     const listEl = container.querySelector('#issues-list');
 
     const renderList = (issues) => {
-      if (!Array.isArray(issues) || issues.length === 0) {
-        listEl.innerHTML = `<div class="muted">No issues found on configured relays.</div>`;
+      if (!Array.isArray(issues)) issues = [];
+      // Phase 7 status filter — Open = anything not yet closed/resolved.
+      const visible = issues.filter(i => {
+        const st = i.status || 'open';
+        if (state.issuesFilter === 'open')   return st === 'open' || st === 'draft';
+        if (state.issuesFilter === 'closed') return st === 'closed' || st === 'resolved';
+        return true;
+      });
+      if (visible.length === 0) {
+        listEl.innerHTML = renderListEmptyState({
+          icon: state.issuesFilter === 'open' ? '📋' : '✓',
+          title: state.issuesFilter === 'open'
+            ? 'No open issues'
+            : state.issuesFilter === 'closed'
+              ? 'No closed issues yet'
+              : 'No issues yet',
+          body: state.issuesFilter === 'open' && issues.length > 0
+            ? `${issues.length} issue${issues.length === 1 ? '' : 's'} found — all are closed or resolved.`
+            : 'Issues are NIP-34 kind-1621 events for tracking bugs, ideas, and discussions. Anyone reading this repo over Nostr can open one.',
+          cta: state.issuesFilter !== 'open' ? null : { label: 'Open the first issue', className: 'issues-new-cta' },
+        });
+        const ctaBtn = listEl.querySelector('.issues-new-cta');
+        if (ctaBtn) ctaBtn.addEventListener('click', () => openNewIssueComposer(p, () => fetchAndRender(true)));
         return;
       }
-      listEl.innerHTML = issues.map(iss => {
+      listEl.innerHTML = visible.map(iss => {
         const author = shortPubkey(iss.author?.pubkey || iss.pubkey || '');
         const labelHtml = (iss.labels || []).slice(0, 6)
           .map(l => `<span class="issue-label">${escapeHtml(l)}</span>`)
@@ -6424,7 +6557,55 @@ const ProjectsPanel = (() => {
     container.querySelector('.deploy-btn').addEventListener('click', () => runProjectDeploy(p));
   }
 
+  // Phase 7: Git and ngit operational controls are now Settings
+  // sections rather than top-level tabs. The publish wizard (Phase 1d)
+  // covers fresh-project onboarding so the standalone ngit-init form
+  // is no longer the user's first encounter — it sits here for
+  // re-initialise / advanced cases.
   function renderSettingsTab(container, p) {
+    // Wrap renderGitTab / renderNgitTab outputs in <details> sections
+    // so the Settings tab stays scannable. Each section's body uses
+    // the existing render function — no refactor needed.
+    const sections = [];
+    if (p.capabilities.git) {
+      sections.push({
+        label:  'Git remote',
+        render: (el) => renderGitTab(el, p),
+        open:   false,
+      });
+    }
+    if (p.capabilities.ngit) {
+      sections.push({
+        label:  p.remotes.ngit
+                  ? 'ngit signer + sync'
+                  : 'Initialize ngit for this project',
+        render: (el) => renderNgitTab(el, p),
+        // Auto-open the ngit section when the project hasn't been
+        // initialised yet — that's the case where the user needs it.
+        open:   !p.remotes.ngit,
+      });
+    }
+    // Render the existing Settings content first (project name, path,
+    // capabilities, etc. — the canonical "metadata" section).
+    renderSettingsTabBody(container, p);
+    // Append operational sections as collapsible details so the
+    // user can find them but they don't dominate the tab.
+    for (const s of sections) {
+      const det = document.createElement('details');
+      det.className = 'settings-section';
+      if (s.open) det.setAttribute('open', '');
+      const sum = document.createElement('summary');
+      sum.textContent = s.label;
+      det.appendChild(sum);
+      const body = document.createElement('div');
+      body.className = 'settings-section-body';
+      det.appendChild(body);
+      container.appendChild(det);
+      s.render(body);
+    }
+  }
+
+  function renderSettingsTabBody(container, p) {
     container.innerHTML = `
       <div class="tab-section">
         <h3>Details</h3>
