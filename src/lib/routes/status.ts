@@ -298,21 +298,97 @@ async function fetchStatusEvents(
 
 /** Fetch the 30617 announcement so we know who the maintainers are.
  *
- * Phase 5: now consults resolveMaintainerSet so authority is granted
- * ONLY to verified maintainers (those who have published their own
- * 30617 under the same coordinate). Candidate-only pubkeys — listed
- * in the trust anchor's maintainers tag but with no own announcement
- * — are deliberately excluded. This closes the "scam scenario" where
- * a malicious anchor could grant authority to reputable strangers.
+ * Authority model — PERMISSIVE (gitworkshop parity):
+ *   We honor any pubkey listed in the trust anchor's `maintainers` tag,
+ *   even if that pubkey has not re-announced their own 30617. The Phase-5
+ *   "verified-only" model rejected candidate-only maintainers as an
+ *   anti-scam measure, but gitworkshop.dev (and other ngit consumers)
+ *   accept them — which means our dashboard would silently disagree
+ *   with gitworkshop's status display whenever a co-maintainer who never
+ *   re-announced closed/merged a PR. Parity > anti-scam guarantee was
+ *   the explicit call (see commit log). resolveMaintainerSet still
+ *   surfaces `candidatesOnly` for UI warning chips.
  */
 async function fetchMaintainerSet(project: Project): Promise<Set<string>> {
   const coords = decodeNgitRemote(project);
   if (!coords) return new Set();
   const ms = await resolveMaintainerSet(coords.pubkey, coords.identifier, coords.relayHints);
-  // Belt + braces: the trust anchor is always verified by construction,
-  // but guard the empty-result path so callers can still self-close.
-  if (ms.verified.size === 0) return new Set([coords.pubkey]);
-  return ms.verified;
+  // Permissive union: trust anchor + verified + candidate-only.
+  // The trust anchor is always authoritative by definition; verified
+  // maintainers have re-announced; candidates are claimed-only and were
+  // previously excluded.
+  const all = new Set<string>([coords.pubkey, ...ms.verified, ...ms.candidatesOnly]);
+  return all;
+}
+
+// ── Root-author resolution ──────────────────────────────────────────────
+//
+// computeEffectiveStatus needs the root event's authoring pubkey so a
+// PR submitter can self-close their own PR (NIP-34 explicitly authorises
+// this). Previously we passed '' as rootAuthor — which silently denied
+// self-closes to anyone not also in the maintainer set. Fixed by
+// querying the relay for the actual root events by id.
+
+interface CachedRootAuthors {
+  authors:   Record<string, string>;  // rootId → pubkey
+  fetchedAt: number;
+}
+
+const ROOT_AUTHOR_CACHE_TTL_MS = 24 * 60 * 60 * 1000;  // 24h — root events are immutable
+
+/**
+ * Resolve rootId → pubkey for every requested root. Cached per project
+ * across calls because the answer is immutable: a root event's author
+ * never changes. Missing entries map to undefined; computeEffectiveStatus
+ * then falls back to the maintainer-set check alone, which is the
+ * conservative behaviour.
+ *
+ * Patches are kind 1617, issues are kind 1621. We query both kinds in
+ * one shot so a mixed rootIds batch costs one round-trip.
+ */
+async function fetchRootAuthors(
+  project: Project,
+  rootIds: string[],
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (rootIds.length === 0 || !project.path) return result;
+  const coords = decodeNgitRemote(project);
+  if (!coords) return result;
+
+  const cacheKey = { projectPath: project.path, key: 'root-authors' };
+  const cached = getCached<CachedRootAuthors>({ ...cacheKey, ttlMs: ROOT_AUTHOR_CACHE_TTL_MS });
+  const known = cached?.authors ?? {};
+  const need: string[] = [];
+  for (const rid of rootIds) {
+    if (known[rid]) result.set(rid, known[rid]);
+    else need.push(rid);
+  }
+  if (need.length === 0) return result;
+
+  const grasp = getGraspServers();
+  const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
+  const relays = [...coords.relayHints, ...grasp, ...projRelays]
+    .filter(isValidRelayUrl)
+    .filter((r, i, a) => a.indexOf(r) === i)
+    .slice(0, 8);
+  if (relays.length === 0) return result;
+
+  const r = await queryRelays({
+    filter:    { kinds: [1617, 1621], ids: need },
+    relays,
+    timeoutMs: RELAY_QUERY_TIMEOUT_MS,
+    stream:    false,
+    acceptUntil: (evs) => evs.length >= need.length,
+  });
+  const next = { ...known };
+  for (const ev of r.events) {
+    if (typeof ev.id === 'string' && typeof ev.pubkey === 'string') {
+      result.set(ev.id, ev.pubkey);
+      next[ev.id] = ev.pubkey;
+    }
+  }
+  setCached<CachedRootAuthors>(cacheKey, { authors: next, fetchedAt: Date.now() });
+  return result;
 }
 
 /**
@@ -376,25 +452,20 @@ export async function handleStatus(
     for (const r of rootIds) {
       if (!/^[a-f0-9]{16,64}$/.test(r)) return json(res, 400, { error: 'invalid rootId' });
     }
-    // Caller may pass rootAuthor hints to avoid the second relay
-    // query for the root events themselves. When absent we use the
-    // announcing-pubkey-as-fallback rule from fetchMaintainerSet.
-    const [statusR, maintainers] = await Promise.all([
+    // Fetch in parallel:
+    //   - 163x status events for the repo (+ per-rootId fallback)
+    //   - maintainer set (permissive: anchor + verified + candidates)
+    //   - rootId → pubkey map so submitter self-closes are authorised
+    const [statusR, maintainers, rootAuthors] = await Promise.all([
       fetchStatusEvents(project, false, rootIds),
       fetchMaintainerSet(project),
+      fetchRootAuthors(project, rootIds),
     ]);
-    // For Phase 4 we treat the rootAuthor as unknown unless the
-    // status event itself authored by them — Phase 5 fetches the
-    // actual root event for an explicit check. The compute helper
-    // gracefully handles unknown rootAuthor (everyone in
-    // maintainers + the status author themselves can publish).
     const results = rootIds.map((rid) =>
-      // Without rootAuthor we still safely admit maintainers +
-      // patch/issue self-closes. The pubkey check inside
-      // computeEffectiveStatus uses an empty-string rootAuthor
-      // when none supplied — no one matches the empty string
-      // accidentally because all real pubkeys are 64 hex chars.
-      computeEffectiveStatus(rid, '', maintainers, statusR.events)
+      // Empty string when we couldn't resolve the root — preserves
+      // pre-existing fall-through behaviour (maintainer-set still
+      // authorises). 64-hex pubkeys can never equal '' so this is safe.
+      computeEffectiveStatus(rid, rootAuthors.get(rid) ?? '', maintainers, statusR.events)
     );
     return json(res, 200, { results, cached: statusR.cached });
   }

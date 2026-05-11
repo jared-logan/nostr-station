@@ -64,6 +64,20 @@ test('buildNakArgs: limit is appended as -l <n> and floored', () => {
   );
 });
 
+test('buildNakArgs: ids expand into one -i per value, after authors', () => {
+  // nak grammar: `-i <id>` repeats per id. Order asserted: kinds →
+  // authors → ids → tags → relays. Used by the status route's
+  // rootAuthor resolution path (one query, many root ids).
+  assert.deepEqual(
+    buildNakArgs(
+      { kinds: [1617, 1621], ids: ['a'.repeat(64), 'b'.repeat(64)] },
+      ['wss://r'],
+      false,
+    ),
+    ['req', '-k', '1617', '-k', '1621', '-i', 'a'.repeat(64), '-i', 'b'.repeat(64), 'wss://r'],
+  );
+});
+
 test('buildNakArgs: stream=false omits --stream', () => {
   // One-shot query mirroring the naddr-resolution flow in
   // routes/ngit.ts:471 (single 30617 lookup with -l 1).

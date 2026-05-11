@@ -44,6 +44,13 @@ export interface RelayQueryFilter {
   kinds?:   number[];
   authors?: string[];                              // hex pubkeys
   /**
+   * Exact event ids (NIP-01 `ids` filter). nak takes them via repeated
+   * `-i <id>`. Use this when you already know the events you want —
+   * canonical example: resolving root patches by id to learn their
+   * authoring pubkey for an authorisation check.
+   */
+  ids?:     string[];
+  /**
    * NIP-01 tag filters. nak accepts repeated `-t key=value` flags, so
    * either `{a: '30617:pk:id'}` or `{t: ['root', 'root-revision']}`
    * works — the multi-value form expands into one flag per value.
@@ -113,6 +120,7 @@ export function buildNakArgs(
   const args: string[] = ['req'];
   for (const k of filter.kinds ?? []) args.push('-k', String(k));
   for (const a of filter.authors ?? []) args.push('-a', a);
+  for (const i of filter.ids ?? []) args.push('-i', i);
   const tagNames = Object.keys(filter.tags ?? {}).sort();
   for (const name of tagNames) {
     const raw = (filter.tags ?? {})[name];

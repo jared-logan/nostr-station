@@ -215,6 +215,16 @@ test('buildStatusRelayFilters: empty rootIds → a-tag only (no useless e filter
   assert.equal(filters[0].tags?.e, undefined);
 });
 
+test('computeEffectiveStatus: empty-string rootAuthor never accidentally matches a stranger', () => {
+  // Defensive: when fetchRootAuthors fails to resolve a rootId we pass
+  // '' as rootAuthor. That must NOT let a stranger publish status —
+  // real pubkeys are 64-hex and never equal ''. Locks the fallback.
+  const stranger = statusEv({ kind: 1632, created_at: 9999, pubkey: STRANGER });
+  const r = computeEffectiveStatus(ROOT_ID, '', new Set(), [stranger]);
+  assert.equal(r.status, 'open', 'stranger with empty-rootAuthor must not flip status');
+  assert.equal(r.statusEventId, null);
+});
+
 test('computeEffectiveStatus: 1631 merge event without a-tag still resolves merged', () => {
   // Simulates the exact wire shape that broke the dashboard: a kind-
   // 1631 status event published with the root `e` reference and a
