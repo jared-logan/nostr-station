@@ -3,6 +3,7 @@
 // utilities (toast, modal, copy-button) at the bottom.
 
 import { previewRetryDecision } from './preview-retry.js';
+import { renderMarkdown, renderCodeBlock } from './markdown.js';
 
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -4219,8 +4220,14 @@ const ProjectsPanel = (() => {
     // existing `ngit` tab already swaps to an Initialize form in that
     // state. Surfacing a separate Proposals tab keeps the list-y view
     // distinct from the operations tab (push / settings).
+    // The Code tab is gated on having a local git checkout — its
+    // backing endpoints (refs/tree/blob/log/readme) all shell out to
+    // `git` against project.path. Local-only projects without a repo
+    // (e.g. nsite-only) keep their existing tab set.
+    const hasGitCheckout = !!p.path && (p.capabilities.git || p.capabilities.ngit);
     const tabs = [
       { key: 'overview', label: 'Overview' },
+      hasGitCheckout       && { key: 'code',  label: 'Code' },
       p.capabilities.git   && { key: 'git',   label: 'Git' },
       p.capabilities.ngit  && { key: 'ngit',  label: 'ngit' },
       (p.capabilities.ngit && p.remotes.ngit) && { key: 'proposals', label: 'Proposals' },
@@ -4287,6 +4294,7 @@ const ProjectsPanel = (() => {
   function renderTab(container, p) {
     container.innerHTML = '';
     if (state.tab === 'overview') renderOverview(container, p);
+    else if (state.tab === 'code')      renderCodeTab(container, p);
     else if (state.tab === 'git')       renderGitTab(container, p);
     else if (state.tab === 'ngit')      renderNgitTab(container, p);
     else if (state.tab === 'proposals') renderProposalsTab(container, p);
@@ -4419,6 +4427,399 @@ const ProjectsPanel = (() => {
     } catch (e) {
       container.innerHTML = `<div class="empty-state err">failed to load git status: ${escapeHtml(e.message)}</div>`;
     }
+  }
+
+  // ── Code tab ─────────────────────────────────────────────────────────
+  //
+  // gitworkshop.dev-style repo home for projects with a local git
+  // checkout. Single-column layout (mobile-first):
+  //   1. Header — repo name / description / maintainers / clone URL
+  //      (when published to ngit), working-tree status badge.
+  //   2. Ref selector — branch/tag dropdown.
+  //   3. File browser — breadcrumb + flat listing of the current
+  //      tree level; click a folder to descend, click a file to open
+  //      the preview pane.
+  //   4. Preview — README (rendered markdown) on tab open; a selected
+  //      file's content otherwise.
+  //   5. Recent commits — last 8.
+  //
+  // All git data comes from local git via routes/repo.ts (Phase 1a) —
+  // no relay round-trip needed for files/commits. The 30617 metadata
+  // (Phase 1a /repo) IS a relay query but is cached for an hour, so
+  // tab opens are cheap after the first.
+  //
+  // Phase 1c handles published projects (state B). Local-only / un-
+  // published (state A) renders a stub pointing the user at Settings;
+  // Phase 1d will replace that with the publish wizard.
+  async function renderCodeTab(container, p) {
+    container.innerHTML = `<div class="code-loading muted">Loading repo…</div>`;
+
+    // Per-tab navigation state — preserved across tab switches so the
+    // user returns to the same ref/path/blob they were viewing. Reset
+    // when the project changes.
+    if (!state.codeView || state.codeView.projectId !== p.id) {
+      state.codeView = { projectId: p.id, ref: 'HEAD', path: '', selectedBlob: null };
+    }
+    const view = state.codeView;
+
+    // Fetch in parallel — the four endpoints are independent and the
+    // round-trip dominates rendering latency.
+    const [pubState, refs, repoMeta, gitState] = await Promise.all([
+      api(`/api/projects/${p.id}/publish-state`).catch(() => null),
+      api(`/api/projects/${p.id}/repo/refs`).catch(() => null),
+      api(`/api/projects/${p.id}/repo`).catch(() => null),
+      api(`/api/projects/${p.id}/git-state`).catch(() => null),
+    ]);
+
+    // Resolve a concrete ref. Prefer HEAD's symbolic target so
+    // checkout/log calls work against a real branch name; fall back
+    // to literal 'HEAD' in detached state.
+    if (view.ref === 'HEAD' && refs?.head && !refs.head.startsWith('(')) {
+      view.ref = refs.head;
+    }
+
+    container.innerHTML = '';
+
+    // 1 — Header
+    container.appendChild(renderCodeHeader(p, pubState, repoMeta, gitState));
+
+    // 2 — Ref selector + breadcrumb
+    container.appendChild(renderCodeNav(p, refs, view));
+
+    // 3 — File browser
+    const filesEl = document.createElement('div');
+    filesEl.className = 'code-files';
+    container.appendChild(filesEl);
+    renderCodeFiles(filesEl, p, view);
+
+    // 4 — Preview (README on first open, blob on selection)
+    const previewEl = document.createElement('div');
+    previewEl.className = 'code-preview';
+    container.appendChild(previewEl);
+    renderCodePreview(previewEl, p, view);
+
+    // 5 — Recent commits
+    const commitsEl = document.createElement('div');
+    commitsEl.className = 'code-commits';
+    container.appendChild(commitsEl);
+    renderCodeCommits(commitsEl, p, view);
+  }
+
+  function renderCodeHeader(p, pubState, repoMeta, gitState) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-header';
+
+    const repo = repoMeta?.repo;          // null when local-only
+    const name = repo?.name || pubState?.detectedName || p.name;
+    const desc = repo?.description || pubState?.detectedDescription || '';
+
+    // Working-tree status badge — M·N (modified) ↑N (ahead) ↓N (behind).
+    // Hidden entirely when there's nothing to report (clean + sync'd).
+    let badge = '';
+    if (gitState && gitState.backend !== 'local-only') {
+      const parts = [];
+      if (gitState.dirty)         parts.push(`<span class="code-badge-warn">●</span>`);
+      if (gitState.ahead  > 0)    parts.push(`<span class="code-badge-up">↑${gitState.ahead}</span>`);
+      if (gitState.behind > 0)    parts.push(`<span class="code-badge-down">↓${gitState.behind}</span>`);
+      if (parts.length) {
+        badge = `<span class="code-badge" title="working tree status — open Workbench tab for details">${parts.join(' ')}</span>`;
+      }
+    }
+
+    // Local-only stub: clear, friendly, points to where the publish
+    // wizard will live in Phase 1d.
+    let publishStub = '';
+    if (pubState?.status === 'local-only') {
+      publishStub = `
+        <div class="code-publish-stub muted">
+          Not yet published to ngit. Phase 1d will add a one-click publish here.
+          For now, use the <strong>ngit</strong> tab to initialize the announcement.
+        </div>
+      `;
+    }
+
+    // Maintainer + clone chips only for published projects.
+    let chips = '';
+    if (repo) {
+      const maintCount = (repo.maintainers || []).length;
+      const cloneCount = (repo.clone || []).length;
+      const chipParts = [];
+      if (maintCount > 0) chipParts.push(`<span class="code-chip"><span class="k">maintainers</span><span class="v">${maintCount}</span></span>`);
+      if (cloneCount > 0) chipParts.push(`<span class="code-chip"><span class="k">clone URLs</span><span class="v">${cloneCount}</span></span>`);
+      if (Array.isArray(repo.hashtags)) {
+        for (const t of repo.hashtags.slice(0, 4)) {
+          chipParts.push(`<span class="code-chip code-chip-tag">#${escapeHtml(t)}</span>`);
+        }
+      }
+      chips = `<div class="code-chips">${chipParts.join('')}</div>`;
+    }
+
+    wrap.innerHTML = `
+      <div class="code-title-row">
+        <h2 class="code-title">${escapeHtml(name)}</h2>
+        ${badge}
+      </div>
+      ${desc ? `<div class="code-desc">${escapeHtml(desc)}</div>` : ''}
+      ${chips}
+      ${publishStub}
+    `;
+    return wrap;
+  }
+
+  function renderCodeNav(p, refs, view) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-nav';
+
+    // Branch/tag selector. <select> is intentional — fully keyboard-
+    // accessible and matches the dashboard's existing form style.
+    const branches = refs?.branches || [];
+    const tags     = refs?.tags     || [];
+    const refOptions = [
+      ...branches.map(b => ({ value: b.name, label: b.name, group: 'branches' })),
+      ...tags    .map(t => ({ value: t.name, label: t.name, group: 'tags'     })),
+    ];
+
+    let selectHtml = '';
+    if (refOptions.length > 0) {
+      const byGroup = (group) => refOptions
+        .filter(o => o.group === group)
+        .map(o => `<option value="${escapeHtml(o.value)}" ${o.value === view.ref ? 'selected' : ''}>${escapeHtml(o.label)}</option>`)
+        .join('');
+      selectHtml = `
+        <select class="code-ref-select" aria-label="Branch or tag">
+          <optgroup label="branches">${byGroup('branches')}</optgroup>
+          ${tags.length > 0 ? `<optgroup label="tags">${byGroup('tags')}</optgroup>` : ''}
+        </select>
+      `;
+    } else {
+      // Fallback for the "no refs" edge case (empty repo). The user
+      // sees the literal HEAD string with no surprise dropdown.
+      selectHtml = `<span class="muted code-ref-static">${escapeHtml(view.ref)}</span>`;
+    }
+
+    // Breadcrumb trail. Each segment is clickable and pops the path
+    // back to that level. Root segment ("/" or repo name) goes home.
+    const segs = view.path ? view.path.split('/') : [];
+    const crumbHtml = [
+      `<button class="code-crumb code-crumb-root" data-path="">${escapeHtml(p.name)}</button>`,
+      ...segs.map((seg, i) => {
+        const subPath = segs.slice(0, i + 1).join('/');
+        return `<span class="code-crumb-sep">/</span><button class="code-crumb" data-path="${escapeHtml(subPath)}">${escapeHtml(seg)}</button>`;
+      }),
+    ].join('');
+
+    wrap.innerHTML = `
+      <div class="code-nav-row">
+        ${selectHtml}
+        <div class="code-breadcrumb">${crumbHtml}</div>
+      </div>
+    `;
+
+    const sel = wrap.querySelector('.code-ref-select');
+    if (sel) sel.addEventListener('change', () => {
+      view.ref = sel.value;
+      view.path = '';
+      view.selectedBlob = null;
+      // Re-render the whole tab — branch switch invalidates files,
+      // preview, and commits all at once.
+      renderTab(document.querySelector('.project-tab-content'), p);
+    });
+
+    wrap.querySelectorAll('.code-crumb').forEach(btn => {
+      btn.addEventListener('click', () => {
+        view.path = btn.dataset.path;
+        view.selectedBlob = null;
+        renderTab(document.querySelector('.project-tab-content'), p);
+      });
+    });
+
+    return wrap;
+  }
+
+  async function renderCodeFiles(el, p, view) {
+    el.innerHTML = `<div class="muted">Loading files…</div>`;
+    const qs = new URLSearchParams({ ref: view.ref, path: view.path });
+    let r;
+    try {
+      r = await api(`/api/projects/${p.id}/repo/tree?${qs}`);
+    } catch (e) {
+      el.innerHTML = `<div class="muted">Failed to load tree: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    if (r?.error) {
+      el.innerHTML = `<div class="muted">${escapeHtml(r.error)}</div>`;
+      return;
+    }
+    const entries = Array.isArray(r?.entries) ? r.entries : [];
+    if (entries.length === 0) {
+      el.innerHTML = `<div class="muted">Empty.</div>`;
+      return;
+    }
+    const rows = entries.map(e => {
+      const icon = e.type === 'tree' ? '📁' : (e.type === 'commit' ? '🔗' : '📄');
+      const sizeCell = e.type === 'blob' && Number.isFinite(e.size)
+        ? `<span class="code-file-size muted">${fmtBytes(e.size)}</span>`
+        : '<span class="code-file-size muted"></span>';
+      return `
+        <button class="code-file-row" data-name="${escapeHtml(e.name)}" data-type="${e.type}">
+          <span class="code-file-icon">${icon}</span>
+          <span class="code-file-name">${escapeHtml(e.name)}</span>
+          ${sizeCell}
+        </button>
+      `;
+    }).join('');
+    el.innerHTML = `<div class="code-file-list">${rows}</div>`;
+    el.querySelectorAll('.code-file-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const name = row.dataset.name;
+        const type = row.dataset.type;
+        if (type === 'tree') {
+          view.path = view.path ? `${view.path}/${name}` : name;
+          view.selectedBlob = null;
+          renderTab(document.querySelector('.project-tab-content'), p);
+        } else if (type === 'blob') {
+          view.selectedBlob = view.path ? `${view.path}/${name}` : name;
+          // Only re-render the preview pane — the file list and
+          // commits don't change when you pick a file.
+          const previewEl = document.querySelector('.code-preview');
+          if (previewEl) renderCodePreview(previewEl, p, view);
+        }
+        // type === 'commit' = submodule. No-op for now (Phase 5+
+        // can render submodule metadata).
+      });
+    });
+  }
+
+  async function renderCodePreview(el, p, view) {
+    el.innerHTML = `<div class="muted">Loading preview…</div>`;
+    if (view.selectedBlob) {
+      // Render a specific file picked in the browser.
+      const qs = new URLSearchParams({ ref: view.ref, path: view.selectedBlob });
+      let r;
+      try {
+        r = await api(`/api/projects/${p.id}/repo/blob?${qs}`);
+      } catch (e) {
+        el.innerHTML = `<div class="muted">Failed to load file: ${escapeHtml(e?.message || String(e))}</div>`;
+        return;
+      }
+      if (r?.error) {
+        el.innerHTML = `<div class="muted">${escapeHtml(r.error)}</div>`;
+        return;
+      }
+      const head = `
+        <div class="code-preview-head">
+          <span class="code-preview-path">${escapeHtml(view.selectedBlob)}</span>
+          <span class="code-preview-meta muted">${escapeHtml(fmtBytes(r.size || 0))}${r.binary ? ' · binary' : ''}</span>
+          <button class="code-preview-close" aria-label="Close preview">×</button>
+        </div>
+      `;
+      let body = '';
+      if (r.truncated) {
+        body = `<div class="code-preview-body muted">File too large to preview (${escapeHtml(fmtBytes(r.size))}). Open it locally.</div>`;
+      } else if (r.binary) {
+        body = `<div class="code-preview-body muted">Binary file (${escapeHtml(fmtBytes(r.size))}). Open it locally.</div>`;
+      } else if (/\.md$/i.test(view.selectedBlob)) {
+        body = `<div class="code-preview-body code-md">${renderMarkdown(r.content || '')}</div>`;
+      } else {
+        // Phase 1c: plain pre/code. Phase 1c+ will swap in highlight.js.
+        body = `<div class="code-preview-body">${renderCodeBlock(r.content || '', extLang(view.selectedBlob))}</div>`;
+      }
+      el.innerHTML = head + body;
+      const closeBtn = el.querySelector('.code-preview-close');
+      if (closeBtn) closeBtn.addEventListener('click', () => {
+        view.selectedBlob = null;
+        renderCodePreview(el, p, view);
+      });
+      return;
+    }
+
+    // Default — render the README at the current ref.
+    let r;
+    try {
+      r = await api(`/api/projects/${p.id}/repo/readme?ref=${encodeURIComponent(view.ref)}`);
+    } catch (e) {
+      el.innerHTML = `<div class="muted">Failed to load README: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    if (!r?.found) {
+      el.innerHTML = `<div class="code-preview-empty muted">No README found at this ref.</div>`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="code-preview-head">
+        <span class="code-preview-path">${escapeHtml(r.path || 'README')}</span>
+        <span class="code-preview-meta muted">${escapeHtml(fmtBytes(r.size || 0))}</span>
+      </div>
+      <div class="code-preview-body code-md">${renderMarkdown(r.content || '')}</div>
+    `;
+  }
+
+  async function renderCodeCommits(el, p, view) {
+    el.innerHTML = `<div class="muted">Loading commits…</div>`;
+    const qs = new URLSearchParams({ ref: view.ref, limit: '8' });
+    let r;
+    try {
+      r = await api(`/api/projects/${p.id}/repo/log?${qs}`);
+    } catch (e) {
+      el.innerHTML = `<div class="muted">Failed to load commits: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    if (r?.error) {
+      el.innerHTML = `<div class="muted">${escapeHtml(r.error)}</div>`;
+      return;
+    }
+    const commits = Array.isArray(r?.commits) ? r.commits : [];
+    if (commits.length === 0) {
+      el.innerHTML = `<div class="muted">No commits.</div>`;
+      return;
+    }
+    const rows = commits.map(c => `
+      <div class="code-commit-row">
+        <div class="code-commit-main">
+          <div class="code-commit-subject">${escapeHtml(c.subject || '(no message)')}</div>
+          <div class="code-commit-meta muted">
+            <code class="cmd-inline">${escapeHtml(c.abbrev)}</code>
+            · ${escapeHtml(c.author || 'unknown')}
+            · ${escapeHtml(fmtAgoIso(new Date((c.timestamp || 0) * 1000).toISOString()))}
+          </div>
+        </div>
+        <span class="copy-slot" data-copy="${escapeHtml(c.sha)}"></span>
+      </div>
+    `).join('');
+    el.innerHTML = `
+      <div class="code-commits-head muted">Recent commits</div>
+      <div class="code-commits-list">${rows}</div>
+    `;
+    el.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+  }
+
+  // Tiny extension-to-language hint for the preview. Phase 1c renders
+  // plain `<pre><code>` regardless; this gets stored on the wrapper
+  // class so a future highlight.js swap can pick it up via the
+  // language- class convention without re-traversing the path.
+  function extLang(path) {
+    const m = String(path || '').match(/\.([a-z0-9]+)$/i);
+    if (!m) return '';
+    const ext = m[1].toLowerCase();
+    const map = {
+      js: 'js', jsx: 'jsx', ts: 'ts', tsx: 'tsx', mjs: 'js', cjs: 'js',
+      json: 'json', md: 'markdown', html: 'html', css: 'css', scss: 'scss',
+      py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java', c: 'c',
+      cpp: 'cpp', h: 'c', sh: 'bash', bash: 'bash', yml: 'yaml', yaml: 'yaml',
+      toml: 'toml', sql: 'sql', xml: 'xml',
+    };
+    return map[ext] || '';
+  }
+
+  // Bytes → human-friendly size. Used by the file browser + preview
+  // header. Two decimal places for sub-MB so a 12 KB README doesn't
+  // round to "0 MB"; integer for MB+ since the precision adds noise.
+  function fmtBytes(n) {
+    if (!Number.isFinite(n) || n < 0) return '';
+    if (n < 1024)              return `${n} B`;
+    if (n < 1024 * 1024)       return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   }
 
   function renderNgitTab(container, p) {
