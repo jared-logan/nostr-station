@@ -645,6 +645,10 @@ function serialiseMaintainerSet(ms: MaintainerSet): any {
     blossoms:       ms.blossoms,
     hashtags:       ms.hashtags,
     display:        ms.display,
+    // Raw 30617 events per verified maintainer — drives the
+    // Announcement events inspector modal (per-event timestamp,
+    // "selected" badge for the display source, raw-JSON viewer).
+    events:         ms.events,
   };
 }
 

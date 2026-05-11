@@ -66,6 +66,15 @@ export interface MaintainerSet {
     pubkey:      string;
     publishedAt: number;
   };
+  /**
+   * The raw 30617 events that produced the verified set, in the same
+   * iteration order as `verified`. Surfaced so the UI can render
+   * gitworkshop's "Announcement events" inspector — per-maintainer
+   * row with timestamp, "selected" badge for the freshest event, and
+   * a Raw event JSON viewer. NOT used for any compute decisions; pure
+   * passthrough.
+   */
+  events:         NostrEvent[];
 }
 
 // ── Pure compute (exported for tests) ────────────────────────────────────
@@ -191,6 +200,25 @@ export function buildMaintainerSet(
     };
   }
 
+  // Surface the raw 30617s for verified maintainers so the UI can
+  // render gitworkshop's per-event inspector. Order: trust anchor
+  // first (mirrors row order in the modal), then remaining verified
+  // by descending created_at so the freshest event sits near the top.
+  const events: NostrEvent[] = [];
+  const seenEvents = new Set<string>();
+  const anchorEv = index.get(trustedPubkey);
+  if (anchorEv) { events.push(anchorEv); seenEvents.add(anchorEv.id); }
+  const others = Array.from(verified)
+    .filter((pk) => pk !== trustedPubkey)
+    .map((pk) => index.get(pk))
+    .filter((ev): ev is NostrEvent => !!ev)
+    .sort((a, b) => b.created_at - a.created_at);
+  for (const ev of others) {
+    if (seenEvents.has(ev.id)) continue;
+    seenEvents.add(ev.id);
+    events.push(ev);
+  }
+
   return {
     verified,
     candidatesOnly,
@@ -199,6 +227,7 @@ export function buildMaintainerSet(
     blossoms: Array.from(blossoms),
     hashtags: Array.from(hashtags),
     display,
+    events,
   };
 }
 

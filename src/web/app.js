@@ -5334,13 +5334,14 @@ const ProjectsPanel = (() => {
       if (cloneUrls.length > 0) cloneDropdown = buildCloneDropdown(cloneUrls);
     }
 
-    // Phase 8 — read-only maintainers panel. Spike-confirmed approach
-    // before we add edit controls: the kind-30617 announcement IS the
-    // maintainer registry, so we render it as a real list (anchor +
-    // verified + candidate) instead of just the count chips. Edit
-    // (re-publish via `ngit init --other-maintainers`) lands in a
-    // follow-up commit; this one only surfaces who the repo currently
-    // recognises so users can compare against gitworkshop at a glance.
+    // Phase 8 — read-only maintainers panel + Announcement events
+    // inspector. Mirrors gitworkshop / shakespeare.diy: both treat
+    // their UIs as read+inspect surfaces and keep mutation in the
+    // ngit CLI. Panel summarises who's authoritative; the "View
+    // announcement events" link opens a modal showing each verified
+    // maintainer's raw 30617 with timestamp, "selected" badge for the
+    // event whose fields drive the active display, and a Raw event
+    // JSON viewer.
     const maintainersPanel = repo ? buildMaintainersPanel(repo, repoMeta?.maintainerSet) : '';
 
     wrap.innerHTML = `
@@ -5357,6 +5358,14 @@ const ProjectsPanel = (() => {
       wrap.querySelector('.code-clone-slot').appendChild(cloneDropdown);
     }
     wrap.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+    // "View announcement events" trigger — wired only when the panel
+    // rendered AND we have a serialised maintainerSet to inspect.
+    const announceBtn = wrap.querySelector('.maintainers-view-events');
+    if (announceBtn && repoMeta?.maintainerSet) {
+      announceBtn.addEventListener('click', () => {
+        openAnnouncementsModal(repo, repoMeta.maintainerSet);
+      });
+    }
     return wrap;
   }
 
@@ -5405,12 +5414,120 @@ const ProjectsPanel = (() => {
         </div>
       `;
     }).join('');
+    // Show the "View announcement events" link only when we have at
+    // least one verified 30617 to inspect. With zero verified events
+    // the modal would render empty.
+    const hasEvents = (ms?.events?.length || 0) > 0;
+    const inspector = hasEvents
+      ? `<button class="maintainers-view-events" type="button" title="Inspect each maintainer's raw kind-30617 announcement event">View announcement events</button>`
+      : '';
     return `
       <div class="maintainers-panel">
-        <div class="maintainers-head muted">Maintainers</div>
+        <div class="maintainers-head-row">
+          <div class="maintainers-head muted">Maintainers</div>
+          ${inspector}
+        </div>
         <div class="maintainers-list">${rowHtml}</div>
       </div>
     `;
+  }
+
+  // gitworkshop-parity "Announcement events" inspector. The kind-30617
+  // event drives a repo's display fields, and a multi-maintainer repo
+  // has one such event per maintainer who's published their own. Show
+  // them all so the user can see exactly which event each field is
+  // sourced from. The "selected" badge marks the event whose fields
+  // the dashboard currently treats as authoritative for display
+  // (newest verified by created_at — matches MaintainerSet.display.pubkey).
+  function openAnnouncementsModal(repo, ms) {
+    const events = Array.isArray(ms?.events) ? ms.events : [];
+    const selectedPubkey = ms?.display?.pubkey || repo?.pubkey || '';
+    const candidates = Array.isArray(ms?.candidatesOnly) ? ms.candidatesOnly : [];
+    const npubFor = (hex) => {
+      try {
+        if (window.NostrTools?.nip19) return window.NostrTools.nip19.npubEncode(hex);
+      } catch {}
+      return hex;
+    };
+    const fmtAt = (sec) => {
+      if (!sec) return '—';
+      const d = new Date(sec * 1000);
+      return d.toLocaleString(undefined, {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      });
+    };
+    const initialOf = (npub) => (npub.startsWith('npub1') ? npub.slice(5, 7) : npub.slice(0, 2)).toUpperCase();
+
+    const eventRows = events.map((ev, i) => {
+      const npub = npubFor(ev.pubkey);
+      const display = npub.startsWith('npub1') ? `${npub.slice(0, 12)}…${npub.slice(-6)}` : ev.pubkey.slice(0, 16);
+      const isSelected = ev.pubkey === selectedPubkey;
+      return `
+        <div class="ann-row" data-event-idx="${i}">
+          <div class="ann-row-head">
+            <div class="ann-avatar" aria-hidden="true">${escapeHtml(initialOf(npub))}</div>
+            <div class="ann-row-main">
+              <div class="ann-row-name"><code>${escapeHtml(display)}</code>${isSelected ? `<span class="ann-selected">selected</span>` : ''}</div>
+              <div class="ann-row-meta muted">${escapeHtml(fmtAt(ev.created_at))}</div>
+            </div>
+            <button class="ann-raw-toggle" type="button" data-event-idx="${i}">{ } Raw event</button>
+          </div>
+          <pre class="ann-raw-json" hidden></pre>
+        </div>
+      `;
+    }).join('');
+
+    const candidateBlock = candidates.length > 0 ? `
+      <div class="ann-candidates">
+        <div class="ann-section-head muted">Claimed but not announced (${candidates.length})</div>
+        <div class="ann-candidates-list">
+          ${candidates.map(pk => {
+            const np = npubFor(pk);
+            const disp = np.startsWith('npub1') ? `${np.slice(0, 12)}…${np.slice(-6)}` : pk.slice(0, 16);
+            return `<code class="ann-candidate-pk" title="Listed as a maintainer but has not published their own kind-30617">${escapeHtml(disp)}</code>`;
+          }).join('')}
+        </div>
+      </div>
+    ` : '';
+
+    const body = document.createElement('div');
+    body.className = 'ann-modal';
+    body.innerHTML = `
+      <div class="ann-explainer muted">
+        In a multi-maintainer repository each maintainer publishes their own announcement event.
+        Some fields (relays, clone URLs, maintainers) are <strong>unioned across all announcements</strong>,
+        while others (name, description) are taken from the <strong>most recently updated</strong> announcement
+        — that one is marked <span class="ann-selected">selected</span>.
+      </div>
+      <div class="ann-list">${eventRows || `<div class="muted">No verified announcement events found.</div>`}</div>
+      ${candidateBlock}
+    `;
+    const modal = openModal({
+      title:    'Announcement events',
+      subtitle: repo?.name || repo?.identifier || '',
+      body,
+    });
+    // Toggle inline raw JSON. Click the button → expand the <pre>;
+    // click again → collapse. Each row is independent.
+    body.querySelectorAll('.ann-raw-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.dataset.eventIdx);
+        const ev = events[idx];
+        if (!ev) return;
+        const pre = btn.closest('.ann-row').querySelector('.ann-raw-json');
+        if (pre.hidden) {
+          pre.textContent = JSON.stringify(ev, null, 2);
+          pre.hidden = false;
+          btn.classList.add('active');
+        } else {
+          pre.hidden = true;
+          pre.textContent = '';
+          btn.classList.remove('active');
+        }
+      });
+    });
+    return modal;
   }
 
   // Phase 7: clone URLs grouped by transport (Nostr / HTTPS / SSH /
