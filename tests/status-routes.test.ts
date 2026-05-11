@@ -5,6 +5,7 @@ const {
   isAuthorisedToSetStatus,
   computeEffectiveStatus,
   buildStatusArgs,
+  buildStatusRelayFilters,
 } = await import('../src/lib/routes/status.ts');
 
 const ROOT_AUTHOR = 'a'.repeat(64);
@@ -179,4 +180,54 @@ test('buildStatusArgs: rejects invalid rootId / kind / status', () => {
   assert.equal(buildStatusArgs({ kind: 'patch', rootId: 'not-hex', status: 'open' }),    null);
   assert.equal(buildStatusArgs({ kind: 'other', rootId: 'a'.repeat(64), status: 'open' }), null);
   assert.equal(buildStatusArgs({ kind: 'patch', rootId: 'a'.repeat(64), status: 'merged' }), null);
+});
+
+// ── buildStatusRelayFilters ─────────────────────────────────────────────
+//
+// Regression cover for the "merged PR shows as open" bug. The relay
+// query MUST also filter by `#e: <rootIds>` — not just `#a: <repo>` —
+// or we miss 1631 merge events that omit the repo a-tag (which is what
+// ngit / gitworkshop have historically published).
+
+const A_TAG = '30617:' + 'a'.repeat(64) + ':my-repo';
+
+test('buildStatusRelayFilters: a-tag filter always present', () => {
+  const filters = buildStatusRelayFilters(A_TAG, []);
+  assert.equal(filters.length, 1);
+  assert.deepEqual(filters[0].kinds, [1630, 1631, 1632, 1633]);
+  assert.equal(filters[0].tags?.a, A_TAG);
+});
+
+test('buildStatusRelayFilters: e-tag filter appended when rootIds present', () => {
+  const rootIds = ['r'.repeat(64), 's'.repeat(64)];
+  const filters = buildStatusRelayFilters(A_TAG, rootIds);
+  assert.equal(filters.length, 2, 'must issue both a-tag and e-tag filters');
+  assert.equal(filters[0].tags?.a, A_TAG);
+  // The e-tag filter is what rescues 1631 merge events that omit the
+  // repo a-tag — the actual symptom the user hit on gitworkshop PRs.
+  assert.deepEqual(filters[1].kinds, [1630, 1631, 1632, 1633]);
+  assert.deepEqual(filters[1].tags?.e, rootIds);
+});
+
+test('buildStatusRelayFilters: empty rootIds → a-tag only (no useless e filter)', () => {
+  const filters = buildStatusRelayFilters(A_TAG, []);
+  assert.equal(filters.length, 1);
+  assert.equal(filters[0].tags?.e, undefined);
+});
+
+test('computeEffectiveStatus: 1631 merge event without a-tag still resolves merged', () => {
+  // Simulates the exact wire shape that broke the dashboard: a kind-
+  // 1631 status event published with the root `e` reference and a
+  // merge-commit tag, but NO repo `a` tag. computeEffectiveStatus must
+  // pick it up — and (with the relay-query fix in buildStatusRelayFilters)
+  // the upstream fetch now delivers it to this function in the first place.
+  const ev = statusEv({
+    kind: 1631,
+    pubkey: ROOT_AUTHOR,
+    tags: [['e', ROOT_ID], ['merge-commit', 'd'.repeat(40)]],
+    // explicitly no `a` tag
+  });
+  const r = computeEffectiveStatus(ROOT_ID, ROOT_AUTHOR, new Set(), [ev]);
+  assert.equal(r.status, 'merged');
+  assert.equal(r.mergeCommit, 'd'.repeat(40));
 });

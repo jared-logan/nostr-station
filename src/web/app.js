@@ -6241,13 +6241,20 @@ const ProjectsPanel = (() => {
       // dropdown only when the user can legitimately publish a
       // status change. Server still enforces; this hides options
       // the user can't act on.
-      const [userPubkey, repoMeta] = await Promise.all([
+      //
+      // Also fetch the actual effective status for this root so the
+      // dropdown reflects reality. Without this the control always
+      // reads "open" even for merged/closed PRs (bug:
+      // dashboard-merge-shows-open).
+      const [userPubkey, repoMeta, statusResp] = await Promise.all([
         getOwnerPubkey(),
         api(`/api/projects/${p.id}/repo`).catch(() => null),
+        api(`/api/projects/${p.id}/status?rootIds=${encodeURIComponent(detail.rootId)}`).catch(() => null),
       ]);
       const canEdit = canEditStatus(userPubkey, detail.author?.pubkey, repoMeta?.maintainerSet);
+      const effectiveStatus = statusResp?.results?.[0]?.status || 'open';
       const statusSlot = body.querySelector('.pdetail-status-slot');
-      statusSlot.appendChild(renderStatusControl('patch', 'open', canEdit, (newStatus) => {
+      statusSlot.appendChild(renderStatusControl('patch', effectiveStatus, canEdit, (newStatus) => {
         openExecModal({
           title:    `${newStatus} · ${p.name}`,
           subtitle: `ngit pr_status --${newStatus} ${detail.rootId.slice(0, 12)}…`,

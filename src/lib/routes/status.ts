@@ -49,6 +49,7 @@ import {
   setCached,
   getTags,
   type NostrEvent,
+  type RelayQueryFilter,
 } from '../nostr-query.js';
 import { readBody, streamExec, streamExecError } from './_shared.js';
 import { resolveMaintainerSet } from '../maintainer-set.js';
@@ -200,32 +201,99 @@ interface CachedStatus {
   fetchedAt: number;
 }
 
+const STATUS_KINDS = [1630, 1631, 1632, 1633];
+
+/**
+ * Build the relay filters we issue for a status pull. We deliberately
+ * use TWO filters (union at the relay) instead of one:
+ *
+ *   1. `{kinds: 1630-1633, #a: <repo>}`  — the well-behaved case where
+ *      a status event carries the repo announcement coordinate.
+ *   2. `{kinds: 1630-1633, #e: <rootIds>}` — fallback for status events
+ *      that reference the root patch via `e` only and omit `#a`. NIP-34
+ *      doesn't *require* `#a` on 1630-1633, and ngit / gitworkshop have
+ *      historically published 1631 (merge) events with just the `e`
+ *      tag. Without this filter those merge events get dropped at the
+ *      relay and the PR sticks at "open" in our dashboard while showing
+ *      "merged" on gitworkshop.
+ *
+ * Returned as a list so callers can `Promise.all` two queryRelays calls;
+ * exported so tests can assert both clauses are present.
+ */
+export function buildStatusRelayFilters(
+  aTag: string,
+  rootIds: string[],
+): RelayQueryFilter[] {
+  const filters: RelayQueryFilter[] = [
+    { kinds: STATUS_KINDS, tags: { a: aTag } },
+  ];
+  if (rootIds.length > 0) {
+    filters.push({ kinds: STATUS_KINDS, tags: { e: rootIds } });
+  }
+  return filters;
+}
+
 async function fetchStatusEvents(
   project: Project,
   refresh: boolean,
+  rootIds: string[],
 ): Promise<{ events: NostrEvent[]; cached: boolean }> {
   const coords = decodeNgitRemote(project);
   if (!coords || !project.path) return { events: [], cached: false };
-  const cacheKey = { projectPath: project.path, key: 'status-163x' };
-  if (!refresh) {
-    const cached = getCached<CachedStatus>({ ...cacheKey, ttlMs: STATUS_CACHE_TTL_MS });
-    if (cached) return { events: cached.events, cached: true };
-  }
+
   const grasp = getGraspServers();
   const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
   const relays = [...coords.relayHints, ...grasp, ...projRelays]
     .filter(isValidRelayUrl)
     .filter((r, i, a) => a.indexOf(r) === i)
     .slice(0, 8);
+  if (relays.length === 0) return { events: [], cached: false };
+
   const aTag = `30617:${coords.pubkey}:${coords.identifier}`;
-  const result = await queryRelays({
-    filter: { kinds: [1630, 1631, 1632, 1633], tags: { a: aTag } },
-    relays,
-    timeoutMs: RELAY_QUERY_TIMEOUT_MS,
-    stream:    true,
-  });
-  setCached<CachedStatus>(cacheKey, { events: result.events, fetchedAt: Date.now() });
-  return { events: result.events, cached: false };
+  const cacheKey = { projectPath: project.path, key: 'status-163x' };
+
+  // The per-repo (a-tag) pull is cacheable — it changes slowly and is
+  // shared across all rootIds. The per-rootId (e-tag) pull is always
+  // fresh: it's targeted, small, and exists specifically to catch the
+  // merge events that the broad a-tag query misses.
+  let aTagEvents: NostrEvent[] = [];
+  let cached = false;
+  if (!refresh) {
+    const hit = getCached<CachedStatus>({ ...cacheKey, ttlMs: STATUS_CACHE_TTL_MS });
+    if (hit) { aTagEvents = hit.events; cached = true; }
+  }
+
+  const filters = buildStatusRelayFilters(aTag, rootIds);
+  const tasks: Promise<NostrEvent[]>[] = [];
+  if (!cached) {
+    tasks.push(queryRelays({
+      filter: filters[0], relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: true,
+    }).then((r) => {
+      aTagEvents = r.events;
+      setCached<CachedStatus>(cacheKey, { events: r.events, fetchedAt: Date.now() });
+      return r.events;
+    }));
+  }
+  if (filters.length > 1) {
+    tasks.push(queryRelays({
+      filter: filters[1], relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: true,
+    }).then((r) => r.events));
+  }
+  const groups = await Promise.all(tasks);
+
+  const seen = new Set<string>();
+  const events: NostrEvent[] = [];
+  const push = (list: NostrEvent[]) => {
+    for (const ev of list) {
+      if (seen.has(ev.id)) continue;
+      seen.add(ev.id);
+      events.push(ev);
+    }
+  };
+  if (cached) push(aTagEvents);
+  for (const g of groups) push(g);
+
+  return { events, cached };
 }
 
 /** Fetch the 30617 announcement so we know who the maintainers are.
@@ -312,7 +380,7 @@ export async function handleStatus(
     // query for the root events themselves. When absent we use the
     // announcing-pubkey-as-fallback rule from fetchMaintainerSet.
     const [statusR, maintainers] = await Promise.all([
-      fetchStatusEvents(project, false),
+      fetchStatusEvents(project, false, rootIds),
       fetchMaintainerSet(project),
     ]);
     // For Phase 4 we treat the rootAuthor as unknown unless the
