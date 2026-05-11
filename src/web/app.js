@@ -1612,6 +1612,24 @@ async function runNvpnInstall() {
   }
 }
 
+// ── Dashboard card helpers ───────────────────────────────────────────
+// Compact display formatters used by the at-a-glance cards on the
+// Dashboard panel. Kept at module scope so StatusPanel (a plain object
+// literal, not an IIFE) can reach them without ceremony.
+function fmtDashCount(n) {
+  if (n == null) return '—';
+  if (n < 1000) return String(n);
+  if (n < 10_000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+  if (n < 1_000_000) return Math.round(n / 1000) + 'K';
+  return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+}
+function formatBytesDashboard(n) {
+  if (n == null) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
 const StatusPanel = {
   // Signature of the last payload we rendered. refreshHealth() ticks every
   // 5s; the status rarely changes between ticks, and re-rendering on every
@@ -1619,7 +1637,16 @@ const StatusPanel = {
   // signatures lets us short-circuit when the payload is unchanged — the
   // DOM stays untouched, expanded rows stay expanded.
   _sig: null,
+  // Cache for the follower/following lookup powering the Identity card.
+  // The query hits 3-5 read-relays per call, so we hold the result for
+  // a few minutes to keep dashboard refreshes cheap.
+  _idStats: null,
+  _idStatsAt: 0,
   async onEnter() {
+    // Dashboard cards render independently of /api/status — kick them
+    // off in parallel so a slow /api/status doesn't blank out the rest
+    // of the panel.
+    this.renderDashboardCards();
     try {
       const status = await api('/api/status');
       this.render(status);
@@ -1627,6 +1654,209 @@ const StatusPanel = {
       $('status-cards').innerHTML = `<div class="empty-state">failed to load status: ${escapeHtml(e.message)}</div>`;
     }
   },
+
+  // ── Quick-glance dashboard cards ────────────────────────────────────
+  //
+  // Four cards: Identity, Projects, Relay, AI default. Each one renders
+  // a "loading" placeholder synchronously then resolves in the background
+  // and patches its content. Clicking any card jumps to the relevant
+  // panel via the existing hash-router.
+  async renderDashboardCards() {
+    const root = $('dashboard-cards');
+    if (!root) return;
+    // First render — emit the four card frames if they aren't there yet.
+    // We keep the frames stable across refreshes so re-renders don't
+    // flash the entire grid (panels feel jerky when the DOM rebuilds).
+    if (!root.firstChild) {
+      root.innerHTML = `
+        <a class="dash-card" href="#config" data-card="identity">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Identity</span>
+            <span class="dash-card-cta">Profile →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-identity">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
+        <a class="dash-card" href="#projects" data-card="projects">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Projects</span>
+            <span class="dash-card-cta">Open →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-projects">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
+        <a class="dash-card" href="#relay" data-card="relay">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Relay</span>
+            <span class="dash-card-cta">Stream →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-relay">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
+        <a class="dash-card" href="#chat" data-card="ai">
+          <div class="dash-card-head">
+            <span class="dash-card-label">AI · Chat</span>
+            <span class="dash-card-cta">Chat →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-ai">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
+      `;
+    }
+    // Fan out the four lookups in parallel. Each card patches its own
+    // body when it resolves; failures degrade gracefully.
+    this._fillIdentityCard();
+    this._fillProjectsCard();
+    this._fillRelayCard();
+    this._fillAiCard();
+  },
+
+  async _fillIdentityCard() {
+    const el = $('dash-card-identity');
+    if (!el) return;
+    try {
+      const [ident, profile] = await Promise.all([
+        api('/api/identity/config'),
+        api('/api/identity/profile').catch(() => null),
+      ]);
+      if (!ident?.npub) {
+        el.innerHTML = `<span class="warn">no identity configured</span>`;
+        return;
+      }
+      const name = profile?.name || truncNpub(ident.npub);
+      const avatar = profile?.picture
+        ? `<img src="${escapeHtml(profile.picture)}" alt="" class="dash-avatar">`
+        : `<span class="dash-avatar">${pixelAvatar(ident.npub, 36)}</span>`;
+      const nip05 = profile?.nip05
+        ? `<div class="dash-sub ${profile.nip05Verified ? 'ok' : ''}">${escapeHtml(profile.nip05)}${profile.nip05Verified ? ' ✓' : ''}</div>`
+        : '';
+      el.innerHTML = `
+        <div class="dash-id-row">
+          ${avatar}
+          <div class="dash-id-text">
+            <div class="dash-id-name">${escapeHtml(name)}</div>
+            ${nip05}
+            <div class="dash-id-stats" id="dash-id-stats">
+              <span class="muted">looking up stats…</span>
+            </div>
+          </div>
+        </div>
+      `;
+      // Stats reuse the helper added for the Config panel. Cache the
+      // result for 5 minutes so dashboard refreshes don't re-query the
+      // user's relays on every panel visit.
+      if (profile?.hex && Array.isArray(ident.readRelays) && ident.readRelays.length) {
+        const statsEl = $('dash-id-stats');
+        const fresh = this._idStats && (Date.now() - this._idStatsAt < 5 * 60 * 1000);
+        const promise = fresh
+          ? Promise.resolve(this._idStats)
+          : ConfigPanel.fetchProfileStats(profile.hex, ident.readRelays)
+              .then(r => { this._idStats = r; this._idStatsAt = Date.now(); return r; });
+        promise.then(({ followers, following }) => {
+          if (!statsEl) return;
+          if (followers == null && following == null) {
+            statsEl.innerHTML = `<span class="muted">stats unavailable</span>`;
+            return;
+          }
+          statsEl.innerHTML = `
+            <span><b>${fmtDashCount(following)}</b> following</span>
+            <span class="sep">·</span>
+            <span><b>${fmtDashCount(followers)}</b> followers</span>
+          `;
+        }).catch(() => {
+          if (statsEl) statsEl.innerHTML = `<span class="muted">stats unavailable</span>`;
+        });
+      } else {
+        const statsEl = $('dash-id-stats');
+        if (statsEl) statsEl.innerHTML = `<span class="muted">add read relays to see stats</span>`;
+      }
+    } catch {
+      el.innerHTML = `<span class="muted">identity unavailable</span>`;
+    }
+  },
+
+  async _fillProjectsCard() {
+    const el = $('dash-card-projects');
+    if (!el) return;
+    try {
+      const r = await api('/api/projects');
+      const projects = Array.isArray(r) ? r : (Array.isArray(r?.projects) ? r.projects : []);
+      if (projects.length === 0) {
+        el.innerHTML = `<div class="dash-big">0</div><div class="dash-sub">add your first project →</div>`;
+        return;
+      }
+      // Most-recently-updated wins as the leading bullet. Projects
+      // payload doesn't always carry an updatedAt, so fall back to the
+      // server's insertion order (already sorted recent-first today).
+      const recent = [...projects]
+        .sort((a, b) => (b.updatedAt || b.lastOpenedAt || 0) - (a.updatedAt || a.lastOpenedAt || 0))
+        .slice(0, 3);
+      const recentList = recent
+        .map(p => `<li>${escapeHtml(p.name || p.id || 'untitled')}</li>`)
+        .join('');
+      el.innerHTML = `
+        <div class="dash-big">${projects.length}</div>
+        <ul class="dash-recent">${recentList}</ul>
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">projects unavailable</span>`;
+    }
+  },
+
+  async _fillRelayCard() {
+    const el = $('dash-card-relay');
+    if (!el) return;
+    try {
+      const [rc, dbStats] = await Promise.all([
+        api('/api/relay-config').catch(() => null),
+        api('/api/relay/database/stats').catch(() => null),
+      ]);
+      const url = rc?.url || 'ws://localhost:7777';
+      const size = dbStats?.exists ? formatBytesDashboard(dbStats.sizeBytes) : 'empty';
+      el.innerHTML = `
+        <div class="dash-relay-url" title="${escapeHtml(url)}">${escapeHtml(url)}</div>
+        <div class="dash-sub">DB size: <b>${escapeHtml(size)}</b></div>
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">relay unavailable</span>`;
+    }
+  },
+
+  async _fillAiCard() {
+    const el = $('dash-card-ai');
+    if (!el) return;
+    try {
+      const list = await api('/api/ai/providers');
+      const providers = Array.isArray(list?.providers) ? list.providers : [];
+      const configured = providers.filter(p => p.configured);
+      const chatDefault = configured.find(p => p.isDefault?.chat);
+      const termDefault = configured.find(p => p.isDefault?.terminal);
+      if (configured.length === 0) {
+        el.innerHTML = `<span class="warn">no providers configured</span>
+          <div class="dash-sub">add one in Config → AI</div>`;
+        return;
+      }
+      const chatLine = chatDefault
+        ? `<div class="dash-sub">Chat: <b>${escapeHtml(chatDefault.displayName)}</b>${chatDefault.model ? ` · <span class="muted">${escapeHtml(chatDefault.model)}</span>` : ''}</div>`
+        : `<div class="dash-sub muted">no chat default set</div>`;
+      const termLine = termDefault
+        ? `<div class="dash-sub">Terminal: <b>${escapeHtml(termDefault.displayName)}</b></div>`
+        : '';
+      el.innerHTML = `
+        <div class="dash-big">${configured.length}</div>
+        <div class="dash-sub">provider${configured.length !== 1 ? 's' : ''} configured</div>
+        ${chatLine}
+        ${termLine}
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">AI providers unavailable</span>`;
+    }
+  },
+
   render(status) {
     const cards = $('status-cards');
     // Signature now includes kind so a future hotfix that re-categorizes
@@ -1931,7 +2161,14 @@ async function appendNsiteStatusCard(container) {
   }
 }
 
-$('status-refresh').addEventListener('click', () => refreshHealth());
+$('status-refresh').addEventListener('click', () => {
+  refreshHealth();
+  // Bust the identity-stats cache so the user gets a true refresh of
+  // follower/following counts when they hit the button (otherwise the
+  // 5-min memoize would mask whatever they wanted to re-check).
+  StatusPanel._idStatsAt = 0;
+  StatusPanel.renderDashboardCards();
+});
 
 // ── Panel: Chat (with provider/model switcher) ───────────────────────────
 
@@ -10374,26 +10611,45 @@ const ConfigPanel = (() => {
         </div>`
       : '';
     const avatarHtml = profile && profile.picture
-      ? `<img src="${escapeHtml(profile.picture)}" style="width:40px;height:40px;border-radius:50%;object-fit:cover" alt="">`
-      : pixelAvatar(ident.npub, 40);
+      ? `<img src="${escapeHtml(profile.picture)}" style="width:56px;height:56px;border-radius:50%;object-fit:cover" alt="">`
+      : pixelAvatar(ident.npub, 56);
 
     const sessionLine = session
       ? `<span style="color:var(--success)">● signed in</span>
          <span style="color:var(--text-dim);margin-left:8px">expires ${escapeHtml(fmtExpiry(session.expiresAt))}</span>`
       : `<span style="color:var(--text-dim)">no active session (localhost exemption)</span>`;
 
+    // Bio (kind-0 `about`) rendered full-width below the name block when set.
+    // Preserve line breaks so multi-paragraph bios read naturally.
+    const bioHtml = profile && profile.about
+      ? `<div class="cfg-profile-bio">${escapeHtml(profile.about)}</div>`
+      : '';
+
+    // Stats slot — filled asynchronously by fetchProfileStats() against the
+    // user's read-relays. Hidden when we don't have a hex pubkey to query.
+    const statsSlot = profile && profile.hex
+      ? `<div class="config-row">
+          <div class="k">Stats</div>
+          <div class="v cfg-profile-stats" id="cfg-profile-stats">
+            <span class="muted">loading…</span>
+          </div>
+        </div>`
+      : '';
+
     return `
-      <div class="body" style="font-size:12px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-          <div>${avatarHtml}</div>
-          <div style="flex:1;min-width:0">
-            <div style="color:var(--text-bright);font-size:13px">${escapeHtml(displayName)}</div>
+      <div class="body cfg-profile-body" style="font-size:12px">
+        <div class="cfg-profile-head">
+          <div class="cfg-profile-avatar">${avatarHtml}</div>
+          <div class="cfg-profile-namecol">
+            <div class="cfg-profile-name">${escapeHtml(displayName)}</div>
             ${nip05Html}
-            <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.4px;margin-top:2px">
+            <div class="cfg-profile-role">
               Station owner · signed in via Amber
             </div>
           </div>
         </div>
+        ${bioHtml}
+        ${statsSlot}
         <div class="config-row">
           <div class="k">npub</div>
           <div class="v" id="cfg-identity-npub" style="display:flex;align-items:center;gap:6px">
@@ -10406,6 +10662,130 @@ const ConfigPanel = (() => {
         </div>
       </div>
     `;
+  }
+
+  // ── Profile stats (followers / following) ─────────────────────────────
+  //
+  // Client-side queries against the user's read-relays via raw WebSocket.
+  // Tries NIP-45 COUNT first (fast, no event download); for the "following"
+  // figure we also fetch the user's own kind-3 and count p-tags as a
+  // fallback when COUNT isn't supported by any relay. Each relay gets a
+  // short budget so a slow relay can't stall the section.
+  function fetchProfileStats(hex, relays) {
+    if (!hex || !Array.isArray(relays) || relays.length === 0) {
+      return Promise.resolve({ followers: null, following: null });
+    }
+    return Promise.all([
+      queryCount(relays, { kinds: [3], '#p': [hex] }),
+      queryFollowingCount(relays, hex),
+    ]).then(([followers, following]) => ({ followers, following }));
+  }
+
+  // NIP-45 COUNT across multiple relays. Returns the max non-null count
+  // (different relays see different slices of the network — the largest
+  // is the best approximation for "global"). null if no relay answered.
+  function queryCount(relays, filter) {
+    const PER_RELAY_MS = 5000;
+    return Promise.all(relays.map(url => new Promise((resolve) => {
+      let ws;
+      try { ws = new WebSocket(url); }
+      catch { resolve(null); return; }
+      const subId = 'cnt-' + Math.random().toString(36).slice(2, 8);
+      let settled = false;
+      const finish = (val) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { ws.close(); } catch {}
+        resolve(val);
+      };
+      const timer = setTimeout(() => finish(null), PER_RELAY_MS);
+      ws.addEventListener('open', () => {
+        try { ws.send(JSON.stringify(['COUNT', subId, filter])); }
+        catch { finish(null); }
+      });
+      ws.addEventListener('message', (e) => {
+        try {
+          const data = typeof e.data === 'string' ? e.data : e.data.toString();
+          const msg  = JSON.parse(data);
+          if (Array.isArray(msg) && msg[0] === 'COUNT' && msg[1] === subId) {
+            const c = Number(msg[2]?.count);
+            finish(Number.isFinite(c) ? c : null);
+          } else if (Array.isArray(msg) && (msg[0] === 'CLOSED' || msg[0] === 'NOTICE')) {
+            // Relay rejected the verb — fall through to timeout/close.
+            finish(null);
+          }
+        } catch {}
+      });
+      ws.addEventListener('error', () => finish(null));
+      ws.addEventListener('close', () => finish(null));
+    }))).then(results => {
+      const nums = results.filter(n => typeof n === 'number');
+      return nums.length ? Math.max(...nums) : null;
+    });
+  }
+
+  // Following count = number of p-tags in the user's own latest kind 3.
+  // COUNT can't give us this directly (it'd return event count, not p-tag
+  // count), so we fetch the newest kind-3 across all read-relays and tally
+  // its tags. Replaceable-event semantics mean we want the freshest copy.
+  function queryFollowingCount(relays, hex) {
+    return new Promise((resolve) => {
+      const PER_RELAY_MS = 5000;
+      let bestCount = null;
+      let bestAt    = -1;
+      let remaining = relays.length;
+      const finalize = () => {
+        if (remaining <= 0) resolve(bestCount);
+      };
+      relays.forEach(url => {
+        let ws;
+        try { ws = new WebSocket(url); }
+        catch { remaining--; finalize(); return; }
+        const subId = 'flw-' + Math.random().toString(36).slice(2, 8);
+        let done = false;
+        const close = () => {
+          if (done) return;
+          done = true;
+          try { ws.close(); } catch {}
+          remaining--;
+          finalize();
+        };
+        const timer = setTimeout(close, PER_RELAY_MS);
+        ws.addEventListener('open', () => {
+          try { ws.send(JSON.stringify(['REQ', subId, { authors: [hex], kinds: [3], limit: 1 }])); }
+          catch { clearTimeout(timer); close(); }
+        });
+        ws.addEventListener('message', (e) => {
+          try {
+            const data = typeof e.data === 'string' ? e.data : e.data.toString();
+            const msg  = JSON.parse(data);
+            if (Array.isArray(msg) && msg[0] === 'EVENT' && msg[1] === subId && msg[2]?.kind === 3) {
+              const ev = msg[2];
+              const at = ev.created_at || 0;
+              if (at > bestAt) {
+                bestAt = at;
+                const pTags = (ev.tags || []).filter(t => Array.isArray(t) && t[0] === 'p' && t[1]);
+                bestCount = pTags.length;
+              }
+            } else if (Array.isArray(msg) && msg[0] === 'EOSE' && msg[1] === subId) {
+              clearTimeout(timer); close();
+            }
+          } catch {}
+        });
+        ws.addEventListener('error', () => { clearTimeout(timer); close(); });
+        ws.addEventListener('close', () => { clearTimeout(timer); close(); });
+      });
+      if (remaining === 0) resolve(null);
+    });
+  }
+
+  function fmtCount(n) {
+    if (n == null) return '—';
+    if (n < 1000) return String(n);
+    if (n < 10_000)  return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+    if (n < 1_000_000) return Math.round(n / 1000) + 'K';
+    return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
   }
 
   // "in 7h 22m" / "in 45m" / "now" — matches the identity-chip hover tooltip.
@@ -10430,233 +10810,278 @@ const ConfigPanel = (() => {
         <button class="danger rm">×</button>
       </div>`).join('');
 
+    // Section order is now driven by usage frequency / conceptual grouping:
+    //   1. Profile      — who you are (most-checked, opens by default)
+    //   2. Relay        — your station's relay + read-relay list
+    //   3. AI           — providers + Stacks (configure → use)
+    //   4. Git          — global git identity + ngit (signer/grasp)
+    //   5. Templates    — rarely touched after first run
+    //   6. Appearance   — purely cosmetic, pushed last
+    // Each section is a <details> so users can collapse the ones they
+    // don't care about. Frequently-checked sections start expanded.
     container.innerHTML = `
-      <div class="config-section" id="cfg-appearance-section">
-        <h3>Appearance</h3>
-        <div class="config-row">
-          <div class="k">Accent color</div>
-          <div class="v">
-            ${renderThemePicker()}
-            <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
-              Recolors UI accents (links, active nav, primary buttons). Persists in this browser.
-            </div>
-          </div>
-        </div>
-        ${renderDittoCard()}
-      </div>
-
-      <div class="config-section">
-        <h3>Relay</h3>
-        ${row('Name', rc.name || '—')}
-        ${row('URL',  rc.url  || '—')}
-        <div class="config-row">
-          <div class="k">Write gating</div>
-          <div class="v">
-            <label class="toggle"><input type="checkbox" id="cfg-auth" checked disabled><span class="slider"></span></label>
-            <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">Always on — only the station owner and whitelisted pubkeys can publish. Reads stay open to anyone.</span>
-          </div>
-        </div>
-        <div class="config-row">
-          <div class="k">DM read gating</div>
-          <div class="v">
-            <label class="toggle"><input type="checkbox" id="cfg-dm-auth" disabled><span class="slider"></span></label>
-            <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">Reserved for a future read-gating layer (kind 4/44/1059). Not implemented.</span>
-          </div>
-        </div>
-        <div class="config-row"><div class="k">Whitelist</div><div class="v">${whitelistHtml}</div></div>
-        ${row('Data dir',    rc.dataDir || '—')}
-        ${row('Config file', rc.configPath || '—')}
-      </div>
-
-      <div class="config-section">
-        <h3>Read relays</h3>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Used to look up profile data (kind 0). <b>nostr-station never writes to these relays.</b>
-        </div>
-        <div class="relay-list" id="read-relays">
-          ${relayItems || '<div style="color:var(--muted);font-size:11px">defaults will be used</div>'}
-          <div class="add">
-            <input id="read-relay-input" placeholder="wss://relay.example.com" autocomplete="off">
-            <button id="read-relay-paste">paste</button>
-            <button class="primary" id="read-relay-add">add</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="config-section" id="cfg-ngit-section">
-        <h3>NGIT</h3>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Configure git-over-Nostr: pick which GRASP servers host your repos
-          and pair an Amber signer for push/clone.
-        </div>
-
-        <div class="config-row">
-          <div class="k">GRASP servers</div>
-          <div class="v">
-            <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
-              Where your git+nostr data is hosted. The Initialize ngit form on
-              each project pre-checks these — uncheck per-project if a particular
-              server doesn't host that repo. Two public defaults are seeded;
-              add your own grasp (self-hosted or otherwise) below.
-            </div>
-            <div class="relay-list" id="grasp-servers">
-              ${(ident.graspServers || []).map(url => `
-                <div class="item" data-url="${escapeHtml(url)}">
-                  <span class="url">${escapeHtml(url)}</span>
-                  <button class="danger rm-grasp">×</button>
-                </div>`).join('')}
-              <div class="add">
-                <input id="grasp-server-input" placeholder="wss://your-grasp-server.example" autocomplete="off">
-                <button id="grasp-server-paste">paste</button>
-                <button class="primary" id="grasp-server-add">add</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="config-row" style="margin-top:14px">
-          <div class="k">Account (signer)</div>
-          <div class="v">
-            ${ngitAccount && ngitAccount.loggedIn ? `
-              <div class="key-status-line ok">✓ signer configured</div>
-              <div style="font-size:11px;color:var(--text-dim);margin-top:6px">
-                Relays: ${(ngitAccount.relays || []).length
-                  ? (ngitAccount.relays || []).map(r => `<code>${escapeHtml(r)}</code>`).join(' · ')
-                  : '<em>none declared</em>'}
-              </div>
-              ${ngitAccount.remotePubkey ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Remote pubkey: <code>${escapeHtml(ngitAccount.remotePubkey.slice(0, 12))}…</code></div>` : ''}
-              <div class="keyrow" style="margin-top:10px">
-                <button id="cfg-ngit-relogin">Re-login</button>
-                <button class="danger" id="cfg-ngit-logout">Logout</button>
-              </div>
-              <div class="muted" style="font-size:11px;margin-top:6px">
-                Re-login refreshes a stale bunker session — fixes <code>git-remote-nostr</code>
-                panics during clone/push.
-              </div>
-            ` : `
-              <div class="key-status-line err">✗ not logged in</div>
-              <div class="muted" style="font-size:11px;margin-top:6px">
-                A signer is required before you can clone ngit repos. Login connects Amber (or another NIP-46 signer) to ngit.
-              </div>
-              <div class="keyrow" style="margin-top:10px">
-                <button class="primary" id="cfg-ngit-relogin">Login</button>
-              </div>
-            `}
-          </div>
-        </div>
-      </div>
-
-      <div class="config-section" id="cfg-git-identity-section">
-        <h3>Git Identity</h3>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Author name + email baked into every <code>git commit</code> on this machine. Git records ONE author per commit — when you push to multiple platforms (GitHub, ngit, etc.), all of them see this same author. Per-project overrides are managed in each project's Settings tab.
-        </div>
-        <div class="config-row">
-          <div class="k">Global identity</div>
-          <div class="v">
-            <div class="keyrow">
-              <div class="keyfield">
-                <input id="cfg-git-identity-name" type="text" autocomplete="off" placeholder="Your Name" value="${escapeHtml(gitIdent?.current?.name || '')}">
-              </div>
-            </div>
-            <div class="keyrow" style="margin-top:6px">
-              <div class="keyfield">
-                <input id="cfg-git-identity-email" type="text" autocomplete="off" spellcheck="false" placeholder="you@example.com" value="${escapeHtml(gitIdent?.current?.email || '')}">
-              </div>
-              <button class="primary" id="cfg-git-identity-save">save</button>
-            </div>
-            <div class="key-status-line ${gitIdent?.current?.name && gitIdent?.current?.email ? 'ok' : ''}" id="cfg-git-identity-status">
-              ${gitIdent?.current?.name && gitIdent?.current?.email ? '✓ saved (~/.gitconfig)' : 'not set — projects nostr-station scaffolds will auto-seed an npub-synthetic identity per repo'}
-            </div>
-            <div style="margin-top:10px">
-              <span class="muted" style="font-size:11px">Presets:</span>
-              <div class="keyrow" style="margin-top:6px;flex-wrap:wrap;gap:6px">
-                ${gitIdent?.presets?.npubSynthetic ? `
-                  <button id="cfg-git-identity-preset-npub" type="button"
-                          title="${escapeHtml(gitIdent.presets.npubSynthetic.name)} &lt;${escapeHtml(gitIdent.presets.npubSynthetic.email)}&gt;">
-                    Use npub shorthand
-                  </button>
-                ` : ''}
-                ${gitIdent?.presets?.nip05 ? `
-                  <button id="cfg-git-identity-preset-nip05" type="button"
-                          title="${escapeHtml(gitIdent.presets.nip05.email)}">
-                    Use my nip-05 (${escapeHtml(gitIdent.presets.nip05.email)})
-                  </button>
-                ` : ''}
-              </div>
-              <div class="muted" style="font-size:11px;margin-top:6px">
-                <strong>npub shorthand</strong> — pure Nostr identity, links to your npub but not to any GitHub user.<br>
-                <strong>nip-05</strong> — your Nostr handle as an email-shaped identifier; links to your npub via DNS, AND can link to a GitHub user if that exact email is registered there.<br>
-                <strong>Set my own</strong> — type a real email above (e.g. your GitHub-registered address) for full GitHub user attribution.
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="config-section">
-        <h3>AI Providers</h3>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Terminal-native tools (Claude Code, OpenCode Go) launch in the terminal panel with cwd scoped to the selected project.
-          API providers stream through the Chat pane via <code>/api/ai/chat</code>.
-        </div>
-        ${renderAiProviders(aiList)}
-        <div class="config-row" style="margin-top:10px">
-          <div class="k">Context</div>
-          <div class="v ${cfg.hasContext ? 'on' : 'off'}" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <span>${describeContext(cfg)}</span>
-            <button id="cfg-station-edit" type="button">Edit notes</button>
-            <button id="cfg-prompt-preview" type="button">Preview prompt</button>
-          </div>
-        </div>
-        <div class="callout">
-          Per-provider keys live in the OS keychain as <code>ai:&lt;provider&gt;</code>.
-          Config file: <code>~/.nostr-station/ai-config.json</code>.
-        </div>
-      </div>
-
-      <div class="config-section" id="cfg-templates-section">
-        <h3>Project Templates</h3>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Templates available to the New Project flow (and to the AI when
-          it picks a starting point for a fresh project). Built-in
-          templates can be edited or reset; user-added ones can be
-          deleted. Stored at <code>~/.config/nostr-station/templates.json</code>.
-        </div>
-        <div id="cfg-templates-list">loading…</div>
-      </div>
-
-      <div class="config-section">
-        <h3>Identity (Amber / ngit)</h3>
-        ${renderIdentityBody(ident, session, profile)}
-        <div class="callout" style="margin-top:10px">
-          Bunker URL is managed inside ngit. Configure via the setup wizard or <code>ngit init</code>.
-          Test signing from your mobile signer (Amber) on first push.
-        </div>
-      </div>
-
-      <div class="config-section" id="cfg-stacks-section">
-        <h3>Stacks AI (Dork)</h3>
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-          Stacks ships its own AI provider config (separate from the providers above) at
-          <code>~/Library/Preferences/stacks/config.json</code>. The Dork agent that runs inside
-          mkstack projects uses this. Provider list is decided by Stacks itself —
-          <code>stacks configure</code> shows the current options (Anthropic, OpenRouter,
-          Routstr, PayPerQ, etc.).
-        </div>
-        <div class="config-row" style="margin-bottom:10px">
-          <div class="k">Status</div>
-          <div class="v" id="cfg-stacks-status">checking…</div>
-        </div>
-        <div class="keyrow">
-          <button id="cfg-stacks-configure">Configure Stacks AI</button>
-          <span style="font-size:11px;color:var(--muted);align-self:center">
-            opens <code>stacks configure</code> in a terminal tab
+      <details class="config-section cfg-collapsible" id="cfg-profile-section" open>
+        <summary>
+          <h3>Profile</h3>
+          <span class="cfg-summary-meta" id="cfg-profile-summary-meta">
+            ${escapeHtml(profile?.name || (ident.npub ? truncNpub(ident.npub) : 'no identity'))}
           </span>
+        </summary>
+        <div class="cfg-section-body">
+          ${renderIdentityBody(ident, session, profile)}
+          <div class="callout" style="margin-top:10px">
+            Bunker URL is managed inside ngit. Configure via the setup wizard or <code>ngit init</code>.
+            Test signing from your mobile signer (Amber) on first push.
+          </div>
         </div>
-      </div>
+      </details>
 
+      <details class="config-section cfg-collapsible" id="cfg-relay-section" open>
+        <summary>
+          <h3>Relay</h3>
+          <span class="cfg-summary-meta">${escapeHtml(rc.name || rc.url || '—')}</span>
+        </summary>
+        <div class="cfg-section-body">
+          ${row('Name', rc.name || '—')}
+          ${row('URL',  rc.url  || '—')}
+          <div class="config-row">
+            <div class="k">Write gating</div>
+            <div class="v">
+              <label class="toggle"><input type="checkbox" id="cfg-auth" checked disabled><span class="slider"></span></label>
+              <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">Always on — only the station owner and whitelisted pubkeys can publish. Reads stay open to anyone.</span>
+            </div>
+          </div>
+          <div class="config-row">
+            <div class="k">DM read gating</div>
+            <div class="v">
+              <label class="toggle"><input type="checkbox" id="cfg-dm-auth" disabled><span class="slider"></span></label>
+              <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">Reserved for a future read-gating layer (kind 4/44/1059). Not implemented.</span>
+            </div>
+          </div>
+          <div class="config-row"><div class="k">Whitelist</div><div class="v">${whitelistHtml}</div></div>
+          ${row('Data dir',    rc.dataDir || '—')}
+          ${row('Config file', rc.configPath || '—')}
 
+          <div class="cfg-subsection">
+            <h4>Read relays</h4>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+              Used to look up profile data (kind 0). <b>nostr-station never writes to these relays.</b>
+            </div>
+            <div class="relay-list" id="read-relays">
+              ${relayItems || '<div style="color:var(--muted);font-size:11px">defaults will be used</div>'}
+              <div class="add">
+                <input id="read-relay-input" placeholder="wss://relay.example.com" autocomplete="off">
+                <button id="read-relay-paste">paste</button>
+                <button class="primary" id="read-relay-add">add</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <details class="config-section cfg-collapsible" id="cfg-ai-section" open>
+        <summary>
+          <h3>AI</h3>
+          <span class="cfg-summary-meta">${escapeHtml(summarizeAi(aiList))}</span>
+        </summary>
+        <div class="cfg-section-body">
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+            Terminal-native tools (Claude Code, OpenCode Go) launch in the terminal panel with cwd scoped to the selected project.
+            API providers stream through the Chat pane via <code>/api/ai/chat</code>.
+          </div>
+          ${renderAiProviders(aiList)}
+          <div class="config-row" style="margin-top:10px">
+            <div class="k">Context</div>
+            <div class="v ${cfg.hasContext ? 'on' : 'off'}" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span>${describeContext(cfg)}</span>
+              <button id="cfg-station-edit" type="button">Edit notes</button>
+              <button id="cfg-prompt-preview" type="button">Preview prompt</button>
+            </div>
+          </div>
+          <div class="callout">
+            Per-provider keys live in the OS keychain as <code>ai:&lt;provider&gt;</code>.
+            Config file: <code>~/.nostr-station/ai-config.json</code>.
+          </div>
+
+          <div class="cfg-subsection" id="cfg-stacks-section">
+            <h4>Stacks AI (Dork)</h4>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+              Stacks ships its own AI provider config (separate from the providers above) at
+              <code>~/Library/Preferences/stacks/config.json</code>. The Dork agent that runs inside
+              mkstack projects uses this. Provider list is decided by Stacks itself —
+              <code>stacks configure</code> shows the current options (Anthropic, OpenRouter,
+              Routstr, PayPerQ, etc.).
+            </div>
+            <div class="config-row" style="margin-bottom:10px">
+              <div class="k">Status</div>
+              <div class="v" id="cfg-stacks-status">checking…</div>
+            </div>
+            <div class="keyrow">
+              <button id="cfg-stacks-configure">Configure Stacks AI</button>
+              <span style="font-size:11px;color:var(--muted);align-self:center">
+                opens <code>stacks configure</code> in a terminal tab
+              </span>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <details class="config-section cfg-collapsible" id="cfg-git-section">
+        <summary>
+          <h3>Git</h3>
+          <span class="cfg-summary-meta">
+            ${escapeHtml(gitIdent?.current?.email || 'not set')}${ngitAccount?.loggedIn ? ' · ngit signed in' : ''}
+          </span>
+        </summary>
+        <div class="cfg-section-body">
+
+          <div class="cfg-subsection" id="cfg-git-identity-section">
+            <h4>Git Identity</h4>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+              Author name + email baked into every <code>git commit</code> on this machine. Git records ONE author per commit — when you push to multiple platforms (GitHub, ngit, etc.), all of them see this same author. Per-project overrides are managed in each project's Settings tab.
+            </div>
+            <div class="config-row">
+              <div class="k">Global identity</div>
+              <div class="v">
+                <div class="keyrow">
+                  <div class="keyfield">
+                    <input id="cfg-git-identity-name" type="text" autocomplete="off" placeholder="Your Name" value="${escapeHtml(gitIdent?.current?.name || '')}">
+                  </div>
+                </div>
+                <div class="keyrow" style="margin-top:6px">
+                  <div class="keyfield">
+                    <input id="cfg-git-identity-email" type="text" autocomplete="off" spellcheck="false" placeholder="you@example.com" value="${escapeHtml(gitIdent?.current?.email || '')}">
+                  </div>
+                  <button class="primary" id="cfg-git-identity-save">save</button>
+                </div>
+                <div class="key-status-line ${gitIdent?.current?.name && gitIdent?.current?.email ? 'ok' : ''}" id="cfg-git-identity-status">
+                  ${gitIdent?.current?.name && gitIdent?.current?.email ? '✓ saved (~/.gitconfig)' : 'not set — projects nostr-station scaffolds will auto-seed an npub-synthetic identity per repo'}
+                </div>
+                <div style="margin-top:10px">
+                  <span class="muted" style="font-size:11px">Presets:</span>
+                  <div class="keyrow" style="margin-top:6px;flex-wrap:wrap;gap:6px">
+                    ${gitIdent?.presets?.npubSynthetic ? `
+                      <button id="cfg-git-identity-preset-npub" type="button"
+                              title="${escapeHtml(gitIdent.presets.npubSynthetic.name)} &lt;${escapeHtml(gitIdent.presets.npubSynthetic.email)}&gt;">
+                        Use npub shorthand
+                      </button>
+                    ` : ''}
+                    ${gitIdent?.presets?.nip05 ? `
+                      <button id="cfg-git-identity-preset-nip05" type="button"
+                              title="${escapeHtml(gitIdent.presets.nip05.email)}">
+                        Use my nip-05 (${escapeHtml(gitIdent.presets.nip05.email)})
+                      </button>
+                    ` : ''}
+                  </div>
+                  <div class="muted" style="font-size:11px;margin-top:6px">
+                    <strong>npub shorthand</strong> — pure Nostr identity, links to your npub but not to any GitHub user.<br>
+                    <strong>nip-05</strong> — your Nostr handle as an email-shaped identifier; links to your npub via DNS, AND can link to a GitHub user if that exact email is registered there.<br>
+                    <strong>Set my own</strong> — type a real email above (e.g. your GitHub-registered address) for full GitHub user attribution.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cfg-subsection" id="cfg-ngit-section">
+            <h4>NGIT</h4>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+              Configure git-over-Nostr: pick which GRASP servers host your repos
+              and pair an Amber signer for push/clone.
+            </div>
+
+            <div class="config-row">
+              <div class="k">GRASP servers</div>
+              <div class="v">
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+                  Where your git+nostr data is hosted. The Initialize ngit form on
+                  each project pre-checks these — uncheck per-project if a particular
+                  server doesn't host that repo. Two public defaults are seeded;
+                  add your own grasp (self-hosted or otherwise) below.
+                </div>
+                <div class="relay-list" id="grasp-servers">
+                  ${(ident.graspServers || []).map(url => `
+                    <div class="item" data-url="${escapeHtml(url)}">
+                      <span class="url">${escapeHtml(url)}</span>
+                      <button class="danger rm-grasp">×</button>
+                    </div>`).join('')}
+                  <div class="add">
+                    <input id="grasp-server-input" placeholder="wss://your-grasp-server.example" autocomplete="off">
+                    <button id="grasp-server-paste">paste</button>
+                    <button class="primary" id="grasp-server-add">add</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="config-row" style="margin-top:14px">
+              <div class="k">Account (signer)</div>
+              <div class="v">
+                ${ngitAccount && ngitAccount.loggedIn ? `
+                  <div class="key-status-line ok">✓ signer configured</div>
+                  <div style="font-size:11px;color:var(--text-dim);margin-top:6px">
+                    Relays: ${(ngitAccount.relays || []).length
+                      ? (ngitAccount.relays || []).map(r => `<code>${escapeHtml(r)}</code>`).join(' · ')
+                      : '<em>none declared</em>'}
+                  </div>
+                  ${ngitAccount.remotePubkey ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Remote pubkey: <code>${escapeHtml(ngitAccount.remotePubkey.slice(0, 12))}…</code></div>` : ''}
+                  <div class="keyrow" style="margin-top:10px">
+                    <button id="cfg-ngit-relogin">Re-login</button>
+                    <button class="danger" id="cfg-ngit-logout">Logout</button>
+                  </div>
+                  <div class="muted" style="font-size:11px;margin-top:6px">
+                    Re-login refreshes a stale bunker session — fixes <code>git-remote-nostr</code>
+                    panics during clone/push.
+                  </div>
+                ` : `
+                  <div class="key-status-line err">✗ not logged in</div>
+                  <div class="muted" style="font-size:11px;margin-top:6px">
+                    A signer is required before you can clone ngit repos. Login connects Amber (or another NIP-46 signer) to ngit.
+                  </div>
+                  <div class="keyrow" style="margin-top:10px">
+                    <button class="primary" id="cfg-ngit-relogin">Login</button>
+                  </div>
+                `}
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <details class="config-section cfg-collapsible" id="cfg-templates-section">
+        <summary>
+          <h3>Project Templates</h3>
+          <span class="cfg-summary-meta">scaffolds for new projects</span>
+        </summary>
+        <div class="cfg-section-body">
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+            Templates available to the New Project flow (and to the AI when
+            it picks a starting point for a fresh project). Built-in
+            templates can be edited or reset; user-added ones can be
+            deleted. Stored at <code>~/.config/nostr-station/templates.json</code>.
+          </div>
+          <div id="cfg-templates-list">loading…</div>
+        </div>
+      </details>
+
+      <details class="config-section cfg-collapsible" id="cfg-appearance-section">
+        <summary>
+          <h3>Appearance</h3>
+          <span class="cfg-summary-meta">theme & colors</span>
+        </summary>
+        <div class="cfg-section-body">
+          <div class="config-row">
+            <div class="k">Accent color</div>
+            <div class="v">
+              ${renderThemePicker()}
+              <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
+                Recolors UI accents (links, active nav, primary buttons). Persists in this browser.
+              </div>
+            </div>
+          </div>
+          ${renderDittoCard()}
+        </div>
+      </details>
     `;
 
     // Appearance — accent theme picker + Ditto sync card
@@ -10705,6 +11130,33 @@ const ConfigPanel = (() => {
     // actually configured (guarded by the same branch in renderIdentityBody).
     const idRow = $('cfg-identity-npub');
     if (idRow && ident.npub) idRow.appendChild(copyBtn(ident.npub));
+
+    // Profile stats — kick off the follower / following queries against
+    // the user's read-relays. Render row is already in the DOM (slot
+    // emitted in renderIdentityBody when we have a hex pubkey).
+    const statsEl = $('cfg-profile-stats');
+    if (statsEl && profile?.hex) {
+      const relays = Array.isArray(ident.readRelays) && ident.readRelays.length
+        ? ident.readRelays
+        : [];
+      if (relays.length === 0) {
+        statsEl.innerHTML = `<span class="muted">add read relays to query stats</span>`;
+      } else {
+        fetchProfileStats(profile.hex, relays).then(({ followers, following }) => {
+          if (followers == null && following == null) {
+            statsEl.innerHTML = `<span class="muted">stats unavailable (relays didn't answer)</span>`;
+            return;
+          }
+          statsEl.innerHTML = `
+            <span class="cfg-stat"><b>${fmtCount(following)}</b> following</span>
+            <span class="cfg-stat-sep">·</span>
+            <span class="cfg-stat"><b>${fmtCount(followers)}</b> followers</span>
+          `;
+        }).catch(() => {
+          statsEl.innerHTML = `<span class="muted">stats unavailable</span>`;
+        });
+      }
+    }
 
     // Read-relays list
     $$('#read-relays .rm').forEach(btn => {
@@ -10886,6 +11338,17 @@ const ConfigPanel = (() => {
   // Renders ai-config + registry state from /api/ai/providers. Callers
   // render the list HTML then call wireAiProviders() to attach actions.
   // Keep this in ConfigPanel so the close-over of load() + toast is free.
+
+  // One-liner shown in the AI <details> summary so the user can tell at
+  // a glance how many providers are wired up without expanding the
+  // section. Falls back gracefully if the API list isn't available.
+  function summarizeAi(aiList) {
+    if (!aiList || !Array.isArray(aiList.providers)) return 'provider list unavailable';
+    const configured = aiList.providers.filter(p => p.configured);
+    if (configured.length === 0) return 'no providers configured';
+    if (configured.length === 1) return `1 provider · ${configured[0].displayName}`;
+    return `${configured.length} providers`;
+  }
 
   function renderAiProviders(aiList) {
     if (!aiList || !Array.isArray(aiList.providers)) {
@@ -11574,6 +12037,9 @@ const ConfigPanel = (() => {
   return {
     onEnter() { load(); },
     reload: load,
+    // Re-exported so the Dashboard's Identity card can drive the same
+    // follower / following lookup without duplicating the helper.
+    fetchProfileStats,
   };
 })();
 
