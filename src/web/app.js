@@ -6107,7 +6107,7 @@ const ProjectsPanel = (() => {
     // Default to the latest revision; user can flip via the version pills.
     let activeRev = detail.revisions[detail.revisions.length - 1];
 
-    const renderDetail = () => {
+    const renderDetail = async () => {
       const author = detail.author?.name || shortPubkey(detail.author?.pubkey || '');
       const versionPills = detail.revisions.map(r =>
         `<button class="pdetail-version-pill ${r === activeRev ? 'active' : ''}"
