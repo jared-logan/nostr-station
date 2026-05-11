@@ -1611,6 +1611,24 @@ async function runNvpnInstall() {
   }
 }
 
+// ── Dashboard card helpers ───────────────────────────────────────────
+// Compact display formatters used by the at-a-glance cards on the
+// Dashboard panel. Kept at module scope so StatusPanel (a plain object
+// literal, not an IIFE) can reach them without ceremony.
+function fmtDashCount(n) {
+  if (n == null) return '—';
+  if (n < 1000) return String(n);
+  if (n < 10_000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+  if (n < 1_000_000) return Math.round(n / 1000) + 'K';
+  return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+}
+function formatBytesDashboard(n) {
+  if (n == null) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
 const StatusPanel = {
   // Signature of the last payload we rendered. refreshHealth() ticks every
   // 5s; the status rarely changes between ticks, and re-rendering on every
@@ -1618,7 +1636,16 @@ const StatusPanel = {
   // signatures lets us short-circuit when the payload is unchanged — the
   // DOM stays untouched, expanded rows stay expanded.
   _sig: null,
+  // Cache for the follower/following lookup powering the Identity card.
+  // The query hits 3-5 read-relays per call, so we hold the result for
+  // a few minutes to keep dashboard refreshes cheap.
+  _idStats: null,
+  _idStatsAt: 0,
   async onEnter() {
+    // Dashboard cards render independently of /api/status — kick them
+    // off in parallel so a slow /api/status doesn't blank out the rest
+    // of the panel.
+    this.renderDashboardCards();
     try {
       const status = await api('/api/status');
       this.render(status);
@@ -1626,6 +1653,209 @@ const StatusPanel = {
       $('status-cards').innerHTML = `<div class="empty-state">failed to load status: ${escapeHtml(e.message)}</div>`;
     }
   },
+
+  // ── Quick-glance dashboard cards ────────────────────────────────────
+  //
+  // Four cards: Identity, Projects, Relay, AI default. Each one renders
+  // a "loading" placeholder synchronously then resolves in the background
+  // and patches its content. Clicking any card jumps to the relevant
+  // panel via the existing hash-router.
+  async renderDashboardCards() {
+    const root = $('dashboard-cards');
+    if (!root) return;
+    // First render — emit the four card frames if they aren't there yet.
+    // We keep the frames stable across refreshes so re-renders don't
+    // flash the entire grid (panels feel jerky when the DOM rebuilds).
+    if (!root.firstChild) {
+      root.innerHTML = `
+        <a class="dash-card" href="#config" data-card="identity">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Identity</span>
+            <span class="dash-card-cta">Profile →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-identity">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
+        <a class="dash-card" href="#projects" data-card="projects">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Projects</span>
+            <span class="dash-card-cta">Open →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-projects">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
+        <a class="dash-card" href="#relay" data-card="relay">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Relay</span>
+            <span class="dash-card-cta">Stream →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-relay">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
+        <a class="dash-card" href="#chat" data-card="ai">
+          <div class="dash-card-head">
+            <span class="dash-card-label">AI · Chat</span>
+            <span class="dash-card-cta">Chat →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-ai">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
+      `;
+    }
+    // Fan out the four lookups in parallel. Each card patches its own
+    // body when it resolves; failures degrade gracefully.
+    this._fillIdentityCard();
+    this._fillProjectsCard();
+    this._fillRelayCard();
+    this._fillAiCard();
+  },
+
+  async _fillIdentityCard() {
+    const el = $('dash-card-identity');
+    if (!el) return;
+    try {
+      const [ident, profile] = await Promise.all([
+        api('/api/identity/config'),
+        api('/api/identity/profile').catch(() => null),
+      ]);
+      if (!ident?.npub) {
+        el.innerHTML = `<span class="warn">no identity configured</span>`;
+        return;
+      }
+      const name = profile?.name || truncNpub(ident.npub);
+      const avatar = profile?.picture
+        ? `<img src="${escapeHtml(profile.picture)}" alt="" class="dash-avatar">`
+        : `<span class="dash-avatar">${pixelAvatar(ident.npub, 36)}</span>`;
+      const nip05 = profile?.nip05
+        ? `<div class="dash-sub ${profile.nip05Verified ? 'ok' : ''}">${escapeHtml(profile.nip05)}${profile.nip05Verified ? ' ✓' : ''}</div>`
+        : '';
+      el.innerHTML = `
+        <div class="dash-id-row">
+          ${avatar}
+          <div class="dash-id-text">
+            <div class="dash-id-name">${escapeHtml(name)}</div>
+            ${nip05}
+            <div class="dash-id-stats" id="dash-id-stats">
+              <span class="muted">looking up stats…</span>
+            </div>
+          </div>
+        </div>
+      `;
+      // Stats reuse the helper added for the Config panel. Cache the
+      // result for 5 minutes so dashboard refreshes don't re-query the
+      // user's relays on every panel visit.
+      if (profile?.hex && Array.isArray(ident.readRelays) && ident.readRelays.length) {
+        const statsEl = $('dash-id-stats');
+        const fresh = this._idStats && (Date.now() - this._idStatsAt < 5 * 60 * 1000);
+        const promise = fresh
+          ? Promise.resolve(this._idStats)
+          : ConfigPanel.fetchProfileStats(profile.hex, ident.readRelays)
+              .then(r => { this._idStats = r; this._idStatsAt = Date.now(); return r; });
+        promise.then(({ followers, following }) => {
+          if (!statsEl) return;
+          if (followers == null && following == null) {
+            statsEl.innerHTML = `<span class="muted">stats unavailable</span>`;
+            return;
+          }
+          statsEl.innerHTML = `
+            <span><b>${fmtDashCount(following)}</b> following</span>
+            <span class="sep">·</span>
+            <span><b>${fmtDashCount(followers)}</b> followers</span>
+          `;
+        }).catch(() => {
+          if (statsEl) statsEl.innerHTML = `<span class="muted">stats unavailable</span>`;
+        });
+      } else {
+        const statsEl = $('dash-id-stats');
+        if (statsEl) statsEl.innerHTML = `<span class="muted">add read relays to see stats</span>`;
+      }
+    } catch {
+      el.innerHTML = `<span class="muted">identity unavailable</span>`;
+    }
+  },
+
+  async _fillProjectsCard() {
+    const el = $('dash-card-projects');
+    if (!el) return;
+    try {
+      const r = await api('/api/projects');
+      const projects = Array.isArray(r) ? r : (Array.isArray(r?.projects) ? r.projects : []);
+      if (projects.length === 0) {
+        el.innerHTML = `<div class="dash-big">0</div><div class="dash-sub">add your first project →</div>`;
+        return;
+      }
+      // Most-recently-updated wins as the leading bullet. Projects
+      // payload doesn't always carry an updatedAt, so fall back to the
+      // server's insertion order (already sorted recent-first today).
+      const recent = [...projects]
+        .sort((a, b) => (b.updatedAt || b.lastOpenedAt || 0) - (a.updatedAt || a.lastOpenedAt || 0))
+        .slice(0, 3);
+      const recentList = recent
+        .map(p => `<li>${escapeHtml(p.name || p.id || 'untitled')}</li>`)
+        .join('');
+      el.innerHTML = `
+        <div class="dash-big">${projects.length}</div>
+        <ul class="dash-recent">${recentList}</ul>
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">projects unavailable</span>`;
+    }
+  },
+
+  async _fillRelayCard() {
+    const el = $('dash-card-relay');
+    if (!el) return;
+    try {
+      const [rc, dbStats] = await Promise.all([
+        api('/api/relay-config').catch(() => null),
+        api('/api/relay/database/stats').catch(() => null),
+      ]);
+      const url = rc?.url || 'ws://localhost:7777';
+      const size = dbStats?.exists ? formatBytesDashboard(dbStats.sizeBytes) : 'empty';
+      el.innerHTML = `
+        <div class="dash-relay-url" title="${escapeHtml(url)}">${escapeHtml(url)}</div>
+        <div class="dash-sub">DB size: <b>${escapeHtml(size)}</b></div>
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">relay unavailable</span>`;
+    }
+  },
+
+  async _fillAiCard() {
+    const el = $('dash-card-ai');
+    if (!el) return;
+    try {
+      const list = await api('/api/ai/providers');
+      const providers = Array.isArray(list?.providers) ? list.providers : [];
+      const configured = providers.filter(p => p.configured);
+      const chatDefault = configured.find(p => p.isDefault?.chat);
+      const termDefault = configured.find(p => p.isDefault?.terminal);
+      if (configured.length === 0) {
+        el.innerHTML = `<span class="warn">no providers configured</span>
+          <div class="dash-sub">add one in Config → AI</div>`;
+        return;
+      }
+      const chatLine = chatDefault
+        ? `<div class="dash-sub">Chat: <b>${escapeHtml(chatDefault.displayName)}</b>${chatDefault.model ? ` · <span class="muted">${escapeHtml(chatDefault.model)}</span>` : ''}</div>`
+        : `<div class="dash-sub muted">no chat default set</div>`;
+      const termLine = termDefault
+        ? `<div class="dash-sub">Terminal: <b>${escapeHtml(termDefault.displayName)}</b></div>`
+        : '';
+      el.innerHTML = `
+        <div class="dash-big">${configured.length}</div>
+        <div class="dash-sub">provider${configured.length !== 1 ? 's' : ''} configured</div>
+        ${chatLine}
+        ${termLine}
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">AI providers unavailable</span>`;
+    }
+  },
+
   render(status) {
     const cards = $('status-cards');
     // Signature now includes kind so a future hotfix that re-categorizes
@@ -1930,7 +2160,14 @@ async function appendNsiteStatusCard(container) {
   }
 }
 
-$('status-refresh').addEventListener('click', () => refreshHealth());
+$('status-refresh').addEventListener('click', () => {
+  refreshHealth();
+  // Bust the identity-stats cache so the user gets a true refresh of
+  // follower/following counts when they hit the button (otherwise the
+  // 5-min memoize would mask whatever they wanted to re-check).
+  StatusPanel._idStatsAt = 0;
+  StatusPanel.renderDashboardCards();
+});
 
 // ── Panel: Chat (with provider/model switcher) ───────────────────────────
 
@@ -9822,6 +10059,9 @@ const ConfigPanel = (() => {
   return {
     onEnter() { load(); },
     reload: load,
+    // Re-exported so the Dashboard's Identity card can drive the same
+    // follower / following lookup without duplicating the helper.
+    fetchProfileStats,
   };
 })();
 

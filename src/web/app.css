@@ -463,7 +463,178 @@ input:focus, textarea:focus, select:focus {
   padding: 20px 24px;
 }
 
-/* ── status list (status panel) ───────────────────────────────────────── */
+/* ── dashboard panel (#status hash) ──────────────────────────────────── */
+
+/* Quick-glance card grid above the Service health block. Auto-fits 2-4
+   columns depending on viewport so the cards stay readable on narrow
+   layouts. Each card is wrapped in an <a> so the entire surface is a
+   navigation target — no separate "open" button needed. */
+.dashboard-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.dash-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+  min-height: 96px;
+}
+.dash-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+  transform: translateY(-1px);
+}
+.dash-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dash-card-label {
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--accent-bright);
+  font-weight: 600;
+}
+.dash-card-cta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.dash-card:hover .dash-card-cta { color: var(--accent-bright); }
+.dash-card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text);
+  min-width: 0;
+}
+
+/* Identity card */
+.dash-id-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dash-avatar,
+.dash-avatar img,
+.dash-avatar svg {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: block;
+  object-fit: cover;
+  flex: 0 0 36px;
+}
+.dash-id-text { min-width: 0; flex: 1; }
+.dash-id-name {
+  color: var(--text-bright);
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dash-id-stats {
+  font-size: 11px;
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dash-id-stats b { color: var(--text-bright); margin-right: 3px; }
+.dash-id-stats .sep { color: var(--muted); }
+
+/* Projects card */
+.dash-big {
+  font-size: 28px;
+  line-height: 1.1;
+  font-weight: 700;
+  color: var(--text-bright);
+}
+.dash-recent {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.dash-recent li {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Relay card */
+.dash-relay-url {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Shared muted sublines inside cards */
+.dash-card .dash-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.dash-card .dash-sub b { color: var(--text-bright); font-weight: 600; }
+.dash-card .dash-sub.ok { color: var(--success); }
+.dash-card .warn { color: var(--warn); font-size: 12px; }
+
+/* Service health collapses under the dashboard cards. Same chevron
+   treatment as the new Config <details> sections, but with a discrete
+   subtitle so the user knows what's behind the fold. */
+details.dashboard-health > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 10px 14px;
+  user-select: none;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  margin-bottom: 10px;
+}
+details.dashboard-health > summary::-webkit-details-marker { display: none; }
+details.dashboard-health > summary::marker { content: ''; }
+details.dashboard-health > summary:hover { background: var(--bg-hover); }
+details.dashboard-health > summary::after {
+  content: '▸';
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  transition: transform 140ms ease;
+}
+details.dashboard-health[open] > summary::after { transform: rotate(90deg); }
+details.dashboard-health .dashboard-health-title {
+  font-size: 12px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--accent-bright);
+  font-weight: 600;
+}
+details.dashboard-health .dashboard-health-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ── status list (rendered into #status-cards inside dashboard-health) ── */
 
 .status-list {
   display: flex;
