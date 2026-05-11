@@ -84,6 +84,7 @@ import { handleIdentity } from './routes/identity.js';
 import { handleDitto } from './routes/ditto.js';
 import { handleNgit } from './routes/ngit.js';
 import { handleRepo } from './routes/repo.js';
+import { handlePatches } from './routes/patches.js';
 import {
   handleAi,
   streamAnthropic, streamOpenAICompat,
@@ -1700,6 +1701,12 @@ export async function startWebServer(port: number): Promise<void> {
       // Matched BEFORE handleProjects because the URL shape overlaps
       // (`/api/projects/:id/repo/...`) and we want repo.ts to win.
       if (await handleRepo(req, res, url, method)) return;
+
+      // ── Patches views (extracted to routes/patches.ts) ────────────────
+      // NIP-34 patch series (kind 1617) grouped into PR-shaped series
+      // with revision threading. Drives the Proposals tab + per-patch
+      // detail view. Same precedence rationale as handleRepo.
+      if (await handlePatches(req, res, url, method)) return;
 
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
       if (await handleProjects(req, res, url, method)) return;
