@@ -155,6 +155,156 @@ async function lookupProfile(npubOrHex: string, relays: string[]): Promise<Profi
 
 function bustProfileCache(): void { PROFILE_CACHE.clear(); }
 
+// ── Batched profile lookup (kind-0 over ws, multi-author per REQ) ─────────
+//
+// The owner-profile flow above queries one author per REQ — fine for the
+// drawer's single lookup but wasteful for the About-tab / maintainers-panel
+// case where we need to resolve 3–10 pubkeys at once. This batched variant
+// sends ONE REQ per relay with `authors: [hex…]` and collects all kind-0
+// replies, picking the freshest per pubkey.
+//
+// Shape: returns Map<hex, ProfileLite>. Unknown pubkeys (no relay returned
+// their kind-0) get a minimal entry with only `hex` + `npub` so the caller
+// can still render an npub fallback without a separate code path.
+//
+// Reuses the PROFILE_CACHE — entries written here are interchangeable with
+// the owner-profile path (same hex key, same 5min TTL). NIP-05 verification
+// is intentionally SKIPPED in the batch path: it's one DNS + HTTP per
+// profile, prohibitively expensive for a 10-row maintainers panel. The raw
+// `nip05` claim is still returned so the UI can display "alex@gleasonator.dev"
+// alongside a "(unverified)" marker if it cares.
+
+interface ProfileLite {
+  hex:          string;
+  npub:         string;
+  name?:        string;
+  displayName?: string;     // kind-0 `display_name` field
+  picture?:     string;
+  nip05?:       string;     // raw claim — not verified in the batch path
+  cachedAt:     number;
+}
+
+function fetchKind0BatchFromRelay(
+  relayUrl: string,
+  pubkeys: string[],
+  timeoutMs: number,
+): Promise<any[]> {
+  return new Promise((resolve) => {
+    const out: any[] = [];
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try { ws.close(); } catch {}
+      clearTimeout(timer);
+      resolve(out);
+    };
+    let ws: WebSocket;
+    try { ws = new WebSocket(relayUrl); }
+    catch { resolve(out); return; }
+    const timer = setTimeout(finish, timeoutMs);
+    const subId = 'ns-profiles-' + Math.random().toString(36).slice(2, 8);
+    ws.addEventListener('open', () => {
+      try {
+        ws.send(JSON.stringify(['REQ', subId, { authors: pubkeys, kinds: [0] }]));
+      } catch { finish(); }
+    });
+    ws.addEventListener('message', (m: any) => {
+      try {
+        const msg = JSON.parse(typeof m.data === 'string' ? m.data : m.data.toString());
+        if (Array.isArray(msg)) {
+          if (msg[0] === 'EVENT' && msg[1] === subId && msg[2]?.kind === 0) {
+            out.push(msg[2]);
+          } else if (msg[0] === 'EOSE' && msg[1] === subId) {
+            finish();
+          }
+        }
+      } catch {}
+    });
+    ws.addEventListener('error', () => finish());
+    ws.addEventListener('close', () => finish());
+  });
+}
+
+async function lookupProfilesBatch(
+  pubkeys: string[],
+  relays: string[],
+): Promise<Map<string, ProfileLite>> {
+  const result = new Map<string, ProfileLite>();
+  const need: string[] = [];
+  // Cache hot-path: skip pubkeys whose entry is fresh.
+  for (const hex of pubkeys) {
+    if (!/^[0-9a-f]{64}$/.test(hex)) continue;
+    const cached = PROFILE_CACHE.get(hex);
+    if (cached && Date.now() - cached.cachedAt < PROFILE_TTL_MS) {
+      result.set(hex, {
+        hex:         cached.hex,
+        npub:        cached.npub,
+        name:        cached.name,
+        picture:     cached.picture,
+        nip05:       cached.nip05,
+        cachedAt:    cached.cachedAt,
+      });
+    } else {
+      need.push(hex);
+    }
+  }
+
+  if (need.length === 0 || relays.length === 0) {
+    // Still emit minimal entries for everything requested so the caller
+    // can render an npub fallback uniformly.
+    for (const hex of pubkeys) {
+      if (!result.has(hex) && /^[0-9a-f]{64}$/.test(hex)) {
+        result.set(hex, { hex, npub: hexToNpub(hex), cachedAt: Date.now() });
+      }
+    }
+    return result;
+  }
+
+  // Parallel REQ across all relays. Each relay gets a 5s budget; total
+  // wall-clock cap is ~5s because they run concurrently.
+  const perRelay = await Promise.all(
+    relays.map(r => fetchKind0BatchFromRelay(r, need, 5000)),
+  );
+  // Pick freshest kind-0 per pubkey across all relay responses.
+  const freshest = new Map<string, any>();
+  for (const events of perRelay) {
+    for (const ev of events) {
+      if (!ev || ev.kind !== 0 || typeof ev.pubkey !== 'string') continue;
+      const prev = freshest.get(ev.pubkey);
+      if (!prev || (ev.created_at || 0) > (prev.created_at || 0)) {
+        freshest.set(ev.pubkey, ev);
+      }
+    }
+  }
+
+  for (const hex of need) {
+    const ev = freshest.get(hex);
+    const profile: ProfileLite = { hex, npub: hexToNpub(hex), cachedAt: Date.now() };
+    if (ev && typeof ev.content === 'string') {
+      try {
+        const meta = JSON.parse(ev.content);
+        if (typeof meta.name         === 'string') profile.name        = meta.name;
+        if (typeof meta.display_name === 'string') profile.displayName = meta.display_name;
+        if (typeof meta.picture      === 'string') profile.picture     = meta.picture;
+        if (typeof meta.nip05        === 'string') profile.nip05       = meta.nip05;
+      } catch {}
+    }
+    result.set(hex, profile);
+    // Mirror into the owner-profile cache so subsequent single lookups
+    // for the same pubkey are free.
+    PROFILE_CACHE.set(hex, {
+      hex,
+      npub:     profile.npub,
+      name:     profile.name,
+      picture:  profile.picture,
+      nip05:    profile.nip05,
+      cachedAt: profile.cachedAt,
+    });
+  }
+  return result;
+}
+
 // ── Route handler ──────────────────────────────────────────────────────────
 
 export async function handleIdentity(
@@ -355,6 +505,54 @@ export async function handleIdentity(
       const p = await lookupProfile(ident.npub, ident.readRelays);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(p));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e.message || e) }));
+    }
+    return true;
+  }
+
+  // ── Batched profile lookup ─────────────────────────────────────────────
+  //
+  // GET /api/profiles?pubkeys=hex1,hex2,...&relays=wss://a,wss://b
+  //   Returns a hex → ProfileLite map. Used by the About tab + maintainers
+  //   panel + comment author rows to swap npub fallbacks for real names
+  //   and avatars. Caller passes the project's relay hints as `relays` so
+  //   we don't lean entirely on the user's read-relay set for maintainers
+  //   whose profiles live elsewhere.
+  if (url.startsWith('/api/profiles') && method === 'GET') {
+    const u = new URL(url, 'http://localhost');
+    const pkParam = u.searchParams.get('pubkeys') || '';
+    const pubkeys = pkParam
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(s => /^[0-9a-f]{64}$/.test(s));
+    if (pubkeys.length === 0) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ profiles: {} }));
+      return true;
+    }
+    // Cap at 50 — the maintainer set for any realistic repo is small.
+    // Refuse oversized requests so a stray caller doesn't open 50 WSes
+    // per relay times N relays.
+    if (pubkeys.length > 50) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'too many pubkeys (max 50)' }));
+      return true;
+    }
+    const relaysParam = (u.searchParams.get('relays') || '').split(',')
+      .map(s => s.trim()).filter(s => /^wss?:\/\//.test(s));
+    const ident = readIdentity();
+    const ownerRelays = Array.isArray(ident.readRelays) && ident.readRelays.length > 0
+      ? ident.readRelays
+      : DEFAULT_READ_RELAYS;
+    const relays = [...new Set([...relaysParam, ...ownerRelays])].slice(0, 8);
+    try {
+      const map = await lookupProfilesBatch(pubkeys, relays);
+      const profiles: Record<string, any> = {};
+      for (const [k, v] of map) profiles[k] = v;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ profiles }));
     } catch (e: any) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: String(e.message || e) }));

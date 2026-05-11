@@ -4744,6 +4744,34 @@ const ProjectsPanel = (() => {
       return;
     }
     const ms = repoMeta.maintainerSet;
+    paintAboutTab(container, repo, ms);
+    // Kick off profile resolution for every pubkey we display. The painter
+    // pulls names from the profile cache, so a second paint after this
+    // promise resolves upgrades the visible rows from npub-truncated
+    // placeholders to real names + avatars.
+    const allPubkeys = [
+      repo.pubkey,
+      ...(ms?.verified || []),
+      ...(ms?.candidatesOnly || []),
+    ];
+    const analysisForKeys = analyseAnnouncements(repo, ms);
+    for (const k of analysisForKeys.clonesByMaintainer.keys()) allPubkeys.push(k);
+    // Repo's relays + maintainer-announcement relays make a decent
+    // initial hint set for profile lookups — these maintainers are most
+    // likely to have their kind-0 on relays the repo already touches.
+    const relays = Array.isArray(repo.relays) ? repo.relays : [];
+    resolveProfiles(allPubkeys, { relays }).then(() => {
+      // Guard against tab switch during the fetch — only re-paint if the
+      // user is still on this tab and the container is in the DOM.
+      if (!container.isConnected) return;
+      paintAboutTab(container, repo, ms);
+    });
+  }
+
+  // Pure painter — synchronous, idempotent. Called once with placeholder
+  // names, then again after profile resolution upgrades the cache. Reads
+  // names/avatars from profileCache via profileNameOf.
+  function paintAboutTab(container, repo, ms) {
     const analysis = analyseAnnouncements(repo, ms);
 
     container.innerHTML = `
@@ -4852,8 +4880,13 @@ const ProjectsPanel = (() => {
     }
     const verifiedHtml = verifiedRows.map(({ pubkey, role }) => {
       const isSelected = pubkey === selectedPubkey;
+      const pic = profilePictureOf(pubkey);
+      const avatar = pic
+        ? `<img class="about-avatar" src="${escapeHtml(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
+        : `<div class="about-avatar-placeholder" aria-hidden="true">${escapeHtml(profileNameOf(pubkey).slice(0, 1).toUpperCase())}</div>`;
       return `
         <div class="about-maintainer-row">
+          ${avatar}
           <span class="maintainers-role maintainers-role-${role}" title="${escapeHtml(role === 'anchor' ? 'Trust anchor — published the repo announcement' : 'Verified — published their own kind-30617')}">${escapeHtml(role)}</span>
           <code class="about-maintainer-pk">${escapeHtml(analysis.nameOf(pubkey))}</code>
           ${isSelected ? `<span class="ann-selected">selected</span>` : ''}
@@ -4877,15 +4910,11 @@ const ProjectsPanel = (() => {
   // relays, clones grouped by hosting maintainer.
   function analyseAnnouncements(repo, ms) {
     const events = Array.isArray(ms?.events) ? ms.events : [];
-    const nameOf = (pk) => {
-      try {
-        if (window.NostrTools?.nip19) {
-          const n = window.NostrTools.nip19.npubEncode(pk);
-          return `${n.slice(0, 10)}…${n.slice(-4)}`;
-        }
-      } catch {}
-      return pk.slice(0, 16);
-    };
+    // Defer to the shared profile resolver so the same name shows up
+    // everywhere (About, maintainers panel, announcements modal) and
+    // automatically upgrades from npub fallback → kind-0 display name
+    // once profiles resolve and the painter re-runs.
+    const nameOf = (pk) => profileNameOf(pk);
     const safeHost = (url) => {
       try { return new URL(url).host; } catch { return null; }
     };
@@ -5630,6 +5659,36 @@ const ProjectsPanel = (() => {
         openAnnouncementsModal(repo, repoMeta.maintainerSet);
       });
     }
+    // Resolve profiles for the maintainers shown in the Code-tab panel
+    // so the npub fallbacks upgrade to real names on the next tick. We
+    // only need to repaint the panel's .maintainers-list (not the whole
+    // wrap) — keeps any other listeners on the wrap intact.
+    if (repo && repoMeta?.maintainerSet) {
+      const ms = repoMeta.maintainerSet;
+      const allPubkeys = [
+        repo.pubkey,
+        ...(ms.verified || []),
+        ...(ms.candidatesOnly || []),
+      ];
+      const relays = Array.isArray(repo.relays) ? repo.relays : [];
+      resolveProfiles(allPubkeys, { relays }).then(() => {
+        if (!wrap.isConnected) return;
+        const fresh = buildMaintainersPanel(repo, ms);
+        const oldPanel = wrap.querySelector('.maintainers-panel');
+        if (oldPanel) {
+          const tmp = document.createElement('div');
+          tmp.innerHTML = fresh;
+          const newPanel = tmp.querySelector('.maintainers-panel');
+          if (newPanel) {
+            oldPanel.replaceWith(newPanel);
+            newPanel.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+            // Re-wire the View announcement events button on the fresh panel.
+            const btn = newPanel.querySelector('.maintainers-view-events');
+            if (btn) btn.addEventListener('click', () => openAnnouncementsModal(repo, ms));
+          }
+        }
+      });
+    }
     return wrap;
   }
 
@@ -5668,7 +5727,10 @@ const ProjectsPanel = (() => {
       try {
         if (window.NostrTools?.nip19) npub = window.NostrTools.nip19.npubEncode(pubkey);
       } catch { /* fall back to hex on encode failure */ }
-      const display = npub.startsWith('npub1') ? `${npub.slice(0, 12)}…${npub.slice(-6)}` : shortPubkey(pubkey);
+      // Prefer kind-0 display name when the profile cache has one;
+      // falls back to truncated npub. The Code-tab page kicks off
+      // resolveProfiles after first paint so this upgrades on re-render.
+      const display = profileNameOf(pubkey);
       const r = roleLabel[role];
       return `
         <div class="maintainers-row">
@@ -5707,12 +5769,6 @@ const ProjectsPanel = (() => {
     const events = Array.isArray(ms?.events) ? ms.events : [];
     const selectedPubkey = ms?.display?.pubkey || repo?.pubkey || '';
     const candidates = Array.isArray(ms?.candidatesOnly) ? ms.candidatesOnly : [];
-    const npubFor = (hex) => {
-      try {
-        if (window.NostrTools?.nip19) return window.NostrTools.nip19.npubEncode(hex);
-      } catch {}
-      return hex;
-    };
     const fmtAt = (sec) => {
       if (!sec) return '—';
       const d = new Date(sec * 1000);
@@ -5721,75 +5777,87 @@ const ProjectsPanel = (() => {
         hour: 'numeric', minute: '2-digit',
       });
     };
-    const initialOf = (npub) => (npub.startsWith('npub1') ? npub.slice(5, 7) : npub.slice(0, 2)).toUpperCase();
 
-    const eventRows = events.map((ev, i) => {
-      const npub = npubFor(ev.pubkey);
-      const display = npub.startsWith('npub1') ? `${npub.slice(0, 12)}…${npub.slice(-6)}` : ev.pubkey.slice(0, 16);
-      const isSelected = ev.pubkey === selectedPubkey;
-      return `
-        <div class="ann-row" data-event-idx="${i}">
-          <div class="ann-row-head">
-            <div class="ann-avatar" aria-hidden="true">${escapeHtml(initialOf(npub))}</div>
-            <div class="ann-row-main">
-              <div class="ann-row-name"><code>${escapeHtml(display)}</code>${isSelected ? `<span class="ann-selected">selected</span>` : ''}</div>
-              <div class="ann-row-meta muted">${escapeHtml(fmtAt(ev.created_at))}</div>
+    // Pure painter — reads names from the profile cache. Called once
+    // synchronously, then again after resolveProfiles upgrades the cache.
+    const paint = () => {
+      const eventRows = events.map((ev, i) => {
+        const display = profileNameOf(ev.pubkey);
+        const pic = profilePictureOf(ev.pubkey);
+        const avatar = pic
+          ? `<img class="ann-avatar ann-avatar-img" src="${escapeHtml(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
+          : `<div class="ann-avatar" aria-hidden="true">${escapeHtml(display.slice(0, 2).toUpperCase())}</div>`;
+        const isSelected = ev.pubkey === selectedPubkey;
+        return `
+          <div class="ann-row" data-event-idx="${i}">
+            <div class="ann-row-head">
+              ${avatar}
+              <div class="ann-row-main">
+                <div class="ann-row-name"><code>${escapeHtml(display)}</code>${isSelected ? `<span class="ann-selected">selected</span>` : ''}</div>
+                <div class="ann-row-meta muted">${escapeHtml(fmtAt(ev.created_at))}</div>
+              </div>
+              <button class="ann-raw-toggle" type="button" data-event-idx="${i}">{ } Raw event</button>
             </div>
-            <button class="ann-raw-toggle" type="button" data-event-idx="${i}">{ } Raw event</button>
+            <pre class="ann-raw-json" hidden></pre>
           </div>
-          <pre class="ann-raw-json" hidden></pre>
-        </div>
-      `;
-    }).join('');
+        `;
+      }).join('');
 
-    const candidateBlock = candidates.length > 0 ? `
-      <div class="ann-candidates">
-        <div class="ann-section-head muted">Claimed but not announced (${candidates.length})</div>
-        <div class="ann-candidates-list">
-          ${candidates.map(pk => {
-            const np = npubFor(pk);
-            const disp = np.startsWith('npub1') ? `${np.slice(0, 12)}…${np.slice(-6)}` : pk.slice(0, 16);
-            return `<code class="ann-candidate-pk" title="Listed as a maintainer but has not published their own kind-30617">${escapeHtml(disp)}</code>`;
-          }).join('')}
+      const candidateBlock = candidates.length > 0 ? `
+        <div class="ann-candidates">
+          <div class="ann-section-head muted">Claimed but not announced (${candidates.length})</div>
+          <div class="ann-candidates-list">
+            ${candidates.map(pk => `<code class="ann-candidate-pk" title="Listed as a maintainer but has not published their own kind-30617">${escapeHtml(profileNameOf(pk))}</code>`).join('')}
+          </div>
         </div>
-      </div>
-    ` : '';
+      ` : '';
+
+      body.innerHTML = `
+        <div class="ann-explainer muted">
+          In a multi-maintainer repository each maintainer publishes their own announcement event.
+          Some fields (relays, clone URLs, maintainers) are <strong>unioned across all announcements</strong>,
+          while others (name, description) are taken from the <strong>most recently updated</strong> announcement
+          — that one is marked <span class="ann-selected">selected</span>.
+        </div>
+        <div class="ann-list">${eventRows || `<div class="muted">No verified announcement events found.</div>`}</div>
+        ${candidateBlock}
+      `;
+      body.querySelectorAll('.ann-raw-toggle').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = Number(btn.dataset.eventIdx);
+          const ev = events[idx];
+          if (!ev) return;
+          const pre = btn.closest('.ann-row').querySelector('.ann-raw-json');
+          if (pre.hidden) {
+            pre.textContent = JSON.stringify(ev, null, 2);
+            pre.hidden = false;
+            btn.classList.add('active');
+          } else {
+            pre.hidden = true;
+            pre.textContent = '';
+            btn.classList.remove('active');
+          }
+        });
+      });
+    };
 
     const body = document.createElement('div');
     body.className = 'ann-modal';
-    body.innerHTML = `
-      <div class="ann-explainer muted">
-        In a multi-maintainer repository each maintainer publishes their own announcement event.
-        Some fields (relays, clone URLs, maintainers) are <strong>unioned across all announcements</strong>,
-        while others (name, description) are taken from the <strong>most recently updated</strong> announcement
-        — that one is marked <span class="ann-selected">selected</span>.
-      </div>
-      <div class="ann-list">${eventRows || `<div class="muted">No verified announcement events found.</div>`}</div>
-      ${candidateBlock}
-    `;
+    paint();
     const modal = openModal({
       title:    'Announcement events',
       subtitle: repo?.name || repo?.identifier || '',
       body,
     });
-    // Toggle inline raw JSON. Click the button → expand the <pre>;
-    // click again → collapse. Each row is independent.
-    body.querySelectorAll('.ann-raw-toggle').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const idx = Number(btn.dataset.eventIdx);
-        const ev = events[idx];
-        if (!ev) return;
-        const pre = btn.closest('.ann-row').querySelector('.ann-raw-json');
-        if (pre.hidden) {
-          pre.textContent = JSON.stringify(ev, null, 2);
-          pre.hidden = false;
-          btn.classList.add('active');
-        } else {
-          pre.hidden = true;
-          pre.textContent = '';
-          btn.classList.remove('active');
-        }
-      });
+    // Kick off resolution for every pubkey we display + the candidate
+    // set, then re-paint once. Modal close before resolution = re-paint
+    // is a noop because the body is detached but innerHTML write is still
+    // safe; we cheap-guard with body.isConnected.
+    const allPubkeys = [...events.map(e => e.pubkey), ...candidates];
+    const relays = Array.isArray(repo?.relays) ? repo.relays : [];
+    resolveProfiles(allPubkeys, { relays }).then(() => {
+      if (!body.isConnected) return;
+      paint();
     });
     return modal;
   }
@@ -6321,6 +6389,89 @@ const ProjectsPanel = (() => {
     if (!hex || typeof hex !== 'string') return '';
     if (hex.length <= 16) return hex;
     return `${hex.slice(0, 8)}…${hex.slice(-4)}`;
+  }
+
+  // ── Profile resolution (kind-0 lookup with client-side cache) ─────────
+  //
+  // Backed by GET /api/profiles?pubkeys=…&relays=… (server fetches kind-0
+  // from the user's relays + project hints, parses content JSON, caches).
+  // This helper layers a session-lived client cache on top so re-renders
+  // and tab switches don't refetch. Two concurrent calls for overlapping
+  // sets are deduped by collapsing into a single in-flight request keyed
+  // by the sorted set of "missing" pubkeys.
+  //
+  // Returns Map<hex, ProfileLite>. Always includes an entry for every
+  // requested hex (npub fallback when relays returned nothing), so call
+  // sites can render without an "is this profile resolved yet?" branch.
+  const profileCache = new Map();           // hex → ProfileLite
+  const profileInFlight = new Map();        // key → Promise<Map>
+
+  async function resolveProfiles(pubkeys, opts = {}) {
+    const hexes = Array.from(new Set(
+      (pubkeys || [])
+        .filter(p => typeof p === 'string' && /^[0-9a-f]{64}$/.test(p))
+    ));
+    const out = new Map();
+    const need = [];
+    for (const h of hexes) {
+      const cached = profileCache.get(h);
+      if (cached) out.set(h, cached);
+      else need.push(h);
+    }
+    if (need.length === 0) return out;
+
+    // Dedupe concurrent requests for the same missing set.
+    const key = need.slice().sort().join(',');
+    let promise = profileInFlight.get(key);
+    if (!promise) {
+      const qs = new URLSearchParams();
+      qs.set('pubkeys', need.join(','));
+      if (Array.isArray(opts.relays) && opts.relays.length > 0) {
+        qs.set('relays', opts.relays.join(','));
+      }
+      promise = api(`/api/profiles?${qs.toString()}`)
+        .then(r => {
+          const profiles = (r && r.profiles) || {};
+          for (const h of need) {
+            const p = profiles[h] || { hex: h };
+            profileCache.set(h, p);
+          }
+        })
+        .catch(() => {
+          // Network / server error — still cache minimal entries so we
+          // don't hammer the endpoint on every render attempt.
+          for (const h of need) {
+            if (!profileCache.has(h)) profileCache.set(h, { hex: h });
+          }
+        })
+        .finally(() => profileInFlight.delete(key));
+      profileInFlight.set(key, promise);
+    }
+    await promise;
+    for (const h of need) out.set(h, profileCache.get(h) || { hex: h });
+    return out;
+  }
+
+  // Render-time name resolver. Pure synchronous lookup against the client
+  // cache; falls back to the npub-truncated form when no profile is loaded
+  // yet. Call sites kick off resolveProfiles(...) and re-render to upgrade.
+  function profileNameOf(hex) {
+    if (!hex || typeof hex !== 'string') return '';
+    const p = profileCache.get(hex);
+    if (p && (p.displayName || p.name)) return p.displayName || p.name;
+    // npub fallback — try nip19 if available, otherwise hex.
+    try {
+      if (window.NostrTools?.nip19) {
+        const n = window.NostrTools.nip19.npubEncode(hex);
+        return `${n.slice(0, 10)}…${n.slice(-4)}`;
+      }
+    } catch {}
+    return shortPubkey(hex);
+  }
+
+  function profilePictureOf(hex) {
+    const p = profileCache.get(hex);
+    return p?.picture || '';
   }
 
   // Cache the latest proposals payload per project so re-rendering the
