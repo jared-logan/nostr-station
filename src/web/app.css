@@ -5599,3 +5599,234 @@ body.term-expanded .term-bar-toggle .term-chevron {
   line-height: 1;
 }
 .cpb-dismiss:hover { color: var(--text-bright); }
+
+/* ── Phase 2b: series cards (Proposals tab) ───────────────────────────── */
+
+.proposals-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.proposals-head-actions { display: flex; gap: 8px; }
+
+.proposals-series-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.series-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s;
+}
+.series-card:hover, .series-card:focus-visible {
+  border-color: var(--accent-dim, var(--border-strong, var(--border)));
+  background: var(--bg-hover);
+  outline: none;
+}
+.series-card-main { flex: 1; min-width: 0; }
+.series-card-title {
+  color: var(--text-bright);
+  font-weight: 500;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+.series-card-meta {
+  font-size: 11px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.series-card-meta .k { color: var(--muted); }
+.series-card-pills {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.series-version-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev, var(--bg-card));
+  color: var(--text-dim);
+}
+.series-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ── Phase 2c: per-series detail modal ────────────────────────────────── */
+
+.pdetail-body { font-size: 13px; }
+.pdetail-err {
+  padding: 16px;
+  color: var(--error);
+  background: var(--bg-card);
+  border-radius: 4px;
+}
+.pdetail-head { margin-bottom: 12px; }
+.pdetail-head h3 {
+  margin: 0 0 6px;
+  color: var(--text-bright);
+  font-size: 18px;
+  word-break: break-word;
+}
+.pdetail-head-meta {
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.pdetail-versions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.pdetail-version-pill {
+  padding: 3px 12px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+}
+.pdetail-version-pill:hover { color: var(--text); }
+.pdetail-version-pill.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 500;
+}
+
+.pdetail-cover {
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 16px;
+}
+
+.pdetail-patches {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pdetail-patch {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  overflow: hidden;
+}
+.pdetail-patch-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid transparent;
+}
+.pdetail-patch-main { flex: 1; min-width: 0; }
+.pdetail-patch-subject {
+  color: var(--text-bright);
+  margin-bottom: 2px;
+  word-break: break-word;
+}
+.pdetail-patch-meta {
+  font-size: 11px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.pdetail-toggle-diff {
+  font-size: 11px;
+  padding: 2px 10px;
+  background: var(--bg-elev, var(--bg-card));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.pdetail-toggle-diff:hover:not(:disabled) {
+  border-color: var(--accent-dim, var(--border-strong, var(--border)));
+}
+.pdetail-toggle-diff:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pdetail-diff:not(:empty) {
+  border-top: 1px solid var(--border);
+}
+
+.pdetail-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* ── Parsed-diff viewer (used in Phase 2c detail) ─────────────────────── */
+
+.pdf-summary {
+  padding: 8px 14px;
+  font-size: 12px;
+  background: var(--bg-elev, var(--bg-card));
+}
+.pdf-add { color: var(--accent-bright); }
+.pdf-del { color: var(--error, #d04040); }
+
+.pdf-file { border-top: 1px solid var(--border); }
+.pdf-file:first-of-type { border-top: none; }
+.pdf-file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 14px;
+  background: var(--bg-elev, var(--bg-card));
+  font-size: 12px;
+}
+.pdf-path {
+  color: var(--text-bright);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  word-break: break-all;
+}
+.pdf-stats { font-size: 11px; flex-shrink: 0; padding-left: 12px; }
+
+.pdf-body {
+  margin: 0;
+  padding: 0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-x: auto;
+  background: var(--bg);
+}
+.pdf-line {
+  display: block;
+  padding: 0 12px;
+  white-space: pre;
+}
+.pdf-hunk {
+  background: var(--bg-elev, var(--bg-card));
+  color: var(--accent-bright);
+  font-weight: 500;
+}
+.pdf-add-line { background: rgba(40, 167, 69, 0.10); color: var(--text); }
+.pdf-del-line { background: rgba(208, 64, 64, 0.10); color: var(--text); }
+.pdf-ctx-line { color: var(--text-dim); }

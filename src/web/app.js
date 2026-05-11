@@ -5319,87 +5319,111 @@ const ProjectsPanel = (() => {
   const proposalsCache = new Map();
 
   async function renderProposalsTab(container, p) {
-    // The "View latest patch" button at top runs `git log -p -5` via
-    // the project's exec whitelist. Useful right after a Download —
-    // HEAD is on the proposal branch so the user sees its commits as
-    // diffs without leaving the dashboard.
+    // Phase 2b: PR-shaped series cards driven by /api/projects/:id/patches
+    // (Phase 2a backend). Replaces the flat 1617-row table with a list
+    // grouped by series, version pills (v1 / v2 / …), patch counts, and
+    // a click target that opens the per-series detail view (Phase 2c).
+    //
+    // The legacy /api/projects/:id/ngit/proposals endpoint still exists
+    // for back-compat but isn't called from the UI anymore.
     container.innerHTML = `
       <div class="tab-section">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="proposals-head">
           <h3 style="margin:0">Open proposals</h3>
-          <div style="display:flex;gap:8px">
+          <div class="proposals-head-actions">
             <button class="proposals-view-patch">View latest patch</button>
             <button class="proposals-refresh">Refresh</button>
           </div>
         </div>
         <div class="muted" style="margin-bottom:12px">
-          NIP-34 kind-1617 proposals tagged against this repo's coordinates.
-          Queried from your read relays via <code>nak</code>.
-          Downloading runs <code>ngit pr checkout &lt;id&gt;</code> in the project directory.
+          NIP-34 patch series for this repo, threaded by root + revision.
+          Click a series to inspect commits and the unified diff.
+          Downloading runs <code>ngit pr checkout &lt;id&gt;</code> locally.
         </div>
-        <div class="proposals-list" id="proposals-list">
+        <div class="proposals-series-list" id="proposals-series-list">
           <div class="muted">loading…</div>
         </div>
       </div>
     `;
 
-    const listEl = container.querySelector('#proposals-list');
+    const listEl = container.querySelector('#proposals-series-list');
 
-    const runDownload = async (proposalId, title) => {
+    const runDownload = async (rootId, subject) => {
       const r = await openExecModal({
         title:    `Download proposal · ${p.name}`,
-        subtitle: `ngit pr checkout ${proposalId.slice(0, 12)}…`,
+        subtitle: `ngit pr checkout ${rootId.slice(0, 12)}…`,
         endpoint: `/api/projects/${p.id}/ngit/download`,
-        body:     { proposalId },
+        body:     { proposalId: rootId },
       });
       if (r.ok) {
-        toast(`Checked out: ${title || proposalId.slice(0, 8)}`,
+        toast(`Checked out: ${subject || rootId.slice(0, 8)}`,
               'View latest patch to see commits', 'ok');
       } else {
         toast('Download failed', `exit ${r.code}`, 'err');
       }
     };
 
-    const renderRows = (proposals) => {
-      if (!Array.isArray(proposals) || proposals.length === 0) {
-        listEl.innerHTML = `<div class="muted">No open proposals found on configured relays.</div>`;
+    const renderSeries = (series) => {
+      if (!Array.isArray(series) || series.length === 0) {
+        listEl.innerHTML = `<div class="muted">No proposals found on configured relays.</div>`;
         return;
       }
-      // Freshest first matches the server's sort, but we re-apply on the
-      // client so a stale cache doesn't surprise the user if the server
-      // contract ever drifts.
-      const rows = [...proposals].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-      listEl.innerHTML = rows.map(r => `
-        <div class="proposal-row" data-id="${escapeHtml(r.id)}">
-          <div class="proposal-main">
-            <div class="proposal-title">${escapeHtml(r.title || r.id.slice(0, 8))}</div>
-            <div class="proposal-meta muted">
-              <span class="k">author</span>
-              <code class="cmd-inline">${escapeHtml(shortPubkey(r.pubkey))}</code>
-              · <span class="k">${escapeHtml(fmtAgoIso(new Date((r.createdAt || 0) * 1000).toISOString()))}</span>
-              · <span class="k">id</span>
-              <code class="cmd-inline">${escapeHtml(r.id.slice(0, 12))}…</code>
+      listEl.innerHTML = series.map(s => {
+        // Latest revision drives the "patches in this series" badge —
+        // older revisions are shown as v1 / v2 pills but the action
+        // button defaults to the freshest version.
+        const latest = s.revisions[s.revisions.length - 1];
+        const versionPills = s.revisions.map(r =>
+          `<span class="series-version-pill" data-revision="${r.rootId}">v${r.version}</span>`
+        ).join('');
+        const authorLabel = s.author?.name || shortPubkey(s.author?.pubkey || '');
+        return `
+          <div class="series-card" data-root="${escapeHtml(s.rootId)}" tabindex="0" role="button">
+            <div class="series-card-main">
+              <div class="series-card-title">${escapeHtml(s.subject || s.rootId.slice(0, 8))}</div>
+              <div class="series-card-meta muted">
+                <span class="k">${escapeHtml(authorLabel)}</span>
+                · <span class="k">${escapeHtml(fmtAgoIso(new Date((s.latestRevisionAt || 0) * 1000).toISOString()))}</span>
+                · <span class="k">${s.patchCount} patch${s.patchCount === 1 ? '' : 'es'}</span>
+                ${s.revisionCount > 1 ? `· <span class="k">${s.revisionCount} revisions</span>` : ''}
+              </div>
+              <div class="series-card-pills">${versionPills}</div>
+            </div>
+            <div class="series-card-actions">
+              <button class="primary series-download"
+                      data-root="${escapeHtml(latest.rootId)}"
+                      data-subject="${escapeHtml(s.subject || '')}">Download</button>
+              <span class="copy-slot" data-copy="${escapeHtml(latest.rootId)}"></span>
             </div>
           </div>
-          <div class="proposal-actions">
-            <button class="primary proposal-download" data-id="${escapeHtml(r.id)}"
-              data-title="${escapeHtml(r.title || '')}">Download</button>
-            <span class="copy-slot" data-copy="${escapeHtml(r.id)}"></span>
-          </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
+
       listEl.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
-      listEl.querySelectorAll('.proposal-download').forEach(btn => {
-        btn.addEventListener('click', () => runDownload(btn.dataset.id, btn.dataset.title));
+      listEl.querySelectorAll('.series-download').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          runDownload(btn.dataset.root, btn.dataset.subject);
+        });
+      });
+      listEl.querySelectorAll('.series-card').forEach(card => {
+        card.addEventListener('click', () => openPatchSeriesDetail(p, card.dataset.root));
+        card.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            openPatchSeriesDetail(p, card.dataset.root);
+          }
+        });
       });
     };
 
-    const fetchAndRender = async () => {
+    const fetchAndRender = async (refresh = false) => {
       try {
-        const r = await api(`/api/projects/${p.id}/ngit/proposals`);
-        const proposals = Array.isArray(r?.proposals) ? r.proposals : [];
-        proposalsCache.set(p.id, proposals);
-        renderRows(proposals);
+        const qs = refresh ? '?refresh=1' : '';
+        const r = await api(`/api/projects/${p.id}/patches${qs}`);
+        const series = Array.isArray(r?.series) ? r.series : [];
+        proposalsCache.set(p.id, series);
+        renderSeries(series);
       } catch (e) {
         listEl.innerHTML = `<div class="muted">Failed to load proposals: ${escapeHtml(e?.message || String(e))}</div>`;
       }
@@ -5407,7 +5431,7 @@ const ProjectsPanel = (() => {
 
     container.querySelector('.proposals-refresh').addEventListener('click', () => {
       listEl.innerHTML = `<div class="muted">refreshing…</div>`;
-      fetchAndRender();
+      fetchAndRender(true);
     });
 
     container.querySelector('.proposals-view-patch').addEventListener('click', () => {
@@ -5419,11 +5443,195 @@ const ProjectsPanel = (() => {
       });
     });
 
-    // Use the cache when it's hot to avoid the 5s relay query on every
-    // tab switch; otherwise fetch fresh.
+    // Cache hot path: re-render previous series so the tab feels
+    // instant on switch; background fetch refreshes when the user
+    // clicks Refresh. The cache shape changed in 2b (was flat list,
+    // now series array) — coerce / discard if shape is wrong.
     const cached = proposalsCache.get(p.id);
-    if (Array.isArray(cached)) renderRows(cached);
-    else                       fetchAndRender();
+    if (Array.isArray(cached) && cached[0] && cached[0].revisions) {
+      renderSeries(cached);
+    } else {
+      fetchAndRender();
+    }
+  }
+
+  // ── Phase 2c: per-series detail modal ────────────────────────────
+  //
+  // Opens on series-card click. Shows:
+  //   - Header: subject, author, revision pills (clickable to switch)
+  //   - Cover letter (markdown via renderMarkdown) when present
+  //   - Per-patch list with subject + commit sha + author + lazy diff
+  //   - Per-patch unified diff rendered file-by-file with hljs spans
+  //
+  // Lazy-loads diffs: each patch row has a "view diff" expander that
+  // fetches /patches/:rootId/diff?patchId=… on first open. Avoids
+  // parsing every diff up-front for series with many patches.
+  async function openPatchSeriesDetail(p, rootId) {
+    const body = document.createElement('div');
+    body.className = 'pdetail-body';
+    body.innerHTML = `<div class="muted" style="padding:24px">Loading series…</div>`;
+    const modal = openModal({
+      title:    'Patch series',
+      subtitle: rootId.slice(0, 16) + '…',
+      body,
+    });
+
+    let detail;
+    try {
+      detail = await api(`/api/projects/${p.id}/patches/${rootId}`);
+    } catch (e) {
+      body.innerHTML = `<div class="pdetail-err">Failed to load series: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    if (!detail || detail.error) {
+      body.innerHTML = `<div class="pdetail-err">${escapeHtml(detail?.error || 'series not found')}</div>`;
+      return;
+    }
+
+    // Default to the latest revision; user can flip via the version pills.
+    let activeRev = detail.revisions[detail.revisions.length - 1];
+
+    const renderDetail = () => {
+      const author = detail.author?.name || shortPubkey(detail.author?.pubkey || '');
+      const versionPills = detail.revisions.map(r =>
+        `<button class="pdetail-version-pill ${r === activeRev ? 'active' : ''}"
+                 data-rev="${r.rootId}">v${r.version}</button>`
+      ).join('');
+      const cover = activeRev.coverLetter
+        ? `<div class="pdetail-cover code-md">${renderMarkdown(activeRev.coverLetter)}</div>`
+        : '';
+      const patchRows = activeRev.patches.map((pa, i) => `
+        <div class="pdetail-patch" data-patch="${escapeHtml(pa.id)}" data-idx="${i}">
+          <div class="pdetail-patch-head">
+            <div class="pdetail-patch-main">
+              <div class="pdetail-patch-subject">${escapeHtml(pa.subject)}</div>
+              <div class="pdetail-patch-meta muted">
+                ${pa.commit ? `<code class="cmd-inline">${escapeHtml(pa.commit.slice(0, 8))}</code> · ` : ''}
+                ${escapeHtml(shortPubkey(pa.pubkey))}
+                · ${escapeHtml(fmtAgoIso(new Date((pa.createdAt || 0) * 1000).toISOString()))}
+                ${pa.isCoverLetter ? ' · cover letter' : ''}
+              </div>
+            </div>
+            <button class="pdetail-toggle-diff" ${pa.isCoverLetter ? 'disabled' : ''}>view diff</button>
+          </div>
+          <div class="pdetail-diff" data-loaded="0"></div>
+        </div>
+      `).join('');
+      body.innerHTML = `
+        <div class="pdetail-head">
+          <h3>${escapeHtml(detail.subject)}</h3>
+          <div class="pdetail-head-meta muted">
+            opened by ${escapeHtml(author)}
+            · ${escapeHtml(fmtAgoIso(new Date((detail.createdAt || 0) * 1000).toISOString()))}
+            · ${detail.patchCount} patch${detail.patchCount === 1 ? '' : 'es'}
+          </div>
+          ${detail.revisions.length > 1
+            ? `<div class="pdetail-versions">${versionPills}</div>`
+            : ''}
+        </div>
+        ${cover}
+        <div class="pdetail-patches">${patchRows}</div>
+        <div class="pdetail-foot">
+          <button class="primary pdetail-download">Download</button>
+          <span class="pdetail-copy"></span>
+        </div>
+      `;
+      // Wire interactions.
+      body.querySelectorAll('.pdetail-version-pill').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const target = detail.revisions.find(r => r.rootId === btn.dataset.rev);
+          if (target) { activeRev = target; renderDetail(); }
+        });
+      });
+      body.querySelectorAll('.pdetail-toggle-diff').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const card = btn.closest('.pdetail-patch');
+          const diffEl = card.querySelector('.pdetail-diff');
+          const expanded = diffEl.dataset.loaded === '1';
+          if (expanded) {
+            diffEl.innerHTML = '';
+            diffEl.dataset.loaded = '0';
+            btn.textContent = 'view diff';
+            return;
+          }
+          btn.textContent = 'loading…';
+          btn.disabled = true;
+          const patchId = card.dataset.patch;
+          try {
+            const r = await api(`/api/projects/${p.id}/patches/${detail.rootId}/diff?patchId=${encodeURIComponent(patchId)}`);
+            diffEl.innerHTML = renderParsedDiff(r);
+            diffEl.dataset.loaded = '1';
+            btn.textContent = 'hide diff';
+          } catch (e) {
+            diffEl.innerHTML = `<div class="muted">Failed to load diff: ${escapeHtml(e?.message || String(e))}</div>`;
+            btn.textContent = 'view diff';
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+      body.querySelector('.pdetail-download').addEventListener('click', () => {
+        modal.close();
+        openExecModal({
+          title:    `Download proposal · ${p.name}`,
+          subtitle: `ngit pr checkout ${activeRev.rootId.slice(0, 12)}…`,
+          endpoint: `/api/projects/${p.id}/ngit/download`,
+          body:     { proposalId: activeRev.rootId },
+        }).then((r) => {
+          if (r.ok) toast('Downloaded', detail.subject, 'ok');
+          else      toast('Download failed', `exit ${r.code}`, 'err');
+        });
+      });
+      body.querySelector('.pdetail-copy').appendChild(copyBtn(activeRev.rootId));
+    };
+
+    renderDetail();
+  }
+
+  // Render a ParsedDiff (Phase 2a wire shape) into a file-by-file
+  // <pre>-formatted diff with +/-/context line classes for CSS
+  // colouring. Each chunk header gets a synthesized hunk line so the
+  // user can see the line ranges. No syntax highlighting on diff
+  // lines themselves — diffs are usually too short for hljs auto-
+  // detect to be useful, and per-language detection per file would
+  // double the render cost. The rest of the dashboard uses hljs
+  // (Code tab file preview), so we have a consistent escape hatch
+  // (the user can open the file in Code tab).
+  function renderParsedDiff(r) {
+    if (!r || !Array.isArray(r.files) || r.files.length === 0) {
+      return `<div class="muted">Empty diff (cover letter or non-diff content).</div>`;
+    }
+    const filesHtml = r.files.map(f => {
+      const path = f.to && f.to !== '/dev/null' ? f.to : (f.from || '(unknown)');
+      const stats = `<span class="pdf-add">+${f.additions}</span> <span class="pdf-del">-${f.deletions}</span>`;
+      const chunksHtml = (f.chunks || []).map(ch => {
+        const headerLine = `<span class="pdf-line pdf-hunk">${escapeHtml(ch.content || `@@ ${ch.oldStart},${ch.oldLines} ${ch.newStart},${ch.newLines} @@`)}</span>`;
+        const lines = (ch.changes || []).map(c => {
+          const cls = c.type === 'add' ? 'pdf-add-line'
+                    : c.type === 'del' ? 'pdf-del-line'
+                    : 'pdf-ctx-line';
+          return `<span class="pdf-line ${cls}">${escapeHtml(c.content || '')}</span>`;
+        }).join('');
+        return headerLine + lines;
+      }).join('');
+      return `
+        <div class="pdf-file">
+          <div class="pdf-file-head">
+            <code class="pdf-path">${escapeHtml(path)}</code>
+            <span class="pdf-stats muted">${stats}</span>
+          </div>
+          <pre class="pdf-body">${chunksHtml}</pre>
+        </div>
+      `;
+    }).join('');
+    const summary = `
+      <div class="pdf-summary muted">
+        ${r.fileCount} file${r.fileCount === 1 ? '' : 's'} ·
+        <span class="pdf-add">+${r.totalAdditions}</span>
+        <span class="pdf-del">-${r.totalDeletions}</span>
+      </div>
+    `;
+    return summary + filesHtml;
   }
 
   // Strip the wss:// prefix for display so the picker stays scannable
