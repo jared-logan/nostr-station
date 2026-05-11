@@ -3,6 +3,7 @@
 // utilities (toast, modal, copy-button) at the bottom.
 
 import { previewRetryDecision } from './preview-retry.js';
+import { renderMarkdown, renderCodeBlock } from './markdown.js';
 
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -4413,6 +4414,11 @@ const ProjectsPanel = (() => {
     state.tab = 'overview';
     projectStatus = null; projectGitLog = null;
     render();
+    // Phase 7: fire-and-forget counts fetch so tab badges populate
+    // shortly after the tabs first paint. Doesn't block the initial
+    // render — failure just means tabs without counts.
+    const p = projects.find(x => x.id === id);
+    if (p) refreshTabCounts(p);
   }
 
   function backToList() {
@@ -4456,11 +4462,38 @@ const ProjectsPanel = (() => {
     // existing `ngit` tab already swaps to an Initialize form in that
     // state. Surfacing a separate Proposals tab keeps the list-y view
     // distinct from the operations tab (push / settings).
+    // Tab structure follows the github / gitworkshop pattern: a small,
+    // discoverable set focused on what the user reads (Code, PRs,
+    // Issues), with operational chrome (git remotes, ngit signer +
+    // sync controls) folded into Settings as sections. Reduces the
+    // top-level tab strip from 8 → 6.
+    //
+    // The Code tab is gated on having a local git checkout — its
+    // backing endpoints (refs/tree/blob/log/readme) all shell out to
+    // `git` against project.path. Local-only projects without a repo
+    // (e.g. nsite-only) skip Code but still see Settings.
+    const hasGitCheckout = !!p.path && (p.capabilities.git || p.capabilities.ngit);
+    const counts = (state.tabCounts && state.tabCounts[p.id]) || {};
+    const issueCount = counts.issues;
+    const prCount    = counts.prs;
+    const fmtCount = (n) => (typeof n === 'number' && n > 0)
+      ? ` <span class="tab-count">${n}</span>` : '';
     const tabs = [
       { key: 'overview', label: 'Overview' },
-      p.capabilities.git   && { key: 'git',   label: 'Git' },
-      p.capabilities.ngit  && { key: 'ngit',  label: 'ngit' },
-      (p.capabilities.ngit && p.remotes.ngit) && { key: 'proposals', label: 'Proposals' },
+      hasGitCheckout && { key: 'code', label: 'Code' },
+      // Renamed from "Proposals" — every other Nostr-git client and
+      // github itself call them "Pull requests" / "PRs". Matching
+      // saves new users a beat of mental translation.
+      (p.capabilities.ngit && p.remotes.ngit) && {
+        key: 'proposals',
+        label: `Pull requests${fmtCount(prCount)}`,
+        labelHtml: true,
+      },
+      (p.capabilities.ngit && p.remotes.ngit) && {
+        key: 'issues',
+        label: `Issues${fmtCount(issueCount)}`,
+        labelHtml: true,
+      },
       p.capabilities.nsite && { key: 'nsite', label: 'nsite' },
       { key: 'settings', label: 'Settings' },
     ].filter(Boolean);
@@ -4477,7 +4510,7 @@ const ProjectsPanel = (() => {
     const tabsEl = document.createElement('div');
     tabsEl.className = 'tabs project-tabs';
     tabsEl.innerHTML = tabs.map(t =>
-      `<button class="tab ${t.key === state.tab ? 'active' : ''}" data-tab="${t.key}">${escapeHtml(t.label)}</button>`
+      `<button class="tab ${t.key === state.tab ? 'active' : ''}" data-tab="${t.key}">${t.labelHtml ? t.label : escapeHtml(t.label)}</button>`
     ).join('');
     body.appendChild(tabsEl);
     tabsEl.addEventListener('click', (e) => {
@@ -4524,11 +4557,61 @@ const ProjectsPanel = (() => {
   function renderTab(container, p) {
     container.innerHTML = '';
     if (state.tab === 'overview') renderOverview(container, p);
-    else if (state.tab === 'git')       renderGitTab(container, p);
-    else if (state.tab === 'ngit')      renderNgitTab(container, p);
+    else if (state.tab === 'code')      renderCodeTab(container, p);
     else if (state.tab === 'proposals') renderProposalsTab(container, p);
+    else if (state.tab === 'issues')    renderIssuesTab(container, p);
     else if (state.tab === 'nsite')     renderNsiteTab(container, p);
     else if (state.tab === 'settings')  renderSettingsTab(container, p);
+  }
+
+  // Phase 7: shared empty-state renderer for Issues / PRs lists.
+  // Big icon + title + explanation + optional CTA — matches the
+  // pattern github/gitworkshop both use to onboard first-time users.
+  function renderListEmptyState(opts) {
+    const cta = opts.cta
+      ? `<button class="primary ${escapeHtml(opts.cta.className || '')}">${escapeHtml(opts.cta.label)}</button>`
+      : '';
+    return `
+      <div class="list-empty-state">
+        <div class="list-empty-icon">${escapeHtml(opts.icon || '·')}</div>
+        <div class="list-empty-title">${escapeHtml(opts.title || '')}</div>
+        <div class="list-empty-body muted">${opts.body || ''}</div>
+        ${cta ? `<div class="list-empty-cta">${cta}</div>` : ''}
+      </div>
+    `;
+  }
+
+  // Phase 7: bulk-fetch the issue + PR counts so the tab strip can
+  // show "Pull requests (N)" / "Issues (N)" at-a-glance. Both
+  // endpoints already exist and are cached; one round trip each.
+  // Failures degrade silently — tabs render without the count.
+  async function refreshTabCounts(p) {
+    if (!p.capabilities.ngit || !p.remotes.ngit) return;
+    state.tabCounts = state.tabCounts || {};
+    state.tabCounts[p.id] = state.tabCounts[p.id] || {};
+    try {
+      const [iss, prs] = await Promise.all([
+        api(`/api/projects/${p.id}/issues`).catch(() => null),
+        api(`/api/projects/${p.id}/patches`).catch(() => null),
+      ]);
+      const issues = Array.isArray(iss?.issues) ? iss.issues : [];
+      const series = Array.isArray(prs?.series) ? prs.series : [];
+      // Phase 4 already computes status; pre-annotate so the tab
+      // count reflects ONLY open items (closed / merged / resolved
+      // don't need user attention).
+      await Promise.all([
+        annotateIssuesWithStatus(p.id, issues),
+        annotateSeriesWithStatus(p.id, series),
+      ]);
+      state.tabCounts[p.id].issues = issues.filter(i => (i.status || 'open') === 'open').length;
+      state.tabCounts[p.id].prs    = series.filter(s => (s.effectiveStatus || 'open') === 'open').length;
+      // Refresh ONLY the tab strip (don't re-render the active tab
+      // body — would re-fire its data fetches needlessly).
+      const tabsEl = document.querySelector('.project-tabs');
+      if (tabsEl && state.view === 'detail' && state.projectId === p.id) {
+        renderDetail();
+      }
+    } catch { /* silent */ }
   }
 
   async function renderOverview(container, p) {
@@ -4656,6 +4739,960 @@ const ProjectsPanel = (() => {
     } catch (e) {
       container.innerHTML = `<div class="empty-state err">failed to load git status: ${escapeHtml(e.message)}</div>`;
     }
+  }
+
+  // ── Code tab ─────────────────────────────────────────────────────────
+  //
+  // gitworkshop.dev-style repo home for projects with a local git
+  // checkout. Single-column layout (mobile-first):
+  //   1. Header — repo name / description / maintainers / clone URL
+  //      (when published to ngit), working-tree status badge.
+  //   2. Ref selector — branch/tag dropdown.
+  //   3. File browser — breadcrumb + flat listing of the current
+  //      tree level; click a folder to descend, click a file to open
+  //      the preview pane.
+  //   4. Preview — README (rendered markdown) on tab open; a selected
+  //      file's content otherwise.
+  //   5. Recent commits — last 8.
+  //
+  // All git data comes from local git via routes/repo.ts (Phase 1a) —
+  // no relay round-trip needed for files/commits. The 30617 metadata
+  // (Phase 1a /repo) IS a relay query but is cached for an hour, so
+  // tab opens are cheap after the first.
+  //
+  // Phase 1c handles published projects (state B). Local-only / un-
+  // published (state A) renders a stub pointing the user at Settings;
+  // Phase 1d will replace that with the publish wizard.
+  async function renderCodeTab(container, p) {
+    container.innerHTML = `<div class="code-loading muted">Loading repo…</div>`;
+
+    // Per-tab navigation state — preserved across tab switches so the
+    // user returns to the same ref/path/blob they were viewing. Reset
+    // when the project changes.
+    if (!state.codeView || state.codeView.projectId !== p.id) {
+      state.codeView = { projectId: p.id, ref: 'HEAD', path: '', selectedBlob: null };
+    }
+    const view = state.codeView;
+
+    // Fetch in parallel — the four endpoints are independent and the
+    // round-trip dominates rendering latency. repoMeta now carries
+    // the Phase 5 maintainerSet alongside the parsed 30617 so chips
+    // can surface verified vs candidate-only status.
+    const [pubState, refs, repoMeta, gitState] = await Promise.all([
+      api(`/api/projects/${p.id}/publish-state`).catch(() => null),
+      api(`/api/projects/${p.id}/repo/refs`).catch(() => null),
+      api(`/api/projects/${p.id}/repo`).catch(() => null),
+      api(`/api/projects/${p.id}/git-state`).catch(() => null),
+    ]);
+
+    // Resolve a concrete ref. Prefer HEAD's symbolic target so
+    // checkout/log calls work against a real branch name; fall back
+    // to literal 'HEAD' in detached state.
+    if (view.ref === 'HEAD' && refs?.head && !refs.head.startsWith('(')) {
+      view.ref = refs.head;
+    }
+
+    container.innerHTML = '';
+
+    // Phase 6: scratch-checkout banner. Pinned by the path prefix —
+    // when a project lives under ~/.nostr-station/scratch/ it's a
+    // temporary clone from the Discover → Browse flow. The banner
+    // tells the user it's not persisted into their normal project
+    // list and points to Settings (where they can edit `path` to
+    // promote it to a regular project).
+    if (isScratchProject(p)) {
+      container.appendChild(renderScratchBanner(p));
+    }
+
+    // Local-only fork: full-tab publish wizard. We deliberately skip
+    // the file browser / commits in this state because (a) there's
+    // no nostr context to anchor them in and (b) the publish form
+    // becomes the obvious next step rather than a side-panel.
+    // Phase 1c rendered a tiny stub here; 1d turns it into the real
+    // first-publish experience.
+    if (pubState && pubState.status === 'local-only') {
+      container.appendChild(renderPublishPanel(p, pubState));
+      return;
+    }
+
+    // 1 — Header (with one-time post-publish banner if the user just
+    // came back from a successful publish on this project)
+    if (state.justPublishedProjectId === p.id) {
+      container.appendChild(renderJustPublishedBanner(p, repoMeta));
+      // Clear the flag so the banner only appears once.
+      state.justPublishedProjectId = null;
+    }
+    container.appendChild(renderCodeHeader(p, pubState, repoMeta, gitState));
+
+    // 2 — Ref selector + breadcrumb
+    container.appendChild(renderCodeNav(p, refs, view));
+
+    // 3 — File browser
+    const filesEl = document.createElement('div');
+    filesEl.className = 'code-files';
+    container.appendChild(filesEl);
+    renderCodeFiles(filesEl, p, view);
+
+    // 4 — Preview (README on first open, blob on selection)
+    const previewEl = document.createElement('div');
+    previewEl.className = 'code-preview';
+    container.appendChild(previewEl);
+    renderCodePreview(previewEl, p, view);
+
+    // 5 — Recent commits
+    const commitsEl = document.createElement('div');
+    commitsEl.className = 'code-commits';
+    container.appendChild(commitsEl);
+    renderCodeCommits(commitsEl, p, view);
+  }
+
+  // ── First-publish wizard (Phase 1d) ────────────────────────────────
+  //
+  // Renders an inline panel (full-tab) when a project hasn't been
+  // published to ngit yet. The Review step inserts a confirmation
+  // sheet between the form and the actual `ngit init` SSE so the
+  // user sees exactly what event will be signed and where the repo
+  // will be reachable, plus an opt-in for auto-sync.
+  //
+  // The panel is intentionally a sibling implementation of the
+  // long-standing ngit-tab init form rather than a refactor: the
+  // ngit-tab form is reachable from a different mental model (Init
+  // panel for power-users) and changing both at once would tangle
+  // the diff. They converge on the same /api/projects/:id/ngit/init
+  // endpoint, so they stay behaviourally consistent.
+
+  function renderPublishPanel(p, pubState) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-publish-panel';
+
+    const name = pubState.detectedName || p.name || '';
+    const desc = pubState.detectedDescription || '';
+    const tags = (pubState.suggestedHashtags || []).join(', ');
+    const noPath  = !pubState.isGitRepo;
+    const hasOriginNonNostr = pubState.hasOrigin
+      && pubState.originUrl
+      && !/^nostr:/i.test(pubState.originUrl);
+
+    wrap.innerHTML = `
+      <div class="code-publish-head">
+        <h2>Publish this project to ngit</h2>
+        <p class="muted">
+          Publishes a kind-30617 announcement so collaborators can
+          <code>git clone nostr://…</code> your repo and submit patches
+          directly. You'll review the exact event before anything is
+          signed.
+        </p>
+      </div>
+
+      ${noPath ? `
+        <div class="code-publish-warn cp-needs-init">
+          This project doesn't have a local git repository yet. Click below
+          to run <code>git init</code> + an initial commit before publishing.
+          <div style="margin-top:10px">
+            <button class="primary cp-init-git">Initialize git</button>
+          </div>
+        </div>
+      ` : ''}
+
+      ${hasOriginNonNostr ? `
+        <div class="code-publish-warn">
+          This project already has an <code>origin</code> remote
+          (<code>${escapeHtml(pubState.originUrl || '')}</code>).
+          Publishing will replace it with a <code>nostr://</code> URL.
+          The original is preserved as a local backup branch by
+          <code>ngit init</code>.
+        </div>
+      ` : ''}
+
+      <div class="code-publish-form">
+        <label class="field-label">Repository name</label>
+        <div class="field-row">
+          <input type="text" class="cp-name" value="${escapeHtml(name)}"
+                 placeholder="my-repo" ${noPath ? 'disabled' : ''}>
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:4px">
+          Letters, digits, dot, dash, underscore. 1–64 chars. This becomes
+          the repo's <code>d</code> tag and the path in the clone URL.
+        </div>
+
+        <label class="field-label" style="margin-top:12px">Description</label>
+        <div class="field-row">
+          <input type="text" class="cp-description" value="${escapeHtml(desc)}"
+                 placeholder="What does this project do?" ${noPath ? 'disabled' : ''}>
+        </div>
+
+        <label class="field-label" style="margin-top:12px">Hashtags (optional, space-separated)</label>
+        <div class="field-row">
+          <input type="text" class="cp-hashtags" value="${escapeHtml(tags)}"
+                 placeholder="nostr  app  rust" ${noPath ? 'disabled' : ''}>
+        </div>
+
+        <label class="field-label" style="margin-top:12px">GRASP server</label>
+        <div class="field-row">
+          <input type="text" class="cp-grasp" value="${escapeHtml(pubState.suggestedGraspServer || 'wss://relay.ngit.dev')}"
+                 placeholder="wss://relay.ngit.dev" ${noPath ? 'disabled' : ''}>
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:4px">
+          Where your git data lives. Anyone can host one;
+          <a href="https://gitgrasp.com" target="_blank" rel="noreferrer">learn more</a>.
+        </div>
+
+        <div class="step-actions" style="margin-top:16px">
+          <button class="primary cp-review" ${noPath ? 'disabled' : ''}>Review announcement</button>
+          <a href="#" class="cp-cli-escape muted">Use the ngit CLI instead →</a>
+        </div>
+      </div>
+    `;
+
+    if (noPath) {
+      // Wire the Initialize-git button. After success, re-render the
+      // Code tab so the warn panel collapses and the publish form
+      // becomes interactive.
+      wrap.querySelector('.cp-init-git').addEventListener('click', () => {
+        openExecModal({
+          title:    `Initialize git · ${p.name}`,
+          subtitle: 'git init && git add -A && git commit -m "initial commit"',
+          endpoint: `/api/projects/${p.id}/git-init`,
+          body:     {},
+        }).then((r) => {
+          if (r.ok) {
+            toast('Git initialized', `${p.name} is ready to publish`, 'ok');
+            // Re-fetch + re-render Code tab so the form unlocks.
+            renderTab(document.querySelector('.project-tab-content'), p);
+          } else {
+            toast('git init failed', `exit ${r.code}`, 'err');
+          }
+        });
+      });
+      return wrap;
+    }
+
+    wrap.querySelector('.cp-cli-escape').addEventListener('click', (e) => {
+      e.preventDefault();
+      state.tab = 'ngit';
+      render();
+    });
+
+    wrap.querySelector('.cp-review').addEventListener('click', async () => {
+      const formData = readPublishFormData(wrap);
+      if (!formData) return;
+      // Fetch identity + signer state up-front so the Review sheet can
+      // accurately reflect "this will sign as <npub>" / "Amber not paired".
+      const [owner, account] = await Promise.all([
+        api('/api/identity/config').catch(() => ({ npub: '' })),
+        api('/api/ngit/account').catch(() => ({ loggedIn: false })),
+      ]);
+      openPublishReview(p, formData, owner, account, pubState);
+    });
+
+    return wrap;
+  }
+
+  function readPublishFormData(wrap) {
+    const name        = wrap.querySelector('.cp-name').value.trim();
+    const description = wrap.querySelector('.cp-description').value.trim();
+    const grasp       = wrap.querySelector('.cp-grasp').value.trim();
+    const hashtags    = wrap.querySelector('.cp-hashtags').value.trim()
+      .split(/[\s,]+/).filter(Boolean).slice(0, 8);
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
+      toast('Invalid name', '1-64 chars: alphanumerics, dot, dash, underscore', 'err');
+      return null;
+    }
+    if (grasp && !/^wss?:\/\//i.test(grasp)) {
+      toast('Invalid GRASP server URL', 'must start with wss:// or ws://', 'err');
+      return null;
+    }
+    return { name, description, hashtags, graspServers: grasp ? [grasp] : [] };
+  }
+
+  function openPublishReview(p, formData, owner, account, pubState) {
+    const npub = owner?.npub || '(no npub configured)';
+    const grasp = formData.graspServers[0] || 'wss://relay.ngit.dev';
+    const graspHost = String(grasp).replace(/^wss?:\/\//, '');
+    const cloneUrl  = `https://${graspHost}/${npub}/${formData.name}.git`;
+    const shareUrl  = `nostr://${npub}/${formData.name}`;
+
+    // Tag rows pinned to NIP-34 §1.2 — this is the contract the user
+    // is reviewing. Keep field names verbatim so a curious reader can
+    // cross-check against the spec.
+    const tagRows = [
+      ['d',           formData.name],
+      ['name',        formData.name],
+      formData.description ? ['description', formData.description] : null,
+      ['clone',       cloneUrl],
+      ['relays',      grasp],
+      ...formData.hashtags.map(t => ['t', t]),
+    ].filter(Boolean);
+
+    const tagHtml = tagRows.map(([k, v]) =>
+      `<div class="rev-tag-row">
+         <code class="rev-tag-key">${escapeHtml(k)}</code>
+         <code class="rev-tag-val">${escapeHtml(v)}</code>
+       </div>`,
+    ).join('');
+
+    const branchLine = pubState.detectedBranch
+      ? `Push branch <code>${escapeHtml(pubState.detectedBranch)}</code> to the GRASP server`
+      : 'Push current branch to the GRASP server';
+
+    const body = document.createElement('div');
+    body.className = 'rev-body';
+    body.innerHTML = `
+      <div class="rev-section">
+        <h4>Event to publish</h4>
+        <div class="rev-meta">
+          <span class="rev-pill"><span class="k">kind</span><span class="v">30617</span></span>
+          <span class="rev-pill"><span class="k">signed by</span><span class="v">${escapeHtml(shortPubkey(npub))}</span></span>
+        </div>
+        <div class="rev-tags">${tagHtml}</div>
+      </div>
+
+      <div class="rev-section">
+        <h4>After publishing</h4>
+        <ul class="rev-list">
+          <li>${branchLine}</li>
+          <li>Configure git remote <code>origin</code> → <code>${escapeHtml(shareUrl)}</code></li>
+          <li>Anyone can clone with <code>git clone ${escapeHtml(shareUrl)}</code></li>
+        </ul>
+      </div>
+
+      <div class="rev-section">
+        <h4>Continuous sync</h4>
+        <label class="rev-autosync">
+          <input type="checkbox" class="rev-autosync-toggle" checked>
+          <span>
+            <strong>Enable auto-sync after publishing</strong>
+            <div class="muted" style="font-size:12px;margin-top:2px">
+              Pulls remote changes and pushes local commits every few minutes.
+              Toggle later in Settings.
+            </div>
+          </span>
+        </label>
+      </div>
+
+      ${!account?.loggedIn ? `
+        <div class="rev-warn">
+          <strong>Amber not paired.</strong> ngit init publishes a signed
+          event; without a signer, publishing will fail. Pair Amber in
+          Config → ngit and try again.
+        </div>
+      ` : ''}
+    `;
+
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px'; foot.style.width = '100%';
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    const publish = document.createElement('button');
+    publish.className = 'primary';
+    publish.textContent = 'Publish';
+    publish.disabled = !account?.loggedIn;
+    if (!account?.loggedIn) publish.title = 'Pair Amber first';
+    const spacer = document.createElement('div');
+    spacer.style.flex = '1';
+    foot.appendChild(cancel); foot.appendChild(spacer); foot.appendChild(publish);
+
+    const modal = openModal({
+      title:    'Review announcement',
+      subtitle: `${p.name} → ${shareUrl}`,
+      body,
+      footer:   foot,
+    });
+
+    cancel.addEventListener('click', () => modal.close());
+    publish.addEventListener('click', () => {
+      const enableAutoSync = body.querySelector('.rev-autosync-toggle').checked;
+      modal.close();
+      runPublishFlow(p, formData, enableAutoSync);
+    });
+  }
+
+  async function runPublishFlow(p, formData, enableAutoSync) {
+    const r = await openExecModal({
+      title:    `Publish ${p.name}`,
+      subtitle: `ngit init --name ${formData.name}`,
+      endpoint: `/api/projects/${p.id}/ngit/init`,
+      body:     {
+        name:         formData.name,
+        description:  formData.description,
+        graspServers: formData.graspServers,
+      },
+    });
+    if (!r.ok) return;  // exec modal stays open with the error stream
+
+    // Sync the project record so the new ngit remote + autoSync flag
+    // land before the next render. We re-detect first (picks up the
+    // ngit URL ngit init wrote into git config), then PATCH any
+    // additional flags the user opted into.
+    try {
+      const det = await api('/api/projects/detect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: p.path }),
+      });
+      const patch = {};
+      if (det.ngitRemote) {
+        patch.remotes = { github: p.remotes.github || null, ngit: det.ngitRemote };
+      }
+      if (enableAutoSync) patch.autoSync = true;
+      if (Object.keys(patch).length > 0) {
+        await api(`/api/projects/${p.id}`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(patch),
+        });
+      }
+      // Mark for the one-time success banner; cleared on the next
+      // renderCodeTab pass so it doesn't reappear on tab switches.
+      state.justPublishedProjectId = p.id;
+      toast('Published to ngit',
+            enableAutoSync ? 'auto-sync enabled' : 'manual sync', 'ok');
+    } catch (e) {
+      toast('Post-publish sync failed', e?.message || '', 'warn');
+    }
+    reload();
+  }
+
+  // Phase 6: scratch checkout heuristic. The /api/ngit/explore
+  // endpoint always lands in ~/.nostr-station/scratch/<...>, so a
+  // simple substring match is unambiguous. (We don't need an
+  // absolute path check because the server only ever writes under
+  // HOME, and the path comparison happens client-side on a string
+  // the server emitted.)
+  function isScratchProject(p) {
+    return typeof p?.path === 'string' && p.path.includes('/.nostr-station/scratch/');
+  }
+
+  function renderScratchBanner(p) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-scratch-banner';
+    wrap.innerHTML = `
+      <div class="csb-icon">🧪</div>
+      <div class="csb-body">
+        <div class="csb-title">Temporary clone</div>
+        <div class="csb-sub muted">
+          You're browsing this repo from a scratch checkout at
+          <code class="csb-path">${escapeHtml(p.path)}</code>.
+          Scratch checkouts older than 7 days are cleaned up
+          automatically.
+        </div>
+      </div>
+      <div class="csb-actions">
+        <button class="primary csb-save">Save to project list</button>
+      </div>
+    `;
+    wrap.querySelector('.csb-save').addEventListener('click', () => openSavePathModal(p));
+    return wrap;
+  }
+
+  // Phase 6-tidy: prompt for a target path + POST /save. Pre-fills
+  // ~/projects/<basename> so the common case is one click. The
+  // server validates the path is under HOME and atomic-moves the
+  // directory; on success the project record is updated and we
+  // re-render to drop the scratch banner.
+  function openSavePathModal(p) {
+    const base = (p.path || '').split('/').pop() || p.name;
+    // Strip the scratch-hash suffix from the directory name when
+    // pre-filling so the saved location reads as `<name>` not
+    // `<name>-<hash>`.
+    const cleanName = base.replace(/-[a-f0-9]{8}$/, '');
+    const homeHint  = window.__homeDir || '~';
+    const defaultTarget = `${homeHint}/projects/${cleanName}`;
+
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div class="muted" style="margin-bottom:10px">
+        Moves <code>${escapeHtml(p.path)}</code> to a permanent
+        location under your home directory. The project record is
+        updated so the dashboard keeps tracking it.
+      </div>
+      <label class="field-label">Target path</label>
+      <input type="text" class="csm-target" value="${escapeHtml(defaultTarget)}"
+             style="width:100%" autofocus>
+      <div class="muted" style="font-size:11px;margin-top:4px">
+        Must be under your home directory. Parent dirs are created
+        automatically. Cancel if you'd rather pick the path manually
+        from Settings.
+      </div>
+    `;
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px'; foot.style.width = '100%';
+    const cancel = document.createElement('button'); cancel.textContent = 'Cancel';
+    const submit = document.createElement('button');
+    submit.className = 'primary'; submit.textContent = 'Save';
+    const spacer = document.createElement('div'); spacer.style.flex = '1';
+    foot.appendChild(cancel); foot.appendChild(spacer); foot.appendChild(submit);
+
+    const modal = openModal({ title: 'Save to project list', subtitle: p.name, body, footer: foot });
+    cancel.addEventListener('click', () => modal.close());
+    submit.addEventListener('click', async () => {
+      const target = body.querySelector('.csm-target').value.trim();
+      if (!target) { toast('Target path required', '', 'err'); return; }
+      submit.disabled = true; submit.textContent = 'Saving…';
+      try {
+        const r = await api(`/api/projects/${p.id}/save`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ targetPath: target }),
+        });
+        if (r?.ok) {
+          toast('Saved', `Moved to ${r.project.path}`, 'ok');
+          modal.close();
+          await reload();
+          // Re-render the now-non-scratch project — banner will be
+          // gone, Code tab unchanged otherwise.
+          renderTab(document.querySelector('.project-tab-content'), r.project);
+        } else {
+          toast('Save failed', r?.error || 'unknown error', 'err');
+          submit.disabled = false; submit.textContent = 'Save';
+        }
+      } catch (e) {
+        toast('Save failed', e?.message || String(e), 'err');
+        submit.disabled = false; submit.textContent = 'Save';
+      }
+    });
+  }
+
+  function renderJustPublishedBanner(p, repoMeta) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-published-banner';
+    const shareUrl = repoMeta?.repo
+      ? `nostr://${shortPubkey(repoMeta.repo.pubkey)}/${repoMeta.repo.identifier}`
+      : '';
+    wrap.innerHTML = `
+      <div class="cpb-icon">✓</div>
+      <div class="cpb-body">
+        <div class="cpb-title">Published to ngit</div>
+        <div class="cpb-sub muted">
+          Anyone can now clone with this URL:
+          ${shareUrl ? `<code class="cpb-url">${escapeHtml(shareUrl)}</code>` : '<em>(detecting clone URL…)</em>'}
+        </div>
+      </div>
+      ${shareUrl ? `<span class="cpb-copy"></span>` : ''}
+      <button class="cpb-dismiss" aria-label="Dismiss">×</button>
+    `;
+    if (shareUrl) {
+      wrap.querySelector('.cpb-copy').appendChild(copyBtn(shareUrl));
+    }
+    wrap.querySelector('.cpb-dismiss').addEventListener('click', () => wrap.remove());
+    return wrap;
+  }
+
+  function renderCodeHeader(p, pubState, repoMeta, gitState) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-header';
+
+    const repo = repoMeta?.repo;          // null when local-only
+    const name = repo?.name || pubState?.detectedName || p.name;
+    const desc = repo?.description || pubState?.detectedDescription || '';
+
+    // Working-tree status badge. Phase 7: plain English replaces the
+    // M·N ↑N ↓N glyphs — friendlier for non-developer users and
+    // still scannable for power users. Hidden entirely when there's
+    // nothing to report (clean + in-sync).
+    let badge = '';
+    if (gitState && gitState.backend !== 'local-only') {
+      const parts = [];
+      if (gitState.dirty)        parts.push(`<span class="code-badge-warn">unsaved changes</span>`);
+      if (gitState.ahead  > 0)   parts.push(`<span class="code-badge-up">${gitState.ahead} ahead</span>`);
+      if (gitState.behind > 0)   parts.push(`<span class="code-badge-down">${gitState.behind} behind</span>`);
+      if (parts.length) {
+        badge = `<span class="code-badge" title="working tree state relative to the remote">${parts.join(' · ')}</span>`;
+      }
+    }
+
+    // Maintainer + clone chips only for published projects.
+    // Phase 5: verified vs candidate maintainer split.
+    // Phase 7: clone URLs become a real dropdown (grouped by
+    // protocol) rather than a count chip — copy-to-clipboard from
+    // the dropdown menu so the user can grab a URL without
+    // leaving the Code tab.
+    let chips = '';
+    let cloneDropdown = null;
+    if (repo) {
+      const ms = repoMeta.maintainerSet;
+      const verifiedCount = ms ? ms.verified.length     : (repo.maintainers?.length || 0);
+      const candidateCount = ms ? ms.candidatesOnly.length : 0;
+      const cloneUrls = (ms && ms.clone.length > 0) ? ms.clone : (repo.clone || []);
+      const chipParts = [];
+      if (verifiedCount > 0) {
+        chipParts.push(`<span class="code-chip code-chip-verified" title="Verified — published own kind-30617 under this coordinate"><span class="k">✓ verified</span><span class="v">${verifiedCount}</span></span>`);
+      }
+      if (candidateCount > 0) {
+        chipParts.push(`<span class="code-chip code-chip-candidate" title="Claimed as maintainer by the announcement but has not published their own kind-30617 — cannot grant authority on this repo"><span class="k">⚠ candidate</span><span class="v">${candidateCount}</span></span>`);
+      }
+      const hashtags = (ms && ms.hashtags.length > 0) ? ms.hashtags : (repo.hashtags || []);
+      for (const t of hashtags.slice(0, 4)) {
+        chipParts.push(`<span class="code-chip code-chip-tag">#${escapeHtml(t)}</span>`);
+      }
+      chips = `<div class="code-chips">${chipParts.join('')}</div>`;
+      if (cloneUrls.length > 0) cloneDropdown = buildCloneDropdown(cloneUrls);
+    }
+
+    wrap.innerHTML = `
+      <div class="code-title-row">
+        <h2 class="code-title">${escapeHtml(name)}</h2>
+        ${badge}
+        <span class="code-clone-slot"></span>
+      </div>
+      ${desc ? `<div class="code-desc">${escapeHtml(desc)}</div>` : ''}
+      ${chips}
+    `;
+    if (cloneDropdown) {
+      wrap.querySelector('.code-clone-slot').appendChild(cloneDropdown);
+    }
+    return wrap;
+  }
+
+  // Phase 7: clone URLs grouped by transport (Nostr / HTTPS / SSH /
+  // Git / Other) — mirrors nostrhub's pattern. Click any row to copy
+  // that URL; click the toggle to open/close. Closes on outside
+  // click. Returns a DOM node; caller decides where to mount it.
+  function buildCloneDropdown(urls) {
+    const wrap = document.createElement('div');
+    wrap.className = 'clone-dropdown';
+    const groups = {
+      Nostr:  urls.filter(u => /^nostr:/i.test(u)),
+      HTTPS:  urls.filter(u => /^https:/i.test(u)),
+      HTTP:   urls.filter(u => /^http:/i.test(u)),
+      SSH:    urls.filter(u => /^(ssh|git\+ssh):/i.test(u) || /^[^/]+@[^:]+:/.test(u)),
+      Git:    urls.filter(u => /^git:/i.test(u)),
+    };
+    // Catch-all for anything that didn't slot into the named groups.
+    const classified = new Set([
+      ...groups.Nostr, ...groups.HTTPS, ...groups.HTTP,
+      ...groups.SSH, ...groups.Git,
+    ]);
+    const other = urls.filter(u => !classified.has(u));
+    if (other.length) groups.Other = other;
+
+    const groupRows = Object.entries(groups)
+      .filter(([, list]) => list.length > 0)
+      .map(([label, list]) => `
+        <div class="clone-group">
+          <div class="clone-group-head">${escapeHtml(label)}</div>
+          ${list.map((u) => `
+            <div class="clone-row">
+              <code class="clone-url" title="Click to copy">${escapeHtml(u)}</code>
+              <span class="copy-slot" data-copy="${escapeHtml(u)}"></span>
+            </div>
+          `).join('')}
+        </div>
+      `).join('');
+
+    wrap.innerHTML = `
+      <button class="clone-toggle" aria-haspopup="true" aria-expanded="false">
+        ⌥ Clone ▾
+      </button>
+      <div class="clone-menu" hidden>${groupRows}</div>
+    `;
+    const toggle = wrap.querySelector('.clone-toggle');
+    const menu   = wrap.querySelector('.clone-menu');
+    const close = () => {
+      menu.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+    };
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      menu.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+      if (open) {
+        // Wire copy buttons + URL click-to-copy on first open.
+        wrap.querySelectorAll('.copy-slot').forEach(s => {
+          if (s.childElementCount === 0) s.appendChild(copyBtn(s.dataset.copy));
+        });
+        wrap.querySelectorAll('.clone-url').forEach(el => {
+          el.onclick = () => {
+            navigator.clipboard?.writeText(el.textContent || '').then(
+              () => toast('Copied', el.textContent, 'ok'),
+            ).catch(() => {});
+          };
+        });
+      }
+    });
+    // Outside click closes the menu.
+    document.addEventListener('click', (e) => {
+      if (!wrap.contains(e.target)) close();
+    });
+    return wrap;
+  }
+
+  function renderCodeNav(p, refs, view) {
+    const wrap = document.createElement('div');
+    wrap.className = 'code-nav';
+
+    // Branch/tag selector. <select> is intentional — fully keyboard-
+    // accessible and matches the dashboard's existing form style.
+    const branches = refs?.branches || [];
+    const tags     = refs?.tags     || [];
+    const refOptions = [
+      ...branches.map(b => ({ value: b.name, label: b.name, group: 'branches' })),
+      ...tags    .map(t => ({ value: t.name, label: t.name, group: 'tags'     })),
+    ];
+
+    let selectHtml = '';
+    if (refOptions.length > 0) {
+      const byGroup = (group) => refOptions
+        .filter(o => o.group === group)
+        .map(o => `<option value="${escapeHtml(o.value)}" ${o.value === view.ref ? 'selected' : ''}>${escapeHtml(o.label)}</option>`)
+        .join('');
+      selectHtml = `
+        <select class="code-ref-select" aria-label="Branch or tag">
+          <optgroup label="branches">${byGroup('branches')}</optgroup>
+          ${tags.length > 0 ? `<optgroup label="tags">${byGroup('tags')}</optgroup>` : ''}
+        </select>
+      `;
+    } else {
+      // Fallback for the "no refs" edge case (empty repo). The user
+      // sees the literal HEAD string with no surprise dropdown.
+      selectHtml = `<span class="muted code-ref-static">${escapeHtml(view.ref)}</span>`;
+    }
+
+    // Breadcrumb trail. Each segment is clickable and pops the path
+    // back to that level. Root segment ("/" or repo name) goes home.
+    const segs = view.path ? view.path.split('/') : [];
+    const crumbHtml = [
+      `<button class="code-crumb code-crumb-root" data-path="">${escapeHtml(p.name)}</button>`,
+      ...segs.map((seg, i) => {
+        const subPath = segs.slice(0, i + 1).join('/');
+        return `<span class="code-crumb-sep">/</span><button class="code-crumb" data-path="${escapeHtml(subPath)}">${escapeHtml(seg)}</button>`;
+      }),
+    ].join('');
+
+    wrap.innerHTML = `
+      <div class="code-nav-row">
+        ${selectHtml}
+        <div class="code-breadcrumb">${crumbHtml}</div>
+      </div>
+    `;
+
+    const sel = wrap.querySelector('.code-ref-select');
+    if (sel) sel.addEventListener('change', () => {
+      view.ref = sel.value;
+      view.path = '';
+      view.selectedBlob = null;
+      // Re-render the whole tab — branch switch invalidates files,
+      // preview, and commits all at once.
+      renderTab(document.querySelector('.project-tab-content'), p);
+    });
+
+    wrap.querySelectorAll('.code-crumb').forEach(btn => {
+      btn.addEventListener('click', () => {
+        view.path = btn.dataset.path;
+        view.selectedBlob = null;
+        renderTab(document.querySelector('.project-tab-content'), p);
+      });
+    });
+
+    return wrap;
+  }
+
+  async function renderCodeFiles(el, p, view) {
+    el.innerHTML = `<div class="muted">Loading files…</div>`;
+    // Phase 7: withLog=1 asks the backend for per-entry last-commit
+    // info. One bounded `git log` walk inside /repo/tree returns
+    // file → most-recent-commit map; entries get a lastCommit field
+    // for the file browser to display alongside name + size.
+    const qs = new URLSearchParams({ ref: view.ref, path: view.path, withLog: '1' });
+    let r;
+    try {
+      r = await api(`/api/projects/${p.id}/repo/tree?${qs}`);
+    } catch (e) {
+      el.innerHTML = `<div class="muted">Failed to load tree: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    if (r?.error) {
+      el.innerHTML = `<div class="muted">${escapeHtml(r.error)}</div>`;
+      return;
+    }
+    const entries = Array.isArray(r?.entries) ? r.entries : [];
+    if (entries.length === 0) {
+      el.innerHTML = `<div class="muted">Empty.</div>`;
+      return;
+    }
+    const rows = entries.map(e => {
+      const icon = e.type === 'tree' ? '📁' : (e.type === 'commit' ? '🔗' : '📄');
+      const sizeCell = e.type === 'blob' && Number.isFinite(e.size)
+        ? `<span class="code-file-size muted">${fmtBytes(e.size)}</span>`
+        : '<span class="code-file-size muted"></span>';
+      // lastCommit cell — subject (truncated) + relative time. Blank
+      // when the backend couldn't find a commit within the 200-commit
+      // window. Click forwards to the relevant commit page (Phase 8
+      // future hook — for now just shows the info).
+      const lc = e.lastCommit;
+      const commitCell = lc
+        ? `<span class="code-file-commit muted" title="${escapeHtml(lc.subject)} (${escapeHtml(lc.abbrev)})">
+             <span class="code-file-commit-subject">${escapeHtml(truncateSubject(lc.subject, 60))}</span>
+             <span class="code-file-commit-time">${escapeHtml(fmtAgoIso(new Date((lc.timestamp || 0) * 1000).toISOString()))}</span>
+           </span>`
+        : '<span class="code-file-commit muted"></span>';
+      return `
+        <button class="code-file-row" data-name="${escapeHtml(e.name)}" data-type="${e.type}">
+          <span class="code-file-icon">${icon}</span>
+          <span class="code-file-name">${escapeHtml(e.name)}</span>
+          ${commitCell}
+          ${sizeCell}
+        </button>
+      `;
+    }).join('');
+    el.innerHTML = `<div class="code-file-list">${rows}</div>`;
+    el.querySelectorAll('.code-file-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const name = row.dataset.name;
+        const type = row.dataset.type;
+        if (type === 'tree') {
+          view.path = view.path ? `${view.path}/${name}` : name;
+          view.selectedBlob = null;
+          renderTab(document.querySelector('.project-tab-content'), p);
+        } else if (type === 'blob') {
+          view.selectedBlob = view.path ? `${view.path}/${name}` : name;
+          // Only re-render the preview pane — the file list and
+          // commits don't change when you pick a file.
+          const previewEl = document.querySelector('.code-preview');
+          if (previewEl) renderCodePreview(previewEl, p, view);
+        }
+        // type === 'commit' = submodule. No-op for now (Phase 5+
+        // can render submodule metadata).
+      });
+    });
+  }
+
+  function truncateSubject(s, max) {
+    s = String(s || '');
+    return s.length > max ? s.slice(0, max - 1) + '…' : s;
+  }
+
+  async function renderCodePreview(el, p, view) {
+    el.innerHTML = `<div class="muted">Loading preview…</div>`;
+    if (view.selectedBlob) {
+      // Render a specific file picked in the browser.
+      const qs = new URLSearchParams({ ref: view.ref, path: view.selectedBlob });
+      let r;
+      try {
+        r = await api(`/api/projects/${p.id}/repo/blob?${qs}`);
+      } catch (e) {
+        el.innerHTML = `<div class="muted">Failed to load file: ${escapeHtml(e?.message || String(e))}</div>`;
+        return;
+      }
+      if (r?.error) {
+        el.innerHTML = `<div class="muted">${escapeHtml(r.error)}</div>`;
+        return;
+      }
+      const head = `
+        <div class="code-preview-head">
+          <span class="code-preview-path">${escapeHtml(view.selectedBlob)}</span>
+          <span class="code-preview-meta muted">${escapeHtml(fmtBytes(r.size || 0))}${r.binary ? ' · binary' : ''}</span>
+          <button class="code-preview-close" aria-label="Close preview">×</button>
+        </div>
+      `;
+      let body = '';
+      if (r.truncated) {
+        body = `<div class="code-preview-body muted">File too large to preview (${escapeHtml(fmtBytes(r.size))}). Open it locally.</div>`;
+      } else if (r.binary) {
+        body = `<div class="code-preview-body muted">Binary file (${escapeHtml(fmtBytes(r.size))}). Open it locally.</div>`;
+      } else if (/\.md$/i.test(view.selectedBlob)) {
+        body = `<div class="code-preview-body code-md">${renderMarkdown(r.content || '')}</div>`;
+      } else {
+        // Phase 1c: plain pre/code. Phase 1c+ will swap in highlight.js.
+        body = `<div class="code-preview-body">${renderCodeBlock(r.content || '', extLang(view.selectedBlob))}</div>`;
+      }
+      el.innerHTML = head + body;
+      const closeBtn = el.querySelector('.code-preview-close');
+      if (closeBtn) closeBtn.addEventListener('click', () => {
+        view.selectedBlob = null;
+        renderCodePreview(el, p, view);
+      });
+      return;
+    }
+
+    // Default — render the README at the current ref.
+    let r;
+    try {
+      r = await api(`/api/projects/${p.id}/repo/readme?ref=${encodeURIComponent(view.ref)}`);
+    } catch (e) {
+      el.innerHTML = `<div class="muted">Failed to load README: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    if (!r?.found) {
+      el.innerHTML = `<div class="code-preview-empty muted">No README found at this ref.</div>`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="code-preview-head">
+        <span class="code-preview-path">${escapeHtml(r.path || 'README')}</span>
+        <span class="code-preview-meta muted">${escapeHtml(fmtBytes(r.size || 0))}</span>
+      </div>
+      <div class="code-preview-body code-md">${renderMarkdown(r.content || '')}</div>
+    `;
+  }
+
+  async function renderCodeCommits(el, p, view) {
+    el.innerHTML = `<div class="muted">Loading commits…</div>`;
+    const qs = new URLSearchParams({ ref: view.ref, limit: '8' });
+    let r;
+    try {
+      r = await api(`/api/projects/${p.id}/repo/log?${qs}`);
+    } catch (e) {
+      el.innerHTML = `<div class="muted">Failed to load commits: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    if (r?.error) {
+      el.innerHTML = `<div class="muted">${escapeHtml(r.error)}</div>`;
+      return;
+    }
+    const commits = Array.isArray(r?.commits) ? r.commits : [];
+    if (commits.length === 0) {
+      el.innerHTML = `<div class="muted">No commits.</div>`;
+      return;
+    }
+    const rows = commits.map(c => `
+      <div class="code-commit-row">
+        <div class="code-commit-main">
+          <div class="code-commit-subject">${escapeHtml(c.subject || '(no message)')}</div>
+          <div class="code-commit-meta muted">
+            <code class="cmd-inline">${escapeHtml(c.abbrev)}</code>
+            · ${escapeHtml(c.author || 'unknown')}
+            · ${escapeHtml(fmtAgoIso(new Date((c.timestamp || 0) * 1000).toISOString()))}
+          </div>
+        </div>
+        <span class="copy-slot" data-copy="${escapeHtml(c.sha)}"></span>
+      </div>
+    `).join('');
+    el.innerHTML = `
+      <div class="code-commits-head muted">Recent commits</div>
+      <div class="code-commits-list">${rows}</div>
+    `;
+    el.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+  }
+
+  // Tiny extension-to-language hint for the preview. Phase 1c renders
+  // plain `<pre><code>` regardless; this gets stored on the wrapper
+  // class so a future highlight.js swap can pick it up via the
+  // language- class convention without re-traversing the path.
+  function extLang(path) {
+    const m = String(path || '').match(/\.([a-z0-9]+)$/i);
+    if (!m) return '';
+    const ext = m[1].toLowerCase();
+    const map = {
+      js: 'js', jsx: 'jsx', ts: 'ts', tsx: 'tsx', mjs: 'js', cjs: 'js',
+      json: 'json', md: 'markdown', html: 'html', css: 'css', scss: 'scss',
+      py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java', c: 'c',
+      cpp: 'cpp', h: 'c', sh: 'bash', bash: 'bash', yml: 'yaml', yaml: 'yaml',
+      toml: 'toml', sql: 'sql', xml: 'xml',
+    };
+    return map[ext] || '';
+  }
+
+  // Bytes → human-friendly size. Used by the file browser + preview
+  // header. Two decimal places for sub-MB so a 12 KB README doesn't
+  // round to "0 MB"; integer for MB+ since the precision adds noise.
+  function fmtBytes(n) {
+    if (!Number.isFinite(n) || n < 0) return '';
+    if (n < 1024)              return `${n} B`;
+    if (n < 1024 * 1024)       return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   }
 
   function renderNgitTab(container, p) {
@@ -4842,87 +5879,167 @@ const ProjectsPanel = (() => {
   const proposalsCache = new Map();
 
   async function renderProposalsTab(container, p) {
-    // The "View latest patch" button at top runs `git log -p -5` via
-    // the project's exec whitelist. Useful right after a Download —
-    // HEAD is on the proposal branch so the user sees its commits as
-    // diffs without leaving the dashboard.
+    // Phase 2b: PR-shaped series cards driven by /api/projects/:id/patches
+    // (Phase 2a backend). Phase 7 adds a status filter row at the top
+    // so closed / merged PRs don't pollute the work-to-do view.
+    //
+    // The legacy /api/projects/:id/ngit/proposals endpoint still exists
+    // for back-compat but isn't called from the UI anymore.
+    if (!state.prsFilter) state.prsFilter = 'open';
+    if (typeof state.prsSearch !== 'string') state.prsSearch = '';
     container.innerHTML = `
       <div class="tab-section">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <h3 style="margin:0">Open proposals</h3>
-          <div style="display:flex;gap:8px">
+        <div class="proposals-head">
+          <h3 style="margin:0">Pull requests</h3>
+          <div class="proposals-head-actions">
             <button class="proposals-view-patch">View latest patch</button>
             <button class="proposals-refresh">Refresh</button>
           </div>
         </div>
-        <div class="muted" style="margin-bottom:12px">
-          NIP-34 kind-1617 proposals tagged against this repo's coordinates.
-          Queried from your read relays via <code>nak</code>.
-          Downloading runs <code>ngit pr checkout &lt;id&gt;</code> in the project directory.
+        <div class="list-toolbar">
+          <div class="list-filter" role="tablist" aria-label="PR status filter">
+            <button class="filter-pill ${state.prsFilter === 'open'   ? 'active' : ''}" data-filter="open"   role="tab">Open</button>
+            <button class="filter-pill ${state.prsFilter === 'all'    ? 'active' : ''}" data-filter="all"    role="tab">All</button>
+            <button class="filter-pill ${state.prsFilter === 'closed' ? 'active' : ''}" data-filter="closed" role="tab">Closed</button>
+          </div>
+          <input type="search" class="list-search" placeholder="Search subjects + authors"
+                 value="${escapeHtml(state.prsSearch)}" aria-label="Search PRs">
         </div>
-        <div class="proposals-list" id="proposals-list">
+        <div class="muted" style="margin-bottom:12px;font-size:11px">
+          NIP-34 patch series threaded by root + revision.
+          Click a card to inspect commits + the unified diff.
+        </div>
+        <div class="proposals-series-list" id="proposals-series-list">
           <div class="muted">loading…</div>
         </div>
       </div>
     `;
+    container.querySelectorAll('.filter-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.prsFilter = btn.dataset.filter;
+        renderTab(document.querySelector('.project-tab-content'), p);
+      });
+    });
+    const prSearchEl = container.querySelector('.list-search');
+    prSearchEl.addEventListener('input', () => {
+      state.prsSearch = prSearchEl.value;
+      // Debounce-free: list filter is cheap and runs client-side, so
+      // re-rendering on each keystroke feels snappier than waiting.
+      const cached = proposalsCache.get(p.id);
+      if (Array.isArray(cached)) renderSeries(cached);
+    });
 
-    const listEl = container.querySelector('#proposals-list');
+    const listEl = container.querySelector('#proposals-series-list');
 
-    const runDownload = async (proposalId, title) => {
+    const runDownload = async (rootId, subject) => {
       const r = await openExecModal({
         title:    `Download proposal · ${p.name}`,
-        subtitle: `ngit pr checkout ${proposalId.slice(0, 12)}…`,
+        subtitle: `ngit pr checkout ${rootId.slice(0, 12)}…`,
         endpoint: `/api/projects/${p.id}/ngit/download`,
-        body:     { proposalId },
+        body:     { proposalId: rootId },
       });
       if (r.ok) {
-        toast(`Checked out: ${title || proposalId.slice(0, 8)}`,
+        toast(`Checked out: ${subject || rootId.slice(0, 8)}`,
               'View latest patch to see commits', 'ok');
       } else {
         toast('Download failed', `exit ${r.code}`, 'err');
       }
     };
 
-    const renderRows = (proposals) => {
-      if (!Array.isArray(proposals) || proposals.length === 0) {
-        listEl.innerHTML = `<div class="muted">No open proposals found on configured relays.</div>`;
+    const renderSeries = (series) => {
+      if (!Array.isArray(series)) series = [];
+      // Phase 7 status filter — applied client-side so the toggle is
+      // instant. Open = open or draft (anything still actionable);
+      // Closed = closed, merged, or resolved.
+      const q = (state.prsSearch || '').trim().toLowerCase();
+      const visible = series.filter(s => {
+        const st = s.effectiveStatus || 'open';
+        const statusOk =
+          state.prsFilter === 'open'   ? (st === 'open' || st === 'draft') :
+          state.prsFilter === 'closed' ? (st === 'closed' || st === 'merged' || st === 'resolved') :
+          true;
+        if (!statusOk) return false;
+        if (!q) return true;
+        const hay = `${s.subject || ''} ${s.author?.name || ''} ${s.author?.pubkey || ''}`.toLowerCase();
+        return hay.includes(q);
+      });
+      if (visible.length === 0) {
+        listEl.innerHTML = renderListEmptyState({
+          icon: state.prsFilter === 'open' ? '🌱' : '✓',
+          title: state.prsFilter === 'open'
+            ? 'No open pull requests'
+            : state.prsFilter === 'closed'
+              ? 'No closed pull requests yet'
+              : 'No pull requests yet',
+          body: state.prsFilter === 'open' && series.length > 0
+            ? `${series.length} pull request${series.length === 1 ? '' : 's'} found — all are closed, merged, or resolved.`
+            : 'Pull requests are NIP-34 patch series proposing changes to this repo. Contributors create them with <code>ngit send</code> from their local checkout.',
+          cta: state.prsFilter !== 'open' ? null : null,
+        });
         return;
       }
-      // Freshest first matches the server's sort, but we re-apply on the
-      // client so a stale cache doesn't surprise the user if the server
-      // contract ever drifts.
-      const rows = [...proposals].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-      listEl.innerHTML = rows.map(r => `
-        <div class="proposal-row" data-id="${escapeHtml(r.id)}">
-          <div class="proposal-main">
-            <div class="proposal-title">${escapeHtml(r.title || r.id.slice(0, 8))}</div>
-            <div class="proposal-meta muted">
-              <span class="k">author</span>
-              <code class="cmd-inline">${escapeHtml(shortPubkey(r.pubkey))}</code>
-              · <span class="k">${escapeHtml(fmtAgoIso(new Date((r.createdAt || 0) * 1000).toISOString()))}</span>
-              · <span class="k">id</span>
-              <code class="cmd-inline">${escapeHtml(r.id.slice(0, 12))}…</code>
+      listEl.innerHTML = visible.map(s => {
+        // Latest revision drives the "patches in this series" badge —
+        // older revisions are shown as v1 / v2 pills but the action
+        // button defaults to the freshest version.
+        const latest = s.revisions[s.revisions.length - 1];
+        const versionPills = s.revisions.map(r =>
+          `<span class="series-version-pill" data-revision="${r.rootId}">v${r.version}</span>`
+        ).join('');
+        const authorLabel = s.author?.name || shortPubkey(s.author?.pubkey || '');
+        const statusBadge = renderStatusBadge(s.effectiveStatus || 'open');
+        return `
+          <div class="series-card" data-root="${escapeHtml(s.rootId)}" tabindex="0" role="button">
+            <div class="series-card-main">
+              <div class="series-card-title">${statusBadge} ${escapeHtml(s.subject || s.rootId.slice(0, 8))}</div>
+              <div class="series-card-meta muted">
+                <span class="k">${escapeHtml(authorLabel)}</span>
+                · <span class="k">${escapeHtml(fmtAgoIso(new Date((s.latestRevisionAt || 0) * 1000).toISOString()))}</span>
+                · <span class="k">${s.patchCount} patch${s.patchCount === 1 ? '' : 'es'}</span>
+                ${s.revisionCount > 1 ? `· <span class="k">${s.revisionCount} revisions</span>` : ''}
+              </div>
+              <div class="series-card-pills">${versionPills}</div>
+            </div>
+            <div class="series-card-actions">
+              <button class="primary series-download"
+                      data-root="${escapeHtml(latest.rootId)}"
+                      data-subject="${escapeHtml(s.subject || '')}">Download</button>
+              <span class="copy-slot" data-copy="${escapeHtml(latest.rootId)}"></span>
             </div>
           </div>
-          <div class="proposal-actions">
-            <button class="primary proposal-download" data-id="${escapeHtml(r.id)}"
-              data-title="${escapeHtml(r.title || '')}">Download</button>
-            <span class="copy-slot" data-copy="${escapeHtml(r.id)}"></span>
-          </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
+
       listEl.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
-      listEl.querySelectorAll('.proposal-download').forEach(btn => {
-        btn.addEventListener('click', () => runDownload(btn.dataset.id, btn.dataset.title));
+      listEl.querySelectorAll('.series-download').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          runDownload(btn.dataset.root, btn.dataset.subject);
+        });
+      });
+      listEl.querySelectorAll('.series-card').forEach(card => {
+        card.addEventListener('click', () => openPatchSeriesDetail(p, card.dataset.root));
+        card.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            openPatchSeriesDetail(p, card.dataset.root);
+          }
+        });
       });
     };
 
-    const fetchAndRender = async () => {
+    const fetchAndRender = async (refresh = false) => {
       try {
-        const r = await api(`/api/projects/${p.id}/ngit/proposals`);
-        const proposals = Array.isArray(r?.proposals) ? r.proposals : [];
-        proposalsCache.set(p.id, proposals);
-        renderRows(proposals);
+        const qs = refresh ? '?refresh=1' : '';
+        const r = await api(`/api/projects/${p.id}/patches${qs}`);
+        const series = Array.isArray(r?.series) ? r.series : [];
+        // Phase 4: enrich each series row with its effective status
+        // (merged / open / draft / closed). One bulk call covers
+        // every visible series; the result is keyed by rootId so
+        // renderSeries can decorate without changing its loop shape.
+        await annotateSeriesWithStatus(p.id, series);
+        proposalsCache.set(p.id, series);
+        renderSeries(series);
       } catch (e) {
         listEl.innerHTML = `<div class="muted">Failed to load proposals: ${escapeHtml(e?.message || String(e))}</div>`;
       }
@@ -4930,7 +6047,7 @@ const ProjectsPanel = (() => {
 
     container.querySelector('.proposals-refresh').addEventListener('click', () => {
       listEl.innerHTML = `<div class="muted">refreshing…</div>`;
-      fetchAndRender();
+      fetchAndRender(true);
     });
 
     container.querySelector('.proposals-view-patch').addEventListener('click', () => {
@@ -4942,11 +6059,773 @@ const ProjectsPanel = (() => {
       });
     });
 
-    // Use the cache when it's hot to avoid the 5s relay query on every
-    // tab switch; otherwise fetch fresh.
+    // Cache hot path: re-render previous series so the tab feels
+    // instant on switch; background fetch refreshes when the user
+    // clicks Refresh. The cache shape changed in 2b (was flat list,
+    // now series array) — coerce / discard if shape is wrong.
     const cached = proposalsCache.get(p.id);
-    if (Array.isArray(cached)) renderRows(cached);
-    else                       fetchAndRender();
+    if (Array.isArray(cached) && cached[0] && cached[0].revisions) {
+      renderSeries(cached);
+    } else {
+      fetchAndRender();
+    }
+  }
+
+  // ── Phase 2c: per-series detail modal ────────────────────────────
+  //
+  // Opens on series-card click. Shows:
+  //   - Header: subject, author, revision pills (clickable to switch)
+  //   - Cover letter (markdown via renderMarkdown) when present
+  //   - Per-patch list with subject + commit sha + author + lazy diff
+  //   - Per-patch unified diff rendered file-by-file with hljs spans
+  //
+  // Lazy-loads diffs: each patch row has a "view diff" expander that
+  // fetches /patches/:rootId/diff?patchId=… on first open. Avoids
+  // parsing every diff up-front for series with many patches.
+  async function openPatchSeriesDetail(p, rootId) {
+    const body = document.createElement('div');
+    body.className = 'pdetail-body';
+    body.innerHTML = `<div class="muted" style="padding:24px">Loading series…</div>`;
+    const modal = openModal({
+      title:    'Patch series',
+      subtitle: rootId.slice(0, 16) + '…',
+      body,
+    });
+
+    let detail;
+    try {
+      detail = await api(`/api/projects/${p.id}/patches/${rootId}`);
+    } catch (e) {
+      body.innerHTML = `<div class="pdetail-err">Failed to load series: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    if (!detail || detail.error) {
+      body.innerHTML = `<div class="pdetail-err">${escapeHtml(detail?.error || 'series not found')}</div>`;
+      return;
+    }
+
+    // Default to the latest revision; user can flip via the version pills.
+    let activeRev = detail.revisions[detail.revisions.length - 1];
+
+    const renderDetail = () => {
+      const author = detail.author?.name || shortPubkey(detail.author?.pubkey || '');
+      const versionPills = detail.revisions.map(r =>
+        `<button class="pdetail-version-pill ${r === activeRev ? 'active' : ''}"
+                 data-rev="${r.rootId}">v${r.version}</button>`
+      ).join('');
+      const cover = activeRev.coverLetter
+        ? `<div class="pdetail-cover code-md">${renderMarkdown(activeRev.coverLetter)}</div>`
+        : '';
+      const patchRows = activeRev.patches.map((pa, i) => `
+        <div class="pdetail-patch" data-patch="${escapeHtml(pa.id)}" data-idx="${i}">
+          <div class="pdetail-patch-head">
+            <div class="pdetail-patch-main">
+              <div class="pdetail-patch-subject">${escapeHtml(pa.subject)}</div>
+              <div class="pdetail-patch-meta muted">
+                ${pa.commit ? `<code class="cmd-inline">${escapeHtml(pa.commit.slice(0, 8))}</code> · ` : ''}
+                ${escapeHtml(shortPubkey(pa.pubkey))}
+                · ${escapeHtml(fmtAgoIso(new Date((pa.createdAt || 0) * 1000).toISOString()))}
+                ${pa.isCoverLetter ? ' · cover letter' : ''}
+              </div>
+            </div>
+            <button class="pdetail-toggle-diff" ${pa.isCoverLetter ? 'disabled' : ''}>view diff</button>
+          </div>
+          <div class="pdetail-diff" data-loaded="0"></div>
+        </div>
+      `).join('');
+      body.innerHTML = `
+        <div class="pdetail-head">
+          <h3>${escapeHtml(detail.subject)}</h3>
+          <div class="pdetail-head-meta muted">
+            opened by ${escapeHtml(author)}
+            · ${escapeHtml(fmtAgoIso(new Date((detail.createdAt || 0) * 1000).toISOString()))}
+            · ${detail.patchCount} patch${detail.patchCount === 1 ? '' : 'es'}
+          </div>
+          ${detail.revisions.length > 1
+            ? `<div class="pdetail-versions">${versionPills}</div>`
+            : ''}
+        </div>
+        ${cover}
+        <div class="pdetail-patches">${patchRows}</div>
+        <div class="pdetail-foot">
+          <button class="primary pdetail-download">Download</button>
+          <button class="pdetail-merge" title="Merge this proposal locally via ngit pr_merge">Merge</button>
+          <span class="pdetail-status-slot"></span>
+          <span class="pdetail-copy"></span>
+        </div>
+        <div class="comment-thread" id="patch-comment-thread"></div>
+        <div class="comment-composer" id="patch-comment-composer"></div>
+      `;
+      // Wire interactions.
+      body.querySelectorAll('.pdetail-version-pill').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const target = detail.revisions.find(r => r.rootId === btn.dataset.rev);
+          if (target) { activeRev = target; renderDetail(); }
+        });
+      });
+      body.querySelectorAll('.pdetail-toggle-diff').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const card = btn.closest('.pdetail-patch');
+          const diffEl = card.querySelector('.pdetail-diff');
+          const expanded = diffEl.dataset.loaded === '1';
+          if (expanded) {
+            diffEl.innerHTML = '';
+            diffEl.dataset.loaded = '0';
+            btn.textContent = 'view diff';
+            return;
+          }
+          btn.textContent = 'loading…';
+          btn.disabled = true;
+          const patchId = card.dataset.patch;
+          try {
+            const r = await api(`/api/projects/${p.id}/patches/${detail.rootId}/diff?patchId=${encodeURIComponent(patchId)}`);
+            diffEl.innerHTML = renderParsedDiff(r);
+            diffEl.dataset.loaded = '1';
+            btn.textContent = 'hide diff';
+          } catch (e) {
+            diffEl.innerHTML = `<div class="muted">Failed to load diff: ${escapeHtml(e?.message || String(e))}</div>`;
+            btn.textContent = 'view diff';
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+      body.querySelector('.pdetail-download').addEventListener('click', () => {
+        modal.close();
+        openExecModal({
+          title:    `Download proposal · ${p.name}`,
+          subtitle: `ngit pr checkout ${activeRev.rootId.slice(0, 12)}…`,
+          endpoint: `/api/projects/${p.id}/ngit/download`,
+          body:     { proposalId: activeRev.rootId },
+        }).then((r) => {
+          if (r.ok) toast('Downloaded', detail.subject, 'ok');
+          else      toast('Download failed', `exit ${r.code}`, 'err');
+        });
+      });
+      body.querySelector('.pdetail-copy').appendChild(copyBtn(activeRev.rootId));
+
+      // Phase 4 — Merge button + status dropdown. Merge runs
+      // ngit pr_merge after a dirty-tree preflight (server-side).
+      // The status dropdown lets the user / a maintainer mark a PR
+      // open / draft / closed via ngit pr_status.
+      body.querySelector('.pdetail-merge').addEventListener('click', () => {
+        confirmDestructive({
+          title: 'Merge this proposal?',
+          description: `Runs ngit pr_merge for the v${activeRev.version} root locally. ` +
+            `This creates a merge commit, pushes refs, and publishes a kind-1631 status event. ` +
+            `The working tree must be clean.`,
+          confirmLabel: 'Merge',
+        }).then((ok) => {
+          if (!ok) return;
+          openExecModal({
+            title:    `Merge · ${p.name}`,
+            subtitle: `ngit pr_merge ${activeRev.rootId.slice(0, 12)}…`,
+            endpoint: `/api/projects/${p.id}/merge`,
+            body:     { rootId: activeRev.rootId },
+          }).then((r) => {
+            if (r.ok) {
+              toast('Merged', detail.subject, 'ok');
+              modal.close();
+              // Refresh the proposals list so the merged badge appears.
+              if (state.tab === 'proposals') {
+                renderTab(document.querySelector('.project-tab-content'), p);
+              }
+            } else {
+              toast('Merge failed', `exit ${r.code}`, 'err');
+            }
+          });
+        });
+      });
+
+      // Phase 7: client-side authority check — show the status
+      // dropdown only when the user can legitimately publish a
+      // status change. Server still enforces; this hides options
+      // the user can't act on.
+      const [userPubkey, repoMeta] = await Promise.all([
+        getOwnerPubkey(),
+        api(`/api/projects/${p.id}/repo`).catch(() => null),
+      ]);
+      const canEdit = canEditStatus(userPubkey, detail.author?.pubkey, repoMeta?.maintainerSet);
+      const statusSlot = body.querySelector('.pdetail-status-slot');
+      statusSlot.appendChild(renderStatusControl('patch', 'open', canEdit, (newStatus) => {
+        openExecModal({
+          title:    `${newStatus} · ${p.name}`,
+          subtitle: `ngit pr_status --${newStatus} ${detail.rootId.slice(0, 12)}…`,
+          endpoint: `/api/projects/${p.id}/status`,
+          body:     { kind: 'patch', rootId: detail.rootId, status: newStatus },
+        }).then((r) => {
+          if (r.ok) toast(`Marked ${newStatus}`, detail.subject, 'ok');
+          else      toast('Status change failed', `exit ${r.code}`, 'err');
+        });
+      }));
+
+      // Phase 3c: NIP-22 comment thread on the patch series. Threaded
+      // against the SERIES' v1 root id so a multi-revision PR keeps a
+      // single conversation across re-rolls (matches gitworkshop UX).
+      const threadEl = body.querySelector('#patch-comment-thread');
+      const composerEl = body.querySelector('#patch-comment-composer');
+      loadAndRenderPatchComments(threadEl, composerEl, p, detail.rootId);
+    };
+
+    renderDetail();
+  }
+
+  async function loadAndRenderPatchComments(threadEl, composerEl, p, rootId) {
+    threadEl.innerHTML = `<div class="comment-empty muted">Loading comments…</div>`;
+    let tree = [];
+    try {
+      const r = await api(`/api/projects/${p.id}/comments?rootId=${encodeURIComponent(rootId)}`);
+      tree = Array.isArray(r?.comments) ? r.comments : [];
+    } catch {
+      // Fall through to empty tree — the composer still works.
+    }
+    threadEl.innerHTML = renderCommentTree(tree);
+    wireCommentReplies(threadEl, p, rootId, () => {
+      loadAndRenderPatchComments(threadEl, composerEl, p, rootId);
+    });
+    mountCommentComposer(composerEl, p, rootId, () => {
+      loadAndRenderPatchComments(threadEl, composerEl, p, rootId);
+    });
+  }
+
+  // Render a ParsedDiff (Phase 2a wire shape) into a file-by-file
+  // <pre>-formatted diff with +/-/context line classes for CSS
+  // colouring. Each chunk header gets a synthesized hunk line so the
+  // user can see the line ranges. No syntax highlighting on diff
+  // lines themselves — diffs are usually too short for hljs auto-
+  // detect to be useful, and per-language detection per file would
+  // double the render cost. The rest of the dashboard uses hljs
+  // (Code tab file preview), so we have a consistent escape hatch
+  // (the user can open the file in Code tab).
+  function renderParsedDiff(r) {
+    if (!r || !Array.isArray(r.files) || r.files.length === 0) {
+      return `<div class="muted">Empty diff (cover letter or non-diff content).</div>`;
+    }
+    const filesHtml = r.files.map(f => {
+      const path = f.to && f.to !== '/dev/null' ? f.to : (f.from || '(unknown)');
+      const stats = `<span class="pdf-add">+${f.additions}</span> <span class="pdf-del">-${f.deletions}</span>`;
+      const chunksHtml = (f.chunks || []).map(ch => {
+        const headerLine = `<span class="pdf-line pdf-hunk">${escapeHtml(ch.content || `@@ ${ch.oldStart},${ch.oldLines} ${ch.newStart},${ch.newLines} @@`)}</span>`;
+        const lines = (ch.changes || []).map(c => {
+          const cls = c.type === 'add' ? 'pdf-add-line'
+                    : c.type === 'del' ? 'pdf-del-line'
+                    : 'pdf-ctx-line';
+          return `<span class="pdf-line ${cls}">${escapeHtml(c.content || '')}</span>`;
+        }).join('');
+        return headerLine + lines;
+      }).join('');
+      return `
+        <div class="pdf-file">
+          <div class="pdf-file-head">
+            <code class="pdf-path">${escapeHtml(path)}</code>
+            <span class="pdf-stats muted">${stats}</span>
+          </div>
+          <pre class="pdf-body">${chunksHtml}</pre>
+        </div>
+      `;
+    }).join('');
+    const summary = `
+      <div class="pdf-summary muted">
+        ${r.fileCount} file${r.fileCount === 1 ? '' : 's'} ·
+        <span class="pdf-add">+${r.totalAdditions}</span>
+        <span class="pdf-del">-${r.totalDeletions}</span>
+      </div>
+    `;
+    return summary + filesHtml;
+  }
+
+  // ── Phase 4: status helpers (shared by patches + issues) ─────────────
+  //
+  // renderStatusBadge: pill rendered next to a series subject or
+  // issue subject. The data-status attribute drives colors via
+  // the existing .issue-status-icon[data-status="…"] CSS, which we
+  // reuse here so the visual language is consistent across surfaces.
+  function renderStatusBadge(status) {
+    const label = {
+      open:     'open',
+      draft:    'draft',
+      closed:   'closed',
+      merged:   'merged',
+      resolved: 'resolved',
+    }[status] || 'open';
+    return `<span class="status-badge" data-status="${escapeHtml(status)}">${escapeHtml(label)}</span>`;
+  }
+
+  // Bulk-annotate a list of series / issues with their effective
+  // status. Single GET /status?rootIds=… call covers all rows;
+  // failures degrade silently to "open" so the surface still renders.
+  async function annotateSeriesWithStatus(projectId, series) {
+    if (!Array.isArray(series) || series.length === 0) return;
+    const ids = series.map(s => s.rootId).join(',');
+    try {
+      const r = await api(`/api/projects/${projectId}/status?rootIds=${encodeURIComponent(ids)}`);
+      const byId = new Map((r?.results || []).map(x => [x.rootId, x]));
+      for (const s of series) {
+        const c = byId.get(s.rootId);
+        s.effectiveStatus = c?.status || 'open';
+        s.statusEventId   = c?.statusEventId || null;
+        s.mergeCommit     = c?.mergeCommit || null;
+      }
+    } catch {
+      for (const s of series) s.effectiveStatus = s.effectiveStatus || 'open';
+    }
+  }
+
+  async function annotateIssuesWithStatus(projectId, issues) {
+    if (!Array.isArray(issues) || issues.length === 0) return;
+    const ids = issues.map(i => i.id).join(',');
+    try {
+      const r = await api(`/api/projects/${projectId}/status?rootIds=${encodeURIComponent(ids)}`);
+      const byId = new Map((r?.results || []).map(x => [x.rootId, x]));
+      for (const i of issues) {
+        const c = byId.get(i.id);
+        // Server returns 'open' when no 163x exists yet — preserves
+        // the default for fresh issues.
+        i.status = c?.status || i.status || 'open';
+        i.statusEventId = c?.statusEventId || null;
+      }
+    } catch {
+      // Already defaults to 'open' from the server — leave as-is.
+    }
+  }
+
+  // Phase 7: the status BADGE is the dropdown trigger (gitworkshop
+  // pattern). Click the green "open" pill → menu opens with allowed
+  // transitions. When the user isn't authorised to change status
+  // (not the root author, not a verified maintainer), the badge is
+  // rendered static — the menu never opens, no buttons to mislead
+  // the user. The server still enforces authority either way; this
+  // is UX hygiene, not security.
+  //
+  // kind:        'patch' | 'issue'
+  // currentStatus: 'open' | 'draft' | 'closed' | 'merged' | 'resolved'
+  // canEdit:     boolean — caller pre-computes the authority check
+  // onChange:    (newStatus) => void
+  function renderStatusControl(kind, currentStatus, canEdit, onChange) {
+    const allowed = kind === 'patch'
+      ? ['open', 'draft', 'closed']
+      : ['open', 'resolved', 'closed'];
+    // Static badge when the user can't edit — no menu, no chevron,
+    // just the status pill the rest of the UI already shows.
+    if (!canEdit) {
+      const span = document.createElement('span');
+      span.innerHTML = renderStatusBadge(currentStatus);
+      return span;
+    }
+    const wrap = document.createElement('div');
+    wrap.className = 'status-control';
+    wrap.innerHTML = `
+      <button class="status-control-toggle" aria-haspopup="true" aria-expanded="false"
+              title="Click to change status">
+        ${renderStatusBadge(currentStatus)}
+        <span class="status-control-chevron">▾</span>
+      </button>
+      <div class="status-control-menu" hidden>
+        ${allowed.map(s => `
+          <button class="status-control-option ${s === currentStatus ? 'current' : ''}"
+                  data-status="${escapeHtml(s)}">
+            ${renderStatusBadge(s)}
+          </button>
+        `).join('')}
+      </div>
+    `;
+    const toggle = wrap.querySelector('.status-control-toggle');
+    const menu   = wrap.querySelector('.status-control-menu');
+    const close = () => { menu.hidden = true; toggle.setAttribute('aria-expanded', 'false'); };
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      menu.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+    });
+    menu.querySelectorAll('.status-control-option').forEach(opt => {
+      opt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        close();
+        const next = opt.dataset.status;
+        if (next && next !== currentStatus) onChange(next);
+      });
+    });
+    document.addEventListener('click', (e) => {
+      if (!wrap.contains(e.target)) close();
+    });
+    return wrap;
+  }
+
+  // Phase 7: client-side authority check. Cached owner identity +
+  // resolved maintainer set let us decide whether to render the
+  // status badge as an editable dropdown or a static pill. The
+  // server check is the source of truth; this exists purely to
+  // stop us showing the user options they can't actually use.
+  let cachedOwnerPubkey = null;
+  async function getOwnerPubkey() {
+    if (cachedOwnerPubkey !== null) return cachedOwnerPubkey;
+    try {
+      const c = await api('/api/identity/config');
+      let pk = c?.npub || '';
+      if (/^npub1[0-9a-z]+$/.test(pk) && window.NostrTools?.nip19) {
+        // Decode npub → hex if nostr-tools is available; fall back
+        // to a quick regex check otherwise (most callers receive
+        // hex already, but defence-in-depth keeps the API tolerant).
+        try { pk = window.NostrTools.nip19.decode(pk).data; } catch {}
+      }
+      cachedOwnerPubkey = (typeof pk === 'string' && /^[0-9a-f]{64}$/.test(pk)) ? pk : '';
+    } catch { cachedOwnerPubkey = ''; }
+    return cachedOwnerPubkey;
+  }
+
+  function canEditStatus(userPubkey, rootAuthorPubkey, maintainerSet) {
+    if (!userPubkey) return false;
+    if (userPubkey === rootAuthorPubkey) return true;
+    if (Array.isArray(maintainerSet?.verified) && maintainerSet.verified.includes(userPubkey)) return true;
+    return false;
+  }
+
+  // ── Phase 3b: Issues tab ─────────────────────────────────────────────
+  //
+  // Kind 1621 issues for the repo, with NIP-22 comment counts and a
+  // "New issue" composer that shells through ngit issue_create.
+  // Click a row → openIssueDetail (Phase 3c) shows the full threaded
+  // conversation + a reply composer. Phase 7 adds an Open/All/Closed
+  // filter row at the top.
+  async function renderIssuesTab(container, p) {
+    if (!state.issuesFilter) state.issuesFilter = 'open';
+    if (typeof state.issuesSearch !== 'string') state.issuesSearch = '';
+    let issuesCache = [];
+    container.innerHTML = `
+      <div class="tab-section">
+        <div class="proposals-head">
+          <h3 style="margin:0">Issues</h3>
+          <div class="proposals-head-actions">
+            <button class="primary issues-new">New issue</button>
+            <button class="issues-refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="list-toolbar">
+          <div class="list-filter" role="tablist" aria-label="Issue status filter">
+            <button class="filter-pill ${state.issuesFilter === 'open'   ? 'active' : ''}" data-filter="open"   role="tab">Open</button>
+            <button class="filter-pill ${state.issuesFilter === 'all'    ? 'active' : ''}" data-filter="all"    role="tab">All</button>
+            <button class="filter-pill ${state.issuesFilter === 'closed' ? 'active' : ''}" data-filter="closed" role="tab">Closed</button>
+          </div>
+          <input type="search" class="list-search" placeholder="Search subjects + labels + authors"
+                 value="${escapeHtml(state.issuesSearch)}" aria-label="Search issues">
+        </div>
+        <div class="issues-list" id="issues-list">
+          <div class="muted">loading…</div>
+        </div>
+      </div>
+    `;
+    container.querySelectorAll('.filter-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.issuesFilter = btn.dataset.filter;
+        renderTab(document.querySelector('.project-tab-content'), p);
+      });
+    });
+    const issueSearchEl = container.querySelector('.list-search');
+    issueSearchEl.addEventListener('input', () => {
+      state.issuesSearch = issueSearchEl.value;
+      if (issuesCache.length > 0) renderList(issuesCache);
+    });
+
+    const listEl = container.querySelector('#issues-list');
+
+    const renderList = (issues) => {
+      if (!Array.isArray(issues)) issues = [];
+      // Phase 7 status filter — Open = anything not yet closed/resolved.
+      issuesCache = issues;
+      const q = (state.issuesSearch || '').trim().toLowerCase();
+      const visible = issues.filter(i => {
+        const st = i.status || 'open';
+        const statusOk =
+          state.issuesFilter === 'open'   ? (st === 'open' || st === 'draft') :
+          state.issuesFilter === 'closed' ? (st === 'closed' || st === 'resolved') :
+          true;
+        if (!statusOk) return false;
+        if (!q) return true;
+        const labelsStr = Array.isArray(i.labels) ? i.labels.join(' ') : '';
+        const hay = `${i.subject || ''} ${labelsStr} ${i.author?.pubkey || ''}`.toLowerCase();
+        return hay.includes(q);
+      });
+      if (visible.length === 0) {
+        listEl.innerHTML = renderListEmptyState({
+          icon: state.issuesFilter === 'open' ? '📋' : '✓',
+          title: state.issuesFilter === 'open'
+            ? 'No open issues'
+            : state.issuesFilter === 'closed'
+              ? 'No closed issues yet'
+              : 'No issues yet',
+          body: state.issuesFilter === 'open' && issues.length > 0
+            ? `${issues.length} issue${issues.length === 1 ? '' : 's'} found — all are closed or resolved.`
+            : 'Issues are NIP-34 kind-1621 events for tracking bugs, ideas, and discussions. Anyone reading this repo over Nostr can open one.',
+          cta: state.issuesFilter !== 'open' ? null : { label: 'Open the first issue', className: 'issues-new-cta' },
+        });
+        const ctaBtn = listEl.querySelector('.issues-new-cta');
+        if (ctaBtn) ctaBtn.addEventListener('click', () => openNewIssueComposer(p, () => fetchAndRender(true)));
+        return;
+      }
+      listEl.innerHTML = visible.map(iss => {
+        const author = shortPubkey(iss.author?.pubkey || iss.pubkey || '');
+        const labelHtml = (iss.labels || []).slice(0, 6)
+          .map(l => `<span class="issue-label">${escapeHtml(l)}</span>`)
+          .join('');
+        return `
+          <div class="issue-row" data-id="${escapeHtml(iss.id)}" tabindex="0" role="button">
+            <div class="issue-status-icon" data-status="${escapeHtml(iss.status)}">●</div>
+            <div class="issue-main">
+              <div class="issue-title">${escapeHtml(iss.subject)}</div>
+              <div class="issue-meta muted">
+                <span class="k">opened by ${escapeHtml(author)}</span>
+                · <span class="k">${escapeHtml(fmtAgoIso(new Date((iss.createdAt || 0) * 1000).toISOString()))}</span>
+                ${iss.commentCount > 0
+                  ? `· <span class="k">${iss.commentCount} comment${iss.commentCount === 1 ? '' : 's'}</span>`
+                  : ''}
+              </div>
+              ${labelHtml ? `<div class="issue-labels">${labelHtml}</div>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+      listEl.querySelectorAll('.issue-row').forEach(row => {
+        const open = () => openIssueDetail(p, row.dataset.id);
+        row.addEventListener('click', open);
+        row.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+        });
+      });
+    };
+
+    const fetchAndRender = async (refresh = false) => {
+      try {
+        const r = await api(`/api/projects/${p.id}/issues${refresh ? '?refresh=1' : ''}`);
+        const issues = Array.isArray(r?.issues) ? r.issues : [];
+        await annotateIssuesWithStatus(p.id, issues);
+        renderList(issues);
+      } catch (e) {
+        listEl.innerHTML = `<div class="muted">Failed to load issues: ${escapeHtml(e?.message || String(e))}</div>`;
+      }
+    };
+
+    container.querySelector('.issues-refresh').addEventListener('click', () => {
+      listEl.innerHTML = `<div class="muted">refreshing…</div>`;
+      fetchAndRender(true);
+    });
+
+    container.querySelector('.issues-new').addEventListener('click', () => {
+      openNewIssueComposer(p, () => fetchAndRender(true));
+    });
+
+    fetchAndRender();
+  }
+
+  // ── New-issue composer (Phase 3b) ────────────────────────────────────
+  function openNewIssueComposer(p, onPublished) {
+    const body = document.createElement('div');
+    body.className = 'issue-composer';
+    body.innerHTML = `
+      <label class="field-label">Title</label>
+      <div class="field-row">
+        <input type="text" class="ni-title" maxlength="240" placeholder="Short subject">
+      </div>
+
+      <label class="field-label" style="margin-top:12px">Body (markdown)</label>
+      <textarea class="ni-body" rows="8" placeholder="Describe the issue…"></textarea>
+
+      <label class="field-label" style="margin-top:12px">Labels (optional)</label>
+      <div class="field-row">
+        <input type="text" class="ni-labels" placeholder="bug urgent enhancement">
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:4px">
+        Space-separated. Alphanumeric, dash, underscore. Max 32 chars each.
+      </div>
+    `;
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px'; foot.style.width = '100%';
+    const cancel = document.createElement('button'); cancel.textContent = 'Cancel';
+    const submit = document.createElement('button'); submit.className = 'primary'; submit.textContent = 'Open issue';
+    const spacer = document.createElement('div'); spacer.style.flex = '1';
+    foot.appendChild(cancel); foot.appendChild(spacer); foot.appendChild(submit);
+
+    const modal = openModal({ title: 'New issue', subtitle: p.name, body, footer: foot });
+    cancel.addEventListener('click', () => modal.close());
+    submit.addEventListener('click', () => {
+      const title = body.querySelector('.ni-title').value.trim();
+      if (!title) { toast('Title required', '', 'err'); return; }
+      const bodyText = body.querySelector('.ni-body').value;
+      const labels = body.querySelector('.ni-labels').value.trim()
+        .split(/\s+/).filter(Boolean).slice(0, 8);
+      modal.close();
+      openExecModal({
+        title:    `Open issue · ${p.name}`,
+        subtitle: `ngit issue_create --title ${title.slice(0, 32)}${title.length > 32 ? '…' : ''}`,
+        endpoint: `/api/projects/${p.id}/issues`,
+        body:     { title, body: bodyText, labels },
+      }).then((r) => {
+        if (r.ok) { toast('Issue opened', title, 'ok'); onPublished?.(); }
+        else      { toast('Failed to open issue', `exit ${r.code}`, 'err'); }
+      });
+    });
+  }
+
+  // ── Phase 3c: per-issue detail with threaded comments ────────────────
+  async function openIssueDetail(p, issueId) {
+    const body = document.createElement('div');
+    body.className = 'idetail-body';
+    body.innerHTML = `<div class="muted" style="padding:24px">Loading issue…</div>`;
+    const modal = openModal({
+      title:    'Issue',
+      subtitle: issueId.slice(0, 16) + '…',
+      body,
+    });
+
+    const load = async () => {
+      let detail;
+      try {
+        detail = await api(`/api/projects/${p.id}/issues/${issueId}`);
+      } catch (e) {
+        body.innerHTML = `<div class="pdetail-err">Failed to load issue: ${escapeHtml(e?.message || String(e))}</div>`;
+        return;
+      }
+      if (!detail || detail.error) {
+        body.innerHTML = `<div class="pdetail-err">${escapeHtml(detail?.error || 'issue not found')}</div>`;
+        return;
+      }
+      const author = shortPubkey(detail.author?.pubkey || detail.pubkey || '');
+      const labels = (detail.labels || []).map(l => `<span class="issue-label">${escapeHtml(l)}</span>`).join('');
+      // Phase 4: pull current effective status before render so the
+      // badge + dropdown both reflect the latest 163x.
+      let effective = 'open';
+      try {
+        const sr = await api(`/api/projects/${p.id}/status?rootIds=${encodeURIComponent(detail.id)}`);
+        effective = sr?.results?.[0]?.status || 'open';
+      } catch { /* stays 'open' */ }
+
+      body.innerHTML = `
+        <div class="idetail-head">
+          <h3>${renderStatusBadge(effective)} ${escapeHtml(detail.subject)}</h3>
+          <div class="idetail-meta muted">
+            opened by ${escapeHtml(author)}
+            · ${escapeHtml(fmtAgoIso(new Date((detail.createdAt || 0) * 1000).toISOString()))}
+          </div>
+          ${labels ? `<div class="issue-labels" style="margin-top:6px">${labels}</div>` : ''}
+          <div class="idetail-status-slot" style="margin-top:8px"></div>
+        </div>
+
+        ${detail.body
+          ? `<div class="idetail-body-md code-md">${renderMarkdown(detail.body)}</div>`
+          : ''}
+
+        <div class="comment-thread" id="comment-thread"></div>
+        <div class="comment-composer" id="comment-composer"></div>
+      `;
+      const [issueOwnerPk, issueRepoMeta] = await Promise.all([
+        getOwnerPubkey(),
+        api(`/api/projects/${p.id}/repo`).catch(() => null),
+      ]);
+      const issueCanEdit = canEditStatus(
+        issueOwnerPk, detail.author?.pubkey || detail.pubkey, issueRepoMeta?.maintainerSet,
+      );
+      body.querySelector('.idetail-status-slot').appendChild(
+        renderStatusControl('issue', effective, issueCanEdit, (newStatus) => {
+          openExecModal({
+            title:    `${newStatus} · ${p.name}`,
+            subtitle: `ngit issue_status --${newStatus} ${detail.id.slice(0, 12)}…`,
+            endpoint: `/api/projects/${p.id}/status`,
+            body:     { kind: 'issue', rootId: detail.id, status: newStatus },
+          }).then((r) => {
+            if (r.ok) { toast(`Marked ${newStatus}`, detail.subject, 'ok'); load(); }
+            else      { toast('Status change failed', `exit ${r.code}`, 'err'); }
+          });
+        }),
+      );
+      const threadEl = body.querySelector('#comment-thread');
+      threadEl.innerHTML = renderCommentTree(detail.comments || []);
+      wireCommentReplies(threadEl, p, issueId, load);
+      mountCommentComposer(
+        body.querySelector('#comment-composer'),
+        p, issueId, load,
+      );
+    };
+    load();
+  }
+
+  // ── Comment thread rendering + composer (Phase 3c, reused) ───────────
+  //
+  // The same renderer + composer pair is used for issue threads and
+  // (in 3c-tidy) patch detail threads — wherever a kind-1621 or 1617
+  // event needs a NIP-22 conversation surface.
+  function renderCommentTree(nodes, depth = 0) {
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+      return depth === 0
+        ? `<div class="comment-empty muted">No comments yet.</div>`
+        : '';
+    }
+    return nodes.map(n => {
+      const author = shortPubkey(n.pubkey);
+      const legacy = n.kind === 1622 ? ' <span class="comment-legacy">legacy</span>' : '';
+      return `
+        <div class="comment" data-id="${escapeHtml(n.id)}" style="--depth:${depth}">
+          <div class="comment-head">
+            <span class="comment-author">${escapeHtml(author)}</span>${legacy}
+            <span class="comment-time muted">${escapeHtml(fmtAgoIso(new Date((n.createdAt || 0) * 1000).toISOString()))}</span>
+          </div>
+          <div class="comment-body code-md">${renderMarkdown(n.content || '')}</div>
+          <div class="comment-actions">
+            <button class="comment-reply" data-id="${escapeHtml(n.id)}">reply</button>
+            <span class="copy-slot" data-copy="${escapeHtml(n.id)}"></span>
+          </div>
+          <div class="comment-children">
+            ${renderCommentTree(n.children || [], depth + 1)}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function wireCommentReplies(threadEl, p, rootId, onPublished) {
+    threadEl.querySelectorAll('.copy-slot').forEach(s => {
+      if (s.childElementCount === 0) s.appendChild(copyBtn(s.dataset.copy));
+    });
+    threadEl.querySelectorAll('.comment-reply').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const targetId = btn.dataset.id;
+        const wrap = btn.closest('.comment');
+        // Toggle: if an inline composer already exists, remove it.
+        const existing = wrap.querySelector(':scope > .comment-inline-composer');
+        if (existing) { existing.remove(); return; }
+        const composer = document.createElement('div');
+        composer.className = 'comment-inline-composer';
+        mountCommentComposer(composer, p, targetId, () => {
+          composer.remove();
+          onPublished?.();
+        });
+        wrap.appendChild(composer);
+      });
+    });
+  }
+
+  function mountCommentComposer(container, p, targetEventId, onPublished) {
+    container.innerHTML = `
+      <textarea class="comment-input" rows="3" placeholder="Write a comment…"></textarea>
+      <div class="comment-composer-foot">
+        <span class="muted" style="font-size:11px">
+          Replies to <code>${escapeHtml(targetEventId.slice(0, 12))}…</code>
+        </span>
+        <button class="primary comment-submit">Reply</button>
+      </div>
+    `;
+    container.querySelector('.comment-submit').addEventListener('click', () => {
+      const text = container.querySelector('.comment-input').value.trim();
+      if (!text) { toast('Empty comment', 'write something first', 'err'); return; }
+      openExecModal({
+        title:    `Comment · ${p.name}`,
+        subtitle: `ngit comment --on ${targetEventId.slice(0, 12)}…`,
+        endpoint: `/api/projects/${p.id}/comments`,
+        body:     { eventId: targetEventId, body: text },
+      }).then((r) => {
+        if (r.ok) { toast('Comment posted', '', 'ok'); onPublished?.(); }
+        else      { toast('Failed to post comment', `exit ${r.code}`, 'err'); }
+      });
+    });
   }
 
   // Strip the wss:// prefix for display so the picker stays scannable
@@ -5136,7 +7015,55 @@ const ProjectsPanel = (() => {
     container.querySelector('.deploy-btn').addEventListener('click', () => runProjectDeploy(p));
   }
 
+  // Phase 7: Git and ngit operational controls are now Settings
+  // sections rather than top-level tabs. The publish wizard (Phase 1d)
+  // covers fresh-project onboarding so the standalone ngit-init form
+  // is no longer the user's first encounter — it sits here for
+  // re-initialise / advanced cases.
   function renderSettingsTab(container, p) {
+    // Wrap renderGitTab / renderNgitTab outputs in <details> sections
+    // so the Settings tab stays scannable. Each section's body uses
+    // the existing render function — no refactor needed.
+    const sections = [];
+    if (p.capabilities.git) {
+      sections.push({
+        label:  'Git remote',
+        render: (el) => renderGitTab(el, p),
+        open:   false,
+      });
+    }
+    if (p.capabilities.ngit) {
+      sections.push({
+        label:  p.remotes.ngit
+                  ? 'ngit signer + sync'
+                  : 'Initialize ngit for this project',
+        render: (el) => renderNgitTab(el, p),
+        // Auto-open the ngit section when the project hasn't been
+        // initialised yet — that's the case where the user needs it.
+        open:   !p.remotes.ngit,
+      });
+    }
+    // Render the existing Settings content first (project name, path,
+    // capabilities, etc. — the canonical "metadata" section).
+    renderSettingsTabBody(container, p);
+    // Append operational sections as collapsible details so the
+    // user can find them but they don't dominate the tab.
+    for (const s of sections) {
+      const det = document.createElement('details');
+      det.className = 'settings-section';
+      if (s.open) det.setAttribute('open', '');
+      const sum = document.createElement('summary');
+      sum.textContent = s.label;
+      det.appendChild(sum);
+      const body = document.createElement('div');
+      body.className = 'settings-section-body';
+      det.appendChild(body);
+      container.appendChild(det);
+      s.render(body);
+    }
+  }
+
+  function renderSettingsTabBody(container, p) {
     container.innerHTML = `
       <div class="tab-section">
         <h3>Details</h3>
@@ -5793,6 +7720,54 @@ const ProjectsPanel = (() => {
             remotes: { github: gitUrl, ngit: nostrUrl },
           });
         });
+        // Phase 6: Browse button — clones into ~/.nostr-station/scratch/
+        // for one-tap exploration without committing the repo to the
+        // main project list. After clone succeeds the client calls
+        // /api/projects/detect to register the scratch path; the Code
+        // tab detects the path prefix and renders a "temporary clone"
+        // banner with a path to make it permanent.
+        const browseBtn = card.querySelector('.browse-scratch');
+        if (browseBtn) browseBtn.addEventListener('click', async () => {
+          modal.close();
+          const nostrUrl = repo.cloneUrl
+            || (repo.naddr ? repo.naddr : (repo.clone || []).find(u => u.startsWith('nostr://')))
+            || '';
+          if (!nostrUrl) {
+            toast('Cannot browse', 'no nostr:// URL or naddr available for this repo', 'err');
+            return;
+          }
+          const r = await openExecModal({
+            title:    `Browse · ${repo.name}`,
+            subtitle: `git clone ${nostrUrl.slice(0, 32)}…  →  ~/.nostr-station/scratch/`,
+            endpoint: `/api/ngit/explore`,
+            body:     { url: nostrUrl },
+          });
+          const resolvedPath = r.info?.resolvedPath;
+          if (!r.ok || !resolvedPath) {
+            if (!r.ok) toast('Browse failed', `exit ${r.code}`, 'err');
+            return;
+          }
+          // Register the scratch path as a Project so the Code tab
+          // can open against it. If a project already lives at this
+          // path (re-explore), just navigate to it.
+          try {
+            const existing = projects.find(x => x.path === resolvedPath);
+            if (!existing) {
+              const identity = { useDefault: true, npub: '', bunkerUrl: '' };
+              await registerAfterNgitClone(resolvedPath, repo.name, nostrUrl, identity);
+            }
+            await reload();
+            const fresh = projects.find(x => x.path === resolvedPath);
+            if (fresh) {
+              state.view = 'detail';
+              state.projectId = fresh.id;
+              state.tab = 'code';
+              render();
+            }
+          } catch (e) {
+            toast('Could not register scratch checkout', e?.message || '', 'err');
+          }
+        });
       });
       queriedEl.textContent = `Queried: ${queried}`;
     }).catch((e) => {
@@ -5823,7 +7798,10 @@ const ProjectsPanel = (() => {
       <div class="discover-card" data-idx="${idx}">
         <div class="discover-card-head">
           <div class="discover-name">${escapeHtml(r.name)}</div>
-          <button class="primary add-to-projects" title="Open the Add Project drawer pre-filled with this repo's metadata">Add to Projects</button>
+          <div class="discover-card-actions">
+            <button class="browse-scratch" title="Clone into a scratch directory and browse without committing to your project list">Browse</button>
+            <button class="primary add-to-projects" title="Open the Add Project drawer pre-filled with this repo's metadata">Add to Projects</button>
+          </div>
         </div>
         ${desc ? `<div class="discover-desc muted">${escapeHtml(desc)}</div>` : ''}
         ${cloneRows ? `<div class="discover-clones">${cloneRows}</div>` : ''}

@@ -83,6 +83,11 @@ import { handleProjects } from './routes/projects.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleDitto } from './routes/ditto.js';
 import { handleNgit } from './routes/ngit.js';
+import { handleRepo } from './routes/repo.js';
+import { handlePatches } from './routes/patches.js';
+import { handleIssues } from './routes/issues.js';
+import { handleStatus } from './routes/status.js';
+import { runScratchGc } from './scratch-gc.js';
 import {
   handleAi,
   streamAnthropic, streamOpenAICompat,
@@ -743,6 +748,21 @@ export async function startWebServer(port: number): Promise<void> {
         }
       })
       .catch(e => process.stderr.write(`[ai-config] migration failed: ${e?.message || e}\n`));
+    // Phase 6-tidy: GC stale scratch checkouts from
+    // ~/.nostr-station/scratch/. Best-effort, runs once per server
+    // boot; never throws (any per-entry error is captured in the
+    // returned summary and logged). 7-day TTL by default — see
+    // src/lib/scratch-gc.ts.
+    try {
+      const gc = runScratchGc();
+      if (gc.removed.length > 0 || gc.errors.length > 0) {
+        process.stderr.write(
+          `[scratch-gc] removed=${gc.removed.length} projects-removed=${gc.projectsRemoved.length} errors=${gc.errors.length}\n`,
+        );
+      }
+    } catch (e: any) {
+      process.stderr.write(`[scratch-gc] skipped: ${e?.message || e}\n`);
+    }
   };
 
   // Loopback host:port variants we accept for Host / Origin / Referer.
@@ -1692,6 +1712,31 @@ export async function startWebServer(port: number): Promise<void> {
         res.on('close', cleanup);
         return;
       }
+
+      // ── Repo views (extracted to routes/repo.ts) ──────────────────────
+      // Per-project read-only views of the local git checkout + the
+      // project's NIP-34 30617 announcement. Drives the Code tab.
+      // Matched BEFORE handleProjects because the URL shape overlaps
+      // (`/api/projects/:id/repo/...`) and we want repo.ts to win.
+      if (await handleRepo(req, res, url, method)) return;
+
+      // ── Patches views (extracted to routes/patches.ts) ────────────────
+      // NIP-34 patch series (kind 1617) grouped into PR-shaped series
+      // with revision threading. Drives the Proposals tab + per-patch
+      // detail view. Same precedence rationale as handleRepo.
+      if (await handlePatches(req, res, url, method)) return;
+
+      // ── Issues + NIP-22 comments (extracted to routes/issues.ts) ─────
+      // Kind 1621 issues with kind 1111 (and legacy 1622) comment trees,
+      // plus SSE POSTs to ngit issue_create / ngit comment. Drives the
+      // Issues tab + comment threading on both issues and patches.
+      if (await handleIssues(req, res, url, method)) return;
+
+      // ── Status + merge (extracted to routes/status.ts) ────────────────
+      // Effective-status compute over kind 1630-1633 events, plus
+      // SSE POSTs to ngit pr_status / issue_status / pr_merge.
+      // Merge enforces a dirty-tree refusal before spawning ngit.
+      if (await handleStatus(req, res, url, method)) return;
 
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
       if (await handleProjects(req, res, url, method)) return;

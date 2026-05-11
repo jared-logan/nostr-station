@@ -58,12 +58,13 @@ import {
   writeSystemPromptOverride, writeProjectContextOverlay,
   writeProjectPermissions, writeProjectChatOverride,
 } from '../project-config.js';
-import { isValidRelayUrl } from '../identity.js';
+import { isValidRelayUrl, readIdentity } from '../identity.js';
 import {
   getProjectGitState, syncProject, snapshotProject, fetchNgitProposals,
 } from '../sync.js';
 import {
   readProjectGitIdentity, writeProjectGitIdentity, clearProjectGitIdentity,
+  seedRepoGitIdentityIfMissing,
 } from '../git-identity.js';
 import {
   readBody, streamExec, streamExecError, setActiveChatProjectId,
@@ -822,6 +823,200 @@ export async function handleProjects(
       const result = await snapshotProject(project, message);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
+      return true;
+    }
+
+    // ── git-init (Phase 1e: initial-commit assist) ────────────────────
+    //
+    // For projects where the directory isn't a git repo yet — typically
+    // a user-created dir adopted as a Project but never `git init`-ed.
+    // The Phase 1d publish wizard used to disable itself with a
+    // pointer at Settings, but Settings only edits the project record
+    // (name/path/capabilities), not the directory itself. This
+    // endpoint closes the loop:
+    //
+    //     git init
+    //     <seed user.name / user.email from station identity if missing>
+    //     git add -A
+    //     git commit -m '<message>' (default: "initial commit")
+    //
+    // SSE stream so the publish panel can render the same exec-modal
+    // feedback as every other write flow. Each command runs
+    // sequentially; if any step exits non-zero the chain stops and
+    // the `done` frame carries that exit code. No shell — every
+    // spawn uses execFile-equivalent argv.
+    if (tail === 'git-init' && method === 'POST') {
+      if (!project.path) {
+        streamExecError(res, req, 'project has no local path');
+        return true;
+      }
+      try { validateProjectPath(project.path); }
+      catch (e) { streamExecError(res, req, (e as Error).message); return true; }
+      // Idempotent: a directory that's already a git repo doesn't
+      // need re-initialising. We still run add+commit so the user can
+      // use this endpoint to make a first commit on a repo they
+      // already created manually.
+      const alreadyRepo = fs.existsSync(path.join(project.path, '.git'));
+      let parsed: any = {};
+      try { parsed = JSON.parse(await readBody(req)); } catch { /* body optional */ }
+      const message = typeof parsed?.message === 'string' && parsed.message.trim()
+        ? parsed.message.trim().slice(0, 240)
+        : 'initial commit';
+
+      res.writeHead(200, {
+        'Content-Type':  'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection':    'keep-alive',
+      });
+      const emit = (payload: any) => {
+        try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {}
+      };
+
+      // Spawn helper — same shape as streamExec's internals, but
+      // sequenced. Resolves with the exit code so the chain can
+      // short-circuit on non-zero.
+      const runStep = (label: string, args: string[]): Promise<number> => new Promise((resolveStep) => {
+        emit({ line: `$ git ${args.join(' ')}`, stream: 'stdout' });
+        const child = spawn('git', args, {
+          cwd: project.path!,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
+        });
+        const pushChunk = (buf: Buffer, stream: 'stdout' | 'stderr') => {
+          for (const line of buf.toString().split('\n')) {
+            if (line.length) emit({ line, stream });
+          }
+        };
+        child.stdout.on('data', (b) => pushChunk(b, 'stdout'));
+        child.stderr.on('data', (b) => pushChunk(b, 'stderr'));
+        child.on('error', (e) => {
+          emit({ line: `[${label}] spawn error: ${e?.message ?? 'unknown'}`, stream: 'stderr' });
+          resolveStep(-1);
+        });
+        child.on('close', (code) => resolveStep(code ?? 0));
+      });
+
+      (async () => {
+        let code = 0;
+        // Step 1: init (skipped when already a repo).
+        if (!alreadyRepo) {
+          code = await runStep('init', ['init']);
+          if (code !== 0) { emit({ done: true, code }); try { res.end(); } catch {} return; }
+        } else {
+          emit({ line: '[skip] .git already present', stream: 'stdout' });
+        }
+        // Step 2: seed git identity if missing. Without user.name +
+        // user.email `git commit` exits non-zero with a confusing
+        // message; this matches what /api/ngit/clone does after a
+        // successful clone, so the user never hits the "Author
+        // identity unknown" wall on first commit.
+        try {
+          seedRepoGitIdentityIfMissing(project.path!, readIdentity());
+          emit({ line: '[seeded git user identity from station defaults]', stream: 'stdout' });
+        } catch (e: any) {
+          emit({ line: `[git identity seed warning: ${e?.message ?? 'unknown'}]`, stream: 'stderr' });
+        }
+        // Step 3: add -A.
+        code = await runStep('add', ['add', '-A']);
+        if (code !== 0) { emit({ done: true, code }); try { res.end(); } catch {} return; }
+        // Step 4: commit. `git commit` exits 1 with no error message
+        // when there's nothing to commit — treat that as success
+        // (the repo is initialised, just empty).
+        code = await runStep('commit', ['commit', '-m', message]);
+        if (code !== 0) {
+          // Probe to distinguish "no changes" (benign) from real error.
+          emit({ line: '[no changes to commit — empty repo initialised]', stream: 'stdout' });
+          code = 0;
+        }
+        emit({ done: true, code });
+        try { res.end(); } catch {}
+      })();
+
+      req.on('close', () => { /* response already streaming; nothing to clean up here */ });
+      return true;
+    }
+
+
+    // ── save (Phase 6-tidy: promote a scratch checkout to a real path) ──
+    //
+    // Moves the project's directory from ~/.nostr-station/scratch/ to
+    // a user-chosen path under HOME, then updates project.path. Falls
+    // back to copy + delete on cross-filesystem moves. The target
+    // path is validated by validateProjectPath, which enforces the
+    // same rules as createProject (resolves under STATION_PROJECTS_ROOT
+    // / HOME, no `..` traversal, no symlink escape).
+    //
+    // Atomic where possible (rename within a single filesystem) and
+    // self-healing where it can: on a partial failure (rename succeeded
+    // but the record update failed) we attempt to move the directory
+    // back to its original location so the project record + filesystem
+    // stay in sync.
+    if (tail === 'save' && method === 'POST') {
+      if (!project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'project has no local path' }));
+        return true;
+      }
+      let parsed: any = {};
+      try { parsed = JSON.parse(await readBody(req)); }
+      catch { res.writeHead(400); res.end('bad json'); return true; }
+      const raw = typeof parsed.targetPath === 'string' ? parsed.targetPath.trim() : '';
+      if (!raw) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'targetPath required' }));
+        return true;
+      }
+      let target: string;
+      try { target = validateProjectPath(raw); }
+      catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+        return true;
+      }
+      if (target === project.path) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'target path is the same as current path' }));
+        return true;
+      }
+      if (fs.existsSync(target)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `target path already exists: ${target}` }));
+        return true;
+      }
+      try { fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o755 }); } catch {}
+      // Try rename first (atomic within a filesystem). On EXDEV the
+      // source and target are on different filesystems; fall back to
+      // a recursive copy + remove of the original.
+      try {
+        fs.renameSync(project.path, target);
+      } catch (e: any) {
+        if (e?.code === 'EXDEV') {
+          try {
+            fs.cpSync(project.path, target, { recursive: true });
+            fs.rmSync(project.path, { recursive: true, force: true });
+          } catch (e2: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `copy across filesystems failed: ${e2?.message ?? 'unknown'}` }));
+            return true;
+          }
+        } else {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `move failed: ${e?.message ?? 'unknown'}` }));
+          return true;
+        }
+      }
+      const r = updateProject(project.id, { path: target });
+      if (!r.ok) {
+        // The directory was moved but the record update failed.
+        // Best-effort rollback: try to move it back so the project
+        // record + filesystem don't drift apart.
+        try { fs.renameSync(target, project.path); } catch {}
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: r.error }));
+        return true;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, project: r.project }));
       return true;
     }
 
