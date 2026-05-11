@@ -5379,10 +5379,11 @@ const ProjectsPanel = (() => {
           `<span class="series-version-pill" data-revision="${r.rootId}">v${r.version}</span>`
         ).join('');
         const authorLabel = s.author?.name || shortPubkey(s.author?.pubkey || '');
+        const statusBadge = renderStatusBadge(s.effectiveStatus || 'open');
         return `
           <div class="series-card" data-root="${escapeHtml(s.rootId)}" tabindex="0" role="button">
             <div class="series-card-main">
-              <div class="series-card-title">${escapeHtml(s.subject || s.rootId.slice(0, 8))}</div>
+              <div class="series-card-title">${statusBadge} ${escapeHtml(s.subject || s.rootId.slice(0, 8))}</div>
               <div class="series-card-meta muted">
                 <span class="k">${escapeHtml(authorLabel)}</span>
                 · <span class="k">${escapeHtml(fmtAgoIso(new Date((s.latestRevisionAt || 0) * 1000).toISOString()))}</span>
@@ -5424,6 +5425,11 @@ const ProjectsPanel = (() => {
         const qs = refresh ? '?refresh=1' : '';
         const r = await api(`/api/projects/${p.id}/patches${qs}`);
         const series = Array.isArray(r?.series) ? r.series : [];
+        // Phase 4: enrich each series row with its effective status
+        // (merged / open / draft / closed). One bulk call covers
+        // every visible series; the result is keyed by rootId so
+        // renderSeries can decorate without changing its loop shape.
+        await annotateSeriesWithStatus(p.id, series);
         proposalsCache.set(p.id, series);
         renderSeries(series);
       } catch (e) {
@@ -5535,6 +5541,8 @@ const ProjectsPanel = (() => {
         <div class="pdetail-patches">${patchRows}</div>
         <div class="pdetail-foot">
           <button class="primary pdetail-download">Download</button>
+          <button class="pdetail-merge" title="Merge this proposal locally via ngit pr_merge">Merge</button>
+          <span class="pdetail-status-slot"></span>
           <span class="pdetail-copy"></span>
         </div>
         <div class="comment-thread" id="patch-comment-thread"></div>
@@ -5587,6 +5595,52 @@ const ProjectsPanel = (() => {
         });
       });
       body.querySelector('.pdetail-copy').appendChild(copyBtn(activeRev.rootId));
+
+      // Phase 4 — Merge button + status dropdown. Merge runs
+      // ngit pr_merge after a dirty-tree preflight (server-side).
+      // The status dropdown lets the user / a maintainer mark a PR
+      // open / draft / closed via ngit pr_status.
+      body.querySelector('.pdetail-merge').addEventListener('click', () => {
+        confirmDestructive({
+          title: 'Merge this proposal?',
+          description: `Runs ngit pr_merge for the v${activeRev.version} root locally. ` +
+            `This creates a merge commit, pushes refs, and publishes a kind-1631 status event. ` +
+            `The working tree must be clean.`,
+          confirmLabel: 'Merge',
+        }).then((ok) => {
+          if (!ok) return;
+          openExecModal({
+            title:    `Merge · ${p.name}`,
+            subtitle: `ngit pr_merge ${activeRev.rootId.slice(0, 12)}…`,
+            endpoint: `/api/projects/${p.id}/merge`,
+            body:     { rootId: activeRev.rootId },
+          }).then((r) => {
+            if (r.ok) {
+              toast('Merged', detail.subject, 'ok');
+              modal.close();
+              // Refresh the proposals list so the merged badge appears.
+              if (state.tab === 'proposals') {
+                renderTab(document.querySelector('.project-tab-content'), p);
+              }
+            } else {
+              toast('Merge failed', `exit ${r.code}`, 'err');
+            }
+          });
+        });
+      });
+
+      const statusSlot = body.querySelector('.pdetail-status-slot');
+      statusSlot.appendChild(renderStatusDropdown('patch', 'open', (newStatus) => {
+        openExecModal({
+          title:    `${newStatus} · ${p.name}`,
+          subtitle: `ngit pr_status --${newStatus} ${detail.rootId.slice(0, 12)}…`,
+          endpoint: `/api/projects/${p.id}/status`,
+          body:     { kind: 'patch', rootId: detail.rootId, status: newStatus },
+        }).then((r) => {
+          if (r.ok) toast(`Marked ${newStatus}`, detail.subject, 'ok');
+          else      toast('Status change failed', `exit ${r.code}`, 'err');
+        });
+      }));
 
       // Phase 3c: NIP-22 comment thread on the patch series. Threaded
       // against the SERIES' v1 root id so a multi-revision PR keeps a
@@ -5663,6 +5717,84 @@ const ProjectsPanel = (() => {
     return summary + filesHtml;
   }
 
+  // ── Phase 4: status helpers (shared by patches + issues) ─────────────
+  //
+  // renderStatusBadge: pill rendered next to a series subject or
+  // issue subject. The data-status attribute drives colors via
+  // the existing .issue-status-icon[data-status="…"] CSS, which we
+  // reuse here so the visual language is consistent across surfaces.
+  function renderStatusBadge(status) {
+    const label = {
+      open:     'open',
+      draft:    'draft',
+      closed:   'closed',
+      merged:   'merged',
+      resolved: 'resolved',
+    }[status] || 'open';
+    return `<span class="status-badge" data-status="${escapeHtml(status)}">${escapeHtml(label)}</span>`;
+  }
+
+  // Bulk-annotate a list of series / issues with their effective
+  // status. Single GET /status?rootIds=… call covers all rows;
+  // failures degrade silently to "open" so the surface still renders.
+  async function annotateSeriesWithStatus(projectId, series) {
+    if (!Array.isArray(series) || series.length === 0) return;
+    const ids = series.map(s => s.rootId).join(',');
+    try {
+      const r = await api(`/api/projects/${projectId}/status?rootIds=${encodeURIComponent(ids)}`);
+      const byId = new Map((r?.results || []).map(x => [x.rootId, x]));
+      for (const s of series) {
+        const c = byId.get(s.rootId);
+        s.effectiveStatus = c?.status || 'open';
+        s.statusEventId   = c?.statusEventId || null;
+        s.mergeCommit     = c?.mergeCommit || null;
+      }
+    } catch {
+      for (const s of series) s.effectiveStatus = s.effectiveStatus || 'open';
+    }
+  }
+
+  async function annotateIssuesWithStatus(projectId, issues) {
+    if (!Array.isArray(issues) || issues.length === 0) return;
+    const ids = issues.map(i => i.id).join(',');
+    try {
+      const r = await api(`/api/projects/${projectId}/status?rootIds=${encodeURIComponent(ids)}`);
+      const byId = new Map((r?.results || []).map(x => [x.rootId, x]));
+      for (const i of issues) {
+        const c = byId.get(i.id);
+        // Server returns 'open' when no 163x exists yet — preserves
+        // the default for fresh issues.
+        i.status = c?.status || i.status || 'open';
+        i.statusEventId = c?.statusEventId || null;
+      }
+    } catch {
+      // Already defaults to 'open' from the server — leave as-is.
+    }
+  }
+
+  // Status-change dropdown button for the issue/patch detail modal.
+  // Phase 4 ships a simple dropdown (open/closed/draft for patches;
+  // open/resolved/closed for issues). Authority is enforced server-
+  // side; the dropdown shows all options because we don't yet know
+  // the user's pubkey context here (would require an /account call).
+  function renderStatusDropdown(kind, currentStatus, onChange) {
+    const allowed = kind === 'patch'
+      ? ['open', 'draft', 'closed']
+      : ['open', 'resolved', 'closed'];
+    const wrap = document.createElement('div');
+    wrap.className = 'status-dropdown';
+    wrap.innerHTML = `
+      <label class="muted" style="font-size:11px">Status</label>
+      <select class="status-dropdown-select">
+        ${allowed.map(s =>
+          `<option value="${escapeHtml(s)}" ${s === currentStatus ? 'selected' : ''}>${escapeHtml(s)}</option>`,
+        ).join('')}
+      </select>
+    `;
+    wrap.querySelector('select').addEventListener('change', (e) => onChange(e.target.value));
+    return wrap;
+  }
+
   // ── Phase 3b: Issues tab ─────────────────────────────────────────────
   //
   // Kind 1621 issues for the repo, with NIP-22 comment counts and a
@@ -5731,7 +5863,9 @@ const ProjectsPanel = (() => {
     const fetchAndRender = async (refresh = false) => {
       try {
         const r = await api(`/api/projects/${p.id}/issues${refresh ? '?refresh=1' : ''}`);
-        renderList(Array.isArray(r?.issues) ? r.issues : []);
+        const issues = Array.isArray(r?.issues) ? r.issues : [];
+        await annotateIssuesWithStatus(p.id, issues);
+        renderList(issues);
       } catch (e) {
         listEl.innerHTML = `<div class="muted">Failed to load issues: ${escapeHtml(e?.message || String(e))}</div>`;
       }
@@ -5823,15 +5957,23 @@ const ProjectsPanel = (() => {
       }
       const author = shortPubkey(detail.author?.pubkey || detail.pubkey || '');
       const labels = (detail.labels || []).map(l => `<span class="issue-label">${escapeHtml(l)}</span>`).join('');
+      // Phase 4: pull current effective status before render so the
+      // badge + dropdown both reflect the latest 163x.
+      let effective = 'open';
+      try {
+        const sr = await api(`/api/projects/${p.id}/status?rootIds=${encodeURIComponent(detail.id)}`);
+        effective = sr?.results?.[0]?.status || 'open';
+      } catch { /* stays 'open' */ }
+
       body.innerHTML = `
         <div class="idetail-head">
-          <h3>${escapeHtml(detail.subject)}</h3>
+          <h3>${renderStatusBadge(effective)} ${escapeHtml(detail.subject)}</h3>
           <div class="idetail-meta muted">
-            <span class="issue-status-icon" data-status="${escapeHtml(detail.status)}">●</span>
             opened by ${escapeHtml(author)}
             · ${escapeHtml(fmtAgoIso(new Date((detail.createdAt || 0) * 1000).toISOString()))}
           </div>
           ${labels ? `<div class="issue-labels" style="margin-top:6px">${labels}</div>` : ''}
+          <div class="idetail-status-slot" style="margin-top:8px"></div>
         </div>
 
         ${detail.body
@@ -5841,6 +5983,19 @@ const ProjectsPanel = (() => {
         <div class="comment-thread" id="comment-thread"></div>
         <div class="comment-composer" id="comment-composer"></div>
       `;
+      body.querySelector('.idetail-status-slot').appendChild(
+        renderStatusDropdown('issue', effective, (newStatus) => {
+          openExecModal({
+            title:    `${newStatus} · ${p.name}`,
+            subtitle: `ngit issue_status --${newStatus} ${detail.id.slice(0, 12)}…`,
+            endpoint: `/api/projects/${p.id}/status`,
+            body:     { kind: 'issue', rootId: detail.id, status: newStatus },
+          }).then((r) => {
+            if (r.ok) { toast(`Marked ${newStatus}`, detail.subject, 'ok'); load(); }
+            else      { toast('Status change failed', `exit ${r.code}`, 'err'); }
+          });
+        }),
+      );
       const threadEl = body.querySelector('#comment-thread');
       threadEl.innerHTML = renderCommentTree(detail.comments || []);
       wireCommentReplies(threadEl, p, issueId, load);

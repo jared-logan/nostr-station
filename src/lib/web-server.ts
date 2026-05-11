@@ -86,6 +86,7 @@ import { handleNgit } from './routes/ngit.js';
 import { handleRepo } from './routes/repo.js';
 import { handlePatches } from './routes/patches.js';
 import { handleIssues } from './routes/issues.js';
+import { handleStatus } from './routes/status.js';
 import {
   handleAi,
   streamAnthropic, streamOpenAICompat,
@@ -1714,6 +1715,12 @@ export async function startWebServer(port: number): Promise<void> {
       // plus SSE POSTs to ngit issue_create / ngit comment. Drives the
       // Issues tab + comment threading on both issues and patches.
       if (await handleIssues(req, res, url, method)) return;
+
+      // ── Status + merge (extracted to routes/status.ts) ────────────────
+      // Effective-status compute over kind 1630-1633 events, plus
+      // SSE POSTs to ngit pr_status / issue_status / pr_merge.
+      // Merge enforces a dirty-tree refusal before spawning ngit.
+      if (await handleStatus(req, res, url, method)) return;
 
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
       if (await handleProjects(req, res, url, method)) return;

@@ -6039,3 +6039,63 @@ body.term-expanded .term-bar-toggle .term-chevron {
   margin-top: 8px;
   gap: 8px;
 }
+
+/* ── Phase 4: status badge + dropdown + merge button ──────────────────── */
+
+.status-badge {
+  display: inline-block;
+  padding: 1px 9px;
+  font-size: 11px;
+  border-radius: 999px;
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: 0.3px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev, var(--bg-card));
+  vertical-align: middle;
+  margin-right: 4px;
+}
+.status-badge[data-status="open"]     { color: var(--accent-bright); border-color: var(--accent-dim, var(--border)); }
+.status-badge[data-status="draft"]    { color: var(--muted); }
+.status-badge[data-status="closed"]   { color: var(--error, #d04040); border-color: rgba(208, 64, 64, 0.4); }
+.status-badge[data-status="merged"]   { color: #b48ddf; border-color: rgba(180, 141, 223, 0.4); }
+.status-badge[data-status="resolved"] { color: var(--accent); border-color: var(--accent-dim, var(--border)); }
+
+.status-dropdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.status-dropdown-select {
+  padding: 3px 8px;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.status-dropdown-select:focus { border-color: var(--accent); outline: none; }
+
+.pdetail-merge {
+  background: var(--bg-card);
+  border: 1px solid var(--accent-dim, var(--border));
+  color: var(--accent-bright);
+  padding: 4px 14px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+}
+.pdetail-merge:hover {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+.pdetail-status-slot {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;            /* push dropdown to the right of the merge button */
+}
