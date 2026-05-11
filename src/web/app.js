@@ -4555,6 +4555,11 @@ const ProjectsPanel = (() => {
   }
 
   function renderTab(container, p) {
+    // Each tab renderer may register a cleanup via container.__cleanup
+    // (intervals, visibility listeners). Run it before swapping content
+    // so timers/listeners don't leak when the user switches tabs.
+    try { container.__cleanup?.(); } catch {}
+    container.__cleanup = null;
     container.innerHTML = '';
     if (state.tab === 'overview') renderOverview(container, p);
     else if (state.tab === 'code')      renderCodeTab(container, p);
@@ -5877,6 +5882,11 @@ const ProjectsPanel = (() => {
   // tab (e.g. after a Download finishes) doesn't refetch unless the
   // user explicitly asks via the Refresh button.
   const proposalsCache = new Map();
+  // One-shot "force refresh on next paint" set, populated by user
+  // actions (merge / status-change) that just published a 163x event
+  // and need the dashboard's next render to bypass the server's 60s
+  // status cache. Consumed-and-cleared inside fetchAndRender.
+  const proposalsForceRefresh = new Set();
 
   async function renderProposalsTab(container, p) {
     // Phase 2b: PR-shaped series cards driven by /api/projects/:id/patches
@@ -6029,6 +6039,11 @@ const ProjectsPanel = (() => {
     };
 
     const fetchAndRender = async (refresh = false) => {
+      // Consume any pending one-shot force-refresh from a prior user
+      // action (merge / status-change) so its 163x event makes it
+      // past the server's 60s cache on this very next paint.
+      const forced = proposalsForceRefresh.delete(p.id);
+      const refreshStatus = refresh || forced;
       try {
         const qs = refresh ? '?refresh=1' : '';
         const r = await api(`/api/projects/${p.id}/patches${qs}`);
@@ -6037,7 +6052,7 @@ const ProjectsPanel = (() => {
         // (merged / open / draft / closed). One bulk call covers
         // every visible series; the result is keyed by rootId so
         // renderSeries can decorate without changing its loop shape.
-        await annotateSeriesWithStatus(p.id, series);
+        await annotateSeriesWithStatus(p.id, series, refreshStatus);
         proposalsCache.set(p.id, series);
         renderSeries(series);
       } catch (e) {
@@ -6069,6 +6084,47 @@ const ProjectsPanel = (() => {
     } else {
       fetchAndRender();
     }
+
+    // Smart polling — keep status in tune with the actual relay state
+    // without the cost of a persistent subscription.
+    //
+    //   - re-poll status every 30s while the tab is visible (the server's
+    //     60s cache rate-limits the relay round-trips naturally)
+    //   - re-poll immediately when the tab regains focus (covers the
+    //     "I came back from gitworkshop, what changed?" case)
+    //   - skip polling when the tab is hidden so a backgrounded dashboard
+    //     doesn't burn relay round-trips on data nobody is looking at
+    //
+    // Patches list itself isn't repolled here — new PRs are slow-changing
+    // and Refresh / tab re-entry already covers them; status flips are
+    // what users care about catching live.
+    const refreshStatusOnly = async () => {
+      const series = proposalsCache.get(p.id);
+      if (!Array.isArray(series) || series.length === 0) return;
+      try {
+        await annotateSeriesWithStatus(p.id, series);
+        renderSeries(series);
+      } catch { /* polling is best-effort */ }
+    };
+    let pollTimer = null;
+    const startPoll = () => {
+      if (pollTimer || document.hidden) return;
+      pollTimer = setInterval(refreshStatusOnly, 30_000);
+    };
+    const stopPoll = () => {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    };
+    const onVisibility = () => {
+      if (document.hidden) { stopPoll(); return; }
+      refreshStatusOnly();
+      startPoll();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    startPoll();
+    container.__cleanup = () => {
+      stopPoll();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }
 
   // ── Phase 2c: per-series detail modal ────────────────────────────
@@ -6226,7 +6282,10 @@ const ProjectsPanel = (() => {
             if (r.ok) {
               toast('Merged', detail.subject, 'ok');
               modal.close();
-              // Refresh the proposals list so the merged badge appears.
+              // Force the proposals list's next paint to bypass the
+              // 60s status cache so the freshly published 1631 shows
+              // up immediately instead of after the TTL expires.
+              proposalsForceRefresh.add(p.id);
               if (state.tab === 'proposals') {
                 renderTab(document.querySelector('.project-tab-content'), p);
               }
@@ -6261,8 +6320,15 @@ const ProjectsPanel = (() => {
           endpoint: `/api/projects/${p.id}/status`,
           body:     { kind: 'patch', rootId: detail.rootId, status: newStatus },
         }).then((r) => {
-          if (r.ok) toast(`Marked ${newStatus}`, detail.subject, 'ok');
-          else      toast('Status change failed', `exit ${r.code}`, 'err');
+          if (r.ok) {
+            toast(`Marked ${newStatus}`, detail.subject, 'ok');
+            // Force the proposals list to bypass the status cache so
+            // the new status pill appears on the next paint instead
+            // of waiting for the 60s TTL.
+            proposalsForceRefresh.add(p.id);
+          } else {
+            toast('Status change failed', `exit ${r.code}`, 'err');
+          }
         });
       }));
 
@@ -6361,11 +6427,12 @@ const ProjectsPanel = (() => {
   // Bulk-annotate a list of series / issues with their effective
   // status. Single GET /status?rootIds=… call covers all rows;
   // failures degrade silently to "open" so the surface still renders.
-  async function annotateSeriesWithStatus(projectId, series) {
+  async function annotateSeriesWithStatus(projectId, series, refresh = false) {
     if (!Array.isArray(series) || series.length === 0) return;
     const ids = series.map(s => s.rootId).join(',');
+    const refreshParam = refresh ? '&refresh=1' : '';
     try {
-      const r = await api(`/api/projects/${projectId}/status?rootIds=${encodeURIComponent(ids)}`);
+      const r = await api(`/api/projects/${projectId}/status?rootIds=${encodeURIComponent(ids)}${refreshParam}`);
       const byId = new Map((r?.results || []).map(x => [x.rootId, x]));
       for (const s of series) {
         const c = byId.get(s.rootId);

@@ -447,6 +447,10 @@ export async function handleStatus(
   if (statusMatch && method === 'GET') {
     const rootIdsParam = u.searchParams.get('rootIds') || '';
     const rootIds = rootIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
+    // `refresh=1` bypasses the 60s status cache. Used by the client
+    // after a successful merge / status change, and by manual refresh
+    // gestures, so the next paint reflects the just-published 163x.
+    const refresh = u.searchParams.get('refresh') === '1';
     if (rootIds.length === 0) return json(res, 200, { results: [] });
     if (rootIds.length > 200) return json(res, 400, { error: 'too many rootIds (max 200)' });
     for (const r of rootIds) {
@@ -457,7 +461,7 @@ export async function handleStatus(
     //   - maintainer set (permissive: anchor + verified + candidates)
     //   - rootId → pubkey map so submitter self-closes are authorised
     const [statusR, maintainers, rootAuthors] = await Promise.all([
-      fetchStatusEvents(project, false, rootIds),
+      fetchStatusEvents(project, refresh, rootIds),
       fetchMaintainerSet(project),
       fetchRootAuthors(project, rootIds),
     ]);
