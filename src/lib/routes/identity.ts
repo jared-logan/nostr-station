@@ -155,6 +155,215 @@ async function lookupProfile(npubOrHex: string, relays: string[]): Promise<Profi
 
 function bustProfileCache(): void { PROFILE_CACHE.clear(); }
 
+// ── Batched profile lookup (kind-0 over ws, multi-author per REQ) ─────────
+//
+// The owner-profile flow above queries one author per REQ — fine for the
+// drawer's single lookup but wasteful for the About-tab / maintainers-panel
+// case where we need to resolve 3–10 pubkeys at once. This batched variant
+// sends ONE REQ per relay with `authors: [hex…]` and collects all kind-0
+// replies, picking the freshest per pubkey.
+//
+// Shape: returns Map<hex, ProfileLite>. Unknown pubkeys (no relay returned
+// their kind-0) get a minimal entry with only `hex` + `npub` so the caller
+// can still render an npub fallback without a separate code path.
+//
+// Reuses the PROFILE_CACHE — entries written here are interchangeable with
+// the owner-profile path (same hex key, same 5min TTL). NIP-05 verification
+// is intentionally SKIPPED in the batch path: it's one DNS + HTTP per
+// profile, prohibitively expensive for a 10-row maintainers panel. The raw
+// `nip05` claim is still returned so the UI can display "alex@gleasonator.dev"
+// alongside a "(unverified)" marker if it cares.
+
+interface ProfileLite {
+  hex:          string;
+  npub:         string;
+  name?:        string;
+  displayName?: string;     // kind-0 `display_name` field
+  picture?:     string;
+  nip05?:       string;     // raw claim
+  nip05Verified?: boolean;  // true when the NIP-05's well-known JSON resolves back to this hex
+  cachedAt:     number;
+}
+
+function fetchKind0BatchFromRelay(
+  relayUrl: string,
+  pubkeys: string[],
+  timeoutMs: number,
+): Promise<any[]> {
+  return new Promise((resolve) => {
+    const out: any[] = [];
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try { ws.close(); } catch {}
+      clearTimeout(timer);
+      resolve(out);
+    };
+    let ws: WebSocket;
+    try { ws = new WebSocket(relayUrl); }
+    catch { resolve(out); return; }
+    const timer = setTimeout(finish, timeoutMs);
+    const subId = 'ns-profiles-' + Math.random().toString(36).slice(2, 8);
+    ws.addEventListener('open', () => {
+      try {
+        ws.send(JSON.stringify(['REQ', subId, { authors: pubkeys, kinds: [0] }]));
+      } catch { finish(); }
+    });
+    ws.addEventListener('message', (m: any) => {
+      try {
+        const msg = JSON.parse(typeof m.data === 'string' ? m.data : m.data.toString());
+        if (Array.isArray(msg)) {
+          if (msg[0] === 'EVENT' && msg[1] === subId && msg[2]?.kind === 0) {
+            out.push(msg[2]);
+          } else if (msg[0] === 'EOSE' && msg[1] === subId) {
+            finish();
+          }
+        }
+      } catch {}
+    });
+    ws.addEventListener('error', () => finish());
+    ws.addEventListener('close', () => finish());
+  });
+}
+
+async function lookupProfilesBatch(
+  pubkeys: string[],
+  relays: string[],
+  verifyNip05: boolean = false,
+): Promise<Map<string, ProfileLite>> {
+  const result = new Map<string, ProfileLite>();
+  const need: string[] = [];
+  // Cache hot-path: skip pubkeys whose entry is fresh. We re-fetch
+  // (move to `need`) when verification was requested but we don't have
+  // a verification result yet — otherwise the verified ✓ wouldn't
+  // appear on a re-paint that arrived from cache.
+  for (const hex of pubkeys) {
+    if (!/^[0-9a-f]{64}$/.test(hex)) continue;
+    const cached = PROFILE_CACHE.get(hex);
+    const isFresh = cached && Date.now() - cached.cachedAt < PROFILE_TTL_MS;
+    const needsVerification = verifyNip05 && cached?.nip05 && cached.nip05Verified === undefined;
+    if (isFresh && !needsVerification) {
+      result.set(hex, {
+        hex:           cached!.hex,
+        npub:          cached!.npub,
+        name:          cached!.name,
+        picture:       cached!.picture,
+        nip05:         cached!.nip05,
+        nip05Verified: cached!.nip05Verified,
+        cachedAt:      cached!.cachedAt,
+      });
+    } else if (isFresh && needsVerification) {
+      // Skip the relay roundtrip but include this hex in the
+      // verification pass below by seeding `result` with the cached
+      // profile values.
+      result.set(hex, {
+        hex:           cached!.hex,
+        npub:          cached!.npub,
+        name:          cached!.name,
+        picture:       cached!.picture,
+        nip05:         cached!.nip05,
+        cachedAt:      cached!.cachedAt,
+      });
+    } else {
+      need.push(hex);
+    }
+  }
+
+  if (need.length === 0 || relays.length === 0) {
+    // Still emit minimal entries for everything requested so the caller
+    // can render an npub fallback uniformly.
+    for (const hex of pubkeys) {
+      if (!result.has(hex) && /^[0-9a-f]{64}$/.test(hex)) {
+        result.set(hex, { hex, npub: hexToNpub(hex), cachedAt: Date.now() });
+      }
+    }
+    return result;
+  }
+
+  // Parallel REQ across all relays. Each relay gets a 5s budget; total
+  // wall-clock cap is ~5s because they run concurrently.
+  const perRelay = await Promise.all(
+    relays.map(r => fetchKind0BatchFromRelay(r, need, 5000)),
+  );
+  // Pick freshest kind-0 per pubkey across all relay responses.
+  const freshest = new Map<string, any>();
+  for (const events of perRelay) {
+    for (const ev of events) {
+      if (!ev || ev.kind !== 0 || typeof ev.pubkey !== 'string') continue;
+      const prev = freshest.get(ev.pubkey);
+      if (!prev || (ev.created_at || 0) > (prev.created_at || 0)) {
+        freshest.set(ev.pubkey, ev);
+      }
+    }
+  }
+
+  for (const hex of need) {
+    const ev = freshest.get(hex);
+    const profile: ProfileLite = { hex, npub: hexToNpub(hex), cachedAt: Date.now() };
+    if (ev && typeof ev.content === 'string') {
+      try {
+        const meta = JSON.parse(ev.content);
+        if (typeof meta.name         === 'string') profile.name        = meta.name;
+        if (typeof meta.display_name === 'string') profile.displayName = meta.display_name;
+        if (typeof meta.picture      === 'string') profile.picture     = meta.picture;
+        if (typeof meta.nip05        === 'string') profile.nip05       = meta.nip05;
+      } catch {}
+    }
+    result.set(hex, profile);
+  }
+
+  // NIP-05 verification — opt-in via `verifyNip05` arg. Each lookup is
+  // a DNS + HTTPS GET so it's not free; we cap parallelism so we don't
+  // open 50 DNS lookups + sockets at once. Failures (network, 4xx,
+  // mismatch) leave nip05Verified === false. Successes set true.
+  if (verifyNip05) {
+    const withClaim = [...result.values()].filter(p => typeof p.nip05 === 'string' && p.nip05.includes('@'));
+    // Cap at 8 in flight at a time. The total wall-clock for, say, 12
+    // claims is 2× the slowest fetch instead of all serialised.
+    const queue = withClaim.slice();
+    const inFlight: Promise<void>[] = [];
+    const runOne = async (p: ProfileLite): Promise<void> => {
+      const at = p.nip05!.indexOf('@');
+      const name   = at >= 0 ? p.nip05!.slice(0, at) : '_';
+      const domain = at >= 0 ? p.nip05!.slice(at + 1) : p.nip05!;
+      try { p.nip05Verified = await fetchNip05(name, domain, p.hex); }
+      catch { p.nip05Verified = false; }
+    };
+    const tick = async () => {
+      while (queue.length > 0 && inFlight.length < 8) {
+        const next = queue.shift()!;
+        const promise = runOne(next).finally(() => {
+          const idx = inFlight.indexOf(promise);
+          if (idx >= 0) inFlight.splice(idx, 1);
+        });
+        inFlight.push(promise);
+      }
+    };
+    while (queue.length > 0 || inFlight.length > 0) {
+      await tick();
+      if (inFlight.length > 0) await Promise.race(inFlight);
+    }
+  }
+
+  // Mirror into the owner-profile cache so subsequent single lookups
+  // for the same pubkey are free. Done after verification so the
+  // verified flag is persisted alongside the rest.
+  for (const hex of need) {
+    const profile = result.get(hex)!;
+    PROFILE_CACHE.set(hex, {
+      hex,
+      npub:          profile.npub,
+      name:          profile.name,
+      picture:       profile.picture,
+      nip05:         profile.nip05,
+      nip05Verified: profile.nip05Verified,
+      cachedAt:      profile.cachedAt,
+    });
+  }
+  return result;
+}
+
 // ── Route handler ──────────────────────────────────────────────────────────
 
 export async function handleIdentity(
@@ -355,6 +564,60 @@ export async function handleIdentity(
       const p = await lookupProfile(ident.npub, ident.readRelays);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(p));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e.message || e) }));
+    }
+    return true;
+  }
+
+  // ── Batched profile lookup ─────────────────────────────────────────────
+  //
+  // GET /api/profiles?pubkeys=hex1,hex2,...&relays=wss://a,wss://b
+  //   Returns a hex → ProfileLite map. Used by the About tab + maintainers
+  //   panel + comment author rows to swap npub fallbacks for real names
+  //   and avatars. Caller passes the project's relay hints as `relays` so
+  //   we don't lean entirely on the user's read-relay set for maintainers
+  //   whose profiles live elsewhere.
+  if (url.startsWith('/api/profiles') && method === 'GET') {
+    const u = new URL(url, 'http://localhost');
+    const pkParam = u.searchParams.get('pubkeys') || '';
+    const pubkeys = pkParam
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(s => /^[0-9a-f]{64}$/.test(s));
+    if (pubkeys.length === 0) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ profiles: {} }));
+      return true;
+    }
+    // Cap at 50 — the maintainer set for any realistic repo is small.
+    // Refuse oversized requests so a stray caller doesn't open 50 WSes
+    // per relay times N relays.
+    if (pubkeys.length > 50) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'too many pubkeys (max 50)' }));
+      return true;
+    }
+    const relaysParam = (u.searchParams.get('relays') || '').split(',')
+      .map(s => s.trim()).filter(s => /^wss?:\/\//.test(s));
+    const ident = readIdentity();
+    const ownerRelays = Array.isArray(ident.readRelays) && ident.readRelays.length > 0
+      ? ident.readRelays
+      : DEFAULT_READ_RELAYS;
+    const relays = [...new Set([...relaysParam, ...ownerRelays])].slice(0, 8);
+    // verify=1 opts in to NIP-05 well-known verification per profile.
+    // Off by default because it's DNS + HTTPS per claim — fine for the
+    // owner profile but expensive on a 10-row maintainers panel. The
+    // client invokes verify=1 in a follow-up async request after the
+    // initial paint so the unverified state never blocks the UI.
+    const verify = u.searchParams.get('verify') === '1';
+    try {
+      const map = await lookupProfilesBatch(pubkeys, relays, verify);
+      const profiles: Record<string, any> = {};
+      for (const [k, v] of map) profiles[k] = v;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ profiles }));
     } catch (e: any) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: String(e.message || e) }));

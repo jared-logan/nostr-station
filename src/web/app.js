@@ -4551,6 +4551,11 @@ const ProjectsPanel = (() => {
       ? ` <span class="tab-count">${n}</span>` : '';
     const tabs = [
       { key: 'overview', label: 'Overview' },
+      // About — gitworkshop-style metadata page. Only meaningful for
+      // ngit-published projects (no 30617 → nothing to show). Sits
+      // before Code so it acts as the canonical "what is this repo?"
+      // landing for visitors after Overview.
+      (p.capabilities.ngit && p.remotes.ngit) && { key: 'about', label: 'About' },
       hasGitCheckout && { key: 'code', label: 'Code' },
       // Renamed from "Proposals" — every other Nostr-git client and
       // github itself call them "Pull requests" / "PRs". Matching
@@ -4626,8 +4631,14 @@ const ProjectsPanel = (() => {
   }
 
   function renderTab(container, p) {
+    // Each tab renderer may register a cleanup via container.__cleanup
+    // (intervals, visibility listeners). Run it before swapping content
+    // so timers/listeners don't leak when the user switches tabs.
+    try { container.__cleanup?.(); } catch {}
+    container.__cleanup = null;
     container.innerHTML = '';
     if (state.tab === 'overview') renderOverview(container, p);
+    else if (state.tab === 'about')     renderAboutTab(container, p);
     else if (state.tab === 'code')      renderCodeTab(container, p);
     else if (state.tab === 'proposals') renderProposalsTab(container, p);
     else if (state.tab === 'issues')    renderIssuesTab(container, p);
@@ -4761,6 +4772,372 @@ const ProjectsPanel = (() => {
         body: { cmd: 'git-status' },
       });
     });
+  }
+
+  // ── About tab ────────────────────────────────────────────────────────
+  //
+  // Gitworkshop-style metadata page for ngit-published projects.
+  // Consolidates everything the kind-30617 announcement(s) declare:
+  //
+  //   - Description + website
+  //   - Maintainers (anchor + verified + candidate-only)
+  //   - GRASP servers — hosts that serve BOTH a git endpoint AND a
+  //     nostr relay at the same domain (per ngit.dev/grasp). Detected
+  //     by intersecting an announcement's `clone` host set with its
+  //     `relays` host set.
+  //   - Other relays — relay URLs whose host doesn't appear in any
+  //     clone URL. Each labelled "via X" so the user can see which
+  //     co-maintainer's announcement contributed it.
+  //   - Clone URLs grouped by maintainer (per GRASP convention,
+  //     `https://<host>/<npub>/<identifier>.git` — the npub in the
+  //     path identifies which maintainer hosts that copy).
+  //   - "Raw announcement events (N)" — opens the inspector modal.
+  //
+  // All data comes from /api/projects/:id/repo (repo + maintainerSet).
+  // No new server work; the analysis is pure client-side derivation.
+  async function renderAboutTab(container, p) {
+    container.innerHTML = `<div class="muted">loading…</div>`;
+    let repoMeta;
+    try {
+      repoMeta = await api(`/api/projects/${p.id}/repo`);
+    } catch (e) {
+      container.innerHTML = `<div class="empty-state err">Failed to load repo metadata: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    const repo = repoMeta?.repo;
+    if (!repo) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="muted">This project hasn't been announced to nostr yet.</div>
+          <div class="muted" style="font-size:11px;margin-top:8px">Run <code>ngit init</code> to publish the kind-30617 announcement.</div>
+        </div>
+      `;
+      return;
+    }
+    const ms = repoMeta.maintainerSet;
+    paintAboutTab(container, repo, ms);
+    // Kick off profile resolution for every pubkey we display. The painter
+    // pulls names from the profile cache, so a second paint after this
+    // promise resolves upgrades the visible rows from npub-truncated
+    // placeholders to real names + avatars.
+    const allPubkeys = [
+      repo.pubkey,
+      ...(ms?.verified || []),
+      ...(ms?.candidatesOnly || []),
+    ];
+    const analysisForKeys = analyseAnnouncements(repo, ms);
+    for (const k of analysisForKeys.clonesByMaintainer.keys()) allPubkeys.push(k);
+    // Repo's relays + maintainer-announcement relays make a decent
+    // initial hint set for profile lookups — these maintainers are most
+    // likely to have their kind-0 on relays the repo already touches.
+    const relays = Array.isArray(repo.relays) ? repo.relays : [];
+    resolveProfiles(allPubkeys, { relays }).then(() => {
+      // Guard against tab switch during the fetch — only re-paint if the
+      // user is still on this tab and the container is in the DOM.
+      if (!container.isConnected) return;
+      paintAboutTab(container, repo, ms);
+      // Kick off NIP-05 verification asynchronously. This adds DNS +
+      // HTTPS per claim — slower than the kind-0 fetch, hence a third
+      // paint when it completes. Non-blocking; the tab is fully
+      // usable after the second paint without verification.
+      resolveProfilesVerified(allPubkeys, { relays }).then(() => {
+        if (!container.isConnected) return;
+        paintAboutTab(container, repo, ms);
+      });
+    });
+  }
+
+  // Pure painter — synchronous, idempotent. Called once with placeholder
+  // names, then again after profile resolution upgrades the cache. Reads
+  // names/avatars from profileCache via profileNameOf.
+  function paintAboutTab(container, repo, ms) {
+    const analysis = analyseAnnouncements(repo, ms);
+
+    // Section order matches gitworkshop: Topics → Maintainers → GRASP →
+    // Other relays → Clone (the nostr:// URL contributors actually use)
+    // → Raw git URLs (the per-maintainer https:// breakdown). Putting
+    // Topics first reads naturally because it's the "what is this?"
+    // signal; Clone before Raw git URLs because the nostr:// URL is the
+    // canonical entry point and the raw https:// URLs are a
+    // power-user view of the same data.
+    const ngitRemoteUrl = window.__projectsCache?.find?.(x => x.id === p.id)?.remotes?.ngit
+      ?? p.remotes?.ngit
+      ?? '';
+
+    container.innerHTML = `
+      <div class="about-tab">
+        ${repo.description ? `<div class="about-desc">${escapeHtml(repo.description)}</div>` : ''}
+
+        ${repo.web?.length ? `
+          <div class="about-section">
+            <div class="about-head muted">Website</div>
+            <div class="about-web">
+              ${repo.web.map(u => `<a href="${escapeHtml(u)}" target="_blank" rel="noreferrer noopener" class="about-web-link">${escapeHtml(u)}</a>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        ${repo.hashtags?.length ? `
+          <div class="about-section">
+            <div class="about-head muted">Topics</div>
+            <div class="about-pills">
+              ${repo.hashtags.map(t => `<code class="about-pill about-pill-tag">${escapeHtml(t)}</code>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        <div class="about-section">
+          <div class="about-head muted">Maintainers</div>
+          <div class="about-maintainers">${renderAboutMaintainers(repo, ms, analysis)}</div>
+        </div>
+
+        ${analysis.graspHosts.size > 0 ? `
+          <div class="about-section">
+            <div class="about-head muted">GRASP servers</div>
+            <div class="about-pills">
+              ${[...analysis.graspHosts].map(h => `<code class="about-pill about-pill-grasp">${escapeHtml(h)}</code>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        ${analysis.otherRelays.size > 0 ? `
+          <div class="about-section">
+            <div class="about-head muted">Other relays</div>
+            <div class="about-pills">
+              ${[...analysis.otherRelays.entries()].map(([url, contributors]) => {
+                const host = (() => { try { return new URL(url).host; } catch { return url; } })();
+                const viaLabel = contributors.length > 0 && contributors[0] !== repo.pubkey
+                  ? ` <span class="about-pill-via">via ${escapeHtml(analysis.nameOf(contributors[0]))}</span>` : '';
+                return `<code class="about-pill">${escapeHtml(host)}${viaLabel}</code>`;
+              }).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        ${ngitRemoteUrl ? `
+          <div class="about-section">
+            <div class="about-head muted">Clone</div>
+            <div class="about-clone-ngit">
+              <div class="about-clone-ngit-label">ngit <span class="muted">(nostr git plugin)</span></div>
+              <div class="about-clone-row about-clone-row-primary">
+                <code class="about-clone-url">git clone ${escapeHtml(ngitRemoteUrl)}</code>
+                <span class="copy-slot" data-copy="${escapeHtml('git clone ' + ngitRemoteUrl)}"></span>
+              </div>
+            </div>
+          </div>
+        ` : ''}
+
+        ${analysis.clonesByMaintainer.size > 0 ? `
+          <div class="about-section">
+            <div class="about-head muted" title="Raw https:// URLs from each maintainer's announcement. Most users should clone via the nostr:// URL above instead — it discovers all of these automatically.">Raw git URLs</div>
+            <div class="about-clones">
+              ${[...analysis.clonesByMaintainer.entries()].map(([owner, urls]) => `
+                <div class="about-clone-group">
+                  <div class="about-clone-owner">
+                    <span class="about-clone-owner-name">${escapeHtml(analysis.nameOf(owner))}</span>
+                    ${owner === repo.pubkey ? `<span class="about-clone-owner-badge">owner</span>` : ''}
+                  </div>
+                  ${urls.map(u => `
+                    <div class="about-clone-row">
+                      <code class="about-clone-url">${escapeHtml(u)}</code>
+                      <span class="copy-slot" data-copy="${escapeHtml(u)}"></span>
+                    </div>
+                  `).join('')}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        <div class="about-footer-row">
+          <button class="about-action about-action-edit" type="button" title="Edit this repository's announcement (re-publishes a signed kind-30617 with your changes)">
+            <span class="about-action-icon">✎</span> Edit
+          </button>
+          <button class="about-action about-action-share" type="button" title="Copy share links (naddr / nostr:// URL)">
+            <span class="about-action-icon">↗</span> Share links
+          </button>
+          ${ms?.events?.length ? `
+            <button class="about-action about-action-raw" type="button" title="Inspect each maintainer's raw kind-30617 event">
+              <span class="about-action-icon">{ }</span> Raw announcement event${ms.events.length === 1 ? '' : 's'}${ms.events.length > 1 ? ` (${ms.events.length})` : ''}
+            </button>
+          ` : ''}
+          <button class="about-action about-action-delete" type="button" title="Unregister this project from your dashboard (the nostr events remain on relays — there is no on-chain delete)">
+            <span class="about-action-icon">🗑</span> Delete
+          </button>
+        </div>
+      </div>
+    `;
+
+    container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+    container.querySelector('.about-action-raw')?.addEventListener('click', () => {
+      openAnnouncementsModal(repo, ms);
+    });
+    container.querySelector('.about-action-edit')?.addEventListener('click', () => {
+      openEditRepositoryModal(p, repo, ms, () => {
+        // After a successful save, re-fetch the repo metadata so the
+        // About tab reflects the new announcement. The cache is busted
+        // server-side. Guard against the user having switched tabs
+        // during the round-trip — re-rendering into a detached
+        // container would leak DOM and orphan our cleanup hooks.
+        if (!container.isConnected) return;
+        renderAboutTab(container, p);
+      });
+    });
+    container.querySelector('.about-action-share')?.addEventListener('click', () => {
+      openShareLinksModal(p, repo);
+    });
+    container.querySelector('.about-action-delete')?.addEventListener('click', () => {
+      openDeleteProjectConfirm(p);
+    });
+  }
+
+  // Render the maintainer rows on the About tab. Richer than the
+  // Code-tab strip: full row per maintainer with role badge, npub,
+  // and copy. Anchor first, then verified by the order MaintainerSet
+  // already establishes (anchor + verified-by-freshest), then any
+  // candidate-only pubkeys at the bottom under a "claimed but not
+  // announced" caption.
+  function renderAboutMaintainers(repo, ms, analysis) {
+    const anchor = repo.pubkey;
+    const verified = ms?.verified || [];
+    const candidate = ms?.candidatesOnly || [];
+    const selectedPubkey = ms?.display?.pubkey || anchor;
+    const seen = new Set([anchor]);
+    const verifiedRows = [{ pubkey: anchor, role: 'anchor' }];
+    for (const pk of verified) {
+      if (seen.has(pk)) continue;
+      seen.add(pk);
+      verifiedRows.push({ pubkey: pk, role: 'verified' });
+    }
+    const verifiedHtml = verifiedRows.map(({ pubkey, role }) => {
+      const isSelected = pubkey === selectedPubkey;
+      const pic = profilePictureOf(pubkey);
+      const avatar = pic
+        ? `<img class="about-avatar" src="${escapeHtml(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
+        : `<div class="about-avatar-placeholder" aria-hidden="true">${escapeHtml(profileNameOf(pubkey).slice(0, 1).toUpperCase())}</div>`;
+      // NIP-05 row when the profile has a claim. Verified === true →
+      // green ✓; verified === false → muted ✗ (claim doesn't resolve);
+      // verified === undefined → no marker (verification still running
+      // or never requested). Hover reveals the full claim.
+      const { nip05, verified } = profileNip05Of(pubkey);
+      let nip05Html = '';
+      if (nip05) {
+        const marker = verified === true
+          ? '<span class="about-nip05-mark about-nip05-mark-ok" title="NIP-05 verified — well-known JSON resolves back to this pubkey">✓</span>'
+          : verified === false
+            ? '<span class="about-nip05-mark about-nip05-mark-bad" title="NIP-05 claim does not verify — the well-known JSON points elsewhere">✗</span>'
+            : '';
+        nip05Html = `<span class="about-nip05" title="${escapeHtml(nip05)}">${escapeHtml(nip05)}${marker}</span>`;
+      }
+      return `
+        <div class="about-maintainer-row">
+          ${avatar}
+          <span class="maintainers-role maintainers-role-${role}" title="${escapeHtml(role === 'anchor' ? 'Trust anchor — published the repo announcement' : 'Verified — published their own kind-30617')}">${escapeHtml(role)}</span>
+          <div class="about-maintainer-main">
+            <div class="about-maintainer-name-row">
+              <code class="about-maintainer-pk">${escapeHtml(analysis.nameOf(pubkey))}</code>
+              ${isSelected ? `<span class="ann-selected">selected</span>` : ''}
+            </div>
+            ${nip05Html}
+          </div>
+          <span class="copy-slot" data-copy="${escapeHtml(window.NostrTools?.nip19 ? window.NostrTools.nip19.npubEncode(pubkey) : pubkey)}"></span>
+        </div>
+      `;
+    }).join('');
+    const candidateHtml = candidate.length === 0 ? '' : `
+      <div class="about-maintainer-candidates">
+        <div class="about-head muted" style="font-size:10px;margin-top:8px">Claimed but not announced (${candidate.length})</div>
+        <div class="about-pills">
+          ${candidate.map(pk => `<code class="ann-candidate-pk">${escapeHtml(analysis.nameOf(pk))}</code>`).join('')}
+        </div>
+      </div>
+    `;
+    return verifiedHtml + candidateHtml;
+  }
+
+  // Pure analysis of the per-maintainer 30617 events. Returns the
+  // shape the About tab renderer consumes — GRASP hosts, attributed
+  // relays, clones grouped by hosting maintainer.
+  function analyseAnnouncements(repo, ms) {
+    const events = Array.isArray(ms?.events) ? ms.events : [];
+    // Defer to the shared profile resolver so the same name shows up
+    // everywhere (About, maintainers panel, announcements modal) and
+    // automatically upgrades from npub fallback → kind-0 display name
+    // once profiles resolve and the painter re-runs.
+    const nameOf = (pk) => profileNameOf(pk);
+    const safeHost = (url) => {
+      try { return new URL(url).host; } catch { return null; }
+    };
+    const ownerFromCloneUrl = (url) => {
+      try {
+        const m = new URL(url).pathname.match(/^\/(npub1[0-9a-z]+)\//);
+        if (!m) return null;
+        if (window.NostrTools?.nip19) {
+          const d = window.NostrTools.nip19.decode(m[1]);
+          if (d.type === 'npub' && typeof d.data === 'string') return d.data;
+        }
+      } catch {}
+      return null;
+    };
+    const tagsOf = (ev, name) => ev.tags
+      .filter(t => Array.isArray(t) && t[0] === name)
+      .flatMap(t => t.slice(1).filter(v => typeof v === 'string' && v.length > 0));
+
+    // Per-event extraction.
+    const perEvent = events.map(ev => {
+      const relays = tagsOf(ev, 'relays');
+      const clones = tagsOf(ev, 'clone');
+      const relayHosts = new Set(relays.map(safeHost).filter(Boolean));
+      const cloneHosts = new Set(clones.map(safeHost).filter(Boolean));
+      // GRASP: a host serving BOTH protocols at the same domain.
+      const graspHosts = [...relayHosts].filter(h => cloneHosts.has(h));
+      return { event: ev, pubkey: ev.pubkey, relays, clones, graspHosts };
+    });
+
+    // Aggregate GRASP hosts across all announcements.
+    const graspHosts = new Set();
+    for (const e of perEvent) for (const h of e.graspHosts) graspHosts.add(h);
+
+    // Other relays: relay URLs whose host is not a known GRASP host.
+    // Attribute to the contributing maintainer pubkeys (first-seen wins
+    // for the "via" label so we don't blink between attributions).
+    const otherRelays = new Map();
+    for (const e of perEvent) {
+      for (const url of e.relays) {
+        const host = safeHost(url);
+        if (host && graspHosts.has(host)) continue;
+        if (!otherRelays.has(url)) otherRelays.set(url, []);
+        otherRelays.get(url).push(e.pubkey);
+      }
+    }
+
+    // Clone URLs grouped by the maintainer whose npub is in the path.
+    // Falls back to the announcing maintainer when the path doesn't
+    // match the GRASP convention. Order: anchor first, then others
+    // by appearance in `events` (= anchor-first then freshest).
+    const clonesByMaintainer = new Map();
+    const seenClones = new Set();
+    for (const e of perEvent) {
+      for (const url of e.clones) {
+        if (seenClones.has(url)) continue;
+        seenClones.add(url);
+        const owner = ownerFromCloneUrl(url) || e.pubkey;
+        if (!clonesByMaintainer.has(owner)) clonesByMaintainer.set(owner, []);
+        clonesByMaintainer.get(owner).push(url);
+      }
+    }
+    // Re-sort the map so the anchor's clones appear first.
+    if (clonesByMaintainer.has(repo.pubkey)) {
+      const anchorClones = clonesByMaintainer.get(repo.pubkey);
+      clonesByMaintainer.delete(repo.pubkey);
+      const reordered = new Map();
+      reordered.set(repo.pubkey, anchorClones);
+      for (const [k, v] of clonesByMaintainer) reordered.set(k, v);
+      clonesByMaintainer.clear();
+      for (const [k, v] of reordered) clonesByMaintainer.set(k, v);
+    }
+
+    return { perEvent, graspHosts, otherRelays, clonesByMaintainer, nameOf };
   }
 
   async function renderGitTab(container, p) {
@@ -5400,6 +5777,16 @@ const ProjectsPanel = (() => {
       if (cloneUrls.length > 0) cloneDropdown = buildCloneDropdown(cloneUrls);
     }
 
+    // Phase 8 — read-only maintainers panel + Announcement events
+    // inspector. Mirrors gitworkshop / shakespeare.diy: both treat
+    // their UIs as read+inspect surfaces and keep mutation in the
+    // ngit CLI. Panel summarises who's authoritative; the "View
+    // announcement events" link opens a modal showing each verified
+    // maintainer's raw 30617 with timestamp, "selected" badge for the
+    // event whose fields drive the active display, and a Raw event
+    // JSON viewer.
+    const maintainersPanel = repo ? buildMaintainersPanel(repo, repoMeta?.maintainerSet) : '';
+
     wrap.innerHTML = `
       <div class="code-title-row">
         <h2 class="code-title">${escapeHtml(name)}</h2>
@@ -5408,11 +5795,682 @@ const ProjectsPanel = (() => {
       </div>
       ${desc ? `<div class="code-desc">${escapeHtml(desc)}</div>` : ''}
       ${chips}
+      ${maintainersPanel}
     `;
     if (cloneDropdown) {
       wrap.querySelector('.code-clone-slot').appendChild(cloneDropdown);
     }
+    wrap.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+    // "View announcement events" trigger — wired only when the panel
+    // rendered AND we have a serialised maintainerSet to inspect.
+    const announceBtn = wrap.querySelector('.maintainers-view-events');
+    if (announceBtn && repoMeta?.maintainerSet) {
+      announceBtn.addEventListener('click', () => {
+        openAnnouncementsModal(repo, repoMeta.maintainerSet);
+      });
+    }
+    // Resolve profiles for the maintainers shown in the Code-tab panel
+    // so the npub fallbacks upgrade to real names on the next tick. We
+    // only need to repaint the panel's .maintainers-list (not the whole
+    // wrap) — keeps any other listeners on the wrap intact.
+    if (repo && repoMeta?.maintainerSet) {
+      const ms = repoMeta.maintainerSet;
+      const allPubkeys = [
+        repo.pubkey,
+        ...(ms.verified || []),
+        ...(ms.candidatesOnly || []),
+      ];
+      const relays = Array.isArray(repo.relays) ? repo.relays : [];
+      resolveProfiles(allPubkeys, { relays }).then(() => {
+        if (!wrap.isConnected) return;
+        const fresh = buildMaintainersPanel(repo, ms);
+        const oldPanel = wrap.querySelector('.maintainers-panel');
+        if (oldPanel) {
+          const tmp = document.createElement('div');
+          tmp.innerHTML = fresh;
+          const newPanel = tmp.querySelector('.maintainers-panel');
+          if (newPanel) {
+            oldPanel.replaceWith(newPanel);
+            newPanel.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+            // Re-wire the View announcement events button on the fresh panel.
+            const btn = newPanel.querySelector('.maintainers-view-events');
+            if (btn) btn.addEventListener('click', () => openAnnouncementsModal(repo, ms));
+          }
+        }
+      });
+    }
     return wrap;
+  }
+
+  // Render the maintainers list as `anchor` + verified + candidate rows.
+  // Repo `pubkey` is the trust anchor (always authoritative by definition);
+  // verified are pubkeys that re-announced under the same identifier;
+  // candidate-only are claimed by the anchor but haven't re-announced.
+  // Returns an HTML string — caller wires copy-slots after innerHTML.
+  function buildMaintainersPanel(repo, ms) {
+    const anchor = repo.pubkey;
+    const verified  = ms?.verified       || [];
+    const candidate = ms?.candidatesOnly || [];
+    // De-dupe: anchor is always shown explicitly first; verified set
+    // already contains it by construction so filter that out. Candidate
+    // pubkeys are disjoint from verified by computeMaintainerSet design.
+    const seen = new Set([anchor]);
+    const rows = [{ pubkey: anchor, role: 'anchor' }];
+    for (const pk of verified) {
+      if (seen.has(pk)) continue;
+      seen.add(pk);
+      rows.push({ pubkey: pk, role: 'verified' });
+    }
+    for (const pk of candidate) {
+      if (seen.has(pk)) continue;
+      seen.add(pk);
+      rows.push({ pubkey: pk, role: 'candidate' });
+    }
+    if (rows.length === 0) return '';
+    const roleLabel = {
+      anchor:    { text: 'owner',     title: 'Trust anchor — published the repo announcement; always authoritative.' },
+      verified:  { text: 'verified',  title: 'Published their own kind-30617 under this coordinate — fully authorised.' },
+      candidate: { text: 'candidate', title: 'Listed as a maintainer but has not published their own kind-30617 — accepted permissively for gitworkshop parity.' },
+    };
+    const rowHtml = rows.map(({ pubkey, role }) => {
+      let npub = pubkey;
+      try {
+        if (window.NostrTools?.nip19) npub = window.NostrTools.nip19.npubEncode(pubkey);
+      } catch { /* fall back to hex on encode failure */ }
+      // Prefer kind-0 display name when the profile cache has one;
+      // falls back to truncated npub. The Code-tab page kicks off
+      // resolveProfiles after first paint so this upgrades on re-render.
+      const display = profileNameOf(pubkey);
+      const r = roleLabel[role];
+      return `
+        <div class="maintainers-row">
+          <span class="maintainers-role maintainers-role-${role}" title="${escapeHtml(r.title)}">${escapeHtml(r.text)}</span>
+          <code class="maintainers-pk">${escapeHtml(display)}</code>
+          <span class="copy-slot" data-copy="${escapeHtml(npub)}"></span>
+        </div>
+      `;
+    }).join('');
+    // Show the "View announcement events" link only when we have at
+    // least one verified 30617 to inspect. With zero verified events
+    // the modal would render empty.
+    const hasEvents = (ms?.events?.length || 0) > 0;
+    const inspector = hasEvents
+      ? `<button class="maintainers-view-events" type="button" title="Inspect each maintainer's raw kind-30617 announcement event">View announcement events</button>`
+      : '';
+    return `
+      <div class="maintainers-panel">
+        <div class="maintainers-head-row">
+          <div class="maintainers-head muted">Maintainers</div>
+          ${inspector}
+        </div>
+        <div class="maintainers-list">${rowHtml}</div>
+      </div>
+    `;
+  }
+
+  // gitworkshop-parity "Announcement events" inspector. The kind-30617
+  // event drives a repo's display fields, and a multi-maintainer repo
+  // has one such event per maintainer who's published their own. Show
+  // them all so the user can see exactly which event each field is
+  // sourced from. The "selected" badge marks the event whose fields
+  // the dashboard currently treats as authoritative for display
+  // (newest verified by created_at — matches MaintainerSet.display.pubkey).
+  // ── Edit Repository form modal (Phase 3b) ────────────────────────────
+  //
+  // Republishes the kind-30617 announcement via POST /announce. Server
+  // constructs the event template, signs via the persisted Amber pairing
+  // (signEventWithSavedBunker), publishes to the relay union, and busts
+  // the repo-30617 cache. Form is pre-populated from the current
+  // announcement; submit sends the FULL new value of every field (not a
+  // delta) because the server replaces the announcement wholesale —
+  // omitted fields would otherwise be lost on the next render.
+  //
+  // Field parity with gitworkshop's edit form (per the screenshots):
+  //   - Name, Description
+  //   - Website (multi-value)
+  //   - Topics (chip-based)
+  //   - Earliest unique commit
+  //   - GRASP servers (multi-value; server treats as a relay subset)
+  //   - Other relays (multi-value, wss://)
+  //   - Other git servers (clone URLs, multi-value, https://)
+  //   - Other maintainers — npub or hex, hex-decoded server-side
+  //   - Custom tags (advanced) — preserves forward-compat tags
+  function openEditRepositoryModal(p, repo, ms, onSaved) {
+    // Pre-fill arrays mutated by add/remove buttons in-modal. The
+    // confirmed value is the array state at submit time.
+    const state = {
+      name:        repo.name        || '',
+      description: repo.description || '',
+      web:         (repo.web || []).slice(),
+      topics:      (repo.hashtags || []).slice(),
+      euc:         repo.euc || '',
+      // The 30617 doesn't distinguish GRASP from other relays — that's
+      // a derived UI grouping. For the form we recompute the GRASP set
+      // (hosts appearing in both relays + clone of any announcement) so
+      // the user can edit each group independently. On submit we
+      // collapse back to a single relays list + clone list.
+      graspServers: deriveGraspHostsForEdit(ms),
+      otherRelays:  deriveOtherRelaysForEdit(ms),
+      cloneUrls:    (repo.clone || []).slice(),
+      otherMaintainers: ((ms?.events || [])
+        // Include the anchor's own maintainers tag — that's whose
+        // endorsement list the user is editing.
+        .find(e => e.pubkey === repo.pubkey)?.tags || [])
+        .filter(t => Array.isArray(t) && t[0] === 'maintainers')
+        .flatMap(t => t.slice(1))
+        .filter(p => /^[0-9a-f]{64}$/.test(p) && p !== repo.pubkey),
+      customTags: extractEditableCustomTags(ms, repo),
+    };
+
+    const body = document.createElement('div');
+    body.className = 'edit-repo-modal';
+    // Scoping note: a 30617 announcement is per-maintainer. Saving here
+    // republishes YOUR announcement only — co-maintainers' announcements
+    // are untouched. Important for multi-maintainer repos where the user
+    // could otherwise read this form as repo-global.
+    const isMultiMaintainer = (ms?.events?.length || 0) > 1;
+    const renderBody = () => {
+      body.innerHTML = `
+        ${isMultiMaintainer ? `
+          <div class="edit-repo-banner muted">
+            You're editing <strong>your own</strong> announcement event. Co-maintainers' announcements
+            are independent — fields like clone URLs and relays here are yours alone, and the
+            "Other relays" section on About will continue to surface other maintainers' contributions
+            via the union.
+          </div>
+        ` : ''}
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label" for="erm-name">Name</label>
+          <input id="erm-name" class="edit-repo-input" type="text" value="${escapeHtml(state.name)}" />
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label" for="erm-desc">Description</label>
+          <textarea id="erm-desc" class="edit-repo-textarea" rows="3">${escapeHtml(state.description)}</textarea>
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label">Website</label>
+          ${multiValueRows(state.web, 'web', 'https://example.com')}
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label">Topics</label>
+          <div class="edit-repo-chips">
+            ${state.topics.map((t, i) => `<span class="edit-repo-chip"><span>${escapeHtml(t)}</span><button type="button" class="edit-repo-chip-x" data-topic-idx="${i}" aria-label="remove">×</button></span>`).join('')}
+            <input class="edit-repo-input edit-repo-chip-input" type="text" placeholder="Add topic and press Enter" data-input="topic" />
+          </div>
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label" for="erm-euc">Earliest unique commit
+            <span class="muted">(40-char git SHA — set automatically by ngit init; rarely needs editing)</span>
+          </label>
+          <input id="erm-euc" class="edit-repo-input" type="text" maxlength="40" value="${escapeHtml(state.euc)}" />
+        </div>
+
+        <div class="edit-repo-section">
+          <div class="edit-repo-section-head">Infrastructure</div>
+          <div class="muted edit-repo-help">
+            GRASP servers serve both git hosting and a nostr relay at the same domain
+            (e.g. <code>git.shakespeare.diy</code>). Other relays are nostr-only.
+          </div>
+
+          <label class="edit-repo-label">GRASP servers <span class="muted">(wss://)</span></label>
+          ${multiValueRows(state.graspServers, 'grasp', 'wss://git.example.com')}
+
+          <label class="edit-repo-label" style="margin-top:8px">Other relays <span class="muted">(wss://)</span></label>
+          ${multiValueRows(state.otherRelays, 'relay', 'wss://relay.example.com')}
+
+          <label class="edit-repo-label" style="margin-top:8px">Clone URLs <span class="muted">(https:// or git://)</span></label>
+          ${multiValueRows(state.cloneUrls, 'clone', 'https://git.example.com/npub.../repo.git')}
+        </div>
+
+        <div class="edit-repo-section">
+          <label class="edit-repo-label">Other maintainers <span class="muted">(your acknowledged co-maintainers — they need to publish their own 30617 to count as authoritative)</span></label>
+          ${multiValueRows(state.otherMaintainers, 'maintainer', 'npub1… or 64-char hex')}
+        </div>
+
+        <details class="edit-repo-section edit-repo-advanced">
+          <summary>Custom tags <span class="muted">(advanced)</span></summary>
+          <div class="muted edit-repo-help">
+            Tags not recognised by this form are preserved here. Editing them lets you
+            attach forward-compat data — nostr-station auto-includes <code>client = nostr-station</code>
+            on save unless you set a different <code>client</code> value yourself.
+          </div>
+          ${state.customTags.map((tag, i) => `
+            <div class="edit-repo-tag-row">
+              <input class="edit-repo-input edit-repo-tag-name" data-tag-idx="${i}" data-field="name" value="${escapeHtml(tag[0] || '')}" placeholder="tag name" />
+              <input class="edit-repo-input edit-repo-tag-value" data-tag-idx="${i}" data-field="value" value="${escapeHtml((tag.slice(1)).join(' '))}" placeholder="value (space-separated for multi-value)" />
+              <button type="button" class="edit-repo-row-x" data-tag-idx="${i}" aria-label="remove">×</button>
+            </div>
+          `).join('')}
+          <button type="button" class="edit-repo-add" data-add="tag">+ add custom tag</button>
+        </details>
+      `;
+      wireBody();
+    };
+
+    function multiValueRows(values, kind, placeholder) {
+      const rows = values.map((v, i) => `
+        <div class="edit-repo-row">
+          <input class="edit-repo-input" type="text" data-kind="${kind}" data-idx="${i}" value="${escapeHtml(v)}" placeholder="${escapeHtml(placeholder)}" />
+          <button type="button" class="edit-repo-row-x" data-kind="${kind}" data-idx="${i}" aria-label="remove">×</button>
+        </div>
+      `).join('');
+      return rows + `<button type="button" class="edit-repo-add" data-add="${kind}">+ add</button>`;
+    }
+
+    function wireBody() {
+      // Plain inputs — debounced to avoid thrashing state on every keystroke.
+      body.querySelector('#erm-name').addEventListener('input', e => { state.name = e.target.value; });
+      body.querySelector('#erm-desc').addEventListener('input', e => { state.description = e.target.value; });
+      body.querySelector('#erm-euc').addEventListener('input', e => { state.euc = e.target.value.trim().toLowerCase(); });
+
+      // Multi-value rows: editing an entry updates the array; remove
+      // button drops it; add button appends a blank.
+      body.querySelectorAll('input[data-kind]').forEach(el => {
+        el.addEventListener('input', () => {
+          const kind = el.dataset.kind;
+          const idx = Number(el.dataset.idx);
+          const list = listForKind(kind);
+          list[idx] = el.value;
+        });
+      });
+      body.querySelectorAll('.edit-repo-row-x[data-kind]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const list = listForKind(btn.dataset.kind);
+          list.splice(Number(btn.dataset.idx), 1);
+          renderBody();
+        });
+      });
+      body.querySelectorAll('.edit-repo-add[data-add]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const kind = btn.dataset.add;
+          if (kind === 'tag') state.customTags.push(['', '']);
+          else listForKind(kind).push('');
+          renderBody();
+        });
+      });
+
+      // Topics chip-input — Enter to commit, click × to remove.
+      body.querySelectorAll('.edit-repo-chip-x[data-topic-idx]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.topics.splice(Number(btn.dataset.topicIdx), 1);
+          renderBody();
+        });
+      });
+      const topicInput = body.querySelector('[data-input="topic"]');
+      if (topicInput) {
+        topicInput.addEventListener('keydown', e => {
+          if (e.key === 'Enter' && topicInput.value.trim()) {
+            e.preventDefault();
+            const v = topicInput.value.trim().replace(/^#/, '');
+            if (v && !state.topics.includes(v)) state.topics.push(v);
+            renderBody();
+            // Re-focus into the input after re-render for fast multi-add.
+            setTimeout(() => body.querySelector('[data-input="topic"]')?.focus(), 0);
+          }
+        });
+      }
+
+      // Custom tag rows: name + value (space-separated) edits.
+      body.querySelectorAll('.edit-repo-tag-row input[data-tag-idx]').forEach(el => {
+        el.addEventListener('input', () => {
+          const idx = Number(el.dataset.tagIdx);
+          const field = el.dataset.field;
+          const row = state.customTags[idx];
+          if (!row) return;
+          if (field === 'name') row[0] = el.value;
+          else {
+            const values = el.value.split(/\s+/).filter(Boolean);
+            row.splice(1, row.length - 1, ...values);
+          }
+        });
+      });
+      body.querySelectorAll('.edit-repo-row-x[data-tag-idx]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.customTags.splice(Number(btn.dataset.tagIdx), 1);
+          renderBody();
+        });
+      });
+    }
+
+    function listForKind(kind) {
+      switch (kind) {
+        case 'web':        return state.web;
+        case 'grasp':      return state.graspServers;
+        case 'relay':      return state.otherRelays;
+        case 'clone':      return state.cloneUrls;
+        case 'maintainer': return state.otherMaintainers;
+        default: return [];
+      }
+    }
+
+    renderBody();
+
+    const foot = document.createElement('div');
+    foot.className = 'edit-repo-foot';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'primary';
+    save.textContent = 'Save changes';
+    foot.appendChild(save); foot.appendChild(cancel);
+
+    const modal = openModal({
+      title:    'Edit repository',
+      subtitle: repo.name || repo.identifier,
+      body,
+      footer:   foot,
+    });
+    cancel.addEventListener('click', () => modal.close());
+    save.addEventListener('click', async () => {
+      // Commit any pending text in the topic chip-input that the user
+      // didn't press Enter on. Otherwise typing a topic and clicking
+      // Save loses the topic silently — confusing.
+      const pendingTopic = body.querySelector('[data-input="topic"]')?.value?.trim().replace(/^#/, '');
+      if (pendingTopic && !state.topics.includes(pendingTopic)) {
+        state.topics.push(pendingTopic);
+      }
+
+      save.disabled = true;
+      save.textContent = 'Signing via Amber…';
+      // GRASP and Other relays are treated as one `relays` list on
+      // submit — server stores them as a single relays tag. The split
+      // is purely a UI affordance.
+      const allRelays = [...state.graspServers, ...state.otherRelays]
+        .map(s => s.trim()).filter(Boolean)
+        .filter((v, i, a) => a.indexOf(v) === i);
+      // Decode npub → hex for any maintainer entered as npub.
+      const decodeMaintainer = (v) => {
+        v = v.trim();
+        if (!v) return null;
+        if (/^[0-9a-f]{64}$/i.test(v)) return v.toLowerCase();
+        if (/^npub1[0-9a-z]+$/.test(v) && window.NostrTools?.nip19) {
+          try {
+            const d = window.NostrTools.nip19.decode(v);
+            if (d.type === 'npub' && typeof d.data === 'string') return d.data;
+          } catch {}
+        }
+        return null;
+      };
+      const maintainers = state.otherMaintainers.map(decodeMaintainer).filter(Boolean);
+      const customTags = state.customTags
+        .filter(t => Array.isArray(t) && typeof t[0] === 'string' && t[0].trim())
+        .map(t => [t[0].trim(), ...t.slice(1).filter(v => typeof v === 'string' && v.length > 0)]);
+
+      const payload = {
+        name:        state.name.trim(),
+        description: state.description,
+        web:         state.web.map(s => s.trim()).filter(Boolean),
+        clone:       state.cloneUrls.map(s => s.trim()).filter(Boolean),
+        relays:      allRelays,
+        hashtags:    state.topics.map(s => s.trim().replace(/^#/, '')).filter(Boolean),
+        maintainers,
+        euc:         state.euc || null,
+        customTags,
+      };
+      try {
+        // silent: true so api() doesn't auto-toast on non-2xx — we
+        // produce a higher-quality, action-specific toast in the
+        // catch (with per-relay reasons or the bunker error).
+        const r = await api(`/api/projects/${p.id}/announce`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(payload),
+        }, { silent: true });
+        if (r?.ok && r?.accepted > 0) {
+          toast('Repository updated', `${r.accepted}/${r.targets} relays accepted the new announcement`, 'ok');
+          modal.close();
+          if (typeof onSaved === 'function') onSaved();
+        } else {
+          // Partial failure: at least we signed. Surface relay reasons.
+          const reasons = (r?.publish || []).filter(x => !x.ok).map(x => `${x.relay}: ${x.reason || 'no OK'}`).slice(0, 3).join('\n');
+          toast('No relays accepted', reasons || r?.error || 'unknown error', 'err');
+          save.disabled = false;
+          save.textContent = 'Save changes';
+        }
+      } catch (e) {
+        // Stack trace into the console for actual debugging — toast is
+        // for the user, console.warn is for us when they paste a screenshot.
+        console.warn('[edit-repo] announce failed:', e);
+        toast('Save failed', String(e?.message || e), 'err');
+        save.disabled = false;
+        save.textContent = 'Save changes';
+      }
+    });
+  }
+
+  // Derive the GRASP-host subset for the edit form. Same heuristic as
+  // analyseAnnouncements but operating per-announcement: a host is GRASP
+  // if any verified maintainer's 30617 lists it as BOTH a relay and a
+  // clone URL host. Returns the raw wss:// URLs from the relays tag so
+  // editing preserves the exact value (port, path) the user originally
+  // had.
+  function deriveGraspHostsForEdit(ms) {
+    const events = Array.isArray(ms?.events) ? ms.events : [];
+    const safeHost = (url) => { try { return new URL(url).host; } catch { return null; } };
+    const graspHosts = new Set();
+    for (const ev of events) {
+      const relays = (ev.tags || []).filter(t => t[0] === 'relays').flatMap(t => t.slice(1));
+      const clones = (ev.tags || []).filter(t => t[0] === 'clone').flatMap(t => t.slice(1));
+      const relayHosts = new Set(relays.map(safeHost).filter(Boolean));
+      const cloneHosts = new Set(clones.map(safeHost).filter(Boolean));
+      for (const h of relayHosts) if (cloneHosts.has(h)) graspHosts.add(h);
+    }
+    // From the anchor's own announcement (events[0]), surface the
+    // wss:// URLs whose host is in the GRASP set.
+    const anchorRelays = events[0]
+      ? (events[0].tags || []).filter(t => t[0] === 'relays').flatMap(t => t.slice(1))
+      : [];
+    return anchorRelays.filter(u => {
+      const h = safeHost(u); return h && graspHosts.has(h);
+    });
+  }
+
+  function deriveOtherRelaysForEdit(ms) {
+    const events = Array.isArray(ms?.events) ? ms.events : [];
+    const safeHost = (url) => { try { return new URL(url).host; } catch { return null; } };
+    const graspHosts = new Set();
+    for (const ev of events) {
+      const relays = (ev.tags || []).filter(t => t[0] === 'relays').flatMap(t => t.slice(1));
+      const clones = (ev.tags || []).filter(t => t[0] === 'clone').flatMap(t => t.slice(1));
+      const relayHosts = new Set(relays.map(safeHost).filter(Boolean));
+      const cloneHosts = new Set(clones.map(safeHost).filter(Boolean));
+      for (const h of relayHosts) if (cloneHosts.has(h)) graspHosts.add(h);
+    }
+    const anchorRelays = events[0]
+      ? (events[0].tags || []).filter(t => t[0] === 'relays').flatMap(t => t.slice(1))
+      : [];
+    return anchorRelays.filter(u => {
+      const h = safeHost(u); return h && !graspHosts.has(h);
+    });
+  }
+
+  // The "advanced" custom-tags editor only surfaces tags the form
+  // doesn't already cover. The server-side template builder is the
+  // source of truth for which names are emitted natively — this is a
+  // copy of that set so the user doesn't see duplicates in the form.
+  function extractEditableCustomTags(ms, repo) {
+    const KNOWN = new Set(['d', 'r', 'name', 'description', 'clone', 'web', 'relays', 't', 'maintainers', 'alt', 'blossoms']);
+    const anchor = (ms?.events || []).find(e => e.pubkey === repo.pubkey);
+    if (!anchor || !Array.isArray(anchor.tags)) return [];
+    return anchor.tags
+      .filter(t => Array.isArray(t) && typeof t[0] === 'string' && !KNOWN.has(t[0]))
+      .map(t => t.map(v => typeof v === 'string' ? v : ''));
+  }
+
+  // Share links — gitworkshop-style helper. The kind-30617 announcement
+  // is identified by an NIP-19 naddr that bundles the coordinate
+  // (30617:pubkey:identifier) plus the relay hints from the announcement,
+  // and by the nostr:// URL that ngit-aware git plugins consume. Both
+  // are useful: naddr for embedding/linking in other nostr clients, the
+  // nostr:// for "git clone …" from a terminal. Copy buttons on both.
+  function openShareLinksModal(p, repo) {
+    const naddr = (() => {
+      try {
+        if (!window.NostrTools?.nip19) return '';
+        return window.NostrTools.nip19.naddrEncode({
+          kind:       30617,
+          pubkey:     repo.pubkey,
+          identifier: repo.identifier,
+          // Cap relay hints so the encoded naddr stays compact — first
+          // few are usually the maintainer's own.
+          relays:     (repo.relays || []).slice(0, 4),
+        });
+      } catch { return ''; }
+    })();
+    const ngitRemote = window.__projectsCache?.find?.(x => x.id === p.id)?.remotes?.ngit
+      ?? p.remotes?.ngit
+      ?? '';
+    const gitworkshopUrl = naddr ? `https://gitworkshop.dev/${naddr}` : '';
+    const body = document.createElement('div');
+    body.className = 'share-modal';
+    const row = (label, value, hint) => value ? `
+      <div class="share-row">
+        <div class="share-label">${escapeHtml(label)}${hint ? ` <span class="muted">${escapeHtml(hint)}</span>` : ''}</div>
+        <div class="share-value">
+          <code>${escapeHtml(value)}</code>
+          <span class="copy-slot" data-copy="${escapeHtml(value)}"></span>
+        </div>
+      </div>
+    ` : '';
+    body.innerHTML = `
+      ${row('naddr', naddr, '(nostr address — NIP-19)')}
+      ${row('nostr:// URL', ngitRemote, '(ngit clone)')}
+      ${row('gitworkshop.dev', gitworkshopUrl, '(browser link)')}
+    `;
+    body.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+    openModal({
+      title:    'Share links',
+      subtitle: repo.name || repo.identifier,
+      body,
+    });
+  }
+
+  // Confirm + run the project-unregister flow. The nostr events stay
+  // on relays — that's an inherent property of NIP-34 announcements
+  // and out of scope for a dashboard. The tooltip on the Delete button
+  // states this explicitly so users don't expect a true delete.
+  async function openDeleteProjectConfirm(p) {
+    const ok = await confirmDestructive({
+      title: 'Remove from dashboard',
+      description:
+        `Unregisters "${p.name}" from nostr-station. The kind-30617 announcement and all related ` +
+        `nostr events remain on the relays they were published to — there is no on-chain delete in NIP-34. ` +
+        `Files on disk are not touched either; remove them manually if desired.`,
+      confirmLabel: 'Remove',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/projects/${p.id}`, { method: 'DELETE' });
+      toast('Project removed', p.name, 'ok');
+      state.view = 'list'; state.projectId = null;
+      reload();
+    } catch (e) {
+      toast('Remove failed', String(e?.message || e), 'err');
+    }
+  }
+
+  function openAnnouncementsModal(repo, ms) {
+    const events = Array.isArray(ms?.events) ? ms.events : [];
+    const selectedPubkey = ms?.display?.pubkey || repo?.pubkey || '';
+    const candidates = Array.isArray(ms?.candidatesOnly) ? ms.candidatesOnly : [];
+    const fmtAt = (sec) => {
+      if (!sec) return '—';
+      const d = new Date(sec * 1000);
+      return d.toLocaleString(undefined, {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      });
+    };
+
+    // Pure painter — reads names from the profile cache. Called once
+    // synchronously, then again after resolveProfiles upgrades the cache.
+    const paint = () => {
+      const eventRows = events.map((ev, i) => {
+        const display = profileNameOf(ev.pubkey);
+        const pic = profilePictureOf(ev.pubkey);
+        const avatar = pic
+          ? `<img class="ann-avatar ann-avatar-img" src="${escapeHtml(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
+          : `<div class="ann-avatar" aria-hidden="true">${escapeHtml(display.slice(0, 2).toUpperCase())}</div>`;
+        const isSelected = ev.pubkey === selectedPubkey;
+        return `
+          <div class="ann-row" data-event-idx="${i}">
+            <div class="ann-row-head">
+              ${avatar}
+              <div class="ann-row-main">
+                <div class="ann-row-name"><code>${escapeHtml(display)}</code>${isSelected ? `<span class="ann-selected">selected</span>` : ''}</div>
+                <div class="ann-row-meta muted">${escapeHtml(fmtAt(ev.created_at))}</div>
+              </div>
+              <button class="ann-raw-toggle" type="button" data-event-idx="${i}">{ } Raw event</button>
+            </div>
+            <pre class="ann-raw-json" hidden></pre>
+          </div>
+        `;
+      }).join('');
+
+      const candidateBlock = candidates.length > 0 ? `
+        <div class="ann-candidates">
+          <div class="ann-section-head muted">Claimed but not announced (${candidates.length})</div>
+          <div class="ann-candidates-list">
+            ${candidates.map(pk => `<code class="ann-candidate-pk" title="Listed as a maintainer but has not published their own kind-30617">${escapeHtml(profileNameOf(pk))}</code>`).join('')}
+          </div>
+        </div>
+      ` : '';
+
+      body.innerHTML = `
+        <div class="ann-explainer muted">
+          In a multi-maintainer repository each maintainer publishes their own announcement event.
+          Some fields (relays, clone URLs, maintainers) are <strong>unioned across all announcements</strong>,
+          while others (name, description) are taken from the <strong>most recently updated</strong> announcement
+          — that one is marked <span class="ann-selected">selected</span>.
+        </div>
+        <div class="ann-list">${eventRows || `<div class="muted">No verified announcement events found.</div>`}</div>
+        ${candidateBlock}
+      `;
+      body.querySelectorAll('.ann-raw-toggle').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = Number(btn.dataset.eventIdx);
+          const ev = events[idx];
+          if (!ev) return;
+          const pre = btn.closest('.ann-row').querySelector('.ann-raw-json');
+          if (pre.hidden) {
+            pre.textContent = JSON.stringify(ev, null, 2);
+            pre.hidden = false;
+            btn.classList.add('active');
+          } else {
+            pre.hidden = true;
+            pre.textContent = '';
+            btn.classList.remove('active');
+          }
+        });
+      });
+    };
+
+    const body = document.createElement('div');
+    body.className = 'ann-modal';
+    paint();
+    const modal = openModal({
+      title:    'Announcement events',
+      subtitle: repo?.name || repo?.identifier || '',
+      body,
+    });
+    // Kick off resolution for every pubkey we display + the candidate
+    // set, then re-paint once. Modal close before resolution = re-paint
+    // is a noop because the body is detached but innerHTML write is still
+    // safe; we cheap-guard with body.isConnected.
+    const allPubkeys = [...events.map(e => e.pubkey), ...candidates];
+    const relays = Array.isArray(repo?.relays) ? repo.relays : [];
+    resolveProfiles(allPubkeys, { relays }).then(() => {
+      if (!body.isConnected) return;
+      paint();
+    });
+    return modal;
   }
 
   // Phase 7: clone URLs grouped by transport (Nostr / HTTPS / SSH /
@@ -5944,10 +7002,147 @@ const ProjectsPanel = (() => {
     return `${hex.slice(0, 8)}…${hex.slice(-4)}`;
   }
 
+  // ── Profile resolution (kind-0 lookup with client-side cache) ─────────
+  //
+  // Backed by GET /api/profiles?pubkeys=…&relays=… (server fetches kind-0
+  // from the user's relays + project hints, parses content JSON, caches).
+  // This helper layers a session-lived client cache on top so re-renders
+  // and tab switches don't refetch. Two concurrent calls for overlapping
+  // sets are deduped by collapsing into a single in-flight request keyed
+  // by the sorted set of "missing" pubkeys.
+  //
+  // Returns Map<hex, ProfileLite>. Always includes an entry for every
+  // requested hex (npub fallback when relays returned nothing), so call
+  // sites can render without an "is this profile resolved yet?" branch.
+  const profileCache = new Map();           // hex → ProfileLite
+  const profileInFlight = new Map();        // key → Promise<Map>
+
+  async function resolveProfiles(pubkeys, opts = {}) {
+    const hexes = Array.from(new Set(
+      (pubkeys || [])
+        .filter(p => typeof p === 'string' && /^[0-9a-f]{64}$/.test(p))
+    ));
+    const out = new Map();
+    const need = [];
+    for (const h of hexes) {
+      const cached = profileCache.get(h);
+      if (cached) out.set(h, cached);
+      else need.push(h);
+    }
+    if (need.length === 0) return out;
+
+    // Dedupe concurrent requests for the same missing set.
+    const key = need.slice().sort().join(',') + (opts.verify ? '|v' : '');
+    let promise = profileInFlight.get(key);
+    if (!promise) {
+      const qs = new URLSearchParams();
+      qs.set('pubkeys', need.join(','));
+      if (Array.isArray(opts.relays) && opts.relays.length > 0) {
+        qs.set('relays', opts.relays.join(','));
+      }
+      if (opts.verify) qs.set('verify', '1');
+      promise = api(`/api/profiles?${qs.toString()}`)
+        .then(r => {
+          const profiles = (r && r.profiles) || {};
+          for (const h of need) {
+            const p = profiles[h] || { hex: h };
+            profileCache.set(h, p);
+          }
+        })
+        .catch(() => {
+          // Network / server error — still cache minimal entries so we
+          // don't hammer the endpoint on every render attempt.
+          for (const h of need) {
+            if (!profileCache.has(h)) profileCache.set(h, { hex: h });
+          }
+        })
+        .finally(() => profileInFlight.delete(key));
+      profileInFlight.set(key, promise);
+    }
+    await promise;
+    for (const h of need) out.set(h, profileCache.get(h) || { hex: h });
+    return out;
+  }
+
+  // Same as resolveProfiles but FORCES a re-fetch so the caller can
+  // request verification on profiles that were already cached without
+  // it. Used by the About tab to do its async upgrade pass without
+  // waiting for the 5min server cache TTL to expire.
+  async function resolveProfilesVerified(pubkeys, opts = {}) {
+    const hexes = Array.from(new Set(
+      (pubkeys || []).filter(p => typeof p === 'string' && /^[0-9a-f]{64}$/.test(p))
+    ));
+    const candidates = hexes.filter(h => {
+      const p = profileCache.get(h);
+      // Skip pubkeys we already have a verification result for, AND
+      // pubkeys that don't have a nip05 claim to verify.
+      return !p || (p.nip05 && p.nip05Verified === undefined);
+    });
+    if (candidates.length === 0) return;
+    const key = candidates.slice().sort().join(',') + '|v';
+    let promise = profileInFlight.get(key);
+    if (!promise) {
+      const qs = new URLSearchParams();
+      qs.set('pubkeys', candidates.join(','));
+      if (Array.isArray(opts.relays) && opts.relays.length > 0) {
+        qs.set('relays', opts.relays.join(','));
+      }
+      qs.set('verify', '1');
+      promise = api(`/api/profiles?${qs.toString()}`)
+        .then(r => {
+          const profiles = (r && r.profiles) || {};
+          for (const h of candidates) {
+            const p = profiles[h];
+            if (p) profileCache.set(h, p);
+          }
+        })
+        .catch(() => { /* best-effort */ })
+        .finally(() => profileInFlight.delete(key));
+      profileInFlight.set(key, promise);
+    }
+    await promise;
+  }
+
+  // Render-time name resolver. Pure synchronous lookup against the client
+  // cache; falls back to the npub-truncated form when no profile is loaded
+  // yet. Call sites kick off resolveProfiles(...) and re-render to upgrade.
+  function profileNameOf(hex) {
+    if (!hex || typeof hex !== 'string') return '';
+    const p = profileCache.get(hex);
+    if (p && (p.displayName || p.name)) return p.displayName || p.name;
+    // npub fallback — try nip19 if available, otherwise hex.
+    try {
+      if (window.NostrTools?.nip19) {
+        const n = window.NostrTools.nip19.npubEncode(hex);
+        return `${n.slice(0, 10)}…${n.slice(-4)}`;
+      }
+    } catch {}
+    return shortPubkey(hex);
+  }
+
+  function profilePictureOf(hex) {
+    const p = profileCache.get(hex);
+    return p?.picture || '';
+  }
+
+  // Returns { nip05, verified } where verified is true / false / undefined.
+  // Undefined = verification hasn't run yet (the UI shows the raw claim
+  // without a marker until a verify=1 round-trip completes and re-paints).
+  function profileNip05Of(hex) {
+    const p = profileCache.get(hex);
+    if (!p?.nip05) return { nip05: '', verified: undefined };
+    return { nip05: p.nip05, verified: p.nip05Verified };
+  }
+
   // Cache the latest proposals payload per project so re-rendering the
   // tab (e.g. after a Download finishes) doesn't refetch unless the
   // user explicitly asks via the Refresh button.
   const proposalsCache = new Map();
+  // One-shot "force refresh on next paint" set, populated by user
+  // actions (merge / status-change) that just published a 163x event
+  // and need the dashboard's next render to bypass the server's 60s
+  // status cache. Consumed-and-cleared inside fetchAndRender.
+  const proposalsForceRefresh = new Set();
 
   async function renderProposalsTab(container, p) {
     // Phase 2b: PR-shaped series cards driven by /api/projects/:id/patches
@@ -6100,6 +7295,11 @@ const ProjectsPanel = (() => {
     };
 
     const fetchAndRender = async (refresh = false) => {
+      // Consume any pending one-shot force-refresh from a prior user
+      // action (merge / status-change) so its 163x event makes it
+      // past the server's 60s cache on this very next paint.
+      const forced = proposalsForceRefresh.delete(p.id);
+      const refreshStatus = refresh || forced;
       try {
         const qs = refresh ? '?refresh=1' : '';
         const r = await api(`/api/projects/${p.id}/patches${qs}`);
@@ -6108,7 +7308,7 @@ const ProjectsPanel = (() => {
         // (merged / open / draft / closed). One bulk call covers
         // every visible series; the result is keyed by rootId so
         // renderSeries can decorate without changing its loop shape.
-        await annotateSeriesWithStatus(p.id, series);
+        await annotateSeriesWithStatus(p.id, series, refreshStatus);
         proposalsCache.set(p.id, series);
         renderSeries(series);
       } catch (e) {
@@ -6140,6 +7340,47 @@ const ProjectsPanel = (() => {
     } else {
       fetchAndRender();
     }
+
+    // Smart polling — keep status in tune with the actual relay state
+    // without the cost of a persistent subscription.
+    //
+    //   - re-poll status every 30s while the tab is visible (the server's
+    //     60s cache rate-limits the relay round-trips naturally)
+    //   - re-poll immediately when the tab regains focus (covers the
+    //     "I came back from gitworkshop, what changed?" case)
+    //   - skip polling when the tab is hidden so a backgrounded dashboard
+    //     doesn't burn relay round-trips on data nobody is looking at
+    //
+    // Patches list itself isn't repolled here — new PRs are slow-changing
+    // and Refresh / tab re-entry already covers them; status flips are
+    // what users care about catching live.
+    const refreshStatusOnly = async () => {
+      const series = proposalsCache.get(p.id);
+      if (!Array.isArray(series) || series.length === 0) return;
+      try {
+        await annotateSeriesWithStatus(p.id, series);
+        renderSeries(series);
+      } catch { /* polling is best-effort */ }
+    };
+    let pollTimer = null;
+    const startPoll = () => {
+      if (pollTimer || document.hidden) return;
+      pollTimer = setInterval(refreshStatusOnly, 30_000);
+    };
+    const stopPoll = () => {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    };
+    const onVisibility = () => {
+      if (document.hidden) { stopPoll(); return; }
+      refreshStatusOnly();
+      startPoll();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    startPoll();
+    container.__cleanup = () => {
+      stopPoll();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }
 
   // ── Phase 2c: per-series detail modal ────────────────────────────
@@ -6297,7 +7538,10 @@ const ProjectsPanel = (() => {
             if (r.ok) {
               toast('Merged', detail.subject, 'ok');
               modal.close();
-              // Refresh the proposals list so the merged badge appears.
+              // Force the proposals list's next paint to bypass the
+              // 60s status cache so the freshly published 1631 shows
+              // up immediately instead of after the TTL expires.
+              proposalsForceRefresh.add(p.id);
               if (state.tab === 'proposals') {
                 renderTab(document.querySelector('.project-tab-content'), p);
               }
@@ -6312,21 +7556,35 @@ const ProjectsPanel = (() => {
       // dropdown only when the user can legitimately publish a
       // status change. Server still enforces; this hides options
       // the user can't act on.
-      const [userPubkey, repoMeta] = await Promise.all([
+      //
+      // Also fetch the actual effective status for this root so the
+      // dropdown reflects reality. Without this the control always
+      // reads "open" even for merged/closed PRs (bug:
+      // dashboard-merge-shows-open).
+      const [userPubkey, repoMeta, statusResp] = await Promise.all([
         getOwnerPubkey(),
         api(`/api/projects/${p.id}/repo`).catch(() => null),
+        api(`/api/projects/${p.id}/status?rootIds=${encodeURIComponent(detail.rootId)}`).catch(() => null),
       ]);
       const canEdit = canEditStatus(userPubkey, detail.author?.pubkey, repoMeta?.maintainerSet);
+      const effectiveStatus = statusResp?.results?.[0]?.status || 'open';
       const statusSlot = body.querySelector('.pdetail-status-slot');
-      statusSlot.appendChild(renderStatusControl('patch', 'open', canEdit, (newStatus) => {
+      statusSlot.appendChild(renderStatusControl('patch', effectiveStatus, canEdit, (newStatus) => {
         openExecModal({
           title:    `${newStatus} · ${p.name}`,
           subtitle: `ngit pr_status --${newStatus} ${detail.rootId.slice(0, 12)}…`,
           endpoint: `/api/projects/${p.id}/status`,
           body:     { kind: 'patch', rootId: detail.rootId, status: newStatus },
         }).then((r) => {
-          if (r.ok) toast(`Marked ${newStatus}`, detail.subject, 'ok');
-          else      toast('Status change failed', `exit ${r.code}`, 'err');
+          if (r.ok) {
+            toast(`Marked ${newStatus}`, detail.subject, 'ok');
+            // Force the proposals list to bypass the status cache so
+            // the new status pill appears on the next paint instead
+            // of waiting for the 60s TTL.
+            proposalsForceRefresh.add(p.id);
+          } else {
+            toast('Status change failed', `exit ${r.code}`, 'err');
+          }
         });
       }));
 
@@ -6425,11 +7683,12 @@ const ProjectsPanel = (() => {
   // Bulk-annotate a list of series / issues with their effective
   // status. Single GET /status?rootIds=… call covers all rows;
   // failures degrade silently to "open" so the surface still renders.
-  async function annotateSeriesWithStatus(projectId, series) {
+  async function annotateSeriesWithStatus(projectId, series, refresh = false) {
     if (!Array.isArray(series) || series.length === 0) return;
     const ids = series.map(s => s.rootId).join(',');
+    const refreshParam = refresh ? '&refresh=1' : '';
     try {
-      const r = await api(`/api/projects/${projectId}/status?rootIds=${encodeURIComponent(ids)}`);
+      const r = await api(`/api/projects/${projectId}/status?rootIds=${encodeURIComponent(ids)}${refreshParam}`);
       const byId = new Map((r?.results || []).map(x => [x.rootId, x]));
       for (const s of series) {
         const c = byId.get(s.rootId);
@@ -7135,7 +8394,23 @@ const ProjectsPanel = (() => {
   }
 
   function renderSettingsTabBody(container, p) {
+    // Phase 3 follow-up — once the About tab landed with full Edit
+    // Repository support, Settings is exclusively for *local* dashboard
+    // config (path, capabilities, AI overrides, etc). The banner orients
+    // users who reach Settings looking to edit the public-facing repo
+    // metadata (name/description/website/topics/relays/maintainers).
+    const aboutAvailable = p.capabilities.ngit && p.remotes.ngit;
+    const aboutBanner = aboutAvailable ? `
+      <div class="settings-banner">
+        <span class="muted">This tab manages how nostr-station handles this project locally
+        — path, capabilities, signing identity, AI config.
+        Edit the repository's public announcement (name, description, website, topics,
+        relays, maintainers) on the
+        <a href="#" class="settings-banner-link" data-go="about">About</a> tab.</span>
+      </div>
+    ` : '';
     container.innerHTML = `
+      ${aboutBanner}
       <div class="tab-section">
         <h3>Details</h3>
         <label class="field-label">Name</label>
@@ -7221,7 +8496,10 @@ const ProjectsPanel = (() => {
         <div class="row">
           <div>
             <div>Remove project</div>
-            <div class="desc">Removes the project from nostr-station. Does not delete any files.</div>
+            <div class="desc">
+              Removes the project from nostr-station. Does not delete any files.
+              ${aboutAvailable ? `Same action is also available on the About tab footer.` : ''}
+            </div>
           </div>
           <button class="danger remove-btn">remove</button>
         </div>
@@ -7253,6 +8531,18 @@ const ProjectsPanel = (() => {
       const gid = container.querySelector('#git-identity-section .git-identity-body');
       if (gid) gid.innerHTML = '<div class="muted">Project has no local path — git identity requires a path.</div>';
     }
+
+    // Banner link: switch to About without a full page navigation.
+    container.querySelector('.settings-banner-link')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      state.tab = 'about';
+      renderTab(document.querySelector('.project-tab-content'), p);
+      // Highlight the About tab in the strip — render() rebuilds the
+      // strip but renderTab alone doesn't, so set the visual state too.
+      document.querySelectorAll('.project-tabs .tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === 'about');
+      });
+    });
 
     container.querySelector('.save-name').addEventListener('click', async () => {
       const v = container.querySelector('.s-name').value.trim();

@@ -7,6 +7,7 @@ const {
   isLikelyBinary,
   parseRepoAnnouncement,
   clampInt,
+  buildRepoAnnounceTemplate,
 } = await import('../src/lib/routes/repo.ts');
 
 // ── isSafeRef ────────────────────────────────────────────────────────────
@@ -286,4 +287,245 @@ test('clampInt: parses leading-numeric strings (parseInt semantics)', () => {
   // parseInt('10abc', 10) → 10. Document the behavior so a future
   // tightening (to /^-?\d+$/) is a deliberate choice.
   assert.equal(clampInt('10abc', 20, 1, 100), 10);
+});
+
+// ── buildRepoAnnounceTemplate ────────────────────────────────────────────
+
+const ANCHOR_HEX = 'a'.repeat(64);
+const CO_HEX     = 'b'.repeat(64);
+
+test('buildRepoAnnounceTemplate: kind=30617, identifier as d-tag, default content empty', () => {
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip' },
+    null,
+    ANCHOR_HEX,
+  );
+  assert.equal(tpl.kind, 30617);
+  assert.equal(tpl.content, '');
+  assert.deepEqual(tpl.tags[0], ['d', 'blip']);
+  assert.ok(Number.isFinite(tpl.created_at) && tpl.created_at > 0);
+});
+
+test('buildRepoAnnounceTemplate: emits one t-tag per hashtag (relays index per value)', () => {
+  // Hashtag indexing in NIP-01 relies on a tag PER value, not a single
+  // tag with multiple values. Confirms we're using the right shape.
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', hashtags: ['shakespeare', 'mkstack'] },
+    null,
+    ANCHOR_HEX,
+  );
+  const tTags = tpl.tags.filter(t => t[0] === 't');
+  assert.equal(tTags.length, 2);
+  assert.ok(tTags.some(t => t[1] === 'shakespeare'));
+  assert.ok(tTags.some(t => t[1] === 'mkstack'));
+});
+
+test('buildRepoAnnounceTemplate: web/clone/relays/blossoms collapse to one multi-value tag each', () => {
+  const tpl = buildRepoAnnounceTemplate(
+    {
+      identifier: 'blip',
+      web:        ['https://example.com'],
+      clone:      ['https://git.example.com/x.git', 'https://git2.example.com/x.git'],
+      relays:     ['wss://relay.one', 'wss://relay.two'],
+      blossoms:   ['https://blossom.example.com'],
+    },
+    null,
+    ANCHOR_HEX,
+  );
+  const find = (n: string) => tpl.tags.find(t => t[0] === n);
+  assert.deepEqual(find('web'),      ['web', 'https://example.com']);
+  assert.deepEqual(find('clone'),    ['clone', 'https://git.example.com/x.git', 'https://git2.example.com/x.git']);
+  assert.deepEqual(find('relays'),   ['relays', 'wss://relay.one', 'wss://relay.two']);
+  assert.deepEqual(find('blossoms'), ['blossoms', 'https://blossom.example.com']);
+});
+
+test('buildRepoAnnounceTemplate: maintainers strips the signer (avoids self-claim)', () => {
+  // The signer IS the trust anchor by construction; including their
+  // own pubkey in the `maintainers` tag would be redundant noise.
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', maintainers: [ANCHOR_HEX, CO_HEX] },
+    null,
+    ANCHOR_HEX,
+  );
+  const m = tpl.tags.find(t => t[0] === 'maintainers');
+  assert.deepEqual(m, ['maintainers', CO_HEX]);
+});
+
+test('buildRepoAnnounceTemplate: no maintainers tag when only the signer was passed', () => {
+  // Self-only list collapses to no tag (consistent with the strip rule).
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', maintainers: [ANCHOR_HEX] },
+    null,
+    ANCHOR_HEX,
+  );
+  assert.equal(tpl.tags.find(t => t[0] === 'maintainers'), undefined);
+});
+
+test('buildRepoAnnounceTemplate: auto-injects client=nostr-station when absent', () => {
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip' },
+    null,
+    ANCHOR_HEX,
+  );
+  const client = tpl.tags.find(t => t[0] === 'client');
+  assert.deepEqual(client, ['client', 'nostr-station']);
+});
+
+test('buildRepoAnnounceTemplate: does NOT overwrite an explicit client tag from the form', () => {
+  // Forward compat: a user-supplied client tag wins. Lets users
+  // override the auto-injection if they republish from a multi-tool
+  // setup.
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', customTags: [['client', 'my-other-client']] },
+    null,
+    ANCHOR_HEX,
+  );
+  const clients = tpl.tags.filter(t => t[0] === 'client');
+  assert.equal(clients.length, 1);
+  assert.deepEqual(clients[0], ['client', 'my-other-client']);
+});
+
+test('buildRepoAnnounceTemplate: preserves unknown tags from the prior announcement', () => {
+  // Forward-compat carry-through. If the prior announcement contained
+  // a tag type we don't surface in the form (e.g. ['x-future-thing', …]),
+  // we MUST preserve it on republish or the user silently loses data.
+  const prior: any = {
+    kind: 30617,
+    tags: [
+      ['d', 'blip'],
+      ['x-future-thing', 'value1', 'value2'],
+      ['client', 'shakespeare.diy'],   // also unknown to our form
+    ],
+  };
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip' },
+    prior,
+    ANCHOR_HEX,
+  );
+  const x = tpl.tags.find(t => t[0] === 'x-future-thing');
+  assert.deepEqual(x, ['x-future-thing', 'value1', 'value2']);
+  // Prior's client tag wins over auto-injection (no double client tag).
+  const clients = tpl.tags.filter(t => t[0] === 'client');
+  assert.equal(clients.length, 1);
+  assert.equal(clients[0][1], 'shakespeare.diy');
+});
+
+test('buildRepoAnnounceTemplate: form-supplied custom tag overrides prior with same name', () => {
+  // Edit form wins over the prior announcement's value when both
+  // supply the same tag name — required so the form can actually
+  // change a custom tag's value.
+  const prior: any = {
+    kind: 30617,
+    tags: [['d', 'blip'], ['client', 'old-value']],
+  };
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', customTags: [['client', 'new-value']] },
+    prior,
+    ANCHOR_HEX,
+  );
+  const clients = tpl.tags.filter(t => t[0] === 'client');
+  assert.equal(clients.length, 1);
+  assert.equal(clients[0][1], 'new-value');
+});
+
+test('buildRepoAnnounceTemplate: r-euc tag emitted only when euc provided', () => {
+  const without = buildRepoAnnounceTemplate({ identifier: 'blip' }, null, ANCHOR_HEX);
+  assert.equal(without.tags.find(t => t[0] === 'r'), undefined);
+
+  const sha = '0'.repeat(40);
+  const withEuc = buildRepoAnnounceTemplate(
+    { identifier: 'blip', euc: sha },
+    null,
+    ANCHOR_HEX,
+  );
+  assert.deepEqual(withEuc.tags.find(t => t[0] === 'r'), ['r', sha, 'euc']);
+});
+
+// ── publishEventToRelays ────────────────────────────────────────────────
+//
+// Round-trip test against an in-process WebSocketServer mock. Stands up
+// two relays — one that ACK's the EVENT, one that NACK's — then asserts
+// the per-relay results.
+
+import { WebSocketServer } from 'ws';
+import { AddressInfo } from 'net';
+
+const { publishEventToRelays } = await import('../src/lib/routes/repo.ts');
+
+function startMockRelay(behavior: 'accept' | 'reject'): Promise<{ url: string; close: () => void }> {
+  return new Promise((resolve) => {
+    const wss = new WebSocketServer({ port: 0 });
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (Array.isArray(msg) && msg[0] === 'EVENT' && msg[1]?.id) {
+            const id = msg[1].id;
+            if (behavior === 'accept') ws.send(JSON.stringify(['OK', id, true, '']));
+            else                       ws.send(JSON.stringify(['OK', id, false, 'mock-rejected']));
+          }
+        } catch { /* ignore */ }
+      });
+    });
+    wss.on('listening', () => {
+      const port = (wss.address() as AddressInfo).port;
+      resolve({
+        url:   `ws://127.0.0.1:${port}`,
+        close: () => wss.close(),
+      });
+    });
+  });
+}
+
+test('publishEventToRelays: parses OK true → ok=true', async () => {
+  const relay = await startMockRelay('accept');
+  try {
+    const event = { id: 'a'.repeat(64), kind: 30617, tags: [], pubkey: 'b'.repeat(64), created_at: 1, content: '', sig: 'x' };
+    const results = await publishEventToRelays(event, [relay.url], 2000);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].relay, relay.url);
+    assert.equal(results[0].ok, true);
+  } finally { relay.close(); }
+});
+
+test('publishEventToRelays: parses OK false → ok=false with reason', async () => {
+  const relay = await startMockRelay('reject');
+  try {
+    const event = { id: 'c'.repeat(64), kind: 30617, tags: [], pubkey: 'd'.repeat(64), created_at: 1, content: '', sig: 'x' };
+    const results = await publishEventToRelays(event, [relay.url], 2000);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].ok, false);
+    assert.equal(results[0].reason, 'mock-rejected');
+  } finally { relay.close(); }
+});
+
+test('publishEventToRelays: parallel relays — mixed accept + reject reflected per-relay', async () => {
+  // Establishes that the per-relay results array preserves which relay
+  // returned what — important UX so we can list reasons in the toast.
+  const a = await startMockRelay('accept');
+  const r = await startMockRelay('reject');
+  try {
+    const event = { id: 'e'.repeat(64), kind: 30617, tags: [], pubkey: 'f'.repeat(64), created_at: 1, content: '', sig: 'x' };
+    const results = await publishEventToRelays(event, [a.url, r.url], 2000);
+    const byRelay = Object.fromEntries(results.map(x => [x.relay, x]));
+    assert.equal(byRelay[a.url].ok, true);
+    assert.equal(byRelay[r.url].ok, false);
+    assert.equal(byRelay[r.url].reason, 'mock-rejected');
+  } finally { a.close(); r.close(); }
+});
+
+test('publishEventToRelays: relay that never responds → ok=false reason="timeout"', async () => {
+  // Mock relay that accepts the connection but ignores EVENT — the
+  // helper must time out cleanly and surface "timeout" as the reason
+  // rather than hanging.
+  const wss = new WebSocketServer({ port: 0 });
+  wss.on('connection', () => { /* swallow */ });
+  await new Promise<void>(r => wss.on('listening', () => r()));
+  const port = (wss.address() as AddressInfo).port;
+  try {
+    const event = { id: 'g'.repeat(64), kind: 30617, tags: [], pubkey: 'h'.repeat(64), created_at: 1, content: '', sig: 'x' };
+    const results = await publishEventToRelays(event, [`ws://127.0.0.1:${port}`], 300);
+    assert.equal(results[0].ok, false);
+    assert.equal(results[0].reason, 'timeout');
+  } finally { wss.close(); }
 });

@@ -31,6 +31,28 @@ test('buildMaintainerSet: trust anchor alone with no maintainers tag', () => {
   const r = buildMaintainerSet(ANCHOR, 'r', ix);
   assert.deepEqual([...r.verified], [ANCHOR]);
   assert.equal(r.candidatesOnly.size, 0);
+  // events: surfaces the anchor's raw 30617 for the inspector modal.
+  assert.equal(r.events.length, 1);
+  assert.equal(r.events[0].pubkey, ANCHOR);
+});
+
+test('buildMaintainerSet: events are anchor-first then verified by descending created_at', () => {
+  // Mirrors gitworkshop's "Announcement events" ordering — anchor row
+  // first regardless of timestamp, then everyone else freshest-first
+  // so the most-recent event (which drives the display fields) sits
+  // visually near the top with the "selected" badge. The id-uniqueness
+  // here also guards the dedup-by-id step inside buildMaintainerSet
+  // (events helper would otherwise smear shared default ids).
+  const ix = new Map([
+    [ANCHOR, ev({ id: '1'.repeat(64), pubkey: ANCHOR, created_at: 1000, tags: [['d', 'r'], ['maintainers', CO_A, CO_B]] })],
+    [CO_A,   ev({ id: '2'.repeat(64), pubkey: CO_A,   created_at: 3000, tags: [['d', 'r']] })],
+    [CO_B,   ev({ id: '3'.repeat(64), pubkey: CO_B,   created_at: 2000, tags: [['d', 'r']] })],
+  ]);
+  const r = buildMaintainerSet(ANCHOR, 'r', ix);
+  assert.equal(r.events.length, 3);
+  assert.equal(r.events[0].pubkey, ANCHOR, 'anchor must be first row');
+  assert.equal(r.events[1].pubkey, CO_A,   'next: freshest verified (created_at 3000)');
+  assert.equal(r.events[2].pubkey, CO_B,   'then: older verified (created_at 2000)');
 });
 
 test('buildMaintainerSet: co-maintainer who published their own 30617 → verified', () => {

@@ -49,6 +49,7 @@ import {
   setCached,
   getTags,
   type NostrEvent,
+  type RelayQueryFilter,
 } from '../nostr-query.js';
 import { readBody, streamExec, streamExecError } from './_shared.js';
 import { resolveMaintainerSet } from '../maintainer-set.js';
@@ -200,51 +201,194 @@ interface CachedStatus {
   fetchedAt: number;
 }
 
+const STATUS_KINDS = [1630, 1631, 1632, 1633];
+
+/**
+ * Build the relay filters we issue for a status pull. We deliberately
+ * use TWO filters (union at the relay) instead of one:
+ *
+ *   1. `{kinds: 1630-1633, #a: <repo>}`  — the well-behaved case where
+ *      a status event carries the repo announcement coordinate.
+ *   2. `{kinds: 1630-1633, #e: <rootIds>}` — fallback for status events
+ *      that reference the root patch via `e` only and omit `#a`. NIP-34
+ *      doesn't *require* `#a` on 1630-1633, and ngit / gitworkshop have
+ *      historically published 1631 (merge) events with just the `e`
+ *      tag. Without this filter those merge events get dropped at the
+ *      relay and the PR sticks at "open" in our dashboard while showing
+ *      "merged" on gitworkshop.
+ *
+ * Returned as a list so callers can `Promise.all` two queryRelays calls;
+ * exported so tests can assert both clauses are present.
+ */
+export function buildStatusRelayFilters(
+  aTag: string,
+  rootIds: string[],
+): RelayQueryFilter[] {
+  const filters: RelayQueryFilter[] = [
+    { kinds: STATUS_KINDS, tags: { a: aTag } },
+  ];
+  if (rootIds.length > 0) {
+    filters.push({ kinds: STATUS_KINDS, tags: { e: rootIds } });
+  }
+  return filters;
+}
+
 async function fetchStatusEvents(
   project: Project,
   refresh: boolean,
+  rootIds: string[],
 ): Promise<{ events: NostrEvent[]; cached: boolean }> {
   const coords = decodeNgitRemote(project);
   if (!coords || !project.path) return { events: [], cached: false };
-  const cacheKey = { projectPath: project.path, key: 'status-163x' };
-  if (!refresh) {
-    const cached = getCached<CachedStatus>({ ...cacheKey, ttlMs: STATUS_CACHE_TTL_MS });
-    if (cached) return { events: cached.events, cached: true };
-  }
+
   const grasp = getGraspServers();
   const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
   const relays = [...coords.relayHints, ...grasp, ...projRelays]
     .filter(isValidRelayUrl)
     .filter((r, i, a) => a.indexOf(r) === i)
     .slice(0, 8);
+  if (relays.length === 0) return { events: [], cached: false };
+
   const aTag = `30617:${coords.pubkey}:${coords.identifier}`;
-  const result = await queryRelays({
-    filter: { kinds: [1630, 1631, 1632, 1633], tags: { a: aTag } },
-    relays,
-    timeoutMs: RELAY_QUERY_TIMEOUT_MS,
-    stream:    true,
-  });
-  setCached<CachedStatus>(cacheKey, { events: result.events, fetchedAt: Date.now() });
-  return { events: result.events, cached: false };
+  const cacheKey = { projectPath: project.path, key: 'status-163x' };
+
+  // The per-repo (a-tag) pull is cacheable — it changes slowly and is
+  // shared across all rootIds. The per-rootId (e-tag) pull is always
+  // fresh: it's targeted, small, and exists specifically to catch the
+  // merge events that the broad a-tag query misses.
+  let aTagEvents: NostrEvent[] = [];
+  let cached = false;
+  if (!refresh) {
+    const hit = getCached<CachedStatus>({ ...cacheKey, ttlMs: STATUS_CACHE_TTL_MS });
+    if (hit) { aTagEvents = hit.events; cached = true; }
+  }
+
+  const filters = buildStatusRelayFilters(aTag, rootIds);
+  const tasks: Promise<NostrEvent[]>[] = [];
+  if (!cached) {
+    tasks.push(queryRelays({
+      filter: filters[0], relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: true,
+    }).then((r) => {
+      aTagEvents = r.events;
+      setCached<CachedStatus>(cacheKey, { events: r.events, fetchedAt: Date.now() });
+      return r.events;
+    }));
+  }
+  if (filters.length > 1) {
+    tasks.push(queryRelays({
+      filter: filters[1], relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: true,
+    }).then((r) => r.events));
+  }
+  const groups = await Promise.all(tasks);
+
+  const seen = new Set<string>();
+  const events: NostrEvent[] = [];
+  const push = (list: NostrEvent[]) => {
+    for (const ev of list) {
+      if (seen.has(ev.id)) continue;
+      seen.add(ev.id);
+      events.push(ev);
+    }
+  };
+  if (cached) push(aTagEvents);
+  for (const g of groups) push(g);
+
+  return { events, cached };
 }
 
 /** Fetch the 30617 announcement so we know who the maintainers are.
  *
- * Phase 5: now consults resolveMaintainerSet so authority is granted
- * ONLY to verified maintainers (those who have published their own
- * 30617 under the same coordinate). Candidate-only pubkeys — listed
- * in the trust anchor's maintainers tag but with no own announcement
- * — are deliberately excluded. This closes the "scam scenario" where
- * a malicious anchor could grant authority to reputable strangers.
+ * Authority model — PERMISSIVE (gitworkshop parity):
+ *   We honor any pubkey listed in the trust anchor's `maintainers` tag,
+ *   even if that pubkey has not re-announced their own 30617. The Phase-5
+ *   "verified-only" model rejected candidate-only maintainers as an
+ *   anti-scam measure, but gitworkshop.dev (and other ngit consumers)
+ *   accept them — which means our dashboard would silently disagree
+ *   with gitworkshop's status display whenever a co-maintainer who never
+ *   re-announced closed/merged a PR. Parity > anti-scam guarantee was
+ *   the explicit call (see commit log). resolveMaintainerSet still
+ *   surfaces `candidatesOnly` for UI warning chips.
  */
 async function fetchMaintainerSet(project: Project): Promise<Set<string>> {
   const coords = decodeNgitRemote(project);
   if (!coords) return new Set();
   const ms = await resolveMaintainerSet(coords.pubkey, coords.identifier, coords.relayHints);
-  // Belt + braces: the trust anchor is always verified by construction,
-  // but guard the empty-result path so callers can still self-close.
-  if (ms.verified.size === 0) return new Set([coords.pubkey]);
-  return ms.verified;
+  // Permissive union: trust anchor + verified + candidate-only.
+  // The trust anchor is always authoritative by definition; verified
+  // maintainers have re-announced; candidates are claimed-only and were
+  // previously excluded.
+  const all = new Set<string>([coords.pubkey, ...ms.verified, ...ms.candidatesOnly]);
+  return all;
+}
+
+// ── Root-author resolution ──────────────────────────────────────────────
+//
+// computeEffectiveStatus needs the root event's authoring pubkey so a
+// PR submitter can self-close their own PR (NIP-34 explicitly authorises
+// this). Previously we passed '' as rootAuthor — which silently denied
+// self-closes to anyone not also in the maintainer set. Fixed by
+// querying the relay for the actual root events by id.
+
+interface CachedRootAuthors {
+  authors:   Record<string, string>;  // rootId → pubkey
+  fetchedAt: number;
+}
+
+const ROOT_AUTHOR_CACHE_TTL_MS = 24 * 60 * 60 * 1000;  // 24h — root events are immutable
+
+/**
+ * Resolve rootId → pubkey for every requested root. Cached per project
+ * across calls because the answer is immutable: a root event's author
+ * never changes. Missing entries map to undefined; computeEffectiveStatus
+ * then falls back to the maintainer-set check alone, which is the
+ * conservative behaviour.
+ *
+ * Patches are kind 1617, issues are kind 1621. We query both kinds in
+ * one shot so a mixed rootIds batch costs one round-trip.
+ */
+async function fetchRootAuthors(
+  project: Project,
+  rootIds: string[],
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (rootIds.length === 0 || !project.path) return result;
+  const coords = decodeNgitRemote(project);
+  if (!coords) return result;
+
+  const cacheKey = { projectPath: project.path, key: 'root-authors' };
+  const cached = getCached<CachedRootAuthors>({ ...cacheKey, ttlMs: ROOT_AUTHOR_CACHE_TTL_MS });
+  const known = cached?.authors ?? {};
+  const need: string[] = [];
+  for (const rid of rootIds) {
+    if (known[rid]) result.set(rid, known[rid]);
+    else need.push(rid);
+  }
+  if (need.length === 0) return result;
+
+  const grasp = getGraspServers();
+  const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
+  const relays = [...coords.relayHints, ...grasp, ...projRelays]
+    .filter(isValidRelayUrl)
+    .filter((r, i, a) => a.indexOf(r) === i)
+    .slice(0, 8);
+  if (relays.length === 0) return result;
+
+  const r = await queryRelays({
+    filter:    { kinds: [1617, 1621], ids: need },
+    relays,
+    timeoutMs: RELAY_QUERY_TIMEOUT_MS,
+    stream:    false,
+    acceptUntil: (evs) => evs.length >= need.length,
+  });
+  const next = { ...known };
+  for (const ev of r.events) {
+    if (typeof ev.id === 'string' && typeof ev.pubkey === 'string') {
+      result.set(ev.id, ev.pubkey);
+      next[ev.id] = ev.pubkey;
+    }
+  }
+  setCached<CachedRootAuthors>(cacheKey, { authors: next, fetchedAt: Date.now() });
+  return result;
 }
 
 /**
@@ -303,30 +447,29 @@ export async function handleStatus(
   if (statusMatch && method === 'GET') {
     const rootIdsParam = u.searchParams.get('rootIds') || '';
     const rootIds = rootIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
+    // `refresh=1` bypasses the 60s status cache. Used by the client
+    // after a successful merge / status change, and by manual refresh
+    // gestures, so the next paint reflects the just-published 163x.
+    const refresh = u.searchParams.get('refresh') === '1';
     if (rootIds.length === 0) return json(res, 200, { results: [] });
     if (rootIds.length > 200) return json(res, 400, { error: 'too many rootIds (max 200)' });
     for (const r of rootIds) {
       if (!/^[a-f0-9]{16,64}$/.test(r)) return json(res, 400, { error: 'invalid rootId' });
     }
-    // Caller may pass rootAuthor hints to avoid the second relay
-    // query for the root events themselves. When absent we use the
-    // announcing-pubkey-as-fallback rule from fetchMaintainerSet.
-    const [statusR, maintainers] = await Promise.all([
-      fetchStatusEvents(project, false),
+    // Fetch in parallel:
+    //   - 163x status events for the repo (+ per-rootId fallback)
+    //   - maintainer set (permissive: anchor + verified + candidates)
+    //   - rootId → pubkey map so submitter self-closes are authorised
+    const [statusR, maintainers, rootAuthors] = await Promise.all([
+      fetchStatusEvents(project, refresh, rootIds),
       fetchMaintainerSet(project),
+      fetchRootAuthors(project, rootIds),
     ]);
-    // For Phase 4 we treat the rootAuthor as unknown unless the
-    // status event itself authored by them — Phase 5 fetches the
-    // actual root event for an explicit check. The compute helper
-    // gracefully handles unknown rootAuthor (everyone in
-    // maintainers + the status author themselves can publish).
     const results = rootIds.map((rid) =>
-      // Without rootAuthor we still safely admit maintainers +
-      // patch/issue self-closes. The pubkey check inside
-      // computeEffectiveStatus uses an empty-string rootAuthor
-      // when none supplied — no one matches the empty string
-      // accidentally because all real pubkeys are 64 hex chars.
-      computeEffectiveStatus(rid, '', maintainers, statusR.events)
+      // Empty string when we couldn't resolve the root — preserves
+      // pre-existing fall-through behaviour (maintainer-set still
+      // authorises). 64-hex pubkeys can never equal '' so this is safe.
+      computeEffectiveStatus(rid, rootAuthors.get(rid) ?? '', maintainers, statusR.events)
     );
     return json(res, 200, { results, cached: statusR.cached });
   }

@@ -45,19 +45,23 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import { nip19 } from 'nostr-tools';
+import { WebSocket } from 'ws';
 import { getProject, type Project } from '../projects.js';
 import { findBin } from '../detect.js';
-import { isValidRelayUrl, getGraspServers } from '../identity.js';
+import { isValidRelayUrl, getGraspServers, readIdentity } from '../identity.js';
 import { safeHttpUrl } from '../url-safety.js';
 import {
   queryRelays,
   getCached,
   setCached,
+  clearCache,
   getTagValue,
   getTags,
   type NostrEvent,
 } from '../nostr-query.js';
 import { resolveMaintainerSet, type MaintainerSet } from '../maintainer-set.js';
+import { signEventWithSavedBunker } from '../auth-bunker.js';
+import { readBody } from './_shared.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -645,6 +649,10 @@ function serialiseMaintainerSet(ms: MaintainerSet): any {
     blossoms:       ms.blossoms,
     hashtags:       ms.hashtags,
     display:        ms.display,
+    // Raw 30617 events per verified maintainer — drives the
+    // Announcement events inspector modal (per-event timestamp,
+    // "selected" badge for the display source, raw-JSON viewer).
+    events:         ms.events,
   };
 }
 
@@ -656,9 +664,304 @@ function extractGitError(e: any): string {
   return (stderr || message || 'git command failed').slice(0, 240);
 }
 
+// ── Announce (Edit Repository) — Phase 3b ─────────────────────────────
+//
+// POST /api/projects/:id/announce republishes the kind-30617 with the
+// user's edits. The reason we build + sign + publish ourselves instead
+// of shelling `ngit init` for everything:
+//
+//   - ngit init covers the standard fields (name, description, web,
+//     hashtag, grasp-server, relay, clone, other-maintainers, EUC) but
+//     does NOT accept arbitrary custom tags. Custom-tag forward-compat
+//     (e.g. `["client", "nostr-station"]`) is a stated requirement.
+//   - Building the event ourselves also means a single Amber-sign
+//     instead of ngit's multi-step (which would risk a race if we
+//     re-published a second time to add custom tags).
+//
+// The signing path uses the existing signEventWithSavedBunker — same
+// Amber pairing the dashboard uses for setup/verify. Publish to the
+// union of: announcement's own relay list, user's grasp servers, and
+// the user's read-relays. After a successful publish (≥1 relay OK'd)
+// we invalidate the cached repo-30617 so the next GET /repo refetches.
+
+interface AnnounceInput {
+  identifier:        string;             // d-tag — fixed for a given coordinate
+  name?:             string;
+  description?:      string;
+  web?:              string[];
+  clone?:            string[];
+  relays?:           string[];           // includes GRASP + other relays — server doesn't split
+  blossoms?:         string[];
+  hashtags?:         string[];
+  maintainers?:      string[];           // OTHER maintainers (hex pubkeys); anchor is auto-added
+  euc?:              string | null;      // earliest-unique-commit
+  customTags?:       string[][];         // forward-compat ['name', ...vals]; preserved verbatim
+}
+
+/**
+ * Build the unsigned 30617 event template from form input + the prior
+ * announcement (used to preserve tags the form doesn't surface, like
+ * future tag types nostr-station hasn't learned about yet). Pure — no
+ * I/O. Exported for tests.
+ *
+ * Tag order roughly matches ngit init's output:
+ *   d, r euc, name, description, clone…, web…, relays…, t…, maintainers,
+ *   alt, blossoms…, then any custom tags (with client=nostr-station
+ *   auto-injected if not already present).
+ */
+export function buildRepoAnnounceTemplate(
+  input:        AnnounceInput,
+  prior:        NostrEvent | null,
+  signerPubkey: string,
+): { kind: number; created_at: number; tags: string[][]; content: string } {
+  const tags: string[][] = [];
+  tags.push(['d', input.identifier]);
+  if (input.euc) tags.push(['r', input.euc, 'euc']);
+  if (input.name)        tags.push(['name', input.name]);
+  if (input.description) tags.push(['description', input.description]);
+  // Web/clone/relays/blossoms: single tag with all values (NIP-34 convention).
+  if (input.clone?.length) {
+    tags.push(['clone', ...input.clone]);
+  }
+  if (input.web?.length) {
+    tags.push(['web', ...input.web]);
+  }
+  if (input.relays?.length) {
+    tags.push(['relays', ...input.relays]);
+  }
+  // Hashtags emit ONE `t` tag per value (matches how relays index them).
+  for (const t of input.hashtags || []) {
+    if (typeof t === 'string' && t.length > 0 && t.length <= 64) tags.push(['t', t]);
+  }
+  // Maintainers: only the OTHER ones — the signer is the trust anchor by
+  // construction and including their own pubkey here would be redundant.
+  const others = (input.maintainers || []).filter(
+    (p) => typeof p === 'string' && /^[0-9a-f]{64}$/.test(p) && p !== signerPubkey,
+  );
+  if (others.length > 0) tags.push(['maintainers', ...others]);
+  // Stable display string for clients that don't render the event raw.
+  tags.push(['alt', `git repository: ${input.name || input.identifier}`]);
+  if (input.blossoms?.length) {
+    tags.push(['blossoms', ...input.blossoms]);
+  }
+  // Custom tags pass through verbatim. We also auto-inject
+  // ['client', 'nostr-station'] when no client tag is already set,
+  // mirroring how shakespeare.diy / gitworkshop tag their announcements.
+  // Don't preserve tag types we already emit above (avoids duplicates).
+  const emittedTagNames = new Set(['d', 'r', 'name', 'description', 'clone', 'web', 'relays', 't', 'maintainers', 'alt', 'blossoms']);
+  const customs: string[][] = [];
+  const seenCustomKey = new Set<string>();
+  // (1) form-supplied custom tags first
+  for (const t of input.customTags || []) {
+    if (!Array.isArray(t) || typeof t[0] !== 'string' || !t[0]) continue;
+    if (emittedTagNames.has(t[0])) continue;
+    const key = JSON.stringify(t);
+    if (seenCustomKey.has(key)) continue;
+    seenCustomKey.add(key);
+    customs.push(t.map(v => typeof v === 'string' ? v : ''));
+  }
+  // (2) preserve any unknown-to-us tags from the prior announcement
+  if (prior && Array.isArray(prior.tags)) {
+    for (const t of prior.tags) {
+      if (!Array.isArray(t) || typeof t[0] !== 'string') continue;
+      if (emittedTagNames.has(t[0])) continue;
+      const key = JSON.stringify(t);
+      if (seenCustomKey.has(key)) continue;
+      // Only preserve if the form didn't supply the same tag name — form
+      // wins. Detected by checking if any customs entry has same name.
+      if (customs.some((c) => c[0] === t[0])) continue;
+      seenCustomKey.add(key);
+      customs.push(t.map(v => typeof v === 'string' ? v : ''));
+    }
+  }
+  // (3) auto-inject the client marker if nothing else set it.
+  if (!customs.some((c) => c[0] === 'client')) {
+    customs.push(['client', 'nostr-station']);
+  }
+  for (const c of customs) tags.push(c);
+
+  return {
+    kind:       30617,
+    created_at: Math.floor(Date.now() / 1000),
+    tags,
+    content:    '',
+  };
+}
+
+interface RelayPublishResult { relay: string; ok: boolean; reason?: string }
+
+/**
+ * Publish a signed event to a set of relays in parallel. Each relay
+ * gets a 6s budget; we resolve as soon as an OK / NOTICE comes back
+ * (or the timeout fires). Returns per-relay results so the client can
+ * show which relays accepted vs. rejected.
+ */
+export async function publishEventToRelays(
+  event:    any,
+  relays:   string[],
+  timeoutMs: number = 6000,
+): Promise<RelayPublishResult[]> {
+  const tasks = relays.map((url) => new Promise<RelayPublishResult>((resolve) => {
+    let settled = false;
+    let ws: WebSocket;
+    const finish = (r: RelayPublishResult) => {
+      if (settled) return;
+      settled = true;
+      try { ws?.close(); } catch {}
+      clearTimeout(timer);
+      resolve(r);
+    };
+    try { ws = new WebSocket(url); }
+    catch (e: any) { resolve({ relay: url, ok: false, reason: e?.message || 'invalid url' }); return; }
+    const timer = setTimeout(() => finish({ relay: url, ok: false, reason: 'timeout' }), timeoutMs);
+    ws.addEventListener('open', () => {
+      try { ws.send(JSON.stringify(['EVENT', event])); }
+      catch (e: any) { finish({ relay: url, ok: false, reason: e?.message || 'send failed' }); }
+    });
+    ws.addEventListener('message', (m: any) => {
+      try {
+        const msg = JSON.parse(typeof m.data === 'string' ? m.data : m.data.toString());
+        if (Array.isArray(msg) && msg[0] === 'OK' && msg[1] === event.id) {
+          finish({ relay: url, ok: msg[2] === true, reason: typeof msg[3] === 'string' ? msg[3] : undefined });
+        }
+      } catch { /* not JSON / not array */ }
+    });
+    ws.addEventListener('error', (e: any) => finish({ relay: url, ok: false, reason: e?.message || 'ws error' }));
+    ws.addEventListener('close', () => finish({ relay: url, ok: false, reason: 'closed before OK' }));
+  }));
+  return Promise.all(tasks);
+}
+
+async function handleAnnounce(
+  req:     http.IncomingMessage,
+  res:     http.ServerResponse,
+  project: Project,
+): Promise<boolean> {
+  let body: any;
+  try { body = JSON.parse(await readBody(req)); }
+  catch { return json(res, 400, { error: 'bad json' }); }
+
+  // Resolve coordinate from the existing 30617 — the d-tag identifier
+  // is part of the coordinate and must NOT be editable (changing it
+  // forks the repo to a new coordinate).
+  const coords = decodeNgitRemote(project);
+  if (!coords) return json(res, 400, { error: 'project has no ngit remote — cannot announce' });
+
+  // Sanitise input. Strings are trimmed; arrays are filtered to strings
+  // of reasonable shape. Anything outside the schema falls through as
+  // undefined (so the builder uses its own defaults / preserves).
+  const trim = (v: any) => typeof v === 'string' ? v.trim() : undefined;
+  const strArr = (v: any): string[] => Array.isArray(v)
+    ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map(s => s.trim())
+    : [];
+  const hexArr = (v: any): string[] => Array.isArray(v)
+    ? v.filter((x): x is string => typeof x === 'string' && /^[0-9a-f]{64}$/.test(x.toLowerCase()))
+       .map(s => s.toLowerCase())
+    : [];
+  const tagArr = (v: any): string[][] => Array.isArray(v)
+    ? v.filter((t): t is any[] => Array.isArray(t) && t.length >= 1 && typeof t[0] === 'string' && t[0].length > 0)
+       .map(t => t.map((x: any) => typeof x === 'string' ? x : ''))
+    : [];
+
+  const input: AnnounceInput = {
+    identifier:  coords.identifier,
+    name:        trim(body.name),
+    description: typeof body.description === 'string' ? body.description : undefined,  // preserve newlines
+    web:         strArr(body.web).filter(u => /^https?:\/\//i.test(u)),
+    clone:       strArr(body.clone),
+    relays:      strArr(body.relays).filter(u => /^wss?:\/\//i.test(u)),
+    blossoms:    strArr(body.blossoms).filter(u => /^https?:\/\//i.test(u)),
+    hashtags:    strArr(body.hashtags).map(s => s.replace(/^#/, '')),
+    maintainers: hexArr(body.maintainers),
+    euc:         typeof body.euc === 'string' && /^[0-9a-f]{40}$/.test(body.euc.toLowerCase())
+                 ? body.euc.toLowerCase()
+                 : null,
+    customTags:  tagArr(body.customTags),
+  };
+
+  // Owner-only guard: the signed-in pubkey must equal the trust anchor
+  // pubkey for this coordinate (a different pubkey re-publishing 30617
+  // under someone else's `d`-tag would just fork the repo, which is
+  // never what the Edit form intends).
+  const ident = readIdentity();
+  let ownerHex = '';
+  try { ownerHex = ident.npub ? (nip19.decode(ident.npub).data as string) : ''; }
+  catch { ownerHex = ''; }
+  if (!ownerHex || ownerHex !== coords.pubkey) {
+    return json(res, 403, { error: 'only the trust anchor can edit this announcement' });
+  }
+
+  // Pull the prior raw 30617 so we can carry through any tags the form
+  // doesn't surface (forward compat). Direct relay query — fetchRepoMeta
+  // caches the parsed shape, not the raw event. Failing to find it is
+  // non-fatal: we just lose the carry-through and emit the form's tags
+  // as-is.
+  const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
+  const priorRelays = [...coords.relayHints, ...getGraspServers(), ...projRelays]
+    .filter(isValidRelayUrl)
+    .filter((r, i, a) => a.indexOf(r) === i)
+    .slice(0, 8);
+  let priorEvent: NostrEvent | null = null;
+  if (priorRelays.length > 0) {
+    try {
+      const r = await queryRelays({
+        filter: { kinds: [30617], authors: [coords.pubkey], tags: { d: coords.identifier }, limit: 1 },
+        relays: priorRelays,
+        timeoutMs: RELAY_QUERY_TIMEOUT_MS,
+        stream: false,
+        acceptUntil: (evs) => evs.length >= 1,
+      });
+      for (const ev of r.events) {
+        if (ev.kind !== 30617) continue;
+        if (!priorEvent || ev.created_at > priorEvent.created_at) priorEvent = ev;
+      }
+    } catch { /* prior fetch failed — proceed without carry-through */ }
+  }
+
+  const template = buildRepoAnnounceTemplate(input, priorEvent, ownerHex);
+
+  // Sign via the persisted Amber pairing.
+  const signed = await signEventWithSavedBunker(template, 60_000);
+  if (!signed.ok || !signed.signedEvent) {
+    return json(res, signed.tried ? 502 : 400, {
+      error: signed.error || 'sign failed',
+      tried: signed.tried,
+    });
+  }
+
+  // Publish to the union of: the input's own relay list, user's grasp
+  // servers, and read-relays. De-duped + capped at 8 to keep the
+  // request bounded.
+  const publishTargets = [...new Set([
+    ...input.relays || [],
+    ...getGraspServers().map(s => /^wss?:/i.test(s) ? s : `wss://${s}`),
+  ])].filter(isValidRelayUrl).slice(0, 8);
+
+  const results = publishTargets.length > 0
+    ? await publishEventToRelays(signed.signedEvent, publishTargets)
+    : [];
+  const accepted = results.filter(r => r.ok).length;
+
+  // Invalidate the repo-30617 cache so the next GET /repo refetches.
+  // Even if zero relays accepted, the user might be retrying — bust the
+  // cache so a stale 30617 doesn't haunt them.
+  if (project.path) {
+    try { clearCache({ projectPath: project.path, key: 'repo-30617' }); } catch {}
+  }
+
+  return json(res, accepted > 0 ? 200 : 502, {
+    ok:           accepted > 0,
+    signedEvent:  signed.signedEvent,
+    publish:      results,
+    accepted,
+    targets:      publishTargets.length,
+  });
+}
+
 // ── Dispatcher ──────────────────────────────────────────────────────────
 
 const REPO_ROUTE = /^\/api\/projects\/([a-f0-9-]{10,})\/(publish-state|repo(?:\/refs|\/tree|\/blob|\/log|\/readme)?)$/;
+const ANNOUNCE_ROUTE = /^\/api\/projects\/([a-f0-9-]{10,})\/announce$/;
 
 export async function handleRepo(
   req: http.IncomingMessage,
@@ -666,10 +969,18 @@ export async function handleRepo(
   url: string,
   method: string,
 ): Promise<boolean> {
-  if (method !== 'GET') return false;
   // Strip query string for path matching; `URL` parsing requires a
   // base, so glue one on for parsing-only purposes.
   const u = new URL(url, 'http://localhost');
+  // POST /announce — Phase 3b Edit Repository submission.
+  if (method === 'POST') {
+    const am = u.pathname.match(ANNOUNCE_ROUTE);
+    if (!am) return false;
+    const project = getProject(am[1]);
+    if (!project) return json(res, 404, { error: 'project not found' });
+    return handleAnnounce(req, res, project);
+  }
+  if (method !== 'GET') return false;
   const m = u.pathname.match(REPO_ROUTE);
   if (!m) return false;
   const [, id, sub] = m;

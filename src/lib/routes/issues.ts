@@ -296,6 +296,50 @@ async function fetchIssuesInbox(
   return { events: result.events, cached: false, diagnostics: result.diagnostics };
 }
 
+/**
+ * Targeted comment fetch for ONE rootId, by uppercase + lowercase `e`
+ * references. NIP-22 uses `E` for the thread root and `e` for the
+ * immediate parent — querying both catches every comment in the tree
+ * regardless of whether the client emitted the repo `#a` tag. Always
+ * fresh (no cache): the thread is per-modal-open and we want it live.
+ */
+async function fetchCommentsForRoot(
+  project: Project,
+  rootId: string,
+): Promise<NostrEvent[]> {
+  const coords = decodeNgitRemote(project);
+  if (!coords) return [];
+  const grasp = getGraspServers();
+  const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
+  const relays = [...coords.relayHints, ...grasp, ...projRelays]
+    .filter(isValidRelayUrl)
+    .filter((r, i, a) => a.indexOf(r) === i)
+    .slice(0, 8);
+  if (relays.length === 0) return [];
+
+  // Two filters: #E (thread root) catches top-level replies; #e
+  // (parent ref) catches comments-on-comments whose parent is the
+  // root itself, plus any client that uses lowercase only.
+  const [upper, lower] = await Promise.all([
+    queryRelays({
+      filter:    { kinds: [1111, 1622], tags: { E: rootId } },
+      relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: true,
+    }),
+    queryRelays({
+      filter:    { kinds: [1111, 1622], tags: { e: rootId } },
+      relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: true,
+    }),
+  ]);
+  const seen = new Set<string>();
+  const events: NostrEvent[] = [];
+  for (const ev of [...upper.events, ...lower.events]) {
+    if (seen.has(ev.id)) continue;
+    seen.add(ev.id);
+    events.push(ev);
+  }
+  return events;
+}
+
 // ── POST handlers ───────────────────────────────────────────────────────
 
 /**
@@ -381,10 +425,20 @@ export async function handleIssues(
   // ── Detail ───────────────────────────────────────────────────────────
   if (detailMatch && method === 'GET') {
     const eventId = detailMatch[2];
-    const r = await fetchIssuesInbox(project, false);
-    const issue = r.events.find((e) => e.id === eventId && e.kind === 1621);
+    const inbox = await fetchIssuesInbox(project, false);
+    const issue = inbox.events.find((e) => e.id === eventId && e.kind === 1621);
     if (!issue) return json(res, 404, { error: 'issue not found' });
-    const comments = r.events.filter((e) => e.kind === 1111 || e.kind === 1622);
+    // Union inbox + per-issue targeted fetch so comments without the
+    // repo `#a` tag still appear in the thread.
+    const targeted = await fetchCommentsForRoot(project, issue.id);
+    const seen = new Set<string>();
+    const merged: NostrEvent[] = [];
+    for (const ev of [...inbox.events, ...targeted]) {
+      if (seen.has(ev.id)) continue;
+      seen.add(ev.id);
+      merged.push(ev);
+    }
+    const comments = merged.filter((e) => e.kind === 1111 || e.kind === 1622);
     const tree = buildCommentTree(issue.id, comments);
     const detail: IssueDetail = { ...summariseIssue(issue, tree), comments: tree };
     return json(res, 200, detail);
@@ -419,15 +473,30 @@ export async function handleIssues(
   // typically a patch series root or a custom root, not just a
   // kind-1621 issue. Drives the comment thread on the patch detail
   // view (Phase 3c) where /issues/:id wouldn't apply.
+  //
+  // The cached inbox query filters by the repo's `#a` tag, which is
+  // the well-behaved case. But NIP-22 only requires `E`/`e` references
+  // to the thread root — many clients (and patch-series replies in
+  // particular) emit comments with no `#a` at all. Union the cached
+  // inbox with a targeted `#E:<rootId>` + `#e:<rootId>` fetch so we
+  // pick them up. Matches gitworkshop's thread completeness.
   if (commentsMatch && method === 'GET') {
     const rootId = u.searchParams.get('rootId') || '';
     if (!/^[a-f0-9]{16,64}$/.test(rootId)) {
       return json(res, 400, { error: 'invalid rootId' });
     }
-    const r = await fetchIssuesInbox(project, false);
-    const comments = r.events.filter((e) => e.kind === 1111 || e.kind === 1622);
+    const inbox = await fetchIssuesInbox(project, false);
+    const targeted = await fetchCommentsForRoot(project, rootId);
+    const seen = new Set<string>();
+    const merged: NostrEvent[] = [];
+    for (const ev of [...inbox.events, ...targeted]) {
+      if (seen.has(ev.id)) continue;
+      seen.add(ev.id);
+      merged.push(ev);
+    }
+    const comments = merged.filter((e) => e.kind === 1111 || e.kind === 1622);
     const tree = buildCommentTree(rootId, comments);
-    return json(res, 200, { rootId, comments: tree, cached: r.cached });
+    return json(res, 200, { rootId, comments: tree, cached: inbox.cached });
   }
 
   // ── Comment create (SSE) ─────────────────────────────────────────────
