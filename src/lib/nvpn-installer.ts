@@ -27,7 +27,7 @@ import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
 import { verifyFileSha256 } from './checksum.js';
 import { getCargoBin, getNvpnTarget } from './detect.js';
-import { applyLinuxCapsDropIn } from './nvpn.js';
+import { applyLinuxCapsDropIn, seedFreeMagicDnsPort } from './nvpn.js';
 
 export interface InstallResult {
   ok:       boolean;
@@ -218,6 +218,22 @@ export async function installNostrVpn(onProgress: ProgressCallback = () => {}): 
     }
   }
 
+  // Pre-seed a free magic-dns-port + lay down the systemd caps drop-in
+  // BEFORE service install, so the daemon's first start sees both.
+  // Without this, port 1053 collisions and missing CAP_DAC_OVERRIDE
+  // each write a set of scary red lines to the daemon log on first
+  // start; the user sees them in the dashboard's log panel even though
+  // the daemon is functionally fine. Order matters — once nvpn writes
+  // its unit and `systemctl start nvpn` runs (inside `service install`),
+  // it's too late to keep the first start clean. Both are best-effort.
+  step('seed free magic-dns-port');
+  const portSeed = await seedFreeMagicDnsPort();
+  append(`magic-dns-port: ${portSeed.ok ? 'ok' : 'skipped'} — ${portSeed.detail}`);
+
+  step('apply systemd caps drop-in');
+  const caps = await applyLinuxCapsDropIn();
+  append(`caps drop-in: ${caps.ok ? 'ok' : 'skipped'} — ${caps.detail}`);
+
   // System service install — writes /Library/LaunchDaemons (macOS) or
   // /etc/systemd/system (linux). `sudo -n` fails fast if the cred cache
   // is empty. The dashboard runs in an SSE response, no TTY for a sudo
@@ -230,17 +246,6 @@ export async function installNostrVpn(onProgress: ProgressCallback = () => {}): 
       { stdio: 'pipe', timeout: 30_000 },
     );
     append(`service install ok; stdout=${stdout.slice(0, 120)} stderr=${stderr.slice(0, 120)}`);
-
-    // Layer our systemd drop-in for the caps the upstream unit doesn't
-    // request (CAP_DAC_OVERRIDE for the route-cache flush sysctl,
-    // CAP_NET_RAW for NAT probes). No-op on macOS. Best-effort: a
-    // missing sudo cred cache here doesn't fail the install — the
-    // daemon still works, just logs the same route-flush warning until
-    // the user retries via the "Reinstall" button.
-    step('apply systemd caps drop-in');
-    const caps = await applyLinuxCapsDropIn();
-    append(`caps drop-in: ${caps.ok ? 'ok' : 'skipped'} — ${caps.detail}`);
-
     return { ok: true, detail: `installed ${nvpnBin}` };
   } catch (e: any) {
     const stderr = (e?.stderr?.toString?.() || '').trim();
