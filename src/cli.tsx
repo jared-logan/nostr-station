@@ -276,7 +276,9 @@ function printHelp() {
     keychain get <key> --raw         Print value to stdout (for scripts)
     keychain set <key>               Store/update a credential
     keychain delete <key>            Remove a credential (y/N confirm)
-    keychain rotate                  Rotate the AI API key
+    keychain rotate [key]            Rotate a credential (60s rollback window)
+    keychain rotate [key] --rollback Restore the previous value within the window
+    keychain migrate                 Migrate legacy on-disk secrets into the OS keychain
 
   AI SUBCOMMANDS
     ai list                          Show configured providers + defaults
@@ -303,7 +305,7 @@ function printHelp() {
     publish    --github  --ngit  --yes
     nsite      --titan   --yes
     seed       --events <n>  --full
-    keychain   get --raw
+    keychain   get --raw        rotate --rollback
     add        --yes
     completion --shell zsh|bash  --install  --print
   `);
