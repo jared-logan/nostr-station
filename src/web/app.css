@@ -5788,6 +5788,15 @@ body.term-expanded .term-bar-toggle .term-chevron {
   font-weight: 600;
   color: var(--muted);
 }
+/* "Profile not resolved" variant — bigger glyph, lighter color, less
+   weight so it reads as a placeholder marker instead of an initial. */
+.about-avatar-placeholder-anon,
+.ann-avatar-anon {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-dim, var(--muted));
+  opacity: 0.5;
+}
 .ann-avatar-img {
   object-fit: cover;
 }
