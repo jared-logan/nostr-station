@@ -16,6 +16,21 @@ import { getKeychain }    from './lib/keychain.js';
 import { requireInteractive } from './lib/tty.js';
 import { VERSION } from './lib/version.js';
 
+// Replace Node's default multi-line stack-trace with a single concise
+// stderr line. Exit code stays 1 (matching Node's default for both
+// uncaughtException and unhandledRejection on Node ≥15), so script
+// callers see no behavioural change — only the dump is shorter.
+process.on('uncaughtException', (err: unknown) => {
+  const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  process.stderr.write(`nostr-station: uncaught exception\n${msg}\n`);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason: unknown) => {
+  const msg = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  process.stderr.write(`nostr-station: unhandled promise rejection\n${msg}\n`);
+  process.exit(1);
+});
+
 // argv[0] is node, argv[1] is this script. When no subcommand is given
 // (length === 2) we route to the launcher — boot the dashboard + relay,
 // open the browser. An explicit `help` / `--help` / `-h` prints the
