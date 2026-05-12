@@ -43,7 +43,7 @@ import { AutoSyncManager } from './auto-sync.js';
 import { installNostrVpn } from './nvpn-installer.js';
 import {
   probeNvpnStatus, probeNvpnServiceStatus, startNvpnLogTail, vpnBannerRunningFor,
-  nvpnEvents,
+  nvpnEvents, memoizeWithTtl,
 } from './nvpn.js';
 import { installNak } from './nak-installer.js';
 import { installNgit } from './ngit-installer.js';
@@ -529,6 +529,17 @@ export function getAutoSyncManager(): AutoSyncManager | null {
 // land in the Logs panel. Cleaned up on server.close so the polling
 // timer doesn't keep the event loop alive across hot-restarts.
 let nvpnLogTailer: { stop: () => void } | null = null;
+
+// Cache /api/status for 3s. gatherStatus() is the dashboard's hot path —
+// the Status panel polls every 3-5s, and several other dashboard panels
+// call it on render. Each call shells out to nc, nvpn, and ~4 binary
+// `--version` probes, blocking the HTTP loop for as long as the slowest
+// command takes. The 3s TTL bounds blocking to once per 3 wall-clock
+// seconds while keeping panel refreshes feeling live. Re-uses the
+// generic memoizeWithTtl helper that nvpn.ts already exposes (status
+// cache shares the same shape — `await fn()`, identity-checked
+// invalidate).
+const cachedGatherStatus = memoizeWithTtl(async () => gatherStatus(), 3_000);
 
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
@@ -1174,8 +1185,9 @@ export async function startWebServer(port: number): Promise<http.Server> {
       }
 
       if (url === '/api/status' && method === 'GET') {
+        const rows = await cachedGatherStatus();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(gatherStatus()));
+        res.end(JSON.stringify(rows));
         return;
       }
 

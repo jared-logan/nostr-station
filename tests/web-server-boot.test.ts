@@ -113,3 +113,31 @@ test('web-server: rejects mutations with no Origin or Referer with 403', async (
   assert.equal(r.status, 403);
   assert.equal(r.body.trim(), 'bad origin');
 });
+
+test('web-server: /api/status returns the expected schema (cached path)', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Two back-to-back requests inside the 3s TTL should both return the
+  // same payload. We don't assert timing (flaky) — only that the cache
+  // doesn't corrupt the response shape.
+  const a = await rawRequest({ port, path: '/api/status' });
+  const b = await rawRequest({ port, path: '/api/status' });
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+
+  const parsedA = JSON.parse(a.body);
+  const parsedB = JSON.parse(b.body);
+  assert.ok(Array.isArray(parsedA), '/api/status returns an array');
+  assert.deepEqual(parsedA, parsedB, 'cache yields identical successive responses');
+
+  // Schema: each row has the documented shape.
+  for (const row of parsedA) {
+    assert.equal(typeof row.id,    'string');
+    assert.equal(typeof row.label, 'string');
+    assert.equal(typeof row.value, 'string');
+    assert.equal(typeof row.ok,    'boolean');
+    assert.equal(typeof row.state, 'string');
+    assert.equal(typeof row.kind,  'string');
+  }
+});
