@@ -612,13 +612,40 @@ export async function handleIdentity(
     // client invokes verify=1 in a follow-up async request after the
     // initial paint so the unverified state never blocks the UI.
     const verify = u.searchParams.get('verify') === '1';
+    // ?debug=1 surfaces the relays we consulted + per-pubkey resolution
+    // status. Lets users diagnose "why doesn't my name show up?" without
+    // checking the server log — answer is in the response body.
+    const debug = u.searchParams.get('debug') === '1';
     try {
       const map = await lookupProfilesBatch(pubkeys, relays, verify);
       const profiles: Record<string, any> = {};
-      for (const [k, v] of map) profiles[k] = v;
+      let resolved = 0;
+      for (const [k, v] of map) {
+        profiles[k] = v;
+        if (v.name || v.displayName) resolved++;
+      }
+      // Always log when we asked for profiles but got mostly nothing —
+      // catches misconfigured relays without needing debug=1.
+      if (pubkeys.length > 0 && resolved === 0) {
+        console.warn('[profiles] resolved 0/' + pubkeys.length,
+          'pubkeys=', pubkeys.map(p => p.slice(0, 8) + '…').join(','),
+          'relaysCount=', relays.length,
+          'relays=', relays.slice(0, 8).join(','));
+      }
+      const body: any = { profiles };
+      if (debug) {
+        body.debug = {
+          relays,
+          requested:    pubkeys.length,
+          resolved,
+          resolvedFraction: pubkeys.length === 0 ? 0 : resolved / pubkeys.length,
+          verifyRequested: verify,
+        };
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ profiles }));
+      res.end(JSON.stringify(body));
     } catch (e: any) {
+      console.warn('[profiles] FAIL', 'url=', url, 'error=', e?.message || e);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: String(e.message || e) }));
     }

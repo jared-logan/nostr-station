@@ -484,10 +484,15 @@ export async function handleIssues(
     const rootId = u.searchParams.get('rootId') || '';
     if (!/^[a-f0-9]{16,64}$/.test(rootId)) {
       // See patches.ts — diagnostic log on validator-reject so we can
-      // catch truncations / encoding issues without round-tripping
-      // through the user.
-      console.warn(`[comments] reject rootId len=${rootId.length} head=${rootId.slice(0,8)} tail=${rootId.slice(-8)} raw=${JSON.stringify(rootId)}`);
-      return json(res, 400, { error: 'invalid rootId' });
+      // catch truncations / encoding issues from a single log line.
+      console.warn('[comments] REJECT rootId',
+        'url=', req.url,
+        'len=', rootId.length,
+        'head=', rootId.slice(0, 8),
+        'tail=', rootId.slice(-8),
+        'raw=', JSON.stringify(rootId),
+        'searchKeys=', [...u.searchParams.keys()].join(','));
+      return json(res, 400, { error: 'invalid rootId', diagnostic: { len: rootId.length, head: rootId.slice(0,8), tail: rootId.slice(-8) } });
     }
     const inbox = await fetchIssuesInbox(project, false);
     const targeted = await fetchCommentsForRoot(project, rootId);
