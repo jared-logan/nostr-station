@@ -15,7 +15,6 @@
     "build": "tsc && node scripts/copy-web.mjs && node scripts/copy-scaffold-assets.mjs",
     "prepublishOnly": "tsc && node scripts/copy-web.mjs && node scripts/copy-scaffold-assets.mjs",
     "dev": "tsx src/cli.tsx serve",
-    "onboard": "tsx src/cli.tsx onboard",
     "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
