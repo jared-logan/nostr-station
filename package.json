@@ -15,7 +15,9 @@
     "build": "tsc && node scripts/copy-web.mjs && node scripts/copy-scaffold-assets.mjs",
     "prepublishOnly": "tsc && node scripts/copy-web.mjs && node scripts/copy-scaffold-assets.mjs",
     "dev": "tsx src/cli.tsx serve",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "test:watch": "tsx --test --watch tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
