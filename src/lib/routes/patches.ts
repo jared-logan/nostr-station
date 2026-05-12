@@ -547,6 +547,11 @@ export async function handlePatches(
   if (diffMatch) {
     const patchId = u.searchParams.get('patchId') || '';
     if (!/^[a-f0-9]{16,64}$/.test(patchId)) {
+      // Log on rejection so a "browser says 400 / server says ?" can
+      // be diagnosed from the dev-server log alone. Includes hex
+      // length + first/last 8 chars to catch invisible chars or odd
+      // truncations without dumping a full 64-char id at log level.
+      console.warn(`[patches] reject patchId len=${patchId.length} head=${patchId.slice(0,8)} tail=${patchId.slice(-8)} raw=${JSON.stringify(patchId)}`);
       return json(res, 400, { error: 'invalid patchId' });
     }
     const ev = eventsById.get(patchId);
