@@ -4815,7 +4815,7 @@ const ProjectsPanel = (() => {
       return;
     }
     const ms = repoMeta.maintainerSet;
-    paintAboutTab(container, repo, ms);
+    paintAboutTab(container, p, repo, ms);
     // Kick off profile resolution for every pubkey we display. The painter
     // pulls names from the profile cache, so a second paint after this
     // promise resolves upgrades the visible rows from npub-truncated
@@ -4835,14 +4835,14 @@ const ProjectsPanel = (() => {
       // Guard against tab switch during the fetch — only re-paint if the
       // user is still on this tab and the container is in the DOM.
       if (!container.isConnected) return;
-      paintAboutTab(container, repo, ms);
+      paintAboutTab(container, p, repo, ms);
       // Kick off NIP-05 verification asynchronously. This adds DNS +
       // HTTPS per claim — slower than the kind-0 fetch, hence a third
       // paint when it completes. Non-blocking; the tab is fully
       // usable after the second paint without verification.
       resolveProfilesVerified(allPubkeys, { relays }).then(() => {
         if (!container.isConnected) return;
-        paintAboutTab(container, repo, ms);
+        paintAboutTab(container, p, repo, ms);
       });
     });
   }
@@ -4850,7 +4850,7 @@ const ProjectsPanel = (() => {
   // Pure painter — synchronous, idempotent. Called once with placeholder
   // names, then again after profile resolution upgrades the cache. Reads
   // names/avatars from profileCache via profileNameOf.
-  function paintAboutTab(container, repo, ms) {
+  function paintAboutTab(container, p, repo, ms) {
     const analysis = analyseAnnouncements(repo, ms);
 
     // Section order matches gitworkshop: Topics → Maintainers → GRASP →

@@ -241,3 +241,68 @@ test('computeEffectiveStatus: 1631 merge event without a-tag still resolves merg
   assert.equal(r.status, 'merged');
   assert.equal(r.mergeCommit, 'd'.repeat(40));
 });
+
+// ── Regression: user-reported blip merge event ──────────────────────────
+//
+// Exact event JSON the user pulled from gitworkshop.dev for the Blip PR
+// that displays as "Merged" on gitworkshop but stuck at "Open" on
+// nostr-station. If THIS test passes the compute path is correct
+// end-to-end and the bug is upstream (relay query not returning the
+// event, or a stale cache shadowing it).
+
+test('regression(blip): real 1631 merge event → status === merged', () => {
+  const ANCHOR_PK = '291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe';
+  const PATCH_ROOT_ID = 'a2f7d506ce65e8b736a3f6afe7a847bfe6de4370fa2de47dd6bfa70bb5c93e90';
+  const mergeEvent = {
+    id: '406dff306888f62bb47a9025b6deb312047b859d5471b47b2bec5304cf0fa11c',
+    pubkey: ANCHOR_PK,
+    kind: 1631,
+    created_at: 1778209426,
+    content: '',
+    sig: 'a23db6f7be04b50dfba09d1613cbd844c394ed9db3bd1735a617221934c487fe22832c5e0d13b9aec9e8312f5daa9e9f58b7b79a6cfe4ee7656af3e930548f48',
+    tags: [
+      ['e', PATCH_ROOT_ID, '', 'root'],
+      ['a', `30617:${ANCHOR_PK}:blip`],
+      ['alt', 'Status change'],
+      ['merge-commit', '6e0ba1372691ef3103b380c629a51aced16e9348'],
+      ['r', '6e0ba1372691ef3103b380c629a51aced16e9348'],
+      ['q', PATCH_ROOT_ID, '', ANCHOR_PK],
+    ],
+  };
+  // Maintainer set in the form fetchMaintainerSet would build for blip
+  // (no maintainers tag → just the trust anchor, permissive union).
+  const maintainers = new Set([ANCHOR_PK]);
+  // rootAuthor matches the trust anchor (self-merge).
+  const r = computeEffectiveStatus(PATCH_ROOT_ID, ANCHOR_PK, maintainers, [mergeEvent as any]);
+  assert.equal(r.status, 'merged', 'merge event from trust anchor must compute to merged');
+  assert.equal(r.statusEventId, mergeEvent.id);
+  assert.equal(r.mergeCommit, '6e0ba1372691ef3103b380c629a51aced16e9348');
+});
+
+test('regression(blip): empty rootAuthor still authorises trust-anchor merge via maintainer set', () => {
+  // Same event, but simulate fetchRootAuthors returning nothing —
+  // pubkey === '' (empty fallback). The permissive maintainer set
+  // (which always includes the trust anchor) must still authorise.
+  const ANCHOR_PK = '291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe';
+  const PATCH_ROOT_ID = 'a2f7d506ce65e8b736a3f6afe7a847bfe6de4370fa2de47dd6bfa70bb5c93e90';
+  const mergeEvent = {
+    id: '406dff306888f62bb47a9025b6deb312047b859d5471b47b2bec5304cf0fa11c',
+    pubkey: ANCHOR_PK,
+    kind: 1631,
+    created_at: 1778209426,
+    content: '',
+    sig: 'x',
+    tags: [
+      ['e', PATCH_ROOT_ID, '', 'root'],
+      ['a', `30617:${ANCHOR_PK}:blip`],
+      ['merge-commit', '6e0ba1372691ef3103b380c629a51aced16e9348'],
+    ],
+  };
+  const r = computeEffectiveStatus(
+    PATCH_ROOT_ID,
+    '',                             // rootAuthor unresolved
+    new Set([ANCHOR_PK]),           // permissive maintainer set
+    [mergeEvent as any],
+  );
+  assert.equal(r.status, 'merged');
+});

@@ -233,21 +233,58 @@ export function buildStatusRelayFilters(
   return filters;
 }
 
+// Read the cached 30617's `relays` tag from disk. The cache is
+// populated by routes/repo.ts via setCached<RepoMeta> at the
+// `repo-30617` key — same shape, accessed read-only here. Returns
+// `[]` when no cache exists yet (first-load case); status will fall
+// back to grasp servers, and the next status fetch picks up the
+// relays once the About / Code tab populates the cache.
+function readAnnouncementRelays(project: Project): string[] {
+  if (!project.path) return [];
+  try {
+    const cached = getCached<{ relays?: string[] }>({
+      projectPath: project.path,
+      key:         'repo-30617',
+      ttlMs:       60 * 60 * 1000,            // mirror REPO_CACHE_TTL_MS
+    });
+    return Array.isArray(cached?.relays) ? cached!.relays : [];
+  } catch {
+    return [];
+  }
+}
+
 async function fetchStatusEvents(
   project: Project,
   refresh: boolean,
   rootIds: string[],
-): Promise<{ events: NostrEvent[]; cached: boolean }> {
+  announcementRelays: string[] = [],
+): Promise<{ events: NostrEvent[]; cached: boolean; relays: string[] }> {
   const coords = decodeNgitRemote(project);
-  if (!coords || !project.path) return { events: [], cached: false };
+  if (!coords || !project.path) return { events: [], cached: false, relays: [] };
 
+  // Relay set for status query. Order:
+  //   1. coords.relayHints — from a naddr:// URL (often empty for nostr:// URLs)
+  //   2. announcement.relays — passed in by the caller from the resolved
+  //      MaintainerSet's union; falls back to the disk-cached 30617
+  //      when the maintainer fetch returned empty (cold-cache case).
+  //      The canonical "where to find events about this repo" list.
+  //      WITHOUT this entry, projects whose ngit remote is `nostr://npub.../id`
+  //      (= empty relayHints) would never query the relays the trust anchor
+  //      explicitly listed — meaning a 1631 merge event published by gitworkshop
+  //      to those relays gets silently missed and the PR sticks at "open".
+  //   3. user GRASP servers — fallback when the announcement's relays don't
+  //      reach the user's preferred infrastructure
+  //   4. project read-relays — explicit per-project overrides
+  const fallbackAnnouncementRelays = announcementRelays.length > 0
+    ? announcementRelays
+    : readAnnouncementRelays(project);
   const grasp = getGraspServers();
   const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
-  const relays = [...coords.relayHints, ...grasp, ...projRelays]
+  const relays = [...coords.relayHints, ...fallbackAnnouncementRelays, ...grasp, ...projRelays]
     .filter(isValidRelayUrl)
     .filter((r, i, a) => a.indexOf(r) === i)
     .slice(0, 8);
-  if (relays.length === 0) return { events: [], cached: false };
+  if (relays.length === 0) return { events: [], cached: false, relays: [] };
 
   const aTag = `30617:${coords.pubkey}:${coords.identifier}`;
   const cacheKey = { projectPath: project.path, key: 'status-163x' };
@@ -293,7 +330,7 @@ async function fetchStatusEvents(
   if (cached) push(aTagEvents);
   for (const g of groups) push(g);
 
-  return { events, cached };
+  return { events, cached, relays };
 }
 
 /** Fetch the 30617 announcement so we know who the maintainers are.
@@ -309,16 +346,23 @@ async function fetchStatusEvents(
  *   the explicit call (see commit log). resolveMaintainerSet still
  *   surfaces `candidatesOnly` for UI warning chips.
  */
-async function fetchMaintainerSet(project: Project): Promise<Set<string>> {
+async function fetchMaintainerSet(project: Project): Promise<{
+  pubkeys: Set<string>;
+  relays:  string[];
+}> {
   const coords = decodeNgitRemote(project);
-  if (!coords) return new Set();
+  if (!coords) return { pubkeys: new Set(), relays: [] };
   const ms = await resolveMaintainerSet(coords.pubkey, coords.identifier, coords.relayHints);
   // Permissive union: trust anchor + verified + candidate-only.
   // The trust anchor is always authoritative by definition; verified
   // maintainers have re-announced; candidates are claimed-only and were
   // previously excluded.
-  const all = new Set<string>([coords.pubkey, ...ms.verified, ...ms.candidatesOnly]);
-  return all;
+  const pubkeys = new Set<string>([coords.pubkey, ...ms.verified, ...ms.candidatesOnly]);
+  // ms.relays is the union of every verified maintainer's `relays` tag —
+  // the canonical answer to "where do events about this repo live?".
+  // Surfaced so fetchStatusEvents can target those relays even when
+  // they're not in the user's grasp config.
+  return { pubkeys, relays: ms.relays || [] };
 }
 
 // ── Root-author resolution ──────────────────────────────────────────────
@@ -456,21 +500,48 @@ export async function handleStatus(
     for (const r of rootIds) {
       if (!/^[a-f0-9]{16,64}$/.test(r)) return json(res, 400, { error: 'invalid rootId' });
     }
-    // Fetch in parallel:
-    //   - 163x status events for the repo (+ per-rootId fallback)
-    //   - maintainer set (permissive: anchor + verified + candidates)
-    //   - rootId → pubkey map so submitter self-closes are authorised
-    const [statusR, maintainers, rootAuthors] = await Promise.all([
-      fetchStatusEvents(project, refresh, rootIds),
+    // Wave 1: maintainer set + root-author map in parallel. We need
+    // the maintainer set's relay union BEFORE the status fetch so the
+    // status query can target the relays the trust anchor explicitly
+    // listed (otherwise we miss 1631 events published to relays not
+    // in the user's grasp config — root cause of "merged shows as
+    // open" bugs on projects whose ngit URL is `nostr://...` rather
+    // than naddr).
+    const [maintainerSet, rootAuthors] = await Promise.all([
       fetchMaintainerSet(project),
       fetchRootAuthors(project, rootIds),
     ]);
+    // Wave 2: status fetch with the maintainer-supplied relay hints.
+    const statusR = await fetchStatusEvents(project, refresh, rootIds, maintainerSet.relays);
+    const maintainers = maintainerSet.pubkeys;
     const results = rootIds.map((rid) =>
       // Empty string when we couldn't resolve the root — preserves
       // pre-existing fall-through behaviour (maintainer-set still
       // authorises). 64-hex pubkeys can never equal '' so this is safe.
       computeEffectiveStatus(rid, rootAuthors.get(rid) ?? '', maintainers, statusR.events)
     );
+    // ?debug=1 returns the raw signal we used to compute the result —
+    // relays consulted, every 163x event we saw, the maintainer set,
+    // and the resolved root-author map. Pasted into a bug report this
+    // collapses an entire diagnostic round-trip into one curl.
+    if (u.searchParams.get('debug') === '1') {
+      return json(res, 200, {
+        results,
+        cached: statusR.cached,
+        debug: {
+          coords:           decodeNgitRemote(project),
+          relays:           statusR.relays,    // the EXACT list we queried
+          announcement:     maintainerSet.relays,  // what the 30617 declared
+          rawEventCount:    statusR.events.length,
+          rawEvents:        statusR.events.map((e) => ({
+            id: e.id, kind: e.kind, pubkey: e.pubkey, created_at: e.created_at,
+            tags: e.tags,
+          })),
+          maintainers:      Array.from(maintainers),
+          rootAuthors:      Object.fromEntries(rootAuthors),
+        },
+      });
+    }
     return json(res, 200, { results, cached: statusR.cached });
   }
 
