@@ -2089,6 +2089,12 @@ function buildStatusRow(s) {
       }).then(r => {
         if (r.ok) toast(`${s.label} install finished`, '', 'ok');
         else      toast(`${s.label} install exited ${r.code}`, '', 'err');
+        // Bust the cached /api/status so any open Config panel rebuild
+        // (or a later navigation to Config) reflects the new install
+        // state immediately instead of waiting out the 30s apiCached
+        // TTL. refreshHealth uses raw api() so the sidebar + Status
+        // panel are already on a fresh fetch.
+        apiInvalidate('/api/status');
         refreshHealth();
         [30_000, 120_000, 300_000].forEach(ms => setTimeout(refreshHealth, ms));
       });
@@ -11844,7 +11850,7 @@ const ConfigPanel = (() => {
       // within the TTL, which collapses what used to be 3-4 duplicate
       // round-trips per panel switch into one. Mutators dispatch
       // 'api-config-changed', which clears the cache (see listener below).
-      const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent] = await Promise.all([
+      const [rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent, statusRows] = await Promise.all([
         apiCached('/api/relay-config', 30_000),
         // scope=global so the Context row reflects the station setup
         // regardless of which project is currently open in chat. The
@@ -11862,6 +11868,10 @@ const ConfigPanel = (() => {
         // config section render the user's current values + offer
         // npub-synthetic / nip-05 presets without a second round-trip.
         apiCached('/api/git-identity/global', 30_000).catch(() => null),
+        // /api/status drives the install-hint visibility in the AI
+        // section: rows hide once the binary lights up green so the
+        // callout doesn't keep nagging users who already installed.
+        apiCached('/api/status', 30_000).catch(() => null),
       ]);
       // Augment presets with the nip-05 from the cached profile if
       // we have one. The backend stays focused on git config; the
@@ -11882,7 +11892,7 @@ const ConfigPanel = (() => {
           email: profile.nip05,
         };
       }
-      render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent);
+      render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent, statusRows);
     } catch (e) {
       container.innerHTML = `<div class="config-section"><div style="color:var(--error)">failed to load: ${escapeHtml(e.message)}</div></div>`;
     }
@@ -12316,7 +12326,7 @@ const ConfigPanel = (() => {
     return `in ${mins}m`;
   }
 
-  function render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent) {
+  function render(rc, cfg, ident, session, profile, ngitAccount, aiList, gitIdent, statusRows) {
     const whitelistHtml = rc.whitelist && rc.whitelist.length
       ? `<a href="#relay" style="color:var(--accent-bright)">${rc.whitelist.length} npub${rc.whitelist.length !== 1 ? 's' : ''} →</a>`
       : `<a href="#relay" style="color:var(--warn)">empty — add one →</a>`;
@@ -12406,13 +12416,7 @@ const ConfigPanel = (() => {
             Terminal-native tools (Claude Code, OpenCode) launch in the terminal panel with cwd scoped to the selected project.
             API providers stream through the Chat pane via <code>/api/ai/chat</code>.
           </div>
-          <div class="ai-install-hints">
-            <div class="ai-install-hints-head">Install a terminal-native AI</div>
-            <div class="ai-install-hints-body">
-              ${renderTerminalInstallHint('Claude Code', 'claude-code', 'curl -fsSL https://claude.ai/install.sh | bash')}
-              ${renderTerminalInstallHint('OpenCode',    'opencode',    'curl -fsSL https://opencode.ai/install | bash')}
-            </div>
-          </div>
+          ${renderTerminalInstallHints(statusRows)}
           ${renderAiProviders(aiList)}
           <div class="config-row" style="margin-top:10px">
             <div class="k">Context</div>
@@ -12885,23 +12889,49 @@ const ConfigPanel = (() => {
     return `${configured.length} providers`;
   }
 
-  // Static install-command card for a terminal-native AI. The Status
-  // panel's claude/opencode rows show the same Install button + curl
-  // hint when the binary is missing; we surface it here too so users
-  // who land on Config first (e.g. coming through the AI summary chip)
-  // don't have to bounce over to Status. The Install button fires the
-  // same SSE modal as the Status row; the curl text + copy give manual
-  // users a paste-able alternative. Wiring lives in wireAiProviders()
-  // via event delegation on .ai-install-go and .ai-install-copy.
-  function renderTerminalInstallHint(name, slug, cmd) {
-    return `
+  // Install-command callout for terminal-native AIs. Mirrors the
+  // Status panel's claude/opencode rows so users who land on Config
+  // first (e.g. through the AI summary chip) hit a one-click Install
+  // + copy-able curl without bouncing to Status. Rows hide once the
+  // binary lights up green in /api/status — keeps the section quiet
+  // for users who already have both installed; the whole callout
+  // collapses when nothing's missing. Wiring lives in
+  // wireAiProviders() via event delegation on .ai-install-go +
+  // .ai-install-copy.
+  const TERMINAL_AI_INSTALL_HINTS = [
+    { name: 'Claude Code', statusId: 'claude',   slug: 'claude-code', cmd: 'curl -fsSL https://claude.ai/install.sh | bash' },
+    { name: 'OpenCode',    statusId: 'opencode', slug: 'opencode',    cmd: 'curl -fsSL https://opencode.ai/install | bash' },
+  ];
+
+  function renderTerminalInstallHints(statusRows) {
+    // statusRows is the /api/status payload; a row with state 'ok'
+    // means findBin() resolved the binary. Null payload (pre-status
+    // server / fetch failed) → render all rows so users still see
+    // the install option rather than hiding it on us.
+    const byId = new Map(
+      Array.isArray(statusRows) ? statusRows.map(r => [r.id, r]) : []
+    );
+    const missing = TERMINAL_AI_INSTALL_HINTS.filter(h => {
+      const row = byId.get(h.statusId);
+      // Render when we can't tell (no row found) OR when state is
+      // explicitly not-ok.
+      return !row || row.state !== 'ok';
+    });
+    if (missing.length === 0) return '';
+    const rows = missing.map(h => `
       <div class="ai-install-row">
-        <span class="ai-install-name">${escapeHtml(name)}</span>
+        <span class="ai-install-name">${escapeHtml(h.name)}</span>
         <button class="primary ai-install-go" type="button"
-          data-slug="${escapeHtml(slug)}"
-          data-label="${escapeHtml(name)}">Install</button>
-        <code class="cmd-inline ai-install-cmd">${escapeHtml(cmd)}</code>
-        <button class="ai-install-copy" type="button" data-cmd="${escapeHtml(cmd)}">copy</button>
+          data-slug="${escapeHtml(h.slug)}"
+          data-label="${escapeHtml(h.name)}">Install</button>
+        <code class="cmd-inline ai-install-cmd">${escapeHtml(h.cmd)}</code>
+        <button class="ai-install-copy" type="button" data-cmd="${escapeHtml(h.cmd)}">copy</button>
+      </div>
+    `).join('');
+    return `
+      <div class="ai-install-hints">
+        <div class="ai-install-hints-head">Install a terminal-native AI</div>
+        <div class="ai-install-hints-body">${rows}</div>
       </div>
     `;
   }
@@ -13053,10 +13083,12 @@ const ConfigPanel = (() => {
             if (r.ok) toast(`${label} install finished`, '', 'ok');
             else      toast(`${label} install exited ${r.code}`, '', 'err');
             refreshHealth();
-            // Drop the providers cache + re-render Config → AI so the
-            // newly-installed binary flips from "available" to
-            // "enabled" without the user navigating away.
+            // Drop the providers + status caches and re-render Config
+            // → AI so the newly-installed binary flips green and the
+            // install-hint row disappears in the same tick instead of
+            // waiting for the 30s apiCached TTL.
             apiInvalidate('/api/ai/providers');
+            apiInvalidate('/api/status');
             load();
             [30_000, 120_000, 300_000].forEach(ms => setTimeout(refreshHealth, ms));
           });

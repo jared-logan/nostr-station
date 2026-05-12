@@ -12,7 +12,13 @@ function augmentedBinDirs(): string[] {
   const home = os.homedir();
   return [
     `${home}/.cargo/bin`,    // cargo install target + our prebuilt drop dir
-    `${home}/.local/bin`,    // pipx / manual installs
+    `${home}/.local/bin`,    // pipx / manual installs (Claude Code lands here)
+    // OpenCode's official installer (opencode.ai/install) drops the
+    // binary at ~/.opencode/bin and only adds the dir to PATH via the
+    // user's shell rc — which the Node server never sources. Without
+    // this entry the Status row stays red even after a successful
+    // dashboard-driven install.
+    `${home}/.opencode/bin`,
     '/opt/homebrew/bin',     // Apple Silicon Homebrew
     '/usr/local/bin',        // Intel Homebrew + common manual installs
     '/usr/bin',

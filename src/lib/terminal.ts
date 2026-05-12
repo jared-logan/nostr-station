@@ -35,6 +35,7 @@ import fs from 'fs';
 import { createRequire } from 'module';
 import { execa } from 'execa';
 import type { WebSocket } from 'ws';
+import { findBin } from './detect.js';
 
 // Bridge to require() from within an ESM module — needed to call
 // require.resolve('node-pty/package.json') without triggering the native
@@ -269,11 +270,28 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
       return { cmd: shell, args: ['-l'], cwd: shellCwd, label };
     }
 
+    // Both installers (claude.ai/install.sh, opencode.ai/install) drop
+    // binaries into dirs that only get added to PATH via the user's
+    // shell rc — which node-pty doesn't source. Resolve via findBin()'s
+    // augmented walk so the spawn doesn't fail with execvp ENOENT even
+    // when the binary was just installed via the dashboard. Fall back
+    // to the bare name on miss so the PTY surfaces a clean
+    // "command not found" rather than a misleading absolute-path 404.
     case 'claude':
-      return { cmd: 'claude', args: [], cwd, label: cwd ? `claude · ${path.basename(cwd)}` : 'claude' };
+      return {
+        cmd: findBin('claude') ?? 'claude',
+        args: [],
+        cwd,
+        label: cwd ? `claude · ${path.basename(cwd)}` : 'claude',
+      };
 
     case 'opencode':
-      return { cmd: 'opencode', args: [], cwd, label: cwd ? `opencode · ${path.basename(cwd)}` : 'opencode' };
+      return {
+        cmd: findBin('opencode') ?? 'opencode',
+        args: [],
+        cwd,
+        label: cwd ? `opencode · ${path.basename(cwd)}` : 'opencode',
+      };
 
     // Stacks Dork agent — the AI coding loop that ships with mkstack.
     // Run inside the project dir (cwd is required). Uses Stacks' own
