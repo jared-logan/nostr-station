@@ -277,9 +277,18 @@ export const Status: React.FC<StatusProps> = ({ json }) => {
   useEffect(() => {
     const r = gatherStatus();
     setRows(r);
+    // Human path: any failing row → non-zero exit so shell callers can
+    // gate on `if nostr-station status; then …`. The exit code is set
+    // here rather than via process.exit() so Ink finishes its render
+    // first; Node uses process.exitCode when the event loop drains.
+    // `--json` deliberately keeps exit 0 — the JSON payload itself is
+    // the machine-readable answer; CI's status-json smoke depends on
+    // exit 0 to inspect the body before classifying.
     if (json) {
       console.log(formatStatusJson(r));
       process.exit(0);
+    } else if (!r.every(x => x.ok)) {
+      process.exitCode = 1;
     }
   }, []);
 
