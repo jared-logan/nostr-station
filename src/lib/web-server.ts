@@ -742,7 +742,7 @@ async function ensureSeedPubkeyWhitelisted(): Promise<void> {
   }
 }
 
-export async function startWebServer(port: number): Promise<void> {
+export async function startWebServer(port: number): Promise<http.Server> {
   // Sessions are in-memory only and never survive a server restart — the
   // user re-authenticates after a nostr-station chat restart. Explicit here
   // for clarity in case the module is imported multiple times.
@@ -811,7 +811,7 @@ export async function startWebServer(port: number): Promise<void> {
     } catch { return false; }
   };
 
-  return new Promise((resolve, reject) => {
+  return new Promise<http.Server>((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       const url    = (req.url || '/').split('?')[0];
       // The inline route checks below (e.g. `if (url === '/api/auth/status')`)
@@ -2114,7 +2114,7 @@ export async function startWebServer(port: number): Promise<void> {
           process.stderr.write(`[nvpn] log tailer failed to start: ${e?.message || e}\n`);
         }
       }
-      resolve();
+      resolve(server);
     });
   });
 }
