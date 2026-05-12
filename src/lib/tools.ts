@@ -99,6 +99,45 @@ export const TOOLS: Record<string, Tool> = {
     ],
   },
 
+  // Claude Code + OpenCode — terminal-native AI agents. Both ship an
+  // official curl|bash bootstrap; we pipe through bash -c so the
+  // existing spawn-based runStep streams progress line-by-line into
+  // the SSE modal the same way npm-global / cargo-install do. The
+  // upstream URLs are surfaced verbatim in `display` (and the matching
+  // Status row's "or run: …" hint) so the user sees the command before
+  // clicking. `set -euo pipefail` makes a partial install (curl fails,
+  // bash gets nothing on stdin) exit non-zero instead of looking like
+  // a successful no-op.
+  'claude-code': {
+    id:          'claude-code',
+    name:        'Claude Code',
+    description: 'Anthropic\'s CLI agent. Terminal-native; the dashboard\'s default "Open in AI" target.',
+    binary:      'claude',
+    detect:      ['claude', '--version'],
+    installSteps: [
+      {
+        kind:    'shell-script',
+        display: 'curl -fsSL https://claude.ai/install.sh | bash',
+        argv:    ['bash', '-c', 'set -euo pipefail; curl -fsSL https://claude.ai/install.sh | bash'],
+      },
+    ],
+  },
+
+  opencode: {
+    id:          'opencode',
+    name:        'OpenCode',
+    description: 'Open-source terminal-native AI coding agent. Alternative to Claude Code.',
+    binary:      'opencode',
+    detect:      ['opencode', '--version'],
+    installSteps: [
+      {
+        kind:    'shell-script',
+        display: 'curl -fsSL https://opencode.ai/install | bash',
+        argv:    ['bash', '-c', 'set -euo pipefail; curl -fsSL https://opencode.ai/install | bash'],
+      },
+    ],
+  },
+
   nsyte: {
     id:          'nsyte',
     name:        'nsyte',
@@ -153,8 +192,16 @@ export async function detectTool(t: Tool): Promise<DetectResult> {
 const RUNNER_FOR_KIND: Partial<Record<InstallStepKind, { bin: string; install: string }>> = {
   'cargo-install': { bin: 'cargo', install: 'install Rust via https://rustup.rs' },
   'npm-global':    { bin: 'npm',   install: 'install Node.js (npm ships with it) via https://nodejs.org' },
+  // shell-script steps pipe `curl … | bash` — both binaries are
+  // pre-flighted. curl is the more common gap on a minimal Linux image;
+  // bash is on every macOS/Linux out of the box, but we surface a clean
+  // error anyway instead of letting node throw `spawn bash ENOENT`.
   'shell-script':  { bin: 'curl',  install: 'install curl via your system package manager' },
 };
+
+// shell-script also needs bash on PATH for the pipeline-execution case.
+// Tracked separately so the cargo/npm checks above stay one-runner-per-kind.
+const SHELL_SCRIPT_EXTRA_RUNNER = { bin: 'bash', install: 'install bash via your system package manager' };
 
 export async function installTool(
   t:          Tool,
@@ -180,6 +227,15 @@ export async function installTool(
       return {
         ok: false, ranSteps: 0,
         detail: `prerequisite missing: \`${runner.bin}\` not found on PATH. ${runner.install}.`,
+      };
+    }
+    // shell-script also needs bash for the pipe-to-shell case (argv is
+    // ['bash', '-c', '<pipeline>']). Check after the primary runner so
+    // missing-curl shows up first — that's the likelier gap.
+    if (step.kind === 'shell-script' && !hasBin(SHELL_SCRIPT_EXTRA_RUNNER.bin)) {
+      return {
+        ok: false, ranSteps: 0,
+        detail: `prerequisite missing: \`${SHELL_SCRIPT_EXTRA_RUNNER.bin}\` not found on PATH. ${SHELL_SCRIPT_EXTRA_RUNNER.install}.`,
       };
     }
   }
