@@ -22,6 +22,7 @@
 // dashboard event loop.
 
 import { execa } from 'execa';
+import dgram from 'dgram';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
@@ -316,11 +317,25 @@ async function runServiceOp(
 ): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  // For `install` (initial + Reinstall button): lay down our systemd
+  // drop-in BEFORE upstream's `nvpn service install` writes its unit
+  // and starts the daemon. systemd merges drop-ins with the base unit
+  // on daemon-reload, so the very first start picks up our caps —
+  // critical for a clean first-run log (no "Cannot open route/flush"
+  // red lines). Best-effort: if sudo fails here, install proceeds
+  // anyway and we surface the skip reason in the result detail.
+  let capsNote = '';
+  if (op === 'install') {
+    const caps = await applyLinuxCapsDropIn();
+    capsNote = caps.ok
+      ? (caps.detail ? ` (${caps.detail})` : '')
+      : ` (caps drop-in skipped: ${caps.detail})`;
+  }
   try {
     await execa('sudo', ['-n', binPath, 'service', op], {
       timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
     });
-    return { ok: true, detail: `service ${op} ok` };
+    return { ok: true, detail: `service ${op} ok${capsNote}` };
   } catch (e: any) {
     const stderr = (e?.stderr?.toString?.() || '').trim();
     const needsPassword = /password is required|sudo:.*required/i.test(stderr);
@@ -333,6 +348,162 @@ async function runServiceOp(
     }
     return { ok: false, detail: summarizeError(e) };
   }
+}
+
+// ── Linux capabilities drop-in ─────────────────────────────────────────
+//
+// nvpn's upstream systemd unit doesn't request CAP_DAC_OVERRIDE, which
+// the daemon needs to open `/proc/sys/net/ipv4/route/flush` (mode 0200
+// root:root) when re-routing on tunnel changes. We layer a drop-in at
+// /etc/systemd/system/nvpn.service.d/10-nostr-station-caps.conf — the
+// systemd-idiomatic way to augment a unit without touching the
+// upstream-written template. Survives upstream re-installs as long as
+// the unit is still named nvpn.service.
+
+const CAPS_DROP_IN_DIR  = '/etc/systemd/system/nvpn.service.d';
+const CAPS_DROP_IN_PATH = `${CAPS_DROP_IN_DIR}/10-nostr-station-caps.conf`;
+
+// Pure renderer — exported for unit tests. Keeps the cap list in one
+// place so a future "add CAP_X" change has a single edit site.
+export function renderLinuxCapsDropIn(): string {
+  return [
+    '# Managed by nostr-station — grants nvpn the caps it needs to flush',
+    '# the kernel route cache and configure the local resolver. Safe to',
+    '# remove if you prefer to run the daemon under fewer privileges.',
+    '[Service]',
+    'AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_NET_RAW',
+    'CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_NET_RAW',
+    '',
+  ].join('\n');
+}
+
+async function applyLinuxCapsDropIn(): Promise<ControlResult> {
+  if (process.platform !== 'linux') {
+    return { ok: true, detail: 'non-linux — skipped' };
+  }
+  const content = renderLinuxCapsDropIn();
+  try {
+    // `install -d` is idempotent and handles the mkdir + mode in one
+    // sudo call. `tee` writes via stdin so we don't have to round-trip
+    // the content through a shell-escaped string.
+    await execa('sudo', ['-n', 'install', '-d', '-m', '0755', CAPS_DROP_IN_DIR], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+    });
+    await execa('sudo', ['-n', 'tee', CAPS_DROP_IN_PATH], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe', input: content,
+    });
+    await execa('sudo', ['-n', 'systemctl', 'daemon-reload'], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+    });
+    // try-restart instead of restart: if the user has the service
+    // stopped deliberately, don't start it back up behind their back.
+    // When the service is running this picks up the new caps cleanly.
+    await execa('sudo', ['-n', 'systemctl', 'try-restart', 'nvpn.service'], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+    });
+    return { ok: true, detail: 'caps drop-in applied' };
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) {
+      return { ok: false, detail: 'sudo cred cache empty' };
+    }
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+export { applyLinuxCapsDropIn };
+
+// ── Magic-DNS port seed ────────────────────────────────────────────────
+//
+// nvpn's default magic-dns port is 1053. On Ubuntu desktop and anywhere
+// else running systemd-resolved's stub resolver, that port is already
+// bound — so on first start the daemon logs
+//   magicdns: preferred port 1053 unavailable
+//   ... trying random local port
+// which functionally works but looks like a failure in the log panel
+// and re-rolls on every restart (breaking anything pinned to the prior
+// port). We probe 1053 ourselves before the daemon's first start; if
+// it's taken, we pre-pick a stable free port from a small candidate
+// set and write it via `nvpn set --magic-dns-port`. Idempotent: a
+// second call sees the existing value in status JSON and skips.
+
+// Candidate ports tried in order. 1053 first so we keep the upstream
+// default when nothing's stealing it (the common case on servers /
+// dev VMs without systemd-resolved). The high-port fallbacks avoid
+// the well-known service ports (5353 mDNS, 5355 LLMNR, 5354 reserved)
+// that would just shift the collision to a different daemon.
+const MAGIC_DNS_PORT_CANDIDATES = [1053, 5453, 11053, 15353, 15453];
+
+// True iff a UDP socket can be exclusively bound on 127.0.0.1:port. nvpn
+// listens on UDP for magic-dns; TCP isn't probed because the daemon
+// doesn't bind it on this port. `exclusive: true` rejects ports that
+// SO_REUSEADDR/REUSEPORT siblings might tolerate — we want a port no
+// one else is touching.
+export function isUdpPortFree(port: number, host = '127.0.0.1'): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = dgram.createSocket({ type: 'udp4', reuseAddr: false });
+    const cleanup = (ok: boolean): void => {
+      try { sock.close(); } catch { /* already closed */ }
+      resolve(ok);
+    };
+    sock.once('error', () => cleanup(false));
+    try {
+      sock.bind({ port, address: host, exclusive: true }, () => cleanup(true));
+    } catch {
+      cleanup(false);
+    }
+  });
+}
+
+// Probe candidates in order, return the first free one. Returns null
+// if every candidate is taken — in which case we let nvpn do its
+// random-port fallback rather than guessing.
+export async function pickFreeMagicDnsPort(
+  candidates: readonly number[] = MAGIC_DNS_PORT_CANDIDATES,
+): Promise<number | null> {
+  for (const p of candidates) {
+    if (await isUdpPortFree(p)) return p;
+  }
+  return null;
+}
+
+// Pre-seed the magic-dns-port setting during install. Called after
+// `nvpn init` and before `nvpn service install`, so the daemon's
+// first start picks up our chosen port instead of trying 1053 and
+// logging the fallback line. Best-effort: a probe failure or a
+// missing/different `nvpn set` schema is logged and we fall through.
+export async function seedFreeMagicDnsPort(): Promise<ControlResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+
+  // Respect a user-set port. If status JSON already surfaces a
+  // configured magic_dns_port (set by a previous install or a manual
+  // `nvpn set`), don't second-guess it.
+  try {
+    const { stdout } = await execa(binPath, ['status', '--json'], {
+      timeout: STATUS_TIMEOUT_MS, stdio: 'pipe',
+    });
+    const raw = JSON.parse(stdout) as Record<string, unknown>;
+    const configured = raw?.configured_magic_dns_port ?? raw?.magic_dns_port;
+    if (typeof configured === 'number' && configured > 0) {
+      return { ok: true, detail: `magic-dns-port already set to ${configured}` };
+    }
+  } catch { /* status may not be available pre-daemon-start; fall through */ }
+
+  const port = await pickFreeMagicDnsPort();
+  if (port === null) {
+    return { ok: false, detail: 'no free candidate port — letting nvpn pick' };
+  }
+  // Skip the write when 1053 is free — keeping the upstream default
+  // means a future schema change in `nvpn set` doesn't break our
+  // install path, and the daemon's startup log stays identical to a
+  // vanilla install.
+  if (port === MAGIC_DNS_PORT_CANDIDATES[0]) {
+    return { ok: true, detail: `port ${port} free — keeping upstream default` };
+  }
+  const r = await setNvpnSettings({ 'magic-dns-port': port });
+  if (!r.ok) return { ok: false, detail: `set failed: ${r.detail}` };
+  return { ok: true, detail: `magic-dns-port → ${port}` };
 }
 
 export const installNvpnService = (): Promise<ControlResult> => runServiceOp('install');
@@ -1122,6 +1293,12 @@ const SETTABLE_KEYS = new Set([
   'tunnel-ip',
   'endpoint',
   'magic-dns-suffix',
+  // `magic-dns-port` lets users pre-pick a free local port. nvpn defaults
+  // to 1053 and falls back to a random port if that's taken — fine for
+  // function but it surfaces a noisy "preferred port unavailable" line on
+  // every start, and re-roll on restart breaks anything that pinned the
+  // resolver to the prior port.
+  'magic-dns-port',
   'exit-node',
   'advertise-exit-node',
   'advertise-routes',
@@ -1193,6 +1370,47 @@ export function isSettableNvpnKey(key: string): boolean {
   return SETTABLE_KEYS.has(key);
 }
 
+// Known-benign upstream log lines that contain words like "fail" or
+// "err" but are recoverable / informational from the daemon's POV.
+// Without this allowlist they get colored red by the generic keyword
+// heuristic below, which turns a healthy first-run log into a wall of
+// red and trains users to ignore real errors.
+//
+// Each entry must be specific — a vague `/fail/` would hide bugs. Add
+// here only after confirming the daemon prints the line at INFO level
+// and continues normally. Order doesn't matter; first match wins.
+const NVPN_RECOVERABLE_PATTERNS: readonly RegExp[] = [
+  // Port collision on the magic-dns port — daemon falls back to a
+  // random port and keeps running. Our installer pre-seeds a free
+  // port to avoid this, but legacy log files still contain the line.
+  /magicdns: preferred port \d+ unavailable/i,
+  // systemd-resolved isn't on the host (common on minimal servers,
+  // containers, anything without the resolved unit). nvpn keeps its
+  // local resolver on 127.0.0.1:<port>; the user's resolv.conf is
+  // unchanged but the daemon itself answers queries for the magic
+  // suffix as expected.
+  /magicdns: system resolver install failed.*resolve1\.service not found/i,
+  // Route-cache flush sysctl needs CAP_DAC_OVERRIDE. Our caps drop-in
+  // grants it for new installs, but the legacy line stays in the log
+  // file. Both the wrapper and the bare permission-denied form show
+  // up depending on nvpn version.
+  /tunnel: failed to flush linux route cache/i,
+  /Cannot open ["']?\/proc\/sys\/net\/ipv4\/route\/flush["']?: Permission denied/i,
+];
+
+// nvpn doesn't emit a level prefix consistently. Heuristic match
+// mirrors LogsPanel.classify() so the dashboard's coloring works
+// without a wire-protocol change. Recoverable patterns demote to
+// info before the generic error/warn rules run.
+export function classifyNvpnLogLine(line: string): 'info' | 'warn' | 'error' {
+  for (const re of NVPN_RECOVERABLE_PATTERNS) {
+    if (re.test(line)) return 'info';
+  }
+  if (/\b(error|err|panic|fail)\b/i.test(line))   return 'error';
+  if (/\b(warn|warning)\b/i.test(line))           return 'warn';
+  return 'info';
+}
+
 // ── Log tail ─────────────────────────────────────────────────────────────
 //
 // The log file path comes from `nvpn status --json` (`daemon.log_file`).
@@ -1245,14 +1463,7 @@ export function startNvpnLogTail(buffer: LogBuffer): TailerHandle {
     for (const raw of lines) {
       const line = raw.replace(/\r$/, '');
       if (!line) continue;
-      // nvpn doesn't emit a level prefix consistently. Heuristic match
-      // mirrors LogsPanel.classify() so the dashboard's coloring works
-      // without a wire-protocol change.
-      const level: 'info' | 'warn' | 'error' =
-        /\b(error|err|panic|fail)\b/i.test(line) ? 'error'
-      : /\b(warn|warning)\b/i.test(line)         ? 'warn'
-      :                                            'info';
-      buffer.push(level, line);
+      buffer.push(classifyNvpnLogLine(line), line);
     }
   };
 

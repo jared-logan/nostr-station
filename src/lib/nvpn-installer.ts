@@ -27,6 +27,7 @@ import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
 import { verifyFileSha256 } from './checksum.js';
 import { getCargoBin, getNvpnTarget } from './detect.js';
+import { applyLinuxCapsDropIn, seedFreeMagicDnsPort } from './nvpn.js';
 
 export interface InstallResult {
   ok:       boolean;
@@ -216,6 +217,22 @@ export async function installNostrVpn(onProgress: ProgressCallback = () => {}): 
       append(`init skipped: ${(e?.message || '').slice(0, 120)}`);
     }
   }
+
+  // Pre-seed a free magic-dns-port + lay down the systemd caps drop-in
+  // BEFORE service install, so the daemon's first start sees both.
+  // Without this, port 1053 collisions and missing CAP_DAC_OVERRIDE
+  // each write a set of scary red lines to the daemon log on first
+  // start; the user sees them in the dashboard's log panel even though
+  // the daemon is functionally fine. Order matters — once nvpn writes
+  // its unit and `systemctl start nvpn` runs (inside `service install`),
+  // it's too late to keep the first start clean. Both are best-effort.
+  step('seed free magic-dns-port');
+  const portSeed = await seedFreeMagicDnsPort();
+  append(`magic-dns-port: ${portSeed.ok ? 'ok' : 'skipped'} — ${portSeed.detail}`);
+
+  step('apply systemd caps drop-in');
+  const caps = await applyLinuxCapsDropIn();
+  append(`caps drop-in: ${caps.ok ? 'ok' : 'skipped'} — ${caps.detail}`);
 
   // System service install — writes /Library/LaunchDaemons (macOS) or
   // /etc/systemd/system (linux). `sudo -n` fails fast if the cred cache
