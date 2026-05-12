@@ -135,3 +135,40 @@ jobs:
 
       - name: ShellCheck
         run: shellcheck install.sh
+
+      # Contract checks — invariants the install.sh / package.json /
+      # README curl-pipe-to-bash contract depend on. These are cheap
+      # grep-level assertions; they catch the realistic drift modes
+      # (someone bumps engines.node without touching install.sh,
+      # someone renames the npm package, someone deletes the OS guard).
+      - name: install.sh contract
+        run: |
+          set -euo pipefail
+
+          # 1. REQUIRED_NODE in install.sh matches engines.node in package.json.
+          script_node=$(grep -E '^REQUIRED_NODE=' install.sh | head -1 | cut -d= -f2)
+          pkg_node=$(node -p "require('./package.json').engines.node" | grep -oE '[0-9]+' | head -1)
+          if [[ "$script_node" != "$pkg_node" ]]; then
+            echo "❌ install.sh REQUIRED_NODE=$script_node but package.json engines.node major=$pkg_node"; exit 1
+          fi
+          echo "✓ REQUIRED_NODE in sync ($script_node)"
+
+          # 2. NPM_PKG in install.sh matches name in package.json.
+          script_pkg=$(grep -E '^NPM_PKG=' install.sh | head -1 | cut -d= -f2 | tr -d '"')
+          pkg_name=$(node -p "require('./package.json').name")
+          if [[ "$script_pkg" != "$pkg_name" ]]; then
+            echo "❌ install.sh NPM_PKG=$script_pkg but package.json name=$pkg_name"; exit 1
+          fi
+          echo "✓ NPM_PKG in sync ($script_pkg)"
+
+          # 3. OS guard — refuse non-Darwin / non-Linux.
+          grep -qE 'Darwin\|Linux' install.sh \
+            || { echo "❌ install.sh OS guard for Darwin|Linux missing"; exit 1; }
+          echo "✓ OS guard present"
+
+          # 4. The script launches the dashboard at the end. Without this,
+          #    `curl … | bash` returns to the shell instead of dropping
+          #    the user into the dashboard — the entire UX contract.
+          grep -qE '^exec nostr-station' install.sh \
+            || { echo "❌ install.sh does not exec nostr-station at the end"; exit 1; }
+          echo "✓ exec nostr-station present"
