@@ -14,7 +14,7 @@ import os from 'os';
 import fs from 'fs';
 import path from 'path';
 import { nip19 } from 'nostr-tools';
-import { getPublicKey } from 'nostr-tools/pure';
+import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { fileURLToPath } from 'url';
 import { getKeychain } from './keychain.js';
 // Most terminal helpers moved alongside their HTTP routes + the WS
@@ -691,6 +691,7 @@ async function maybeStartInprocRelay(): Promise<void> {
   process.stderr.write(`[relay] in-process relay listening on ws://127.0.0.1:${port}\n`);
   logBuffers.relay.info(`relay listening on ws://127.0.0.1:${port}`);
   await maybeStartWatchdog();
+  await ensureSeedPubkeyWhitelisted();
   if (process.env.STATION_DISABLE_AUTO_SYNC !== '1') {
     autoSync = new AutoSyncManager();
     autoSync.start();
@@ -712,6 +713,32 @@ async function maybeStartWatchdog(): Promise<void> {
     watchdog = wd;
   } catch (e: any) {
     logBuffers.watchdog.error(`watchdog start failed: ${e?.message || e}`);
+  }
+}
+
+// Ensure the `seed-nsec` keychain slot exists and its pubkey is registered
+// in the relay's whitelist. The seed CLI (src/commands/Seed.tsx) runs as a
+// subprocess of this server and can't reach into the in-process relay's
+// in-memory whitelist itself, so we pre-register here. Mirrors the
+// watchdog's auto-whitelist pattern (src/lib/watchdog.ts: relay.whitelist.add).
+// First call generates + stores the nsec; subsequent calls reuse it.
+async function ensureSeedPubkeyWhitelisted(): Promise<void> {
+  if (!inprocRelay) return;
+  try {
+    const kc = getKeychain();
+    let stored = await kc.retrieve('seed-nsec');
+    if (!stored || !stored.startsWith('nsec')) {
+      const fresh = generateSecretKey();
+      stored = nip19.nsecEncode(fresh);
+      await kc.store('seed-nsec', stored);
+    }
+    const decoded = nip19.decode(stored);
+    if (decoded.type !== 'nsec') return;
+    const pubHex = getPublicKey(decoded.data as Uint8Array);
+    const added = inprocRelay.whitelist.add(pubHex);
+    if (added) logBuffers.relay.info(`whitelist: added seed pubkey ${nip19.npubEncode(pubHex)}`);
+  } catch (e: any) {
+    logBuffers.relay.warn(`seed pubkey whitelist registration failed: ${e?.message || e}`);
   }
 }
 
