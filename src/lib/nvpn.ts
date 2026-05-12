@@ -320,7 +320,6 @@ async function runServiceOp(
     await execa('sudo', ['-n', binPath, 'service', op], {
       timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
     });
-    return { ok: true, detail: `service ${op} ok` };
   } catch (e: any) {
     const stderr = (e?.stderr?.toString?.() || '').trim();
     const needsPassword = /password is required|sudo:.*required/i.test(stderr);
@@ -333,7 +332,85 @@ async function runServiceOp(
     }
     return { ok: false, detail: summarizeError(e) };
   }
+  // `service install` writes a vanilla systemd unit on linux. Without
+  // CAP_DAC_OVERRIDE the daemon can't open /proc/sys/net/ipv4/route/flush
+  // (mode 0200 root:root) and logs "tunnel: failed to flush linux route
+  // cache" on every connect. Without CAP_NET_RAW some NAT-discovery
+  // probes degrade. CAP_NET_ADMIN upstream already requests, but we
+  // re-assert it so the bounding set covers all three. Best-effort; on
+  // non-linux we skip, on sudo failure we surface in detail but keep ok.
+  if (op === 'install') {
+    const caps = await applyLinuxCapsDropIn();
+    const suffix = caps.ok
+      ? (caps.detail ? ` (${caps.detail})` : '')
+      : ` (caps drop-in skipped: ${caps.detail})`;
+    return { ok: true, detail: `service install ok${suffix}` };
+  }
+  return { ok: true, detail: `service ${op} ok` };
 }
+
+// ── Linux capabilities drop-in ─────────────────────────────────────────
+//
+// nvpn's upstream systemd unit doesn't request CAP_DAC_OVERRIDE, which
+// the daemon needs to open `/proc/sys/net/ipv4/route/flush` (mode 0200
+// root:root) when re-routing on tunnel changes. We layer a drop-in at
+// /etc/systemd/system/nvpn.service.d/10-nostr-station-caps.conf — the
+// systemd-idiomatic way to augment a unit without touching the
+// upstream-written template. Survives upstream re-installs as long as
+// the unit is still named nvpn.service.
+
+const CAPS_DROP_IN_DIR  = '/etc/systemd/system/nvpn.service.d';
+const CAPS_DROP_IN_PATH = `${CAPS_DROP_IN_DIR}/10-nostr-station-caps.conf`;
+
+// Pure renderer — exported for unit tests. Keeps the cap list in one
+// place so a future "add CAP_X" change has a single edit site.
+export function renderLinuxCapsDropIn(): string {
+  return [
+    '# Managed by nostr-station — grants nvpn the caps it needs to flush',
+    '# the kernel route cache and configure the local resolver. Safe to',
+    '# remove if you prefer to run the daemon under fewer privileges.',
+    '[Service]',
+    'AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_NET_RAW',
+    'CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_NET_RAW',
+    '',
+  ].join('\n');
+}
+
+async function applyLinuxCapsDropIn(): Promise<ControlResult> {
+  if (process.platform !== 'linux') {
+    return { ok: true, detail: 'non-linux — skipped' };
+  }
+  const content = renderLinuxCapsDropIn();
+  try {
+    // `install -d` is idempotent and handles the mkdir + mode in one
+    // sudo call. `tee` writes via stdin so we don't have to round-trip
+    // the content through a shell-escaped string.
+    await execa('sudo', ['-n', 'install', '-d', '-m', '0755', CAPS_DROP_IN_DIR], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+    });
+    await execa('sudo', ['-n', 'tee', CAPS_DROP_IN_PATH], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe', input: content,
+    });
+    await execa('sudo', ['-n', 'systemctl', 'daemon-reload'], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+    });
+    // try-restart instead of restart: if the user has the service
+    // stopped deliberately, don't start it back up behind their back.
+    // When the service is running this picks up the new caps cleanly.
+    await execa('sudo', ['-n', 'systemctl', 'try-restart', 'nvpn.service'], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+    });
+    return { ok: true, detail: 'caps drop-in applied' };
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) {
+      return { ok: false, detail: 'sudo cred cache empty' };
+    }
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
+export { applyLinuxCapsDropIn };
 
 export const installNvpnService = (): Promise<ControlResult> => runServiceOp('install');
 export const enableNvpnService  = (): Promise<ControlResult> => runServiceOp('enable');

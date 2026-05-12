@@ -27,6 +27,7 @@ import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
 import { verifyFileSha256 } from './checksum.js';
 import { getCargoBin, getNvpnTarget } from './detect.js';
+import { applyLinuxCapsDropIn } from './nvpn.js';
 
 export interface InstallResult {
   ok:       boolean;
@@ -229,6 +230,17 @@ export async function installNostrVpn(onProgress: ProgressCallback = () => {}): 
       { stdio: 'pipe', timeout: 30_000 },
     );
     append(`service install ok; stdout=${stdout.slice(0, 120)} stderr=${stderr.slice(0, 120)}`);
+
+    // Layer our systemd drop-in for the caps the upstream unit doesn't
+    // request (CAP_DAC_OVERRIDE for the route-cache flush sysctl,
+    // CAP_NET_RAW for NAT probes). No-op on macOS. Best-effort: a
+    // missing sudo cred cache here doesn't fail the install — the
+    // daemon still works, just logs the same route-flush warning until
+    // the user retries via the "Reinstall" button.
+    step('apply systemd caps drop-in');
+    const caps = await applyLinuxCapsDropIn();
+    append(`caps drop-in: ${caps.ok ? 'ok' : 'skipped'} — ${caps.detail}`);
+
     return { ok: true, detail: `installed ${nvpnBin}` };
   } catch (e: any) {
     const stderr = (e?.stderr?.toString?.() || '').trim();

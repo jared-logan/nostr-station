@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampInt, isSettableNvpnKey } from '../src/lib/nvpn.ts';
+import { clampInt, isSettableNvpnKey, renderLinuxCapsDropIn } from '../src/lib/nvpn.ts';
 
 // ── clampInt ──────────────────────────────────────────────────────────
 
@@ -49,4 +49,30 @@ test('isSettableNvpnKey: unknown / dangerous keys are rejected', () => {
   assert.equal(isSettableNvpnKey(''),            false);
   // Underscore form (TOML key) — must use the kebab-case CLI flag form.
   assert.equal(isSettableNvpnKey('node_name'),   false);
+});
+
+// ── renderLinuxCapsDropIn ─────────────────────────────────────────────
+// The drop-in is what lets the nvpn daemon flush the kernel route cache
+// (CAP_DAC_OVERRIDE for /proc/sys/net/ipv4/route/flush) and run its NAT
+// probes (CAP_NET_RAW) without surfacing permission-denied lines in the
+// log panel on every connect. Pin the systemd-readable shape so a stray
+// edit doesn't break the unit silently.
+
+test('renderLinuxCapsDropIn: contains [Service] section header', () => {
+  assert.match(renderLinuxCapsDropIn(), /^\[Service\]$/m);
+});
+
+test('renderLinuxCapsDropIn: grants the three caps nvpn needs', () => {
+  const out = renderLinuxCapsDropIn();
+  for (const cap of ['CAP_NET_ADMIN', 'CAP_DAC_OVERRIDE', 'CAP_NET_RAW']) {
+    assert.match(out, new RegExp(`AmbientCapabilities=[^\\n]*${cap}`),
+                 `AmbientCapabilities missing ${cap}`);
+    assert.match(out, new RegExp(`CapabilityBoundingSet=[^\\n]*${cap}`),
+                 `CapabilityBoundingSet missing ${cap}`);
+  }
+});
+
+test('renderLinuxCapsDropIn: ends with a newline (systemd-friendly)', () => {
+  assert.ok(renderLinuxCapsDropIn().endsWith('\n'),
+            'drop-in must end with a newline');
 });
