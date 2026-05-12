@@ -814,6 +814,16 @@ export async function startWebServer(port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       const url    = (req.url || '/').split('?')[0];
+      // The inline route checks below (e.g. `if (url === '/api/auth/status')`)
+      // expect `url` to be path-only. But the EXTRACTED route handlers
+      // (handleRepo / handlePatches / handleIssues / handleStatus / etc.)
+      // do `new URL(url, 'http://localhost').searchParams.get(...)` and
+      // need the query string preserved. Pass `fullUrl` to those handlers
+      // so query params survive — without this, every query-dependent
+      // endpoint (e.g. /patches/.../diff?patchId=, /comments?rootId=,
+      // /status?rootIds=) silently sees empty strings for its params,
+      // which manifests as "invalid X" 400s for valid input.
+      const fullUrl = req.url || '/';
       const method = req.method || 'GET';
 
       // ── H1: Reject non-loopback Host headers ──────────────────────────
@@ -1745,37 +1755,37 @@ export async function startWebServer(port: number): Promise<void> {
       // project's NIP-34 30617 announcement. Drives the Code tab.
       // Matched BEFORE handleProjects because the URL shape overlaps
       // (`/api/projects/:id/repo/...`) and we want repo.ts to win.
-      if (await handleRepo(req, res, url, method)) return;
+      if (await handleRepo(req, res, fullUrl, method)) return;
 
       // ── Patches views (extracted to routes/patches.ts) ────────────────
       // NIP-34 patch series (kind 1617) grouped into PR-shaped series
       // with revision threading. Drives the Proposals tab + per-patch
       // detail view. Same precedence rationale as handleRepo.
-      if (await handlePatches(req, res, url, method)) return;
+      if (await handlePatches(req, res, fullUrl, method)) return;
 
       // ── Issues + NIP-22 comments (extracted to routes/issues.ts) ─────
       // Kind 1621 issues with kind 1111 (and legacy 1622) comment trees,
       // plus SSE POSTs to ngit issue_create / ngit comment. Drives the
       // Issues tab + comment threading on both issues and patches.
-      if (await handleIssues(req, res, url, method)) return;
+      if (await handleIssues(req, res, fullUrl, method)) return;
 
       // ── Status + merge (extracted to routes/status.ts) ────────────────
       // Effective-status compute over kind 1630-1633 events, plus
       // SSE POSTs to ngit pr_status / issue_status / pr_merge.
       // Merge enforces a dirty-tree refusal before spawning ngit.
-      if (await handleStatus(req, res, url, method)) return;
+      if (await handleStatus(req, res, fullUrl, method)) return;
 
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
-      if (await handleProjects(req, res, url, method)) return;
+      if (await handleProjects(req, res, fullUrl, method)) return;
 
       // ── Identity (extracted to routes/identity.ts) ─────────────────────
       // Covers /api/identity/config, /api/identity/set, /api/identity/relays/{add,remove},
       // /api/identity/profile/preview, /api/identity/profile, /api/identity/profile/sync.
-      if (await handleIdentity(req, res, url, method)) return;
+      if (await handleIdentity(req, res, fullUrl, method)) return;
 
       // ── Ditto theme sync (routes/ditto.ts) ─────────────────────────────
       // GET /api/ditto/theme — fetch latest kind 16767 from owner's relays.
-      if (await handleDitto(req, res, url, method)) return;
+      if (await handleDitto(req, res, fullUrl, method)) return;
 
       // Setup wizard completion — called once from the Done stage. Flips
       // setupComplete=true (ending the localhost exemption on this box
@@ -1948,31 +1958,31 @@ export async function startWebServer(port: number): Promise<void> {
       // ── ngit / nsite / account (extracted to routes/ngit.ts) ──────────
       // Covers /api/ngit/discover, /api/nsite/discover, /api/ngit/clone,
       // /api/ngit/account[/login|/logout].
-      if (await handleNgit(req, res, url, method)) return;
+      if (await handleNgit(req, res, fullUrl, method)) return;
 
       // ── nvpn runtime control (extracted to routes/nvpn.ts) ────────────
       // Covers /api/nvpn/status, /api/nvpn/{start,stop,restart},
       // /api/nvpn/install-service. Drives the Status panel's start/stop
       // buttons and the Logs panel's nostr-vpn meta strip.
-      if (await handleNvpn(req, res, url, method)) return;
+      if (await handleNvpn(req, res, fullUrl, method)) return;
 
       // ── AI provider system (extracted to routes/ai.ts)
       // Covers /api/ai/providers, /api/ai/config,
       // /api/ai/providers/:id/key (POST/DELETE),
       // /api/ai/providers/:id/models, and /api/ai/chat.
-      if (await handleAi(req, res, url, method)) return;
+      if (await handleAi(req, res, fullUrl, method)) return;
 
       // ── Project templates registry (routes/templates.ts)
       // Covers /api/templates GET/POST and /api/templates/:id
       // GET/PATCH/DELETE + /api/templates/:id/reset.
-      if (await handleTemplates(req, res, url, method)) return;
+      if (await handleTemplates(req, res, fullUrl, method)) return;
 
       // ── Terminal HTTP surface (extracted to routes/terminal.ts) ───────
       // Covers /api/terminal/capability, /api/terminal, /api/terminal/create,
       // and DELETE /api/terminal/:id. The matching WebSocket upgrade is
       // wired below via mountTerminalWebSocket() so it shares this
       // request handler's allowedHosts / isLoopbackUrl primitives.
-      if (await handleTerminal(req, res, url, method)) return;
+      if (await handleTerminal(req, res, fullUrl, method)) return;
 
       // Static fallback — vendor libs first (fast path, strict whitelist),
       // then the regular src/web tree.
