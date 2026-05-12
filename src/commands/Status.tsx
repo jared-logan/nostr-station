@@ -220,6 +220,13 @@ export function gatherStatus(): ServiceStatus[] {
   const claudePath = findBin('claude');
   const claudeV    = claudePath ? cmd(`${claudePath} --version 2>/dev/null`) : null;
 
+  // OpenCode — alternative terminal-native AI to Claude Code. Same
+  // "binary on PATH" model; the AI config + terminal panel already know
+  // about it (see ai-providers.ts), this row just surfaces install state
+  // in the dashboard the same way claude-code does.
+  const opencodePath = findBin('opencode');
+  const opencodeV    = opencodePath ? cmd(`${opencodePath} --version 2>/dev/null`) : null;
+
   const nakPath   = findBin('nak');
   const nakV      = nakPath ? cmd(`${nakPath} --version 2>/dev/null`) : null;
 
@@ -227,8 +234,9 @@ export function gatherStatus(): ServiceStatus[] {
   const stacksBin  = stacksPath !== null;
   const stacksV    = stacksPath ? cmd(`${stacksPath} --version 2>/dev/null`) : null;
 
-  const claudeBin = claudePath !== null;
-  const nakBin    = nakPath !== null;
+  const claudeBin   = claudePath !== null;
+  const opencodeBin = opencodePath !== null;
+  const nakBin      = nakPath !== null;
 
   // Three-state mapping:
   //   ok   — running + configured
@@ -237,6 +245,7 @@ export function gatherStatus(): ServiceStatus[] {
   const relayState:    ServiceState = relayUp ? 'ok' : 'warn';
   const ngitState:     ServiceState = ngitBin ? 'ok' : 'err';
   const claudeState:   ServiceState = claudeBin ? 'ok' : 'err';
+  const opencodeState: ServiceState = opencodeBin ? 'ok' : 'err';
   const nakState:      ServiceState = nakBin ? 'ok' : 'err';
   const stacksState:   ServiceState = stacksBin ? 'ok' : 'err';
 
@@ -248,6 +257,7 @@ export function gatherStatus(): ServiceStatus[] {
     // Binaries — CLI tools; installed or not.
     { id: 'ngit',      label: 'ngit',        value: ngitV ?? 'not installed',                                                                ok: !!ngitV,      state: ngitState,    kind: 'binary' },
     { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed',                                                           ok: !!claudeV,    state: claudeState,   kind: 'binary', plugins: gatherClaudePlugins() },
+    { id: 'opencode',  label: 'opencode',    value: opencodeV ?? (opencodeBin ? 'installed' : 'not installed'),                              ok: opencodeBin,  state: opencodeState, kind: 'binary' },
     { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState,      kind: 'binary' },
     { id: 'stacks',    label: 'Stacks',      value: stacksV  ?? (stacksBin ? 'installed' : 'not installed'),                               ok: stacksBin,    state: stacksState,   kind: 'binary' },
   ];

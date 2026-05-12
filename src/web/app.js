@@ -752,6 +752,11 @@ window.addEventListener('hashchange', () => activatePanel(currentPanel()));
 const PROVIDER_LIST = [
   { value: 'anthropic',    label: 'Anthropic',     models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
   { value: 'opencode-zen', label: 'OpenCode Zen',  models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'gpt-4o', 'gemini-2.5-pro'] },
+  // OpenCode Go ships a different (cheaper) model roster than Zen.
+  // Curated list left empty on purpose so the dropdown collapses to
+  // free-text until the user clicks Fetch Models — opencode.ai/zen/go/v1
+  // returns the live list at /v1/models.
+  { value: 'opencode-go',  label: 'OpenCode Go',   models: [] },
   { value: 'payperq',      label: 'PayPerQ ⚡',     models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
   { value: 'routstr',      label: 'Routstr ⚡',     models: ['claude-sonnet-4', 'gpt-4o', 'llama-3.3-70b'] },
   { value: 'custom',       label: 'Custom Provider', models: [] },
@@ -1469,7 +1474,13 @@ const SERVICE_CTAS = {
   'vpn':       { installSlug: null,    configHint: null },
   'watchdog':  { installSlug: null,    configHint: 'POST /api/watchdog/start to restart the heartbeat loop' },
   'ngit':      { installSlug: 'ngit',  configHint: null /* inline-form handled below */ },
-  'claude':    { installSlug: null,    configHint: 'install Claude Code from claude.com/code' },
+  // claude-code + opencode are externally-distributed binaries with their
+  // own installers — no INSTALL_TARGETS entry on the server, so we surface
+  // the upstream curl one-liner as configHint. The render path below
+  // promotes configHint to a runnable "run: …" + copy button on err state
+  // (not just warn) so users hit a working command, not a dead-end link.
+  'claude':    { installSlug: null,    configHint: 'curl -fsSL https://claude.ai/install.sh | bash' },
+  'opencode':  { installSlug: null,    configHint: 'curl -fsSL https://opencode.ai/install | bash' },
   'nak':       { installSlug: 'nak',   configHint: null },
   'stacks':    { installSlug: 'stacks', configHint: null },
 };
@@ -1499,8 +1510,13 @@ const SERVICE_DETAILS = {
   },
   'claude': {
     summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Launch from project cards or the sidebar Terminal.`,
-    summaryErr:  _ => 'Claude Code is Anthropic\'s CLI agent. Install hooks it up as the default AI editor for your projects.',
+    summaryErr:  _ => 'Claude Code is Anthropic\'s CLI agent. Install with the command below to wire it up as the default AI editor for your projects.',
     panel: { hash: '#projects', label: 'Open Projects' },
+  },
+  'opencode': {
+    summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Pick OpenCode as your terminal-native AI in Config → AI to launch it from project cards.`,
+    summaryErr:  _ => 'OpenCode is an open-source terminal-native AI coding agent — an alternative to Claude Code. Install with the command below, then enable it under Config → AI.',
+    panel: { hash: '#config', label: 'Open Config → AI' },
   },
   'nak': {
     summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Used by <em>seed</em>, <em>watchdog</em>, and the whitelist helpers.`,
@@ -2078,7 +2094,12 @@ function buildStatusRow(s) {
       });
     });
     ctaRow.appendChild(btn);
-  } else if (s.state === 'warn' && cta.configHint) {
+  } else if ((s.state === 'warn' || s.state === 'err') && cta.configHint) {
+    // err + configHint covers externally-distributed binaries (claude-code,
+    // opencode) that don't have an INSTALL_TARGETS entry on the server —
+    // we can't offer a one-click install, but the upstream curl one-liner
+    // is right there with a copy button so the user can paste it into a
+    // terminal without leaving the dashboard.
     const meta = document.createElement('span');
     meta.className = 'meta';
     meta.innerHTML = `run: <span class="cmd-inline">${escapeHtml(cta.configHint)}</span>`;
@@ -12356,8 +12377,15 @@ const ConfigPanel = (() => {
         </summary>
         <div class="cfg-section-body">
           <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-            Terminal-native tools (Claude Code, OpenCode Go) launch in the terminal panel with cwd scoped to the selected project.
+            Terminal-native tools (Claude Code, OpenCode) launch in the terminal panel with cwd scoped to the selected project.
             API providers stream through the Chat pane via <code>/api/ai/chat</code>.
+          </div>
+          <div class="ai-install-hints">
+            <div class="ai-install-hints-head">Install a terminal-native AI</div>
+            <div class="ai-install-hints-body">
+              ${renderTerminalInstallHint('Claude Code', 'curl -fsSL https://claude.ai/install.sh | bash')}
+              ${renderTerminalInstallHint('OpenCode',    'curl -fsSL https://opencode.ai/install | bash')}
+            </div>
           </div>
           ${renderAiProviders(aiList)}
           <div class="config-row" style="margin-top:10px">
@@ -12831,6 +12859,22 @@ const ConfigPanel = (() => {
     return `${configured.length} providers`;
   }
 
+  // Static install-command card for a terminal-native AI. The Status
+  // panel's claude/opencode rows show the same one-liner when the binary
+  // is missing; we surface it here too so users who land on Config first
+  // (e.g. coming through the AI summary chip) don't have to bounce over
+  // to Status to find the install hint. Click-to-copy is wired in
+  // wireAiProviders() via event delegation on .ai-install-copy.
+  function renderTerminalInstallHint(name, cmd) {
+    return `
+      <div class="ai-install-row">
+        <span class="ai-install-name">${escapeHtml(name)}</span>
+        <code class="cmd-inline ai-install-cmd">${escapeHtml(cmd)}</code>
+        <button class="ai-install-copy" type="button" data-cmd="${escapeHtml(cmd)}">copy</button>
+      </div>
+    `;
+  }
+
   function renderAiProviders(aiList) {
     if (!aiList || !Array.isArray(aiList.providers)) {
       return `<div style="color:var(--warn);font-size:12px">AI provider list unavailable — server may be pre-Step-4.</div>`;
@@ -12952,6 +12996,28 @@ const ConfigPanel = (() => {
   }
 
   function wireAiProviders(aiList) {
+    // Copy buttons for the static "Install a terminal-native AI" hints —
+    // these live in the AI section header, outside ai-providers-list, so
+    // they need their own delegation point. Section body is stable across
+    // provider-list re-renders, so binding here is one-shot per Config
+    // panel mount.
+    const aiSection = document.getElementById('cfg-ai-section');
+    if (aiSection && !aiSection.dataset.installHintsWired) {
+      aiSection.dataset.installHintsWired = '1';
+      aiSection.addEventListener('click', async (e) => {
+        const btn = e.target.closest('button.ai-install-copy');
+        if (!btn) return;
+        const cmd = btn.dataset.cmd;
+        if (!cmd) return;
+        try {
+          await navigator.clipboard.writeText(cmd);
+          toast('Copied', cmd, 'ok');
+        } catch {
+          toast('Copy failed', 'select the command and copy manually', 'warn');
+        }
+      });
+    }
+
     // Row-level actions (Remove, Set-default) via event delegation —
     // renderAiProviders re-renders the whole list on every change, so
     // keeping listeners on the container dodges the re-bind dance.
@@ -13426,8 +13492,11 @@ const ConfigPanel = (() => {
     try {
       // Clear the key first (no-op for terminal-native; idempotent for
       // already-missing entries). Then strip the config entry so it
-      // disappears from the list.
-      await api(`/api/ai/providers/${encodeURIComponent(id)}/key`, { method: 'DELETE' })
+      // disappears from the list. {silent:true} suppresses the api()
+      // helper's auto-toast for the expected 400 on terminal-native
+      // providers — the server rejects key ops on those by design, and
+      // the user's already seen the success toast from the config strip.
+      await api(`/api/ai/providers/${encodeURIComponent(id)}/key`, { method: 'DELETE' }, { silent: true })
         .catch(() => {});
       await api('/api/ai/config', {
         method: 'POST',

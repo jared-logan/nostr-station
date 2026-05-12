@@ -2518,6 +2518,48 @@ details.config-section .cfg-summary-meta {
   gap: 6px;
 }
 
+/* Install-command hints shown above the provider list. One row per
+ * terminal-native AI (claude / opencode) — name on the left, the curl
+ * one-liner in a monospace pill, copy button on the right. Minimal
+ * chrome on purpose: the surrounding AI section already carries the
+ * heading + intro copy. */
+.ai-install-hints {
+  margin: 4px 0 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-card);
+}
+.ai-install-hints-head {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+.ai-install-hints-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ai-install-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ai-install-name {
+  font-size: 12px;
+  font-weight: 500;
+  min-width: 90px;
+}
+.ai-install-cmd {
+  flex: 1 1 auto;
+  font-size: 11px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
 /* Chat pane empty-state callout when no API provider is configured. */
 .chat-no-provider {
   display: inline-flex;

@@ -2,7 +2,7 @@
  * AI provider registry — canonical list of every provider nostr-station
  * can talk to, split into two distinct surfaces:
  *
- *   - terminal-native: spawned as a PTY subprocess (Claude Code, OpenCode Go).
+ *   - terminal-native: spawned as a PTY subprocess (Claude Code, OpenCode).
  *     cwd-scoped to the active project. No API key needed — the tool owns
  *     its own auth. Lives behind the dashboard's terminal panel.
  *
@@ -26,6 +26,9 @@
  *   - Anthropic         — direct API for Claude. Best tool-use support.
  *   - OpenCode Zen      — Soapbox's Nostr-native paid tier (sats credits
  *                         tied to npub).
+ *   - OpenCode Go       — Sibling tier under opencode.ai/zen with a
+ *                         different (cheaper) model roster. Same wire
+ *                         format as Zen; users hit Fetch Models to pick.
  *   - PayPerQ ⚡        — Lightning-paid relay for Claude/GPT.
  *   - Routstr ⚡        — Cashu-paid relay for Claude/GPT/Llama.
  *   - Custom            — user-supplied baseUrl + key, OpenAI-compat
@@ -97,7 +100,7 @@ export const PROVIDERS: Record<string, Provider> = {
   },
   'opencode': {
     id: 'opencode',
-    displayName: 'OpenCode Go',
+    displayName: 'OpenCode',
     type: 'terminal-native',
     binary: 'opencode',
   },
@@ -114,12 +117,26 @@ export const PROVIDERS: Record<string, Provider> = {
   },
 
   // Nostr-native paid tier — sats credits tied to the user's npub.
+  // Two sibling tiers live under opencode.ai/zen/*; both are OpenAI-compat
+  // so the Chat pane's Fetch Models button can populate each one's
+  // distinct model list from /v1/models. Keep the IDs split so users can
+  // switch between them without juggling baseUrl overrides.
   'opencode-zen': {
     id: 'opencode-zen',
     displayName: 'OpenCode Zen',
     type: 'api',
     baseUrl: 'https://opencode.ai/zen/v1',
     defaultModel: 'claude-opus-4-6',
+    flavor: 'openai-compat',
+  },
+  'opencode-go': {
+    id: 'opencode-go',
+    displayName: 'OpenCode Go',
+    type: 'api',
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    // Different model roster than Zen — left blank on purpose so the
+    // Chat pane prompts users to hit Fetch Models after adding the key.
+    defaultModel: '',
     flavor: 'openai-compat',
   },
 
@@ -198,8 +215,11 @@ export function keychainAccountFor(providerId: string): `ai:${string}` {
 export function inferIdFromBaseUrl(baseUrl: string): string {
   const url = (baseUrl || '').toLowerCase();
   if (!url) return 'anthropic';
-  // Order matters: more specific matches first.
-  if (url.includes('opencode.ai'))  return 'opencode-zen';
+  // Order matters: more specific matches first. opencode.ai/zen/go is a
+  // sibling tier to opencode.ai/zen — match the deeper path before the
+  // generic Zen prefix so existing configs migrate to the right entry.
+  if (url.includes('opencode.ai/zen/go')) return 'opencode-go';
+  if (url.includes('opencode.ai'))        return 'opencode-zen';
   if (url.includes('routstr'))      return 'routstr';
   if (url.includes('ppq.ai'))       return 'payperq';
   // Everything else (openai/openrouter/groq/mistral/gemini/ollama/lmstudio
