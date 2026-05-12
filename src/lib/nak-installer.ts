@@ -10,21 +10,21 @@
 // and (b) installed an unrelated nak crate from crates.io with the same
 // name as fiatjaf's tool — exact wrong-package footgun this installer
 // avoids.
+//
+// Shared installer boilerplate (logger, curl-download + sha256 verify)
+// lives in ./installer-runtime.ts so nak / ngit / nvpn stay in sync on
+// log conventions and download semantics.
 
 import { execa } from 'execa';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
-import { verifyFileSha256 } from './checksum.js';
+import {
+  type InstallResult, type ProgressCallback,
+  createInstallLogger, downloadAndVerify,
+} from './installer-runtime.js';
 
-export interface InstallResult {
-  ok:      boolean;
-  detail?: string;
-  warn?:   boolean;
-}
-
-export type ProgressCallback = (step: string) => void;
+export type { InstallResult, ProgressCallback };
 
 // nak's release-asset naming: nak-v{version}-{os}-{arch}. We resolve
 // (os, arch) per Node convention and map to the names upstream uses
@@ -51,40 +51,24 @@ export async function installNak(onProgress: ProgressCallback = () => {}): Promi
     };
   }
 
-  const logPath = path.join(os.homedir(), 'logs', 'nak-install.log');
-  const append = (line: string): void => {
-    const stamped = `[${new Date().toISOString()}] ${line}`;
-    try {
-      fs.mkdirSync(path.dirname(logPath), { recursive: true });
-      fs.appendFileSync(logPath, stamped + '\n');
-    } catch { /* best-effort */ }
-  };
-  const step = (msg: string): void => {
-    append(`step: ${msg}`);
-    onProgress(msg);
-  };
-  const fail = (stepName: string, reason: string): InstallResult => {
-    append(`FAIL ${stepName}: ${reason}`);
-    return { ok: false, detail: `${stepName} — ${reason} (log: ${logPath})` };
-  };
-
-  append(`target=${target.key}`);
+  const log = createInstallLogger('nak', onProgress);
+  log.append(`target=${target.key}`);
 
   // Short-circuit when already installed and responding.
-  step('checking for existing install');
+  log.step('checking for existing install');
   try {
     await execa('nak', ['--version'], { stdio: 'pipe', timeout: 5000 });
-    append('already installed — skipping');
+    log.append('already installed — skipping');
     return { ok: true, detail: 'already installed' };
   } catch { /* fall through to install */ }
 
   const pinnedVersion = COMPONENT_VERSIONS['nak'];
   if (!pinnedVersion) {
-    return fail('config', 'no pinned nak version in versions.ts');
+    return log.fail('config', 'no pinned nak version in versions.ts');
   }
   const expectedSha = BINARY_SHA256.nak?.[target.key];
   if (!expectedSha) {
-    return fail(
+    return log.fail(
       'config',
       `no checksum pinned for nak ${target.key} — refusing unverified install`,
     );
@@ -97,53 +81,25 @@ export async function installNak(onProgress: ProgressCallback = () => {}): Promi
   const tmpFile  = path.join(tmp, 'nak');
   const destFile = '/usr/local/bin/nak';
   fs.mkdirSync(tmp, { recursive: true });
-  append(`tmp=${tmp} pinned=${pinnedVersion} sha256=${expectedSha.slice(0, 12)}…`);
+  log.append(`tmp=${tmp} pinned=${pinnedVersion} sha256=${expectedSha.slice(0, 12)}…`);
 
-  step(`downloading ${url}`);
-  try {
-    await execa(
-      'curl',
-      ['-fsSL', '-o', tmpFile, url],
-      { stdio: 'pipe', timeout: 60_000 },
-    );
-    append(`curl ok`);
-  } catch (e: any) {
-    const stderr = e?.stderr?.toString?.() || '';
-    const exit   = e?.exitCode ?? '?';
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return fail(
-      'download',
-      `curl failed (exit ${exit}): ${stderr.trim().slice(0, 160) || 'no stderr'}`,
-    );
-  }
-
-  step('verifying sha256');
-  let verified = false;
-  try { verified = verifyFileSha256(tmpFile, expectedSha); }
-  catch (e: any) {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return fail('checksum', `sha256 read failed: ${(e?.message ?? '').slice(0, 160)}`);
-  }
-  if (!verified) {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return fail(
-      'checksum',
-      `nak binary SHA256 mismatch (expected ${expectedSha.slice(0, 12)}…) — install aborted`,
-    );
-  }
-  append('sha256 verified');
+  const dl = await downloadAndVerify({
+    url, expectedSha, outFile: tmpFile, tmpDir: tmp, log,
+    toolLabel: 'nak binary',
+  });
+  if (!dl.ok) return dl.result;
 
   // Install with sudo into /usr/local/bin. `install -m 0755` is
   // POSIX-portable (handles both copy and mode in one step) — no chmod
   // race vs. concurrent shells looking up nak on PATH. `-n` fails fast
   // when sudo cred cache is empty; we surface it as a soft warn so the
   // user can re-run from their shell with a real prompt.
-  step(`sudo install ${tmpFile} ${destFile}`);
+  log.step(`sudo install ${tmpFile} ${destFile}`);
   try {
     await execa('sudo', ['-n', 'install', '-m', '0755', tmpFile, destFile], {
       stdio: 'pipe', timeout: 10_000,
     });
-    append(`install ok at ${destFile}`);
+    log.append(`install ok at ${destFile}`);
   } catch (e: any) {
     const stderr = (e?.stderr?.toString?.() || '').trim();
     const needsPassword = /password is required|sudo:.*required/i.test(stderr);
@@ -154,19 +110,19 @@ export async function installNak(onProgress: ProgressCallback = () => {}): Promi
         warn: true,
         detail:
           `binary downloaded — finish with: sudo install -m 0755 ${tmpFile} ${destFile} ` +
-          `(or copy to any PATH dir). Log: ${logPath}`,
+          `(or copy to any PATH dir). Log: ${log.logPath}`,
       };
     }
-    return fail('install', `sudo install failed: ${stderr.slice(0, 160) || (e?.message || '').slice(0, 160)}`);
+    return log.fail('install', `sudo install failed: ${stderr.slice(0, 160) || (e?.message || '').slice(0, 160)}`);
   }
   fs.rmSync(tmp, { recursive: true, force: true });
 
-  step('verifying binary on PATH');
+  log.step('verifying binary on PATH');
   try {
     await execa('nak', ['--version'], { stdio: 'pipe', timeout: 5000 });
-    append('verify ok');
+    log.append('verify ok');
   } catch (e: any) {
-    return fail('verify', `nak --version failed: ${(e?.message || '').slice(0, 160)}`);
+    return log.fail('verify', `nak --version failed: ${(e?.message || '').slice(0, 160)}`);
   }
 
   return { ok: true, detail: `installed at ${destFile}` };
