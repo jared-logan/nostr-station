@@ -31,6 +31,14 @@ import type { NostrEvent, NostrFilter } from './types.js';
 // informational here, useful for clients that expect the dance and for
 // the spec-mandated `auth-required:` rejection prefix).
 
+// Future-timestamp slack (seconds). Events with created_at more than
+// this far in the future are rejected with `invalid:`. Without a ceiling
+// a client (intentionally or via a buggy clock) can write events that
+// sort to the top of the recent-event window forever, poisoning per-kind
+// "latest" lookups for the lifetime of the store. 15 min matches the
+// standard NIP-01 clock-skew slack and what Damus / Strfry use.
+const FUTURE_CREATED_AT_SLACK_SEC = 15 * 60;
+
 interface Subscription {
   ws:      WebSocket;
   filters: NostrFilter[];
@@ -291,6 +299,19 @@ export class Relay {
     let valid = false;
     try { valid = verifyEvent(raw as any); } catch { valid = false; }
     if (!valid) return ok(ws, raw.id, false, 'invalid: bad signature');
+
+    // Future-timestamp ceiling — reject events that claim to be created
+    // more than FUTURE_CREATED_AT_SLACK_SEC ahead of wall-clock. See
+    // module-level constant for rationale. Past timestamps are
+    // intentionally accepted: backfilled / imported events are a
+    // first-class use case (relay imports, NIP-94 file metadata, etc.).
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (raw.created_at - nowSec > FUTURE_CREATED_AT_SLACK_SEC) {
+      this.log('warn',
+        `EVENT rejected — created_at ${raw.created_at} > now+${FUTURE_CREATED_AT_SLACK_SEC}s (id ${raw.id.slice(0, 8)}…)`);
+      return ok(ws, raw.id, false,
+        `invalid: created_at is more than ${FUTURE_CREATED_AT_SLACK_SEC}s in the future`);
+    }
 
     // Write gating — pubkey-based, not connection-based. The signature on
     // `raw` already proves authorship, so we don't need an AUTHed
