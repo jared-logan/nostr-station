@@ -45,10 +45,9 @@ import http from 'http';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync, spawn } from 'child_process';
 import {
   readProjects, getProject, createProject, updateProject, deleteProject,
-  detectPath, projectGitStatus, projectGitLog, resolveProjectContext,
+  detectPath, resolveProjectContext,
   isStacksProject, hasDevScript, validateProjectPath,
 } from '../projects.js';
 import { checkCollision, scaffoldProject } from '../project-scaffold.js';
@@ -58,15 +57,11 @@ import {
   writeSystemPromptOverride, writeProjectContextOverlay,
   writeProjectPermissions, writeProjectChatOverride,
 } from '../project-config.js';
-import { readIdentity } from '../identity.js';
 import {
-  getProjectGitState, syncProject, snapshotProject,
+  syncProject, snapshotProject,
 } from '../sync.js';
 import { handleProjectsNgit } from './projects-ngit.js';
-import {
-  readProjectGitIdentity, writeProjectGitIdentity, clearProjectGitIdentity,
-  seedRepoGitIdentityIfMissing,
-} from '../git-identity.js';
+import { handleProjectsGit }  from './projects-git.js';
 import {
   readBody, streamExec, streamExecError, setActiveChatProjectId,
   getAutoSyncRef,
@@ -330,57 +325,8 @@ export async function handleProjects(
       return true;
     }
 
-    if (tail === 'git/status' && method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(projectGitStatus(project.path || '')));
-      return true;
-    }
-    if (tail === 'git/log' && method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(projectGitLog(project.path || '')));
-      return true;
-    }
-    if (tail === 'git/pull' && method === 'POST') {
-      if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
-      streamExec({ bin: 'git', args: ['pull', '--no-rebase', '--ff-only'] }, res, req, project.path);
-      return true;
-    }
-    if (tail === 'git/push' && method === 'POST') {
-      if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
-      // Route based on which capabilities are enabled.
-      // git + ngit → nostr-station publish --yes (handles both remotes)
-      // git only   → git push origin HEAD
-      // ngit only  → git push origin HEAD via git-remote-nostr
-      //
-      // ngit 2.x dropped the `ngit push` subcommand entirely — pushing
-      // is now stock git against a nostr:// remote URL, with the
-      // git-remote-nostr helper (installed alongside the ngit binary)
-      // handling the actual signing + relay publishing under the hood.
-      // ngit init configures `origin` to the nostr URL, so the same
-      // `git push origin HEAD` works across git, ngit, and combined
-      // projects — only the helper / endpoint at the other end differs.
-      let spec: CmdSpec;
-      if (project.capabilities.git && project.capabilities.ngit) {
-        spec = { bin: process.execPath, args: [CLI_BIN, 'publish', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' } };
-      } else if (project.capabilities.git || project.capabilities.ngit) {
-        // Preflight: if the repo has no `origin` remote, git push would
-        // fail with a cryptic "fatal: 'origin' does not appear…". Surface
-        // a readable error through the existing SSE modal instead.
-        try {
-          execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: project.path, stdio: 'pipe' });
-        } catch {
-          const hint = project.capabilities.ngit
-            ? "No git remote named 'origin' — run `ngit init` from the project's ngit tab to configure one."
-            : "No git remote named 'origin' — add one in project Settings.";
-          streamExecError(res, req, hint);
-          return true;
-        }
-        spec = { bin: 'git', args: ['push', 'origin', 'HEAD'] };
-      } else {
-        res.writeHead(400); res.end('no push-capable capability enabled'); return true;
-      }
-      streamExec(spec, res, req, project.path);
-      return true;
+    if (tail.startsWith('git/') || tail === 'git-identity' || tail === 'git-state' || tail === 'git-init') {
+      if (await handleProjectsGit(req, res, project, tail, method)) return true;
     }
 
     if (tail === 'stacks/deploy' && method === 'POST') {
@@ -463,67 +409,6 @@ export async function handleProjects(
     // Per-project git identity. Source attribution ('local' / 'global'
     // / 'unset') lets the Settings UI render "inherited from global"
     // vs. "set per-project" without an extra round-trip.
-    if (tail === 'git-identity' && method === 'GET') {
-      if (!project.path) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'project has no local path' }));
-        return true;
-      }
-      const resolved = readProjectGitIdentity(project.path);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(resolved));
-      return true;
-    }
-    if (tail === 'git-identity' && method === 'PUT') {
-      if (!project.path) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'project has no local path' }));
-        return true;
-      }
-      let parsed: any = {};
-      try { parsed = JSON.parse(await readBody(req)); }
-      catch { res.writeHead(400); res.end('bad json'); return true; }
-      const r = writeProjectGitIdentity(project.path, {
-        name:  typeof parsed.name  === 'string' ? parsed.name  : '',
-        email: typeof parsed.email === 'string' ? parsed.email : '',
-      });
-      res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(r));
-      return true;
-    }
-    if (tail === 'git-identity' && method === 'DELETE') {
-      // Clears the repo-local override so the project inherits the
-      // global identity (or hits the "Author identity unknown" wall
-      // again if global is also empty — explicit user choice).
-      if (!project.path) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'project has no local path' }));
-        return true;
-      }
-      const r = clearProjectGitIdentity(project.path);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(r));
-      return true;
-    }
-
-    if (tail === 'git-state' && method === 'GET') {
-      if (!project.path) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'project has no local path' }));
-        return true;
-      }
-      try { validateProjectPath(project.path); }
-      catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: (e as Error).message }));
-        return true;
-      }
-      const state = await getProjectGitState(project);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(state));
-      return true;
-    }
-
     if (tail === 'sync' && method === 'POST') {
       if (!project.path) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -569,115 +454,6 @@ export async function handleProjects(
       return true;
     }
 
-    // ── git-init (Phase 1e: initial-commit assist) ────────────────────
-    //
-    // For projects where the directory isn't a git repo yet — typically
-    // a user-created dir adopted as a Project but never `git init`-ed.
-    // The Phase 1d publish wizard used to disable itself with a
-    // pointer at Settings, but Settings only edits the project record
-    // (name/path/capabilities), not the directory itself. This
-    // endpoint closes the loop:
-    //
-    //     git init
-    //     <seed user.name / user.email from station identity if missing>
-    //     git add -A
-    //     git commit -m '<message>' (default: "initial commit")
-    //
-    // SSE stream so the publish panel can render the same exec-modal
-    // feedback as every other write flow. Each command runs
-    // sequentially; if any step exits non-zero the chain stops and
-    // the `done` frame carries that exit code. No shell — every
-    // spawn uses execFile-equivalent argv.
-    if (tail === 'git-init' && method === 'POST') {
-      if (!project.path) {
-        streamExecError(res, req, 'project has no local path');
-        return true;
-      }
-      try { validateProjectPath(project.path); }
-      catch (e) { streamExecError(res, req, (e as Error).message); return true; }
-      // Idempotent: a directory that's already a git repo doesn't
-      // need re-initialising. We still run add+commit so the user can
-      // use this endpoint to make a first commit on a repo they
-      // already created manually.
-      const alreadyRepo = fs.existsSync(path.join(project.path, '.git'));
-      let parsed: any = {};
-      try { parsed = JSON.parse(await readBody(req)); } catch { /* body optional */ }
-      const message = typeof parsed?.message === 'string' && parsed.message.trim()
-        ? parsed.message.trim().slice(0, 240)
-        : 'initial commit';
-
-      res.writeHead(200, {
-        'Content-Type':  'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection':    'keep-alive',
-      });
-      const emit = (payload: any) => {
-        try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {}
-      };
-
-      // Spawn helper — same shape as streamExec's internals, but
-      // sequenced. Resolves with the exit code so the chain can
-      // short-circuit on non-zero.
-      const runStep = (label: string, args: string[]): Promise<number> => new Promise((resolveStep) => {
-        emit({ line: `$ git ${args.join(' ')}`, stream: 'stdout' });
-        const child = spawn('git', args, {
-          cwd: project.path!,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
-        });
-        const pushChunk = (buf: Buffer, stream: 'stdout' | 'stderr') => {
-          for (const line of buf.toString().split('\n')) {
-            if (line.length) emit({ line, stream });
-          }
-        };
-        child.stdout.on('data', (b) => pushChunk(b, 'stdout'));
-        child.stderr.on('data', (b) => pushChunk(b, 'stderr'));
-        child.on('error', (e) => {
-          emit({ line: `[${label}] spawn error: ${e?.message ?? 'unknown'}`, stream: 'stderr' });
-          resolveStep(-1);
-        });
-        child.on('close', (code) => resolveStep(code ?? 0));
-      });
-
-      (async () => {
-        let code = 0;
-        // Step 1: init (skipped when already a repo).
-        if (!alreadyRepo) {
-          code = await runStep('init', ['init']);
-          if (code !== 0) { emit({ done: true, code }); try { res.end(); } catch {} return; }
-        } else {
-          emit({ line: '[skip] .git already present', stream: 'stdout' });
-        }
-        // Step 2: seed git identity if missing. Without user.name +
-        // user.email `git commit` exits non-zero with a confusing
-        // message; this matches what /api/ngit/clone does after a
-        // successful clone, so the user never hits the "Author
-        // identity unknown" wall on first commit.
-        try {
-          seedRepoGitIdentityIfMissing(project.path!, readIdentity());
-          emit({ line: '[seeded git user identity from station defaults]', stream: 'stdout' });
-        } catch (e: any) {
-          emit({ line: `[git identity seed warning: ${e?.message ?? 'unknown'}]`, stream: 'stderr' });
-        }
-        // Step 3: add -A.
-        code = await runStep('add', ['add', '-A']);
-        if (code !== 0) { emit({ done: true, code }); try { res.end(); } catch {} return; }
-        // Step 4: commit. `git commit` exits 1 with no error message
-        // when there's nothing to commit — treat that as success
-        // (the repo is initialised, just empty).
-        code = await runStep('commit', ['commit', '-m', message]);
-        if (code !== 0) {
-          // Probe to distinguish "no changes" (benign) from real error.
-          emit({ line: '[no changes to commit — empty repo initialised]', stream: 'stdout' });
-          code = 0;
-        }
-        emit({ done: true, code });
-        try { res.end(); } catch {}
-      })();
-
-      req.on('close', () => { /* response already streaming; nothing to clean up here */ });
-      return true;
-    }
 
 
     // ── save (Phase 6-tidy: promote a scratch checkout to a real path) ──
