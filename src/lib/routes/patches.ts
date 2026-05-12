@@ -547,10 +547,29 @@ export async function handlePatches(
   if (diffMatch) {
     const patchId = u.searchParams.get('patchId') || '';
     if (!/^[a-f0-9]{16,64}$/.test(patchId)) {
-      return json(res, 400, { error: 'invalid patchId' });
+      // Diagnostic log on rejection. Includes everything needed to
+      // identify the bug from a single log line:
+      //   - url: what the server actually received (catches client-side
+      //     URL mangling or proxy rewrites)
+      //   - len/head/tail/raw: catches invisible chars, odd truncations
+      //   - searchKeys: confirms patchId is the only / right param name
+      console.warn('[patches.diff] REJECT patchId',
+        'url=', req.url,
+        'len=', patchId.length,
+        'head=', patchId.slice(0, 8),
+        'tail=', patchId.slice(-8),
+        'raw=', JSON.stringify(patchId),
+        'searchKeys=', [...u.searchParams.keys()].join(','));
+      return json(res, 400, { error: 'invalid patchId', diagnostic: { len: patchId.length, head: patchId.slice(0,8), tail: patchId.slice(-8) } });
     }
     const ev = eventsById.get(patchId);
-    if (!ev) return json(res, 404, { error: 'patch not found' });
+    if (!ev) {
+      console.warn('[patches.diff] patch not found',
+        'patchId=', patchId.slice(0, 8) + '…' + patchId.slice(-8),
+        'eventsByIdSize=', eventsById.size,
+        'projectId=', listMatch?.[1] || detailMatch?.[1] || diffMatch?.[1]);
+      return json(res, 404, { error: 'patch not found' });
+    }
     const diff = parsePatchContent(ev.content);
     return json(res, 200, { patchId, ...diff });
   }

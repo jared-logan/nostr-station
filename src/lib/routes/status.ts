@@ -498,7 +498,18 @@ export async function handleStatus(
     if (rootIds.length === 0) return json(res, 200, { results: [] });
     if (rootIds.length > 200) return json(res, 400, { error: 'too many rootIds (max 200)' });
     for (const r of rootIds) {
-      if (!/^[a-f0-9]{16,64}$/.test(r)) return json(res, 400, { error: 'invalid rootId' });
+      if (!/^[a-f0-9]{16,64}$/.test(r)) {
+        // See patches.ts/issues.ts — diagnostic log on validator-reject.
+        // Multi-rootId case: log the offending one + sibling count.
+        console.warn('[status] REJECT rootId',
+          'url=', req.url,
+          'len=', r.length,
+          'head=', r.slice(0, 8),
+          'tail=', r.slice(-8),
+          'raw=', JSON.stringify(r),
+          'siblingsCount=', rootIds.length);
+        return json(res, 400, { error: 'invalid rootId', diagnostic: { len: r.length, head: r.slice(0,8), tail: r.slice(-8) } });
+      }
     }
     // Wave 1: maintainer set + root-author map in parallel. We need
     // the maintainer set's relay union BEFORE the status fetch so the

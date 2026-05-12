@@ -5012,9 +5012,15 @@ const ProjectsPanel = (() => {
     const verifiedHtml = verifiedRows.map(({ pubkey, role }) => {
       const isSelected = pubkey === selectedPubkey;
       const pic = profilePictureOf(pubkey);
+      // Avatar: real picture > first letter of resolved name > generic
+      // person glyph. The generic glyph (instead of first-char-of-hex)
+      // prevents the "2" placeholder reading as a count badge when
+      // profile resolution hasn't returned a kind-0 for this pubkey.
       const avatar = pic
         ? `<img class="about-avatar" src="${escapeHtml(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
-        : `<div class="about-avatar-placeholder" aria-hidden="true">${escapeHtml(profileNameOf(pubkey).slice(0, 1).toUpperCase())}</div>`;
+        : hasResolvedProfileName(pubkey)
+          ? `<div class="about-avatar-placeholder" aria-hidden="true">${escapeHtml(profileNameOf(pubkey).slice(0, 1).toUpperCase())}</div>`
+          : `<div class="about-avatar-placeholder about-avatar-placeholder-anon" aria-hidden="true" title="Profile not resolved (no kind-0 found on the relays we queried)">●</div>`;
       // NIP-05 row when the profile has a claim. Verified === true →
       // green ✓; verified === false → muted ✗ (claim doesn't resolve);
       // verified === undefined → no marker (verification still running
@@ -6397,7 +6403,9 @@ const ProjectsPanel = (() => {
         const pic = profilePictureOf(ev.pubkey);
         const avatar = pic
           ? `<img class="ann-avatar ann-avatar-img" src="${escapeHtml(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
-          : `<div class="ann-avatar" aria-hidden="true">${escapeHtml(display.slice(0, 2).toUpperCase())}</div>`;
+          : hasResolvedProfileName(ev.pubkey)
+            ? `<div class="ann-avatar" aria-hidden="true">${escapeHtml(display.slice(0, 2).toUpperCase())}</div>`
+            : `<div class="ann-avatar ann-avatar-anon" aria-hidden="true" title="Profile not resolved">●</div>`;
         const isSelected = ev.pubkey === selectedPubkey;
         return `
           <div class="ann-row" data-event-idx="${i}">
@@ -7123,6 +7131,17 @@ const ProjectsPanel = (() => {
   function profilePictureOf(hex) {
     const p = profileCache.get(hex);
     return p?.picture || '';
+  }
+
+  // Has the profile cache resolved a real human-readable name for this
+  // pubkey? Used by avatar-placeholder rendering to decide between
+  // "first-letter-of-name" vs "generic person icon" — without this
+  // check the placeholder falls back to the first char of an npub or
+  // hex string, which can render as a digit (e.g. hex starting "2…")
+  // and look like a count badge to users.
+  function hasResolvedProfileName(hex) {
+    const p = profileCache.get(hex);
+    return !!(p && (p.displayName || p.name));
   }
 
   // Returns { nip05, verified } where verified is true / false / undefined.
