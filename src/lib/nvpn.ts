@@ -1122,6 +1122,12 @@ const SETTABLE_KEYS = new Set([
   'tunnel-ip',
   'endpoint',
   'magic-dns-suffix',
+  // `magic-dns-port` lets users pre-pick a free local port. nvpn defaults
+  // to 1053 and falls back to a random port if that's taken — fine for
+  // function but it surfaces a noisy "preferred port unavailable" line on
+  // every start, and re-roll on restart breaks anything that pinned the
+  // resolver to the prior port.
+  'magic-dns-port',
   'exit-node',
   'advertise-exit-node',
   'advertise-routes',

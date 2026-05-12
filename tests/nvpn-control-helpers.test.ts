@@ -33,7 +33,8 @@ test('isSettableNvpnKey: known nvpn-set keys', () => {
   // allowlist grows in src/lib/nvpn.ts.
   for (const k of ['node-name', 'listen-port', 'autoconnect',
                    'advertise-exit-node', 'advertise-routes',
-                   'relay-for-others', 'magic-dns-suffix', 'tunnel-ip',
+                   'relay-for-others', 'magic-dns-suffix',
+                   'magic-dns-port', 'tunnel-ip',
                    'endpoint', 'exit-node', 'provide-nat-assist',
                    'network-id']) {
     assert.equal(isSettableNvpnKey(k), true, `expected ${k} to be settable`);

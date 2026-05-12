@@ -10892,6 +10892,10 @@ const LogsPanel = (() => {
       'node-name':           '',  // not exposed in status JSON; user sets fresh
       'listen-port':         raw?.listen_port ?? raw?.configured_listen_port ?? '',
       'magic-dns-suffix':    raw?.magic_dns_suffix ?? '',
+      // Read the effective port (`magic_dns_port`) when the daemon
+      // surfaces it, falling back to the configured preference. nvpn has
+      // shipped both shapes across versions, so try both before blank.
+      'magic-dns-port':      raw?.magic_dns_port ?? raw?.configured_magic_dns_port ?? '',
       'autoconnect':         raw?.autoconnect ? 'true' : 'false',
       'advertise-exit-node': raw?.advertise_exit_node ? 'true' : 'false',
       'advertise-routes':    Array.isArray(raw?.advertised_routes)
@@ -10924,6 +10928,7 @@ const LogsPanel = (() => {
             ${fld('node-name', 'node name')}
             ${fld('listen-port', 'listen port', 'number')}
             ${fld('magic-dns-suffix', 'magic DNS suffix')}
+            ${fld('magic-dns-port', 'magic DNS port', 'number')}
             ${fld('advertise-routes', 'advertise routes (a,b,c)')}
             ${fld('autoconnect', 'autoconnect', 'bool')}
             ${fld('advertise-exit-node', 'advertise exit node', 'bool')}
