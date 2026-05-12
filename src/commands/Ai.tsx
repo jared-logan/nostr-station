@@ -18,7 +18,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useApp } from 'ink';
 import TextInput from 'ink-text-input';
 import { P } from '../cli-ui/palette.js';
 import { Select } from '../cli-ui/Select.js';
@@ -112,6 +112,7 @@ const AiList: React.FC = () => {
 // ── ai add <provider> ──────────────────────────────────────────────────────
 
 const AiAdd: React.FC<{ providerId: string }> = ({ providerId }) => {
+  const { exit } = useApp();
   const [phase, setPhase] = useState<'resolving' | 'unknown' | 'key' | 'saving' | 'done' | 'error'>('resolving');
   const [input, setInput] = useState('');
   const [msg, setMsg]     = useState('');
@@ -148,10 +149,13 @@ const AiAdd: React.FC<{ providerId: string }> = ({ providerId }) => {
 
   useEffect(() => {
     if (phase === 'done' || phase === 'unknown' || phase === 'error') {
-      // Let Ink flush the screen before the process exits.
-      setTimeout(() => process.exit(phase === 'unknown' ? 1 : 0), 100);
+      // Set exit code first, then ask Ink to unmount cleanly. Ink
+      // flushes its final frame on exit() and the process drains the
+      // event loop naturally — no setTimeout race needed.
+      process.exitCode = phase === 'unknown' ? 1 : 0;
+      exit();
     }
-  }, [phase]);
+  }, [phase, exit]);
 
   if (phase === 'resolving') {
     return <Text color={P.muted}>resolving {providerId}…</Text>;
@@ -210,6 +214,7 @@ const AiAdd: React.FC<{ providerId: string }> = ({ providerId }) => {
 // ── ai remove <provider> ───────────────────────────────────────────────────
 
 const AiRemove: React.FC<{ providerId: string; yes: boolean }> = ({ providerId, yes }) => {
+  const { exit } = useApp();
   const [phase, setPhase] = useState<'resolving' | 'confirm' | 'removing' | 'done' | 'unknown' | 'notConfigured'>('resolving');
   const [msg, setMsg]     = useState('');
   const [p, setP]         = useState<Provider | null>(null);
@@ -227,9 +232,10 @@ const AiRemove: React.FC<{ providerId: string; yes: boolean }> = ({ providerId, 
 
   useEffect(() => {
     if (phase === 'done' || phase === 'unknown' || phase === 'notConfigured') {
-      setTimeout(() => process.exit(phase === 'done' ? 0 : 1), 100);
+      process.exitCode = phase === 'done' ? 0 : 1;
+      exit();
     }
-  }, [phase]);
+  }, [phase, exit]);
 
   async function doRemove(provider: Provider) {
     setPhase('removing');
@@ -266,7 +272,7 @@ const AiRemove: React.FC<{ providerId: string; yes: boolean }> = ({ providerId, 
       ]}
       onSelect={item => {
         if (item.value === 'yes' && p) doRemove(p);
-        else process.exit(0);
+        else { process.exitCode = 0; exit(); }
       }}
     />
   );
@@ -275,29 +281,33 @@ const AiRemove: React.FC<{ providerId: string; yes: boolean }> = ({ providerId, 
 // ── ai default terminal|chat <provider> ────────────────────────────────────
 
 const AiDefault: React.FC<{ kind: 'terminal' | 'chat'; providerId: string }> = ({ kind, providerId }) => {
+  const { exit: inkExit } = useApp();
   const [msg, setMsg]     = useState('');
   const [color, setColor] = useState<string>(P.muted);
 
+  function exitWith(code: number): void {
+    process.exitCode = code;
+    inkExit();
+  }
+
   useEffect(() => {
     const p = getProvider(providerId);
-    if (!p) { setMsg(`Unknown provider: ${providerId}`); setColor(P.error); exit(1); return; }
+    if (!p) { setMsg(`Unknown provider: ${providerId}`); setColor(P.error); exitWith(1); return; }
     // Type-appropriateness check — setting an API provider as the terminal
     // default (or vice-versa) would silently produce a broken UI.
     if (kind === 'terminal' && p.type !== 'terminal-native') {
       setMsg(`${providerId} is not a terminal-native provider (it's ${p.type})`);
-      setColor(P.error); exit(1); return;
+      setColor(P.error); exitWith(1); return;
     }
     if (kind === 'chat' && p.type !== 'api') {
       setMsg(`${providerId} is not an API provider (it's ${p.type})`);
-      setColor(P.error); exit(1); return;
+      setColor(P.error); exitWith(1); return;
     }
     setAiDefaultCfg(kind, providerId);
     setMsg(`defaults.${kind} = ${providerId}`);
     setColor(P.success);
-    exit(0);
+    exitWith(0);
   }, [kind, providerId]);
-
-  function exit(code: number) { setTimeout(() => process.exit(code), 100); }
 
   return <Text color={color}>{msg || 'saving…'}</Text>;
 };
