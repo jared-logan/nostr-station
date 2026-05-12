@@ -330,7 +330,15 @@ async function runStep(
     const pipeLines = (chunk: Buffer, isStderr: boolean) => {
       const text = chunk.toString();
       if (isStderr) stderrTail = (stderrTail + text).slice(-2000);
-      for (const line of text.split('\n')) {
+      // Installers that draw a progress bar (OpenCode's bash bootstrap
+      // does this) refresh the line with \r, so a single \n-split chunk
+      // can carry dozens of \r-terminated progress frames concatenated
+      // together. Render only the last frame per logical line — the
+      // intermediate states are visual noise and the modal can't
+      // overwrite a line in place anyway.
+      for (const rawLine of text.split('\n')) {
+        const frames = rawLine.split('\r');
+        const line   = frames[frames.length - 1];
         if (line.trim()) onProgress(line);
       }
     };
