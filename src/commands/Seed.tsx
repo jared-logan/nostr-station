@@ -5,8 +5,10 @@ import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { P } from '../cli-ui/palette.js';
 import { Select } from '../cli-ui/Select.js';
 import { getKeychain } from '../lib/keychain.js';
-// addToWhitelist + restartRelay are gone — the in-process relay has no
-// NIP-42 auth or whitelist (yet), so seed publishes directly.
+// The in-process relay enforces NIP-42 write-gating (owner + whitelist —
+// see src/relay/index.ts handleEvent). The seed pubkey is auto-registered
+// in the relay's whitelist at relay startup (web-server.ts
+// ensureSeedPubkeyWhitelisted) so this command can publish directly.
 
 interface SeedProps {
   eventCount: number;
@@ -148,8 +150,10 @@ export const Seed: React.FC<SeedProps> = ({ eventCount, full }) => {
       setSeedNsec(ident.nsec);
       setSeedNpub(ident.npub);
 
-      // (whitelist + relay restart removed — the in-process relay accepts
-      // any signed event from any pubkey. NIP-42 is a future hardening pass.)
+      // Whitelist registration is handled at relay startup
+      // (web-server.ts ensureSeedPubkeyWhitelisted) so the relay already
+      // accepts this pubkey when we get here. The CLI subprocess can't
+      // reach into the running relay's in-memory whitelist directly.
 
       // 2. Now that we can reach the relay with an authenticated,
       // whitelisted identity, see how many events it already has — the
