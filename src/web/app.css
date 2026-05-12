@@ -2553,8 +2553,14 @@ details.config-section .cfg-summary-meta {
   font-weight: 500;
   min-width: 90px;
 }
+.ai-install-go {
+  /* Compact install button — sized down vs. the default primary so the
+   * row reads as "one-click setup" without dominating the section. */
+  font-size: 11px;
+  padding: 3px 10px;
+}
 .ai-install-cmd {
-  flex: 1 1 auto;
+  flex: 1 1 240px;
   font-size: 11px;
   overflow-x: auto;
   white-space: nowrap;

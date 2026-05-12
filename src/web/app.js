@@ -1474,13 +1474,14 @@ const SERVICE_CTAS = {
   'vpn':       { installSlug: null,    configHint: null },
   'watchdog':  { installSlug: null,    configHint: 'POST /api/watchdog/start to restart the heartbeat loop' },
   'ngit':      { installSlug: 'ngit',  configHint: null /* inline-form handled below */ },
-  // claude-code + opencode are externally-distributed binaries with their
-  // own installers — no INSTALL_TARGETS entry on the server, so we surface
-  // the upstream curl one-liner as configHint. The render path below
-  // promotes configHint to a runnable "run: …" + copy button on err state
-  // (not just warn) so users hit a working command, not a dead-end link.
-  'claude':    { installSlug: null,    configHint: 'curl -fsSL https://claude.ai/install.sh | bash' },
-  'opencode':  { installSlug: null,    configHint: 'curl -fsSL https://opencode.ai/install | bash' },
+  // claude-code + opencode have official curl|bash bootstraps wired
+  // through installTool() (src/lib/tools.ts) — the Install button fires
+  // the SSE modal like ngit/nak/stacks. We keep the upstream one-liner
+  // in configHint too so the row shows "or run: <curl>" underneath the
+  // button: gives users who'd rather paste into a real terminal a
+  // copy-able command without forcing them to click through the modal.
+  'claude':    { installSlug: 'claude-code', configHint: 'curl -fsSL https://claude.ai/install.sh | bash' },
+  'opencode':  { installSlug: 'opencode',    configHint: 'curl -fsSL https://opencode.ai/install | bash' },
   'nak':       { installSlug: 'nak',   configHint: null },
   'stacks':    { installSlug: 'stacks', configHint: null },
 };
@@ -2078,10 +2079,9 @@ function buildStatusRow(s) {
       e.preventDefault();
       // SSE modal is the only path: the backend's /api/exec/install/<slug>
       // streams progress lines from installTool() (cargo install / npm
-      // install -g / manual installer URL — see src/lib/tools.ts).
-      // Health refresh schedule is tuned for the long-tail cargo compile
-      // (5min upper bound); user can also click Refresh manually once
-      // the modal closes.
+      // install -g / curl|bash — see src/lib/tools.ts). Health refresh
+      // schedule is tuned for the long-tail cargo compile (5min upper
+      // bound); user can also click Refresh manually once the modal closes.
       openExecModal({
         title:    `Install ${s.label}`,
         subtitle: `Installing ${cta.installSlug}…`,
@@ -2094,15 +2094,17 @@ function buildStatusRow(s) {
       });
     });
     ctaRow.appendChild(btn);
-  } else if ((s.state === 'warn' || s.state === 'err') && cta.configHint) {
-    // err + configHint covers externally-distributed binaries (claude-code,
-    // opencode) that don't have an INSTALL_TARGETS entry on the server —
-    // we can't offer a one-click install, but the upstream curl one-liner
-    // is right there with a copy button so the user can paste it into a
-    // terminal without leaving the dashboard.
+  }
+  // Manual command hint — surfaced alongside the Install button for
+  // claude-code/opencode so users who'd rather paste the curl one-liner
+  // into their own terminal don't have to dig for it. Also handles the
+  // warn-state-with-configHint case for relay/watchdog (no installSlug
+  // there, so the button branch above didn't fire).
+  if ((s.state === 'warn' || s.state === 'err') && cta.configHint) {
     const meta = document.createElement('span');
     meta.className = 'meta';
-    meta.innerHTML = `run: <span class="cmd-inline">${escapeHtml(cta.configHint)}</span>`;
+    const prefix = cta.installSlug ? 'or run' : 'run';
+    meta.innerHTML = `${prefix}: <span class="cmd-inline">${escapeHtml(cta.configHint)}</span>`;
     ctaRow.appendChild(meta);
     ctaRow.appendChild(copyBtn(cta.configHint));
   }
@@ -12383,8 +12385,8 @@ const ConfigPanel = (() => {
           <div class="ai-install-hints">
             <div class="ai-install-hints-head">Install a terminal-native AI</div>
             <div class="ai-install-hints-body">
-              ${renderTerminalInstallHint('Claude Code', 'curl -fsSL https://claude.ai/install.sh | bash')}
-              ${renderTerminalInstallHint('OpenCode',    'curl -fsSL https://opencode.ai/install | bash')}
+              ${renderTerminalInstallHint('Claude Code', 'claude-code', 'curl -fsSL https://claude.ai/install.sh | bash')}
+              ${renderTerminalInstallHint('OpenCode',    'opencode',    'curl -fsSL https://opencode.ai/install | bash')}
             </div>
           </div>
           ${renderAiProviders(aiList)}
@@ -12860,15 +12862,20 @@ const ConfigPanel = (() => {
   }
 
   // Static install-command card for a terminal-native AI. The Status
-  // panel's claude/opencode rows show the same one-liner when the binary
-  // is missing; we surface it here too so users who land on Config first
-  // (e.g. coming through the AI summary chip) don't have to bounce over
-  // to Status to find the install hint. Click-to-copy is wired in
-  // wireAiProviders() via event delegation on .ai-install-copy.
-  function renderTerminalInstallHint(name, cmd) {
+  // panel's claude/opencode rows show the same Install button + curl
+  // hint when the binary is missing; we surface it here too so users
+  // who land on Config first (e.g. coming through the AI summary chip)
+  // don't have to bounce over to Status. The Install button fires the
+  // same SSE modal as the Status row; the curl text + copy give manual
+  // users a paste-able alternative. Wiring lives in wireAiProviders()
+  // via event delegation on .ai-install-go and .ai-install-copy.
+  function renderTerminalInstallHint(name, slug, cmd) {
     return `
       <div class="ai-install-row">
         <span class="ai-install-name">${escapeHtml(name)}</span>
+        <button class="primary ai-install-go" type="button"
+          data-slug="${escapeHtml(slug)}"
+          data-label="${escapeHtml(name)}">Install</button>
         <code class="cmd-inline ai-install-cmd">${escapeHtml(cmd)}</code>
         <button class="ai-install-copy" type="button" data-cmd="${escapeHtml(cmd)}">copy</button>
       </div>
@@ -13005,15 +13012,43 @@ const ConfigPanel = (() => {
     if (aiSection && !aiSection.dataset.installHintsWired) {
       aiSection.dataset.installHintsWired = '1';
       aiSection.addEventListener('click', async (e) => {
-        const btn = e.target.closest('button.ai-install-copy');
-        if (!btn) return;
-        const cmd = btn.dataset.cmd;
-        if (!cmd) return;
-        try {
-          await navigator.clipboard.writeText(cmd);
-          toast('Copied', cmd, 'ok');
-        } catch {
-          toast('Copy failed', 'select the command and copy manually', 'warn');
+        // One-click Install — fires the same SSE modal the Status panel
+        // uses, then refreshes health on close so the AI section's
+        // provider state catches up (terminal-native rows light up as
+        // "enabled" once the binary is on PATH).
+        const goBtn = e.target.closest('button.ai-install-go');
+        if (goBtn) {
+          const slug  = goBtn.dataset.slug;
+          const label = goBtn.dataset.label || slug;
+          if (!slug) return;
+          openExecModal({
+            title:    `Install ${label}`,
+            subtitle: `Installing ${slug}…`,
+            endpoint: `/api/exec/install/${slug}`,
+          }).then(r => {
+            if (r.ok) toast(`${label} install finished`, '', 'ok');
+            else      toast(`${label} install exited ${r.code}`, '', 'err');
+            refreshHealth();
+            // Drop the providers cache + re-render Config → AI so the
+            // newly-installed binary flips from "available" to
+            // "enabled" without the user navigating away.
+            apiInvalidate('/api/ai/providers');
+            load();
+            [30_000, 120_000, 300_000].forEach(ms => setTimeout(refreshHealth, ms));
+          });
+          return;
+        }
+        const copyHintBtn = e.target.closest('button.ai-install-copy');
+        if (copyHintBtn) {
+          const cmd = copyHintBtn.dataset.cmd;
+          if (!cmd) return;
+          try {
+            await navigator.clipboard.writeText(cmd);
+            toast('Copied', cmd, 'ok');
+          } catch {
+            toast('Copy failed', 'select the command and copy manually', 'warn');
+          }
+          return;
         }
       });
     }
