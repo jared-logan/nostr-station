@@ -421,8 +421,15 @@ async function readTree(
   // important: without it you'd get just the entry FOR the path.
   // `-z` gives NUL terminators so filenames with spaces/newlines parse
   // safely.
+  //
+  // CRITICAL: when treePath is empty (= root) we must NOT append an
+  // empty-string argument. `git ls-tree HEAD ""` errors with
+  //   fatal: empty string is not a valid pathspec...
+  // whereas `git ls-tree HEAD` lists the root tree correctly.
   const target = treePath ? `${treePath}/` : '';
-  const args = ['ls-tree', '-l', '-z', `${ref}`, target];
+  const args = target
+    ? ['ls-tree', '-l', '-z', `${ref}`, target]
+    : ['ls-tree', '-l', '-z', `${ref}`];
   let raw: string;
   try {
     raw = await gitRun(project.path, args);

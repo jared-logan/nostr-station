@@ -471,6 +471,34 @@ export async function handleStatus(
       // authorises). 64-hex pubkeys can never equal '' so this is safe.
       computeEffectiveStatus(rid, rootAuthors.get(rid) ?? '', maintainers, statusR.events)
     );
+    // ?debug=1 returns the raw signal we used to compute the result —
+    // relays consulted, every 163x event we saw, the maintainer set,
+    // and the resolved root-author map. Pasted into a bug report this
+    // collapses an entire diagnostic round-trip into one curl.
+    if (u.searchParams.get('debug') === '1') {
+      const coords = decodeNgitRemote(project);
+      const dbgRelays = coords ? (() => {
+        const grasp = getGraspServers();
+        const projRelays = (project.readRelays || []).filter((x): x is string => typeof x === 'string');
+        return [...coords.relayHints, ...grasp, ...projRelays]
+          .filter((r, i, a) => a.indexOf(r) === i).slice(0, 8);
+      })() : [];
+      return json(res, 200, {
+        results,
+        cached: statusR.cached,
+        debug: {
+          coords,
+          relays:        dbgRelays,
+          rawEventCount: statusR.events.length,
+          rawEvents:     statusR.events.map((e) => ({
+            id: e.id, kind: e.kind, pubkey: e.pubkey, created_at: e.created_at,
+            tags: e.tags,
+          })),
+          maintainers:   Array.from(maintainers),
+          rootAuthors:   Object.fromEntries(rootAuthors),
+        },
+      });
+    }
     return json(res, 200, { results, cached: statusR.cached });
   }
 
