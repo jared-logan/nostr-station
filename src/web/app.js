@@ -7653,7 +7653,7 @@ const ProjectsPanel = (() => {
       // Phase 4 — Merge button + status dropdown. Merge runs
       // ngit pr_merge after a dirty-tree preflight (server-side).
       // The status dropdown lets the user / a maintainer mark a PR
-      // open / draft / closed via ngit pr_status.
+      // open / draft / closed via ngit pr status.
       body.querySelector('.pdetail-merge').addEventListener('click', () => {
         confirmDestructive({
           title: 'Merge this proposal?',
@@ -7706,7 +7706,7 @@ const ProjectsPanel = (() => {
       statusSlot.appendChild(renderStatusControl('patch', effectiveStatus, canEdit, (newStatus) => {
         openExecModal({
           title:    `${newStatus} · ${p.name}`,
-          subtitle: `ngit pr_status --${newStatus} ${detail.rootId.slice(0, 12)}…`,
+          subtitle: `ngit pr status --${newStatus} ${detail.rootId.slice(0, 12)}…`,
           endpoint: `/api/projects/${p.id}/status`,
           body:     { kind: 'patch', rootId: detail.rootId, status: newStatus },
         }).then((r) => {
@@ -8192,7 +8192,7 @@ const ProjectsPanel = (() => {
         renderStatusControl('issue', effective, issueCanEdit, (newStatus) => {
           openExecModal({
             title:    `${newStatus} · ${p.name}`,
-            subtitle: `ngit issue_status --${newStatus} ${detail.id.slice(0, 12)}…`,
+            subtitle: `ngit issue status --${newStatus} ${detail.id.slice(0, 12)}…`,
             endpoint: `/api/projects/${p.id}/status`,
             body:     { kind: 'issue', rootId: detail.id, status: newStatus },
           }).then((r) => {

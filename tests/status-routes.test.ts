@@ -171,31 +171,33 @@ test('computeEffectiveStatus: out-of-range kind ignored', () => {
 
 // ── buildStatusArgs ─────────────────────────────────────────────────────
 
+// Argv shape is the spaced form ngit 2.x expects (`pr status` /
+// `issue status`, not the older `pr_status` / `issue_status`).
 test('buildStatusArgs: patch · open', () => {
   assert.deepEqual(
     buildStatusArgs({ kind: 'patch', rootId: 'a'.repeat(64), status: 'open' }),
-    ['pr_status', '--open', 'a'.repeat(64)],
+    ['pr', 'status', '--open', 'a'.repeat(64)],
   );
 });
 
 test('buildStatusArgs: patch · draft', () => {
   assert.deepEqual(
     buildStatusArgs({ kind: 'patch', rootId: 'a'.repeat(64), status: 'draft' }),
-    ['pr_status', '--draft', 'a'.repeat(64)],
+    ['pr', 'status', '--draft', 'a'.repeat(64)],
   );
 });
 
 test('buildStatusArgs: patch · closed', () => {
   assert.deepEqual(
     buildStatusArgs({ kind: 'patch', rootId: 'a'.repeat(64), status: 'closed' }),
-    ['pr_status', '--closed', 'a'.repeat(64)],
+    ['pr', 'status', '--closed', 'a'.repeat(64)],
   );
 });
 
 test('buildStatusArgs: issue · resolved', () => {
   assert.deepEqual(
     buildStatusArgs({ kind: 'issue', rootId: 'a'.repeat(64), status: 'resolved' }),
-    ['issue_status', '--resolved', 'a'.repeat(64)],
+    ['issue', 'status', '--resolved', 'a'.repeat(64)],
   );
 });
 
