@@ -8,7 +8,9 @@
 #   3. Install Node 22+ via nvm if missing or too old. Silent.
 #   4. Clone nostr-station to ~/nostr-station (or fast-forward if already
 #      present), install dependencies, build, and `npm link` so the
-#      `nostr-station` command resolves to dist/cli.js in that checkout.
+#      `nostr-station` command resolves to bin/nostr-station.sh in that
+#      checkout. The wrapper relaunches node on dist/cli.js whenever the
+#      dashboard exits with code 75 (used by the in-app "Update" button).
 #   5. exec nostr-station — the dashboard boots, the browser opens.
 #
 # Re-running this script upgrades an existing install: the git checkout
@@ -111,11 +113,21 @@ npm install --silent
 log "Building…"
 npm run build --silent
 
+# Wrapper script needs the execute bit. We tracked it as 0755 in git but a
+# fresh clone in some environments (umask 0077, ZIP downloads) lands it
+# at 0644 — npm-link the wrapper without +x and the global command
+# silently produces "Permission denied". Idempotent chmod here.
+if [ -f "${INSTALL_DIR}/bin/nostr-station.sh" ]; then
+  chmod +x "${INSTALL_DIR}/bin/nostr-station.sh"
+fi
+
 log "Linking the nostr-station command globally…"
 # npm link is idempotent — re-running just refreshes the symlink. The
-# command resolves to dist/cli.js inside this checkout, so subsequent
-# `git pull && npm run build` upgrades pick up automatically with no
-# re-link needed.
+# command resolves to bin/nostr-station.sh inside this checkout, which
+# in turn runs dist/cli.js. The wrapper restarts node on exit code 75
+# so the in-app "Update" button can hot-replace the build without the
+# user touching the terminal. Subsequent `git pull && npm run build`
+# upgrades still pick up automatically with no re-link needed.
 npm link --silent
 ok "nostr-station installed at ${INSTALL_DIR}"
 

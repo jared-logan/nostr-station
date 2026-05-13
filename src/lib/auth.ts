@@ -17,6 +17,9 @@
 
 import crypto from 'crypto';
 import http from 'http';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { verifyEvent } from 'nostr-tools/pure';
 import { nip19 } from 'nostr-tools';
 import { readIdentity } from './identity.js';
@@ -49,6 +52,68 @@ const challenges = new Map<string, number>();  // challenge → expiresAt
 export function clearAllSessions(): void {
   sessions.clear();
   challenges.clear();
+}
+
+// ── Session persistence (survives a controlled restart) ────────────────────
+//
+// Sessions are still in-memory authoritative, but we snapshot non-expired
+// entries to disk so a "one-click update" restart drops the user back in
+// authenticated. The file is rewritten atomically on shutdown and loaded
+// once at boot, then deleted — a crash or kill -9 won't leak old tokens.
+
+function sessionsPath(): string {
+  return path.join(os.homedir(), '.config', 'nostr-station', 'sessions.json');
+}
+
+export function persistSessions(): void {
+  const now = Date.now();
+  const live: Session[] = [];
+  for (const s of sessions.values()) {
+    if (s.expiresAt > now) live.push(s);
+  }
+  const file = sessionsPath();
+  try {
+    if (live.length === 0) {
+      try { fs.unlinkSync(file); } catch {}
+      return;
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ sessions: live }), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch {
+    // Persistence is best-effort — a failure here just means the user
+    // logs back in after the next restart. Don't crash shutdown over it.
+  }
+}
+
+export function loadSessions(): void {
+  const file = sessionsPath();
+  let raw: string;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch { return; }
+  // Snapshot is single-use — remove immediately so a crash or kill -9
+  // after this point can't replay it.
+  try { fs.unlinkSync(file); } catch {}
+  try {
+    const parsed = JSON.parse(raw);
+    const list = Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+    const now = Date.now();
+    for (const s of list) {
+      if (!s || typeof s.token !== 'string' || !/^[a-f0-9]{64}$/.test(s.token)) continue;
+      if (typeof s.expiresAt !== 'number' || s.expiresAt <= now) continue;
+      if (typeof s.createdAt !== 'number' || typeof s.npub !== 'string') continue;
+      sessions.set(s.token, {
+        token:     s.token,
+        npub:      s.npub,
+        createdAt: s.createdAt,
+        expiresAt: s.expiresAt,
+        userAgent: typeof s.userAgent === 'string' ? s.userAgent : '',
+      });
+    }
+  } catch {
+    // Malformed snapshot — already unlinked above, just move on.
+  }
 }
 
 // ── Challenges ──────────────────────────────────────────────────────────────

@@ -52,10 +52,15 @@ import {
   readIdentity, setSetupComplete, isNsec,
 } from './identity.js';
 import {
-  clearAllSessions, issueChallenge, consumeChallenge, createSession,
+  issueChallenge, consumeChallenge, createSession,
   deleteSession, extractBearer, verifyNip98, authStatus,
   isPublicApi, requireSession, expectedDashboardUrl,
+  loadSessions, persistSessions,
 } from './auth.js';
+import {
+  startUpdatePoller, stopUpdatePoller, getUpdateStatus,
+  refreshUpdateStatus, streamApplyUpdate,
+} from './update-check.js';
 import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
   signWithBunkerUrl, silentBunkerSign,
@@ -305,10 +310,14 @@ async function ensureSeedPubkeyWhitelisted(): Promise<void> {
 }
 
 export async function startWebServer(port: number): Promise<http.Server> {
-  // Sessions are in-memory only and never survive a server restart — the
-  // user re-authenticates after a nostr-station chat restart. Explicit here
-  // for clarity in case the module is imported multiple times.
-  clearAllSessions();
+  // Sessions are in-memory authoritative, but a one-click "Update" exits
+  // the process with code 75 so the wrapper script (bin/nostr-station.sh)
+  // can respawn it on the new build. To make that round-trip invisible
+  // to the user, we snapshot live sessions to ~/.config/nostr-station/
+  // sessions.json on the way down and restore them on the way up. The
+  // snapshot is single-use (deleted at load time) so a kill -9 can't
+  // replay tokens later.
+  loadSessions();
 
   // Deferred warm-up tasks. Everything here used to run BEFORE
   // `server.listen()` with `await` — a fresh Linux box with no seeded
@@ -615,6 +624,32 @@ export async function startWebServer(port: number): Promise<http.Server> {
         res.end(JSON.stringify({
           npub: sess.npub, createdAt: sess.createdAt, expiresAt: sess.expiresAt,
         }));
+        return;
+      }
+
+      // ── One-click update (driven by bin/nostr-station.sh wrapper) ────
+      // GET /api/update-status returns the cached poll result so the UI
+      // can render the "Update available" pill without hitting GitHub
+      // itself. POST /api/update streams the fast-forward + npm install
+      // + build via SSE, then exits with code 75 so the wrapper respawns.
+      // POST /api/update-status/refresh kicks an immediate re-poll
+      // (used right after the user clicks the pill in case it's stale).
+      if (url === '/api/update-status' && method === 'GET') {
+        if (!requireSession(req, res)) return;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(getUpdateStatus()));
+        return;
+      }
+      if (url === '/api/update-status/refresh' && method === 'POST') {
+        if (!requireSession(req, res)) return;
+        void refreshUpdateStatus();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (url === '/api/update' && method === 'POST') {
+        if (!requireSession(req, res)) return;
+        streamApplyUpdate(req, res);
         return;
       }
 
@@ -1625,6 +1660,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // file. Stop it so the polling timer doesn't keep Node alive.
       nvpnLogTailer?.stop();
       nvpnLogTailer = null;
+      // Stop the GitHub update poller so the interval doesn't keep
+      // Node alive past close (the unref above is best-effort).
+      stopUpdatePoller();
+      // Snapshot live sessions so a one-click update restart drops
+      // the user back in authenticated. Best-effort; failure here
+      // just means the user logs in again post-restart.
+      persistSessions();
       dropPid();
     });
 
@@ -1671,6 +1713,11 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // of them hang (secret-tool unlock prompt, node-pty prebuilt probe,
       // ai-config migration) the dashboard is still up and serving.
       warmUp();
+      // Background GitHub update poller (~once every 30 min after a
+      // startup delay). One unauthenticated `compare` request per
+      // poll; cached server-side so the dashboard never blocks on it
+      // and the UI just reads from cache.
+      startUpdatePoller();
       // In-process relay (gated on STATION_INPROC_RELAY=1). Started after
       // the dashboard binds so a relay-port collision doesn't prevent
       // the dashboard from coming up — the relay will surface its own
