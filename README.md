@@ -48,6 +48,10 @@ Then you land on the dashboard. The local relay is running on
 
 The happy path for a project you own. No branches, no PRs, no terminal.
 
+![nostr-station dashboard](https://i.nostr.build/cZHIgynIL3XAtrqZ.png)
+
+*The dashboard after first run: service-health overview, identity card, and the project list. Everything below starts from this screen.*
+
 1. **Projects panel → `+ New Project`.** Pick a template (mkstack, blank, or
    paste a git URL). The project scaffolds locally; the card appears in your
    list within seconds.
@@ -108,6 +112,11 @@ For contributing to a project you don't own.
    commits as it goes.
 3. **Project view → Pull requests tab.** You'll see a card at the top:
    *"Submit your local commits as a PR · N commits ahead of origin/main."*
+
+   ![Submit-a-PR CTA on the Pull requests tab](https://i.nostr.build/WuQp0E4vv1cNyNU6.png)
+
+   *The CTA appears whenever you're on the default branch with a clean working tree and at least one commit ahead of origin. Optional `Reset main` checkbox matches GitHub's "branch off upstream" mental model.*
+
 4. **Type a branch name** (e.g. `feature-add-dark-mode`), optionally tick
    *"Reset main back to origin/main after branching"* if you want a clean
    GitHub-style flow, then click **Submit PR**.
@@ -163,6 +172,10 @@ within the next poll.
 
 ### Chat
 
+![Chat panel mid-conversation, with the live preview iframe on the right](https://i.nostr.build/NnCH6vVCQRimGCfb.png)
+
+*Chat panel with Nori in mid-edit — left pane streams the AI's reasoning and tool calls, right pane is a live iframe of the project's dev server (here, the BLIP demo at `localhost:5173`).*
+
 Your AI coding assistant. Pick a provider in the dropdown:
 
 - **API providers** — Anthropic, OpenAI, OpenRouter, OpenCode Zen,
@@ -180,6 +193,10 @@ Ollama backs the dashboard chat is a normal setup. See `nostr-station ai
 default` in the [CLI reference](#cli-reference).
 
 ### Projects
+
+![Projects panel listing two projects, each with capability badges and a live git-state pill](https://i.nostr.build/HaQHWyUCG7Pgwio6.png)
+
+*The Projects panel. Each card surfaces path, capabilities, live git state ("up to date", "dirty", "N ahead"), identity, and four action icons (Chat, Terminal, Sync, Snapshot).*
 
 The center of gravity. Lists every project as a card showing:
 
@@ -204,10 +221,22 @@ Click into a card to open the project view, which has these tabs:
 - **Settings** — git remote, ngit signer + sync section, identity
   overrides
 
+![Project view — About tab](https://i.nostr.build/fyzcS72FqoDXiTL8.png)
+
+*About tab: topics, maintainers, GRASP servers, additional relays, and the canonical clone command — the gitworkshop-equivalent "what is this repo?" page.*
+
+![Project view — Code tab](https://i.nostr.build/sG4UClk1RTwlnbSd.png)
+
+*Code tab: branch picker, verified-maintainer chip, file tree. Mirrors what visitors see on a hosted git forge.*
+
 See [Project operations](#project-operations) and
 [User journeys](#user-journeys) for the verbs.
 
 ### Relay
+
+![Relay panel — status cards, whitelist, common nak commands](https://i.nostr.build/m75937aQOREIXNsS.png)
+
+*The Relay panel: live status cards, write-whitelist (Seed + Watchdog pre-registered, more pubkeys addable), and ready-to-paste `nak` commands wired at `ws://127.0.0.1:7777`.*
 
 Your local Nostr relay's control surface. Backed by `better-sqlite3` at
 `~/.nostr-station/data/relay.db`.
@@ -242,6 +271,10 @@ later from the Status panel or this panel.
 
 ### Logs
 
+![Logs panel — relay tab, INFO-tagged lines with ISO timestamps](https://i.nostr.build/f4Caw9ClVL2eLPCu.png)
+
+*Logs panel on the relay channel. Lines are `[INFO]` / `[WARN]` / `[ERROR]` with ISO timestamps; auto-scroll keeps the latest line in view as the SSE stream tails.*
+
 Three SSE-streamed log channels in tabs:
 
 - **relay** — connection events, EVENT accepts / rejects / duplicates,
@@ -269,6 +302,18 @@ The settings + identity surface:
 - **Theme** — Ditto theme sync (kind-30078) when configured.
 - **Editor target** — `NOSTR_STATION.md` ↔ tool-specific filename
   symlink (`CLAUDE.md`, `.cursorrules`, etc.).
+
+![Config — Profile section](https://i.nostr.build/Xqovg8i9xPZqzglb.png)
+
+*Config → Profile: your npub, NIP-05, follower stats, session expiry, and the "SIGNED IN VIA AMBER" badge — proof your nsec lives in Amber, not here.*
+
+![Config — AI providers section, three providers configured](https://i.nostr.build/f1SQfyFN0bhsO3yi.png)
+
+*Config → AI: providers list with terminal-native vs API badges. Note the "✓ key set" status — keys themselves never display; they live at `ai:<provider>` slots in the OS keychain.*
+
+![Config — Git/ngit section, paired with Amber](https://i.nostr.build/joTRgHN8pKnXnk0B.png)
+
+*Config → Git/ngit: GRASP server list (where your git-over-Nostr data is hosted) plus the Amber-paired signer, with re-login and logout controls.*
 
 ### Terminal
 
@@ -391,6 +436,10 @@ nostr-station completion --shell bash --print    # write the script yourself
 ## Privacy and security
 
 End-user perspective first; threat-model details below.
+
+![Sign-in screen reinforcing 'nostr-station never stores your nsec'](https://i.nostr.build/dsUMnA9YxnEwJHGr.png)
+
+*Sign-in screen: Alby browser-extension or Amber-via-bunker. The fine print is the contract — "nostr-station never stores your nsec. Signing happens in your extension, phone (Amber), or bunker service."*
 
 ### What stays on your machine
 
