@@ -1103,6 +1103,11 @@ export async function startWebServer(port: number): Promise<http.Server> {
             emit({ line: String(e?.message || e), stream: 'stderr' });
             emit({ done: true, code: -1 });
           }
+          // A newly-installed binary changes findBin(slug)'s answer, which
+          // gatherStatus surfaces as the row's "installed" state. Drop the
+          // SWR cache so the dashboard's post-install refreshHealth() poll
+          // sees the new world instead of the pre-install snapshot.
+          cachedGatherStatus.invalidate();
           try { res.end(); } catch {}
           return;
         }
@@ -1118,6 +1123,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
             emit({ line: String(e?.message || e), stream: 'stderr' });
             emit({ done: true, code: -1 });
           }
+          cachedGatherStatus.invalidate();
           try { res.end(); } catch {}
           return;
         }
@@ -1143,6 +1149,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
           emit({ line: String(e?.message || e), stream: 'stderr' });
           emit({ done: true, code: -1 });
         }
+        cachedGatherStatus.invalidate();
         try { res.end(); } catch {}
         return;
       }

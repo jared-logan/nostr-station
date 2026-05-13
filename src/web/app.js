@@ -12832,6 +12832,12 @@ const ConfigPanel = (() => {
           // loadIfVisible(), so the heavy Config rebuild only happens when
           // the user is actually on the Config panel. While they're staring
           // at the QR in the terminal, we don't churn the panel underneath.
+          //
+          // Schedule chosen to feel snappy on the happy path (Amber confirms
+          // within ~1-5s of the user scanning the QR) while still covering
+          // the slow path (user puts phone down, comes back later). Tight
+          // early polls hit the "I just logged in, why is the panel stale?"
+          // window; the longer tail covers >1-minute delays.
           const refetch = () => {
             apiInvalidate('/api/ngit/account');
             apiInvalidate('/api/identity/config');
@@ -12839,7 +12845,7 @@ const ConfigPanel = (() => {
             loadIfVisible();
             refreshHealth();
           };
-          [5_000, 15_000, 45_000, 120_000].forEach(ms => setTimeout(refetch, ms));
+          [1_000, 2_500, 5_000, 10_000, 25_000, 60_000, 120_000].forEach(ms => setTimeout(refetch, ms));
           return;
         }
         // Fallback path — terminal unavailable. Fire the old modal; ngit
