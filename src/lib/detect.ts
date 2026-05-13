@@ -5,9 +5,9 @@ import path from 'path';
 // Known install targets checked ahead of process.env.PATH. On fresh Linux
 // installs, the Node process inherits a restricted PATH that doesn't yet
 // include ~/.cargo/bin — so every cargo-installed or prebuilt-downloaded
-// binary (nak, ngit, nostr-rs-relay, nvpn) reads as "not installed" until
-// the user opens a new login shell. Walking a curated dir list catches
-// them regardless of shell state.
+// binary (nak, ngit, nvpn) reads as "not installed" until the user opens
+// a new login shell. Walking a curated dir list catches them regardless
+// of shell state.
 function augmentedBinDirs(): string[] {
   const home = os.homedir();
   return [
