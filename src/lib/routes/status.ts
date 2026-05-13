@@ -89,13 +89,29 @@ const KIND_TO_STATUS: Record<number, EffectiveStatus> = {
 /**
  * Map a kind-1631 event to either 'merged' or 'resolved'. NIP-34
  * uses the same kind for both, distinguished by what the event is
- * attached to: patches → merged, issues → resolved. We detect by
- * the presence of a `merge-commit` or `applied-as-commits` tag —
- * both are patch-specific.
+ * attached to: patches → merged, issues → resolved.
+ *
+ * Three detection signals, in priority order:
+ *   1. `merge-commit` tag — gitworkshop's merge events, pre-2.x ngit
+ *   2. `applied-as-commits` tag — patches applied via rebase / squash /
+ *      cherry-pick without a merge commit
+ *   3. `alt` tag matching /\bmerg(e|ed)\b/ — ngit 2.x's `pr merge`
+ *      publishes the kind-1631 with `alt: "PR merged"` but WITHOUT
+ *      either patch-specific tag above. The `r` tag in those events
+ *      is even an empty string, so the alt is the only meaningful
+ *      semantic signal.
+ *
+ * False-positive risk for the alt fallback: an issue-resolution event
+ * whose `alt` happens to contain the word "merge" would misclassify.
+ * No tooling we're aware of writes that — ngit's issue-status flow
+ * uses different alt copy, and gitworkshop uses "Status change."
  */
 function mapKind1631(event: NostrEvent): EffectiveStatus {
   for (const t of event.tags) {
     if (t[0] === 'merge-commit' || t[0] === 'applied-as-commits') return 'merged';
+    if (t[0] === 'alt' && typeof t[1] === 'string' && /\bmerg(e|ed)\b/i.test(t[1])) {
+      return 'merged';
+    }
   }
   return 'resolved';
 }
