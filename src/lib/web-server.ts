@@ -457,9 +457,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       }
 
       if (url === '/api/auth/challenge' && method === 'POST') {
+        // Return the URL the server will require in the signed event's `u`
+        // tag so NIP-07 clients sign against the canonical loopback origin,
+        // not whichever hostname the browser happens to be visiting
+        // (`localhost` vs `127.0.0.1` vs `[::1]` all map to the same socket).
         const c = issueChallenge();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(c));
+        res.end(JSON.stringify({ ...c, expectedUrl: expectedDashboardUrl(req, port) }));
         return;
       }
 
