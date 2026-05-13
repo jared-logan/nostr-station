@@ -82,6 +82,81 @@ export function memoizeWithTtl<T>(fn: () => Promise<T>, ttlMs: number): Memoized
   return wrapped;
 }
 
+// Stale-while-revalidate variant. Same dedupe + per-fetch semantics as
+// memoizeWithTtl on the first-ever call (block until the underlying fn
+// resolves), but after the TTL elapses the cached value is returned
+// IMMEDIATELY and a background refresh fires. Subsequent callers during
+// the refresh continue to get the previously-cached value; once the
+// refresh resolves, the cache updates and the new value is served from
+// then on.
+//
+// Why this exists: nvpn status --json can take 4 s when the daemon
+// socket is wedged (the CLI doesn't fast-fail), and the dashboard pays
+// that cost on every cache miss with the plain TTL cache. SWR turns
+// the first call into a one-time cost — every call afterwards is
+// instant from cache, even past the TTL.
+//
+// Trade-off: state transitions show up to ~TTL of staleness in the UI
+// (a freshly-stopped daemon still reports "running" briefly). For nvpn
+// probes that's invisible on a healthy daemon and net-better than the
+// 4 s freeze on a wedged one.
+//
+// On refresh rejection: the cached value is intentionally preserved (a
+// transient probe failure shouldn't drop the last-known-good state).
+// The next caller still triggers a fresh background refresh on the
+// stale path; the only escape hatch from a permanently-broken upstream
+// is .invalidate() (called from action helpers after Start/Stop).
+//
+// On first-call rejection: nothing cached yet, the caller's promise
+// rejects; the next call retries (the firstFetch slot clears via the
+// .finally hook).
+export function memoizeWithSwr<T>(fn: () => Promise<T>, ttlMs: number): Memoized<T> {
+  let cache: { fetchedAt: number; value: T } | null = null;
+  let firstFetch:        Promise<T> | null = null;
+  let backgroundRefresh: Promise<unknown> | null = null;
+  // Bumps on every invalidate() so an in-flight refresh whose result
+  // arrives after a state-changed event doesn't clobber the fresh
+  // cleared state.
+  let epoch = 0;
+
+  const fetchAndStore = async (): Promise<T> => {
+    const myEpoch = epoch;
+    const value = await fn();
+    if (myEpoch === epoch) {
+      cache = { fetchedAt: Date.now(), value };
+    }
+    return value;
+  };
+
+  const wrapped = (() => {
+    if (cache) {
+      const stale = Date.now() - cache.fetchedAt >= ttlMs;
+      if (stale && !backgroundRefresh) {
+        backgroundRefresh = fetchAndStore()
+          // Swallow refresh errors — we'd rather keep the stale value
+          // than crash the .then chain of whoever started the refresh
+          // (no one awaits backgroundRefresh; it's fire-and-forget).
+          .catch(() => undefined)
+          .finally(() => { backgroundRefresh = null; });
+      }
+      return Promise.resolve(cache.value);
+    }
+    // No cache → first call ever, or post-error retry. Block on a
+    // real fetch, dedupe concurrent callers onto the same promise.
+    if (!firstFetch) {
+      firstFetch = fetchAndStore().finally(() => { firstFetch = null; });
+    }
+    return firstFetch;
+  }) as Memoized<T>;
+
+  wrapped.invalidate = () => {
+    cache = null;
+    backgroundRefresh = null;
+    epoch++;
+  };
+  return wrapped;
+}
+
 const PROBE_CACHE_TTL_MS = 2_000;
 
 // ── Status ────────────────────────────────────────────────────────────────
@@ -160,7 +235,7 @@ async function probeNvpnStatusUncached(): Promise<NvpnStatus> {
 // rationale above). Routes / SSE / gatherStatus all call this; it spawns
 // at most one nvpn subprocess per PROBE_CACHE_TTL_MS slice.
 export const probeNvpnStatus: Memoized<NvpnStatus> =
-  memoizeWithTtl(probeNvpnStatusUncached, PROBE_CACHE_TTL_MS);
+  memoizeWithSwr(probeNvpnStatusUncached, PROBE_CACHE_TTL_MS);
 
 // ── Control ───────────────────────────────────────────────────────────────
 
@@ -294,7 +369,7 @@ function svcErrorResponse(error: string): NvpnServiceStatus {
 // above. Used by the SSE banner's running fallback, the Logs-panel meta
 // strip, and the renderServiceBlock UI.
 export const probeNvpnServiceStatus: Memoized<NvpnServiceStatus> =
-  memoizeWithTtl(probeNvpnServiceStatusUncached, PROBE_CACHE_TTL_MS);
+  memoizeWithSwr(probeNvpnServiceStatusUncached, PROBE_CACHE_TTL_MS);
 
 // ── Cache invalidation on lifecycle events ────────────────────────────
 //

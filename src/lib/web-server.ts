@@ -43,7 +43,7 @@ import { AutoSyncManager } from './auto-sync.js';
 import { installNostrVpn } from './nvpn-installer.js';
 import {
   probeNvpnStatus, probeNvpnServiceStatus, startNvpnLogTail, vpnBannerRunningFor,
-  nvpnEvents, memoizeWithTtl,
+  nvpnEvents, memoizeWithSwr,
 } from './nvpn.js';
 import { installNak } from './nak-installer.js';
 import { installNgit } from './ngit-installer.js';
@@ -176,16 +176,23 @@ export function getAutoSyncManager(): AutoSyncManager | null {
 // timer doesn't keep the event loop alive across hot-restarts.
 let nvpnLogTailer: { stop: () => void } | null = null;
 
-// Cache /api/status for 3s. gatherStatus() is the dashboard's hot path —
-// the Status panel polls every 3-5s, and several other dashboard panels
-// call it on render. Each call shells out to nc, nvpn, and ~4 binary
-// `--version` probes, blocking the HTTP loop for as long as the slowest
-// command takes. The 3s TTL bounds blocking to once per 3 wall-clock
-// seconds while keeping panel refreshes feeling live. Re-uses the
-// generic memoizeWithTtl helper that nvpn.ts already exposes (status
-// cache shares the same shape — `await fn()`, identity-checked
-// invalidate).
-const cachedGatherStatus = memoizeWithTtl(async () => gatherStatus(), 3_000);
+// Cache /api/status with stale-while-revalidate semantics. gatherStatus()
+// is the dashboard's hot path — the Status panel polls every 3-5s, and
+// several other dashboard panels call it on render. Each call shells
+// out to nc, nvpn (up to 4s on a wedged daemon socket — the nvpn CLI
+// doesn't fast-fail), and ~4 binary `--version` probes.
+//
+// With SWR: the first /api/status request after boot blocks once
+// (~4 s worst case if nvpn is wedged). Every subsequent request is
+// instant from cache; after the TTL elapses, callers still get the
+// cached value immediately while a background refresh updates it.
+// Plain TTL caching would re-block every TTL window — meaningful on
+// a healthy daemon (~ms), brutal on a wedged one (~4 s).
+//
+// 3 s TTL stays — short enough that user-driven state changes
+// (start/stop relay, connect/disconnect nvpn) feel responsive on the
+// next panel refresh once the background fetch resolves.
+const cachedGatherStatus = memoizeWithSwr(async () => gatherStatus(), 3_000);
 
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
