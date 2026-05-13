@@ -7562,3 +7562,16 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
 @media (prefers-reduced-motion: reduce) {
   .dashboard-pulse { animation: none; opacity: 0.85; }
 }
+
+/* About → Check for updates result line */
+.cfg-updates-result {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text);
+}
+.cfg-updates-result.ok   { color: var(--success); }
+.cfg-updates-result.warn { color: var(--warn); }
+.cfg-updates-result.err  { color: var(--error); }
+.cfg-updates-result .ok-strong { color: var(--accent-bright, var(--accent, #c79bff)); font-weight: 500; }
