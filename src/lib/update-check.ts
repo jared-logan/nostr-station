@@ -9,10 +9,13 @@
  *      call per poll, cached). Result drives the "Update available" pill.
  *
  *   2. On user click, fast-forwards the working tree, reruns
- *      `npm install` + `npm run build`, and exits with code 75 so the
+ *      `npm ci` + `npm run build`, and exits with code 75 so the
  *      `bin/nostr-station.sh` wrapper respawns into the new build.
  *      Any failure mid-flow rolls the checkout back to the pre-update
- *      SHA so the wrapper boots into a known-good state.
+ *      SHA so the wrapper boots into a known-good state. `npm ci`
+ *      (not `npm install`) is intentional — it strictly respects the
+ *      committed lockfile and never writes back to it, which means
+ *      consecutive updates don't leave the working tree dirty.
  *
  * Polling cadence is deliberately low (every 30 minutes after a short
  * startup delay) so an idle dashboard does ~50 GitHub requests/day —
@@ -348,11 +351,19 @@ export async function applyUpdate(emit: SseEmit): Promise<void> {
       return;
     }
 
+    // `npm ci` (not `npm install`) — strictly installs what's in the
+    // committed lockfile and NEVER writes back to package-lock.json.
+    // `npm install` can subtly nudge the lockfile (npm-version drift,
+    // platform-specific optional deps, registry metadata refresh)
+    // which would leave the working tree "dirty" after every update
+    // and block the next one with our clean-tree refusal. `npm ci`
+    // also wipes node_modules first — a few seconds slower than the
+    // incremental install but reproducible by construction.
     emit({ phase: 'install' });
-    code = await runStep({ bin: 'npm', args: ['install', '--silent', '--no-audit', '--no-fund'] }, root, emit);
+    code = await runStep({ bin: 'npm', args: ['ci', '--silent', '--no-audit', '--no-fund'] }, root, emit);
     if (code !== 0) {
       await rollback(root, beforeSha, emit);
-      emit({ done: true, ok: false, error: 'npm install failed — rolled back' });
+      emit({ done: true, ok: false, error: 'npm ci failed — rolled back' });
       return;
     }
 
@@ -360,10 +371,10 @@ export async function applyUpdate(emit: SseEmit): Promise<void> {
     code = await runStep({ bin: 'npm', args: ['run', 'build', '--silent'] }, root, emit);
     if (code !== 0) {
       await rollback(root, beforeSha, emit);
-      // Best-effort: re-run npm install in case the rolled-back tree
-      // has different deps than the failed-build tree. Failure here
-      // just means the next start might need a manual `npm install`.
-      await runStep({ bin: 'npm', args: ['install', '--silent', '--no-audit', '--no-fund'] }, root, emit);
+      // Best-effort: re-run npm ci so the rolled-back tree has the
+      // deps that match the now-checked-out lockfile. Failure here
+      // just means the next start might need a manual `npm ci`.
+      await runStep({ bin: 'npm', args: ['ci', '--silent', '--no-audit', '--no-fund'] }, root, emit);
       emit({ done: true, ok: false, error: 'build failed — rolled back' });
       return;
     }
