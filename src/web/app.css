@@ -4262,7 +4262,15 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
   border: 1px solid var(--border);
   border-radius: var(--r);
 }
-.auth-owner .avatar { flex-shrink: 0; }
+.auth-owner .avatar { flex-shrink: 0; line-height: 0; }
+.auth-owner .avatar img {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  object-fit: cover;
+  display: block;
+}
+.auth-owner .meta { min-width: 0; }
 .auth-owner .name {
   font-size: 12px;
   color: var(--text-bright);
@@ -4273,6 +4281,19 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
   color: var(--text-dim);
   letter-spacing: 0.4px;
   text-transform: uppercase;
+}
+.auth-owner .nip05 {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  word-break: break-all;
+}
+.auth-owner .nip05 .ok { color: var(--success); }
+.auth-owner .npub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  margin-top: 2px;
+  word-break: break-all;
 }
 
 .auth-warn {
