@@ -23,7 +23,7 @@
  * are exported alongside the async query so they're trivially unit-
  * testable without a relay round-trip.
  */
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { findBin } from './detect.js';
@@ -349,6 +349,46 @@ export function getCached<T>(opts: CacheOptions): T | null {
   return env.value;
 }
 
+// Per-process memo of projects we've already inspected for tracked
+// cache files. Untracking is a one-time cleanup; once we've checked a
+// project (whether we found tracked files or not), no point re-running
+// `git ls-files` on every subsequent cache write.
+const untrackInspected = new Set<string>();
+
+// If the project's index has files under .nostr-station/cache/, stage
+// their removal. Combined with the .gitignore we write below, this
+// turns a "permanently dirty because of dashboard cache" project into
+// a clean working tree on the next snapshot. We deliberately don't
+// commit — the user's next snapshot picks the staged deletion up as a
+// normal change, and they retain explicit control over their git
+// history (no surprise commits land just because the dashboard polled).
+//
+// Safe across edge cases: not-a-git-repo, missing git binary, empty
+// index — all surface as a non-zero exit / empty stdout and we no-op.
+function maybeUntrackCacheFiles(projectPath: string): void {
+  if (untrackInspected.has(projectPath)) return;
+  untrackInspected.add(projectPath);
+
+  const gitBin = findBin('git');
+  if (!gitBin) return;
+
+  try {
+    const tracked = execFileSync(
+      gitBin, ['ls-files', '.nostr-station/cache'],
+      { cwd: projectPath, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 },
+    ).toString().trim();
+    if (!tracked) return; // Nothing tracked → no cleanup needed.
+
+    execFileSync(
+      gitBin,
+      ['rm', '--cached', '-r', '--ignore-unmatch', '.nostr-station/cache'],
+      { cwd: projectPath, stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000 },
+    );
+  } catch {
+    // best-effort — not a git repo, ls-files errored, anything: no-op.
+  }
+}
+
 export function setCached<T>(opts: CacheKey, value: T): void {
   const file = cachePath(opts);
   try {
@@ -360,11 +400,6 @@ export function setCached<T>(opts: CacheKey, value: T): void {
     // dashboard relay-poll rewrites these JSON files, git sees the
     // project as dirty forever, and snapshots accumulate noise commits
     // for cache deltas that the user never asked to track.
-    //
-    // Only covers projects whose cache files weren't previously
-    // tracked — for projects that already committed them, the user
-    // needs a one-time `git rm --cached -r .nostr-station/cache/`
-    // (gitignore can't untrack already-tracked files).
     const ignorePath = path.join(opts.projectPath, '.nostr-station', '.gitignore');
     const desired = 'cache/\n';
     let needsWrite = true;
@@ -372,6 +407,11 @@ export function setCached<T>(opts: CacheKey, value: T): void {
     if (needsWrite) {
       try { fs.writeFileSync(ignorePath, desired, { mode: 0o644 }); } catch { /* best-effort */ }
     }
+    // For projects that committed cache files BEFORE the .gitignore
+    // landed, stage their untracking once per process lifetime. The
+    // .gitignore alone can't help these — git keeps tracking what's
+    // already in the index regardless of ignore rules.
+    maybeUntrackCacheFiles(opts.projectPath);
   } catch {
     // best-effort — a cache write failure should never break the query
     // path. The next call will just re-query relays.
