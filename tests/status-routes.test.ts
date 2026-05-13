@@ -94,6 +94,35 @@ test('computeEffectiveStatus: 1631 without merge/applied tags → resolved (issu
   assert.equal(computeEffectiveStatus(ROOT_ID, ROOT_AUTHOR, new Set(), [ev]).status, 'resolved');
 });
 
+test('computeEffectiveStatus: 1631 with alt="PR merged" → merged (ngit 2.x pr merge)', () => {
+  // ngit 2.x's `pr merge` publishes a kind-1631 with `alt: "PR merged"`
+  // but no `merge-commit` / `applied-as-commits` tag. The pre-fix detector
+  // missed this and fell through to 'resolved' — pinning here so the
+  // alt-based fallback can't regress.
+  const ev = statusEv({
+    kind: 1631, pubkey: ROOT_AUTHOR,
+    tags: [
+      ['alt', 'PR merged'],
+      ['e', ROOT_ID, 'wss://git.shakespeare.diy/', 'root'],
+      ['a', '30617:' + ROOT_AUTHOR + ':blip'],
+      ['r', ''],
+    ],
+  });
+  assert.equal(computeEffectiveStatus(ROOT_ID, ROOT_AUTHOR, new Set(), [ev]).status, 'merged');
+});
+
+test('computeEffectiveStatus: 1631 with alt="Status change" + no merge tag → resolved', () => {
+  // Pins the negative side of the alt heuristic: gitworkshop sometimes
+  // publishes merge events with alt="Status change" (the merge signal
+  // lives in merge-commit). Without merge-commit AND without "merge" in
+  // alt, the event is an issue-style resolution.
+  const ev = statusEv({
+    kind: 1631, pubkey: ROOT_AUTHOR,
+    tags: [['alt', 'Status change'], ['e', ROOT_ID]],
+  });
+  assert.equal(computeEffectiveStatus(ROOT_ID, ROOT_AUTHOR, new Set(), [ev]).status, 'resolved');
+});
+
 test('computeEffectiveStatus: latest-wins among multiple authorised events', () => {
   // Order: open (oldest) → closed → draft (newest). Final status
   // is draft because that's the most recent authorised event.

@@ -27,7 +27,7 @@
  *     burning an Amber prompt).
  *
  *   POST /api/projects/:id/merge                  (SSE)
- *     Shells out to `ngit pr_merge <patch-root-id>`. Preflight:
+ *     Shells out to `ngit pr merge <patch-root-id>`. Preflight:
  *     refuses on dirty working tree (`git status --porcelain`
  *     non-empty) so a half-finished local edit can't be silently
  *     merged into.
@@ -89,13 +89,29 @@ const KIND_TO_STATUS: Record<number, EffectiveStatus> = {
 /**
  * Map a kind-1631 event to either 'merged' or 'resolved'. NIP-34
  * uses the same kind for both, distinguished by what the event is
- * attached to: patches → merged, issues → resolved. We detect by
- * the presence of a `merge-commit` or `applied-as-commits` tag —
- * both are patch-specific.
+ * attached to: patches → merged, issues → resolved.
+ *
+ * Three detection signals, in priority order:
+ *   1. `merge-commit` tag — gitworkshop's merge events, pre-2.x ngit
+ *   2. `applied-as-commits` tag — patches applied via rebase / squash /
+ *      cherry-pick without a merge commit
+ *   3. `alt` tag matching /\bmerg(e|ed)\b/ — ngit 2.x's `pr merge`
+ *      publishes the kind-1631 with `alt: "PR merged"` but WITHOUT
+ *      either patch-specific tag above. The `r` tag in those events
+ *      is even an empty string, so the alt is the only meaningful
+ *      semantic signal.
+ *
+ * False-positive risk for the alt fallback: an issue-resolution event
+ * whose `alt` happens to contain the word "merge" would misclassify.
+ * No tooling we're aware of writes that — ngit's issue-status flow
+ * uses different alt copy, and gitworkshop uses "Status change."
  */
 function mapKind1631(event: NostrEvent): EffectiveStatus {
   for (const t of event.tags) {
     if (t[0] === 'merge-commit' || t[0] === 'applied-as-commits') return 'merged';
+    if (t[0] === 'alt' && typeof t[1] === 'string' && /\bmerg(e|ed)\b/i.test(t[1])) {
+      return 'merged';
+    }
   }
   return 'resolved';
 }
@@ -587,7 +603,7 @@ export async function handleStatus(
       streamExecError(res, req, 'invalid rootId'); return true;
     }
     // Dirty-tree refusal — see Phase 4 design notes. The user told
-    // us merges should appear identical to a terminal `ngit pr_merge`,
+    // us merges should appear identical to a terminal `ngit pr merge`,
     // and a terminal would refuse silently / clobber depending on
     // state. We refuse loudly so the user always knows.
     try {
@@ -603,12 +619,16 @@ export async function handleStatus(
       streamExecError(res, req,
         `git status failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`); return true;
     }
-    // ngit pr_merge takes the root patch id and handles the full
-    // sequence: checkout the PR branch locally, merge into the
-    // target branch, push refs, publish kind 1631 with the merge
-    // commit + applied-as-commits tags.
+    // `ngit pr merge <root-id>` handles the full sequence: checkout
+    // the PR branch locally, merge into the target branch, push refs,
+    // publish kind 1631 with the merge commit + applied-as-commits tags.
+    //
+    // ngit 2.x normalized its subcommand surface from underscore-form
+    // (`pr_merge`) to spaced form (`pr merge`) — same shift `pr checkout`
+    // already used. The old form errors with `unrecognized subcommand
+    // 'pr_merge'` / `tip: a similar subcommand exists: 'pr'`.
     streamExec(
-      { bin: 'ngit', args: ['pr_merge', rootId], env: { NO_COLOR: '1', TERM: 'dumb' }, timeoutMs: 180_000 },
+      { bin: 'ngit', args: ['pr', 'merge', rootId], env: { NO_COLOR: '1', TERM: 'dumb' }, timeoutMs: 180_000 },
       res, req, project.path,
     );
     return true;
