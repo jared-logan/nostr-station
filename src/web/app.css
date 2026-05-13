@@ -7535,3 +7535,30 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
   font-size: 11px;
   flex-shrink: 0;
 }
+
+/* Slow purple pulse next to the Dashboard heading — a tiny live-cue
+   marker that the dashboard panel is the live, real-time surface. */
+.dashboard-pulse {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-left: 8px;
+  vertical-align: middle;
+  background: var(--accent, #a76cff);
+  box-shadow: 0 0 0 0 var(--accent, #a76cff);
+  animation: dashboard-pulse 2.4s ease-in-out infinite;
+}
+@keyframes dashboard-pulse {
+  0%, 100% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 0 rgba(167, 108, 255, 0.55);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 0 6px rgba(167, 108, 255, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-pulse { animation: none; opacity: 0.85; }
+}
