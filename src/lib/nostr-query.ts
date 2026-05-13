@@ -355,6 +355,23 @@ export function setCached<T>(opts: CacheKey, value: T): void {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o755 });
     const env: CacheEnvelope<T> = { cachedAt: Date.now(), value };
     fs.writeFileSync(file, JSON.stringify(env, null, 2), { mode: 0o644 });
+    // Idempotent .gitignore at .nostr-station/.gitignore so the cache
+    // dir is never staged by snapshot / commit. Without this, every
+    // dashboard relay-poll rewrites these JSON files, git sees the
+    // project as dirty forever, and snapshots accumulate noise commits
+    // for cache deltas that the user never asked to track.
+    //
+    // Only covers projects whose cache files weren't previously
+    // tracked — for projects that already committed them, the user
+    // needs a one-time `git rm --cached -r .nostr-station/cache/`
+    // (gitignore can't untrack already-tracked files).
+    const ignorePath = path.join(opts.projectPath, '.nostr-station', '.gitignore');
+    const desired = 'cache/\n';
+    let needsWrite = true;
+    try { needsWrite = fs.readFileSync(ignorePath, 'utf8') !== desired; } catch { /* missing → write */ }
+    if (needsWrite) {
+      try { fs.writeFileSync(ignorePath, desired, { mode: 0o644 }); } catch { /* best-effort */ }
+    }
   } catch {
     // best-effort — a cache write failure should never break the query
     // path. The next call will just re-query relays.

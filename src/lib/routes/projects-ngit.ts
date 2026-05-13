@@ -136,8 +136,8 @@ export async function handleProjectsNgit(
 
     try {
       const pullCode = await runPhase(
-        'git pull --no-rebase --ff-only',
-        'git', ['pull', '--no-rebase', '--ff-only'],
+        'git pull --no-rebase --ff-only origin HEAD',
+        'git', ['pull', '--no-rebase', '--ff-only', 'origin', 'HEAD'],
       );
       if (pullCode !== 0) {
         emit({ line: `pull failed (exit ${pullCode}) — skipping push`, stream: 'stderr' });
