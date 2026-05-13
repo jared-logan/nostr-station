@@ -194,6 +194,21 @@ let nvpnLogTailer: { stop: () => void } | null = null;
 // next panel refresh once the background fetch resolves.
 const cachedGatherStatus = memoizeWithSwr(async () => gatherStatus(), 3_000);
 
+// State-change → cache-invalidate wiring. Without this, the SWR cache's
+// TTL window (3 s) is the floor on how long a user waits to see the
+// effect of an action they just took (Stop nvpn → Status row says
+// "running" for up to 3 s). With invalidate on action, the next read
+// re-fetches immediately and reflects the new state.
+//
+// nvpn action helpers already emit `state-changed` on nvpnEvents (see
+// nvpn.ts); probeNvpnStatus + probeNvpnServiceStatus auto-invalidate on
+// the same event. /api/status surfaces nvpn state via gatherStatus, so
+// it needs the same wiring — otherwise the dashboard's Status panel
+// keeps showing the pre-action world for a TTL slice. Relay and
+// watchdog actions invalidate inline at their endpoints below
+// (search for `cachedGatherStatus.invalidate` in this file).
+nvpnEvents.on('state-changed', () => { cachedGatherStatus.invalidate(); });
+
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
 }
@@ -826,6 +841,9 @@ export async function startWebServer(port: number): Promise<http.Server> {
           if (action === 'start' || action === 'restart') {
             await maybeStartInprocRelay();
           }
+          // Drop the /api/status cache so the next Status panel poll
+          // sees the post-action world (relay row flips immediately).
+          cachedGatherStatus.invalidate();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, action, up: inprocRelay !== null }));
         } catch (e: any) {
@@ -1033,6 +1051,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
       if (url === '/api/watchdog/start' && method === 'POST') {
         try {
           await maybeStartWatchdog();
+          cachedGatherStatus.invalidate();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, status: watchdog?.status() ?? null }));
         } catch (e: any) {
@@ -1046,6 +1065,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
           watchdog.stop();
           watchdog = null;
         }
+        cachedGatherStatus.invalidate();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -1648,9 +1668,28 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // the dashboard binds so a relay-port collision doesn't prevent
       // the dashboard from coming up — the relay will surface its own
       // EADDRINUSE in stderr if 7777 is taken.
-      void maybeStartInprocRelay().catch(e => {
-        process.stderr.write(`[relay] failed to start: ${(e as Error).message}\n`);
-      });
+      void maybeStartInprocRelay()
+        .then(() => {
+          // Pre-warm the SWR caches in the background. The first
+          // /api/status / Logs-SSE request would otherwise pay the
+          // cold probe cost (nc + nvpn + ~5 binary --version probes,
+          // ~1-4 s wall-clock on a wedged nvpn daemon). Kicking them
+          // off here means the dashboard's first poll usually rides
+          // an already-resolved cache. The three caches are
+          // independent — if any of them hangs (e.g. nvpn wedged),
+          // the other two still warm in parallel.
+          //
+          // Fire-and-forget: rejection paths inside the caches just
+          // leave the slot empty so the user's first request takes
+          // the cold hit (same as before this commit), they don't
+          // crash startup.
+          void cachedGatherStatus();
+          void probeNvpnStatus();
+          void probeNvpnServiceStatus();
+        })
+        .catch(e => {
+          process.stderr.write(`[relay] failed to start: ${(e as Error).message}\n`);
+        });
       // nvpn daemon log tailer — best-effort. Sits idle until the daemon
       // log file appears, then pumps lines into logBuffers.vpn so the
       // Logs panel's nostr-vpn tab streams real output. Single instance
