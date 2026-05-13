@@ -37,7 +37,7 @@
  * a parallel kind-163x query.
  */
 import http from 'http';
-import { execFile } from 'child_process';
+import { execFile, execFileSync, spawn } from 'child_process';
 import { promisify } from 'util';
 import { nip19 } from 'nostr-tools';
 import { getProject, type Project } from '../projects.js';
@@ -598,22 +598,56 @@ export async function handleStatus(
   }
 
   // ── Merge (SSE) ─────────────────────────────────────────────────────
+  //
+  // ngit 2.x's `pr merge` is announcement-only: it publishes a kind-1631
+  // status event marking the PR as merged but does NOT actually perform
+  // the git merge or push the merged refs. The empty `r: [""]` tag on
+  // its published event is the smoking gun — no merge commit to
+  // reference because no merge happened.
+  //
+  // So the merge route does the work explicitly in five phases:
+  //   1. git fetch origin
+  //   2. git checkout <default-branch>
+  //   3. git merge --ff-only <pr-branch>
+  //   4. git push origin <default-branch>
+  //   5. ngit pr merge <rootId>           — announce on Nostr LAST,
+  //                                          only after the actual
+  //                                          merge succeeded
+  //
+  // Up-front validation catches everything that should fail with a
+  // clear message rather than mid-flight: branch name shape, branch
+  // exists locally, clean working tree, default-branch detection,
+  // PR branch is not itself the default branch (no self-merge).
   if (mergeMatch && method === 'POST') {
     if (!project.path) { streamExecError(res, req, 'project has no local path'); return true; }
     if (!findBin('ngit')) { streamExecError(res, req, 'ngit not found on PATH'); return true; }
+    const gitBin = findBin('git') || 'git';
+
     let parsed: any = {};
     try { parsed = JSON.parse(await readBody(req)); }
     catch { res.writeHead(400); res.end('bad json'); return true; }
+
     const rootId = typeof parsed.rootId === 'string' ? parsed.rootId.trim() : '';
     if (!/^[a-f0-9]{16,64}$/.test(rootId)) {
       streamExecError(res, req, 'invalid rootId'); return true;
     }
-    // Dirty-tree refusal — see Phase 4 design notes. The user told
-    // us merges should appear identical to a terminal `ngit pr merge`,
-    // and a terminal would refuse silently / clobber depending on
-    // state. We refuse loudly so the user always knows.
+
+    // Branch name comes from the kind-1617 patch event's `branch-name`
+    // tag (surfaced to the client via routes/patches.ts's detail
+    // enrichment). Without it we don't know which local branch holds
+    // the commits to integrate.
+    const branchName = typeof parsed.branchName === 'string' ? parsed.branchName.trim() : '';
+    if (!/^[A-Za-z][A-Za-z0-9._/-]{0,127}$/.test(branchName)) {
+      streamExecError(res, req,
+        'branchName required and must match the patch event\'s branch-name tag. ' +
+        'If you opened this PR yourself, the dashboard should pass it automatically — try refreshing the Pull requests tab.');
+      return true;
+    }
+
+    // Dirty-tree refusal. A merge into a dirty default branch would
+    // either silently fail or clobber the user's WIP depending on what
+    // git is in the mood for; we refuse loudly so they always know.
     try {
-      const gitBin = findBin('git') || 'git';
       const { stdout } = await execFileAsync(gitBin, ['status', '--porcelain'], {
         cwd: project.path, timeout: 5_000,
       });
@@ -625,18 +659,209 @@ export async function handleStatus(
       streamExecError(res, req,
         `git status failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`); return true;
     }
-    // `ngit pr merge <root-id>` handles the full sequence: checkout
-    // the PR branch locally, merge into the target branch, push refs,
-    // publish kind 1631 with the merge commit + applied-as-commits tags.
-    //
-    // ngit 2.x normalized its subcommand surface from underscore-form
-    // (`pr_merge`) to spaced form (`pr merge`) — same shift `pr checkout`
-    // already used. The old form errors with `unrecognized subcommand
-    // 'pr_merge'` / `tip: a similar subcommand exists: 'pr'`.
-    streamExec(
-      { bin: 'ngit', args: ['pr', 'merge', rootId], env: { NO_COLOR: '1', TERM: 'dumb' }, timeoutMs: 180_000 },
-      res, req, project.path,
-    );
+
+    // PR branch must exist locally. For PRs the user opened via the
+    // Submit PR CTA the branch will already be there; for incoming
+    // PRs from contributors the user must Download first (ngit pr
+    // checkout creates the branch).
+    try {
+      execFileSync(gitBin, ['rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`], {
+        cwd: project.path, stdio: ['ignore', 'ignore', 'ignore'], timeout: 5_000,
+      });
+    } catch {
+      streamExecError(res, req,
+        `branch '${branchName}' not found locally — click Download on the PR first (Pull requests tab) to check it out.`);
+      return true;
+    }
+
+    // Default-branch detection. Same `git symbolic-ref` pattern as the
+    // /ngit/proposal/new route. Falls back to 'main' if origin/HEAD
+    // isn't published (rare; happens on freshly-init'd ngit repos
+    // before the first push).
+    let defaultBranch = 'main';
+    try {
+      const out = execFileSync(gitBin, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], {
+        cwd: project.path, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+      }).toString().trim();
+      if (out.startsWith('origin/')) defaultBranch = out.slice('origin/'.length);
+    } catch { /* keep 'main' default */ }
+
+    if (branchName === defaultBranch) {
+      streamExecError(res, req,
+        `'${branchName}' IS the default branch — nothing to merge into itself.`);
+      return true;
+    }
+
+    // All pre-conditions passed. SSE-stream the five-phase flow.
+    res.writeHead(200, {
+      'Content-Type':  'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection':    'keep-alive',
+    });
+    const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+    const env = { ...process.env, NO_COLOR: '1', TERM: 'dumb' };
+    const cwd = project.path;
+    let killed = false;
+    req.on('close', () => { killed = true; });
+
+    const runPhase = (label: string, bin: string, args: string[], timeoutMs = 60_000): Promise<number> =>
+      new Promise((resolve) => {
+        if (killed) return resolve(-1);
+        emit({ line: `▸ ${label}`, stream: 'stdout' });
+        const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], env, cwd });
+        const pipe = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+          for (const line of chunk.toString().split('\n')) {
+            if (line.length) emit({ line, stream });
+          }
+        };
+        child.stdout.on('data', pipe('stdout'));
+        child.stderr.on('data', pipe('stderr'));
+        child.on('error', (e) => {
+          emit({ line: String(e.message || e), stream: 'stderr' });
+          resolve(-1);
+        });
+        let resolved = false;
+        const finish = (code: number) => { if (!resolved) { resolved = true; resolve(code); } };
+        child.on('close', (code) => finish(code ?? -1));
+        const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} finish(-2); }, timeoutMs);
+        child.on('close', () => clearTimeout(timer));
+      });
+
+    try {
+      // 1. Fetch so origin/<default-branch> reflects ground truth. If
+      //    the default branch has advanced upstream since the user last
+      //    synced, the ff-only merge in phase 3 will refuse — which is
+      //    the right behavior. Sync first, retry the merge.
+      const fetchCode = await runPhase('git fetch origin', 'git', ['fetch', 'origin']);
+      if (fetchCode !== 0) {
+        emit({ line: `git fetch failed (exit ${fetchCode}) — aborting before any state changes`, stream: 'stderr' });
+        emit({ done: true, code: fetchCode });
+        try { res.end(); } catch {}
+        return true;
+      }
+
+      // 2. Checkout the default branch so the merge in step 3 lands
+      //    there. ngit's broken pr-merge left HEAD on the PR branch;
+      //    we put HEAD where it actually needs to be.
+      const checkoutCode = await runPhase(
+        `git checkout ${defaultBranch}`,
+        'git', ['checkout', defaultBranch],
+      );
+      if (checkoutCode !== 0) {
+        emit({ line: `git checkout ${defaultBranch} failed (exit ${checkoutCode}) — aborting before any state changes`, stream: 'stderr' });
+        emit({ done: true, code: checkoutCode });
+        try { res.end(); } catch {}
+        return true;
+      }
+
+      // 3. ff-only merge. Refuses (and we surface) if the default
+      //    branch has diverged from the PR branch's base — we don't
+      //    silently fabricate merge commits the user didn't request.
+      const mergeCode = await runPhase(
+        `git merge --ff-only ${branchName}`,
+        'git', ['merge', '--ff-only', branchName],
+      );
+      if (mergeCode !== 0) {
+        emit({
+          line: `merge failed (exit ${mergeCode}) — ${defaultBranch} likely diverged. Pull / sync first, then retry. No refs changed; you're back on ${defaultBranch}.`,
+          stream: 'stderr',
+        });
+        emit({ done: true, code: mergeCode });
+        try { res.end(); } catch {}
+        return true;
+      }
+
+      // 4. Push the merged default branch to origin so the GRASP server
+      //    (and every downstream consumer — gitworkshop, Shakespeare,
+      //    next contributor to clone) sees the new state. Without this
+      //    the merge is local-only and the dashboard's 'merged' badge
+      //    is a lie.
+      //
+      //    Amber sign prompt fires here. 3-min timeout to accommodate
+      //    the user's phone-tap round-trip + GRASP upload.
+      const pushCode = await runPhase(
+        `git push origin ${defaultBranch}`,
+        'git', ['push', 'origin', defaultBranch],
+        180_000,
+      );
+      if (pushCode !== 0) {
+        emit({
+          line: `push failed (exit ${pushCode}) — local ${defaultBranch} has the merge commit but origin doesn't. Try clicking Sync on the project card to retry the push.`,
+          stream: 'stderr',
+        });
+        emit({ done: true, code: pushCode });
+        try { res.end(); } catch {}
+        return true;
+      }
+
+      // 5. Finally — announce on Nostr. We try to publish a kind-1631
+      //    status event ourselves, AFTER the actual merge + push, so
+      //    there's no inconsistent "announced as merged but no merge
+      //    on GRASP" state (the exact bug ngit pr merge exhibits when
+      //    invoked alone).
+      //
+      //    HOWEVER — when pushing to a nostr:// remote (phase 4),
+      //    git-remote-nostr already publishes a kind-1631 itself as
+      //    part of the protocol. By the time this phase runs, ngit
+      //    detects the PR is already marked merged and exits 1 with
+      //    "PR is already applied/merged" written to stderr. That's
+      //    the happy path, not a failure: the announcement is on the
+      //    network either way.
+      //
+      //    So this phase uses a custom inline spawn (rather than the
+      //    shared runPhase helper) so we can both stream output AND
+      //    detect the "already" marker in stderr. Exit 0 or "already"
+      //    → emit success; anything else → propagate the exit code.
+      emit({ line: `▸ ngit pr merge ${rootId}`, stream: 'stdout' });
+      const announceResult: { code: number; alreadyMerged: boolean } =
+        await new Promise((resolve) => {
+          if (killed) return resolve({ code: -1, alreadyMerged: false });
+          let alreadyMerged = false;
+          const child = spawn('ngit', ['pr', 'merge', rootId], {
+            stdio: ['ignore', 'pipe', 'pipe'], env, cwd,
+          });
+          const handle = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+            for (const line of chunk.toString().split('\n')) {
+              if (!line.length) continue;
+              if (/already\s+(applied|merged)/i.test(line)) alreadyMerged = true;
+              emit({ line, stream });
+            }
+          };
+          child.stdout.on('data', handle('stdout'));
+          child.stderr.on('data', handle('stderr'));
+          let resolved = false;
+          const finish = (code: number) => {
+            if (resolved) return;
+            resolved = true;
+            resolve({ code, alreadyMerged });
+          };
+          child.on('error', (e) => {
+            emit({ line: String(e.message || e), stream: 'stderr' });
+            finish(-1);
+          });
+          child.on('close', (code) => finish(code ?? -1));
+          const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} finish(-2); }, 180_000);
+          child.on('close', () => clearTimeout(timer));
+        });
+
+      if (announceResult.code === 0 || announceResult.alreadyMerged) {
+        if (announceResult.alreadyMerged && announceResult.code !== 0) {
+          // Helpful explanatory line so users reading the modal scrollback
+          // understand WHY ngit said "already merged" — without it, the
+          // last visible line is a scary "Error: PR is already
+          // applied/merged" that we then magically treat as success.
+          emit({
+            line: '(merge announcement was already published by git-remote-nostr during the push — treating as success.)',
+            stream: 'stdout',
+          });
+        }
+        emit({ done: true, code: 0 });
+      } else {
+        emit({ done: true, code: announceResult.code });
+      }
+    } finally {
+      try { res.end(); } catch {}
+    }
     return true;
   }
 

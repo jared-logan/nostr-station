@@ -530,14 +530,23 @@ export async function handlePatches(
     const rootId = detailMatch[2];
     const series = buildPatchSeries(r.events).find((s) => s.rootId === rootId);
     if (!series) return json(res, 404, { error: 'series not found' });
-    // Enrich with cover-letter content for each revision's root.
+    // Enrich with cover-letter content for each revision's root, plus
+    // the patch event's `branch-name` tag — the Pull-requests tab's
+    // Merge button needs it to know which local branch to integrate
+    // into the default branch. ngit 2.x's `pr merge` doesn't actually
+    // do that integration itself; the server-side merge route runs
+    // the git operations explicitly. See issue: "Merge button publishes
+    // kind-1631 but doesn't perform the actual merge."
     const enriched = {
       ...series,
       revisions: series.revisions.map((rev) => {
         const rootEv = eventsById.get(rev.rootId);
+        const branchTag = rootEv?.tags.find((t) => t[0] === 'branch-name');
+        const branchName = typeof branchTag?.[1] === 'string' ? branchTag[1] : null;
         return {
           ...rev,
           coverLetter: rootEv && isCoverLetter(rootEv) ? rootEv.content : null,
+          branchName,
         };
       }),
     };
