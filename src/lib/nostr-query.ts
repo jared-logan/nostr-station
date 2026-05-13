@@ -356,12 +356,26 @@ export function getCached<T>(opts: CacheOptions): T | null {
 const untrackInspected = new Set<string>();
 
 // If the project's index has files under .nostr-station/cache/, stage
-// their removal. Combined with the .gitignore we write below, this
-// turns a "permanently dirty because of dashboard cache" project into
-// a clean working tree on the next snapshot. We deliberately don't
-// commit — the user's next snapshot picks the staged deletion up as a
-// normal change, and they retain explicit control over their git
-// history (no surprise commits land just because the dashboard polled).
+// their removal AND commit it, scoped tightly to that pathspec so user
+// WIP elsewhere is never touched. Combined with the .gitignore we
+// write below, this turns a "permanently dirty because of dashboard
+// cache" project into a clean working tree fully automatically — the
+// user never has to know cleanup was needed, never has to think about
+// it in their snapshot, never has to open a terminal.
+//
+// Path-scoped commit: `git commit -- .nostr-station/cache/` only
+// captures changes affecting that pathspec, so the user's other
+// staged/unstaged work is preserved. The only thing in scope is our
+// own `git rm --cached` from a moment earlier.
+//
+// Identity requirement: `git commit` needs user.name + user.email.
+// ngit-scan clones get seeded by seedRepoGitIdentityIfMissing on the
+// clone path, and projects scaffolded through the dashboard inherit
+// the station identity. Truly identity-less projects (adopted from a
+// path with no global git config) will fail at the commit step; the
+// rm --cached still stands, and the user's next snapshot picks it
+// up the same way it would have without this auto-commit. Either
+// way, no terminal-poking required from the user.
 //
 // Safe across edge cases: not-a-git-repo, missing git binary, empty
 // index — all surface as a non-zero exit / empty stdout and we no-op.
@@ -384,6 +398,17 @@ function maybeUntrackCacheFiles(projectPath: string): void {
       ['rm', '--cached', '-r', '--ignore-unmatch', '.nostr-station/cache'],
       { cwd: projectPath, stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000 },
     );
+
+    // Path-scoped commit — only the cache deletions, not user WIP.
+    // Best-effort: swallow if identity isn't configured. The rm
+    // --cached is still staged; the next snapshot would commit it.
+    try {
+      execFileSync(
+        gitBin,
+        ['commit', '-m', 'chore: stop tracking nostr-station cache files', '--', '.nostr-station/cache'],
+        { cwd: projectPath, stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000 },
+      );
+    } catch { /* identity missing, nothing to commit, etc. — fall through */ }
   } catch {
     // best-effort — not a git repo, ls-files errored, anything: no-op.
   }
