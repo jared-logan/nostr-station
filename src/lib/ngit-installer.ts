@@ -14,21 +14,21 @@
 // "cargo not found on PATH". This installer avoids the toolchain
 // dependency entirely — same security model as nak-installer.ts:
 // pinned version + pinned sha256, hard-fail on mismatch, no curl|sh.
+//
+// Shared installer boilerplate (logger, curl-download + sha256 verify)
+// lives in ./installer-runtime.ts so nak / ngit / nvpn stay in sync on
+// log conventions and download semantics.
 
 import { execa } from 'execa';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
-import { verifyFileSha256 } from './checksum.js';
+import {
+  type InstallResult, type ProgressCallback,
+  createInstallLogger, downloadAndVerify,
+} from './installer-runtime.js';
 
-export interface InstallResult {
-  ok:      boolean;
-  detail?: string;
-  warn?:   boolean;
-}
-
-export type ProgressCallback = (step: string) => void;
+export type { InstallResult, ProgressCallback };
 
 // ngit's release-asset naming follows Rust target triples, not Go-style
 // {os}-{arch}. Mac is a single universal binary that runs on both Intel
@@ -84,40 +84,24 @@ export async function installNgit(onProgress: ProgressCallback = () => {}): Prom
     };
   }
 
-  const logPath = path.join(os.homedir(), 'logs', 'ngit-install.log');
-  const append = (line: string): void => {
-    const stamped = `[${new Date().toISOString()}] ${line}`;
-    try {
-      fs.mkdirSync(path.dirname(logPath), { recursive: true });
-      fs.appendFileSync(logPath, stamped + '\n');
-    } catch { /* best-effort */ }
-  };
-  const step = (msg: string): void => {
-    append(`step: ${msg}`);
-    onProgress(msg);
-  };
-  const fail = (stepName: string, reason: string): InstallResult => {
-    append(`FAIL ${stepName}: ${reason}`);
-    return { ok: false, detail: `${stepName} — ${reason} (log: ${logPath})` };
-  };
-
-  append(`target=${target}`);
+  const log = createInstallLogger('ngit', onProgress);
+  log.append(`target=${target}`);
 
   // Short-circuit when already installed and responding.
-  step('checking for existing install');
+  log.step('checking for existing install');
   try {
     await execa('ngit', ['--version'], { stdio: 'pipe', timeout: 5000 });
-    append('already installed — skipping');
+    log.append('already installed — skipping');
     return { ok: true, detail: 'already installed' };
   } catch { /* fall through to install */ }
 
   const pinnedVersion = COMPONENT_VERSIONS['ngit'];
   if (!pinnedVersion) {
-    return fail('config', 'no pinned ngit version in versions.ts');
+    return log.fail('config', 'no pinned ngit version in versions.ts');
   }
   const expectedSha = BINARY_SHA256.ngit?.[target];
   if (!expectedSha) {
-    return fail(
+    return log.fail(
       'config',
       `no checksum pinned for ngit ${target} — refusing unverified install`,
     );
@@ -130,53 +114,27 @@ export async function installNgit(onProgress: ProgressCallback = () => {}): Prom
   const tarPath  = path.join(tmp, 'ngit.tar.gz');
   const destFile = '/usr/local/bin/ngit';
   fs.mkdirSync(tmp, { recursive: true });
-  append(`tmp=${tmp} pinned=${pinnedVersion} sha256=${expectedSha.slice(0, 12)}…`);
+  log.append(`tmp=${tmp} pinned=${pinnedVersion} sha256=${expectedSha.slice(0, 12)}…`);
 
-  step(`downloading ${url}`);
-  try {
-    await execa(
-      'curl',
-      ['-fsSL', '-o', tarPath, url],
-      { stdio: 'pipe', timeout: 120_000 },
-    );
-    append(`curl ok`);
-  } catch (e: any) {
-    const stderr = e?.stderr?.toString?.() || '';
-    const exit   = e?.exitCode ?? '?';
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return fail(
-      'download',
-      `curl failed (exit ${exit}): ${stderr.trim().slice(0, 160) || 'no stderr'}`,
-    );
-  }
+  // Download + verify in one shot. Pre-shared-runtime, this was two
+  // ~25-LOC blocks per installer; now both halves come from the same
+  // helper so the curl flags and the BEFORE-EXTRACTION verification
+  // are consistent across nak / ngit / nvpn.
+  const dl = await downloadAndVerify({
+    url, expectedSha, outFile: tarPath, tmpDir: tmp, log,
+    toolLabel: 'ngit tarball',
+    timeoutMs: 120_000,
+  });
+  if (!dl.ok) return dl.result;
 
-  // Verify BEFORE extracting — tar can write absolute paths or symlinks
-  // that escape the destination, so we never let an unverified tarball
-  // touch disk beyond the single download path we control.
-  step('verifying sha256');
-  let verified = false;
-  try { verified = verifyFileSha256(tarPath, expectedSha); }
-  catch (e: any) {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return fail('checksum', `sha256 read failed: ${(e?.message ?? '').slice(0, 160)}`);
-  }
-  if (!verified) {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return fail(
-      'checksum',
-      `ngit tarball SHA256 mismatch (expected ${expectedSha.slice(0, 12)}…) — install aborted`,
-    );
-  }
-  append('sha256 verified');
-
-  step('extracting tarball');
+  log.step('extracting tarball');
   try {
     await execa('tar', ['-xzf', tarPath, '-C', tmp], { stdio: 'pipe', timeout: 30_000 });
-    append(`extract ok, contents: ${fs.readdirSync(tmp).join(', ')}`);
+    log.append(`extract ok, contents: ${fs.readdirSync(tmp).join(', ')}`);
   } catch (e: any) {
     const stderr = e?.stderr?.toString?.() || '';
     fs.rmSync(tmp, { recursive: true, force: true });
-    return fail('extract', `tar failed: ${stderr.trim().slice(0, 160) || e.message?.slice(0, 160)}`);
+    return log.fail('extract', `tar failed: ${stderr.trim().slice(0, 160) || e.message?.slice(0, 160)}`);
   }
 
   // Locate both binaries. `ngit` is required; `git-remote-nostr` is
@@ -185,7 +143,7 @@ export async function installNgit(onProgress: ProgressCallback = () => {}): Prom
   // PATH lookup of `git-remote-<scheme>`. Refusing to install when
   // either is missing prevents the half-broken state where the CLI
   // works but ngit clones fail with `git-remote-nostr: not found`.
-  step('locating binaries');
+  log.step('locating binaries');
   const ngitSrc        = findBinaryInTree(tmp, 'ngit');
   const remoteHelperSrc = findBinaryInTree(tmp, 'git-remote-nostr');
   if (!ngitSrc || !remoteHelperSrc) {
@@ -195,9 +153,9 @@ export async function installNgit(onProgress: ProgressCallback = () => {}): Prom
       !ngitSrc        ? 'ngit'             : null,
       !remoteHelperSrc ? 'git-remote-nostr' : null,
     ].filter(Boolean).join(' + ');
-    return fail('locate', `${missing} not found in tarball; root: ${listing}`);
+    return log.fail('locate', `${missing} not found in tarball; root: ${listing}`);
   }
-  append(`found ngit=${ngitSrc} helper=${remoteHelperSrc}`);
+  log.append(`found ngit=${ngitSrc} helper=${remoteHelperSrc}`);
 
   // Install both with sudo into /usr/local/bin. `install -m 0755` is
   // POSIX-portable (handles both copy and mode in one step) — no chmod
@@ -224,7 +182,7 @@ export async function installNgit(onProgress: ProgressCallback = () => {}): Prom
     }
   };
 
-  step(`sudo install ngit + git-remote-nostr → /usr/local/bin`);
+  log.step(`sudo install ngit + git-remote-nostr → /usr/local/bin`);
   const installRes = await installPair();
   if (!installRes.ok) {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -236,23 +194,23 @@ export async function installNgit(onProgress: ProgressCallback = () => {}): Prom
           `binaries downloaded — finish with: ` +
           `sudo install -m 0755 ${ngitSrc} ${destFile} && ` +
           `sudo install -m 0755 ${remoteHelperSrc} ${helperDest} ` +
-          `(or copy both to any PATH dir). Log: ${logPath}`,
+          `(or copy both to any PATH dir). Log: ${log.logPath}`,
       };
     }
-    return fail(
+    return log.fail(
       'install',
       `sudo install failed: ${installRes.stderr.slice(0, 160) || 'unknown'}`,
     );
   }
-  append(`install ok: ${destFile}, ${helperDest}`);
+  log.append(`install ok: ${destFile}, ${helperDest}`);
   fs.rmSync(tmp, { recursive: true, force: true });
 
-  step('verifying binaries on PATH');
+  log.step('verifying binaries on PATH');
   try {
     await execa('ngit', ['--version'], { stdio: 'pipe', timeout: 5000 });
-    append('ngit verify ok');
+    log.append('ngit verify ok');
   } catch (e: any) {
-    return fail('verify', `ngit --version failed: ${(e?.message || '').slice(0, 160)}`);
+    return log.fail('verify', `ngit --version failed: ${(e?.message || '').slice(0, 160)}`);
   }
   // `git-remote-nostr` has no --version flag (it's a git protocol
   // helper invoked by git, not a user-facing CLI). Check it's
@@ -260,9 +218,9 @@ export async function installNgit(onProgress: ProgressCallback = () => {}): Prom
   // nothing over a stat + X_OK check.
   try {
     fs.accessSync(helperDest, fs.constants.X_OK);
-    append('helper verify ok');
+    log.append('helper verify ok');
   } catch (e: any) {
-    return fail('verify', `git-remote-nostr not executable at ${helperDest}: ${(e?.message || '').slice(0, 160)}`);
+    return log.fail('verify', `git-remote-nostr not executable at ${helperDest}: ${(e?.message || '').slice(0, 160)}`);
   }
 
   return { ok: true, detail: `installed ${destFile} + ${helperDest}` };

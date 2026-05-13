@@ -7245,6 +7245,92 @@ const ProjectsPanel = (() => {
 
     const listEl = container.querySelector('#proposals-series-list');
 
+    // ── Submit-a-PR CTA card ─────────────────────────────────────────
+    //
+    // Conditional: only renders when (1) project has ngit cap + remote,
+    // (2) user is on the default branch, (3) local is N commits ahead.
+    // Bypasses the existing Settings → ngit signer + sync → Send-as-
+    // proposal button by automating the branch creation step.
+    //
+    // Server-side route handles the multi-step git dance and validates
+    // pre-conditions independently — this gate is purely a UI affordance.
+    (async () => {
+      if (!(p.capabilities?.ngit && p.remotes?.ngit)) return;
+      let gs = null;
+      try { gs = await api(`/api/projects/${p.id}/git-state`); } catch {}
+      if (!gs || typeof gs !== 'object') return;
+      // Heuristic for default branch — server resolves the real one
+      // before doing anything, so 'main' or 'master' here is just a
+      // gate for *showing* the CTA. Users with a non-standard default
+      // can still use Settings → Send.
+      const onDefault = gs.branch === 'main' || gs.branch === 'master';
+      if (!onDefault) return;
+      const ahead = Number(gs.ahead || 0);
+      if (ahead < 1) return;
+      if (gs.dirty) return;  // server refuses anyway; spare the user the round-trip
+
+      const branchPlaceholder = `feature-${new Date().toISOString().slice(0, 10)}`;
+      const cta = document.createElement('div');
+      cta.className = 'tab-section proposal-new-cta';
+      cta.innerHTML = `
+        <div class="proposal-new-head">
+          <h4 style="margin:0">Submit your local commits as a PR</h4>
+          <span class="muted" style="font-size:11px">${ahead} commit${ahead === 1 ? '' : 's'} ahead of <code>origin/${escapeHtml(gs.branch)}</code></span>
+        </div>
+        <div class="proposal-new-form">
+          <label class="proposal-new-row">
+            <span>Branch name</span>
+            <input type="text" class="proposal-new-branch"
+                   placeholder="${escapeHtml(branchPlaceholder)}"
+                   pattern="[A-Za-z][A-Za-z0-9._\\-]{0,63}"
+                   maxlength="64" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="proposal-new-row proposal-new-reset" title="If checked, your local '${escapeHtml(gs.branch)}' branch gets moved back to upstream after the feature branch is created. Off keeps the commits on both '${escapeHtml(gs.branch)}' and the new feature branch.">
+            <input type="checkbox" class="proposal-new-reset-cb">
+            <span>Reset <code>${escapeHtml(gs.branch)}</code> back to <code>origin/${escapeHtml(gs.branch)}</code> after branching</span>
+          </label>
+          <div class="proposal-new-actions">
+            <button class="primary proposal-new-submit" disabled>Submit PR</button>
+          </div>
+        </div>
+      `;
+      // Insert ABOVE the existing list so it's the first thing users see.
+      listEl.parentElement.insertBefore(cta, listEl);
+
+      const branchInput = cta.querySelector('.proposal-new-branch');
+      const resetCb     = cta.querySelector('.proposal-new-reset-cb');
+      const submitBtn   = cta.querySelector('.proposal-new-submit');
+
+      const validateBranchName = (s) => /^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(s);
+      branchInput.addEventListener('input', () => {
+        submitBtn.disabled = !validateBranchName(branchInput.value.trim());
+      });
+
+      submitBtn.addEventListener('click', async () => {
+        const branchName = branchInput.value.trim();
+        if (!validateBranchName(branchName)) return;
+        submitBtn.disabled = true;
+        const r = await openExecModal({
+          title:    `Submit PR · ${p.name}`,
+          subtitle: `branch + ${resetCb.checked ? 'reset + ' : ''}ngit send`,
+          endpoint: `/api/projects/${p.id}/ngit/proposal/new`,
+          body:     { branchName, resetMain: resetCb.checked },
+        });
+        if (r.ok) {
+          toast('PR submitted', `Branch ${branchName} → proposal published`, 'ok');
+          // Refresh the proposals list + project state so the new PR
+          // appears in the list and the card's ahead count updates.
+          apiInvalidate(`/api/projects/${p.id}/git-state`);
+          proposalsCache.delete(p.id);
+          if (state.view === 'detail' && state.projectId === p.id) render();
+          refreshHealth();
+        } else {
+          toast('PR submit failed', `exit ${r.code}`, 'err');
+          submitBtn.disabled = false;
+        }
+      });
+    })();
+
     const runDownload = async (rootId, subject) => {
       const r = await openExecModal({
         title:    `Download proposal · ${p.name}`,
@@ -12832,6 +12918,12 @@ const ConfigPanel = (() => {
           // loadIfVisible(), so the heavy Config rebuild only happens when
           // the user is actually on the Config panel. While they're staring
           // at the QR in the terminal, we don't churn the panel underneath.
+          //
+          // Schedule chosen to feel snappy on the happy path (Amber confirms
+          // within ~1-5s of the user scanning the QR) while still covering
+          // the slow path (user puts phone down, comes back later). Tight
+          // early polls hit the "I just logged in, why is the panel stale?"
+          // window; the longer tail covers >1-minute delays.
           const refetch = () => {
             apiInvalidate('/api/ngit/account');
             apiInvalidate('/api/identity/config');
@@ -12839,7 +12931,7 @@ const ConfigPanel = (() => {
             loadIfVisible();
             refreshHealth();
           };
-          [5_000, 15_000, 45_000, 120_000].forEach(ms => setTimeout(refetch, ms));
+          [1_000, 2_500, 5_000, 10_000, 25_000, 60_000, 120_000].forEach(ms => setTimeout(refetch, ms));
           return;
         }
         // Fallback path — terminal unavailable. Fire the old modal; ngit

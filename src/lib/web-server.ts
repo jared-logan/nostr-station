@@ -15,8 +15,11 @@ import fs from 'fs';
 import path from 'path';
 import { nip19 } from 'nostr-tools';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
-import { fileURLToPath } from 'url';
 import { getKeychain } from './keychain.js';
+import {
+  serveStatic, serveVendorXterm, WEB_DIR, HTML_SECURITY_HEADERS,
+} from './web-server-static.js';
+import { runSetupVerify } from './setup-verify.js';
 // Most terminal helpers moved alongside their HTTP routes + the WS
 // upgrade handler — see routes/terminal.ts. We still need `loadPty`
 // for the warm-up at server-listen time and `destroyAllSessions` to
@@ -29,10 +32,7 @@ import {
 // `/api/config/set` flow below still uses the in-file PROVIDERS map
 // declared further down and the keychain slot `ai-api-key`; that
 // surface goes away when the Chat pane fully switches to /api/ai/chat.
-import { migrateIfNeeded, readAiConfig } from './ai-config.js';
-import {
-  getProvider, keychainAccountFor, type ApiProvider,
-} from './ai-providers.js';
+import { migrateIfNeeded } from './ai-config.js';
 import { gatherStatus } from '../commands/Status.js';
 import { DEFAULT_DB_PATH } from '../relay/store.js';
 import type { Relay } from '../relay/index.js';
@@ -43,7 +43,7 @@ import { AutoSyncManager } from './auto-sync.js';
 import { installNostrVpn } from './nvpn-installer.js';
 import {
   probeNvpnStatus, probeNvpnServiceStatus, startNvpnLogTail, vpnBannerRunningFor,
-  nvpnEvents,
+  nvpnEvents, memoizeWithSwr,
 } from './nvpn.js';
 import { installNak } from './nak-installer.js';
 import { installNgit } from './ngit-installer.js';
@@ -62,13 +62,6 @@ import {
   startSetupAmber, getSetupAmberSession, consumeSetupAmberSession,
   signEventWithSavedBunker,
 } from './auth-bunker.js';
-// `getProject` + `resolveProjectContext` are still needed here for the
-// chat proxy's system-prompt resolution. Everything else moved to
-// `routes/projects.ts` along with the Projects + Chat-context routes.
-import {
-  getProject, resolveProjectContext,
-  type Project,
-} from './projects.js';
 import { writePidFile, removePidFile } from './pid-file.js';
 import {
   readBody, streamExec, streamExecError,
@@ -77,7 +70,7 @@ import {
   setAutoSyncRef,
   type CmdSpec,
 } from './routes/_shared.js';
-import { buildAiContext, readStationContext, stationContextPath } from './ai-context.js';
+import { readStationContext, stationContextPath } from './ai-context.js';
 import { seedStationContext, USER_REGION_BEGIN, USER_REGION_END } from './editor.js';
 import { handleProjects } from './routes/projects.js';
 import { handleIdentity } from './routes/identity.js';
@@ -88,371 +81,24 @@ import { handlePatches } from './routes/patches.js';
 import { handleIssues } from './routes/issues.js';
 import { handleStatus } from './routes/status.js';
 import { runScratchGc } from './scratch-gc.js';
-import {
-  handleAi,
-  streamAnthropic, streamOpenAICompat,
-  type Msg, type ProviderConfig,
-} from './routes/ai.js';
+import { handleAi } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { handleNvpn } from './routes/nvpn.js';
 import { handleTemplates } from './routes/templates.js';
 
-// ── Static assets ─────────────────────────────────────────────────────────────
-//
-// Resolved relative to this file at runtime — whether we're running from
-// dist/lib/web-server.js (copy-web.mjs put the assets at dist/web) or from
-// src via tsx (falls back to src/web so `npm run dev chat` still works).
+// Static-asset + vendor + security-headers wiring lives in
+// ./web-server-static.ts. We re-import the four names the orchestrator
+// still needs (the two route helpers + WEB_DIR/HTML_SECURITY_HEADERS
+// used by the /setup SPA fallback further down).
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const WEB_DIR_CANDIDATES = [
-  path.resolve(here, '..', 'web'),          // dist/web next to dist/lib
-  path.resolve(here, '..', '..', 'src', 'web'), // src/web when running via tsx
-];
-const WEB_DIR = WEB_DIR_CANDIDATES.find(p => fs.existsSync(p)) ?? WEB_DIR_CANDIDATES[0];
-
-// ── Vendored frontend libs (xterm.js)
-//
-// We don't commit xterm.js bundles to the repo or duplicate-copy them into
-// dist/web at build time. Instead the server resolves `/vendor/xterm/<file>`
-// requests to the files already in node_modules (installed as regular deps)
-// at runtime. Works in dev (tsx → src/web/) and prod (node dist/lib/) alike
-// because node_modules is alongside our install root in both layouts.
-//
-// stationRoot is the directory containing our package.json — `..` from
-// dist/lib lands at dist/, then one more `..` lands at the repo / install
-// root; identical from src/lib in dev mode.
-const STATION_ROOT = path.resolve(here, '..', '..');
-
-// Whitelist of vendor files we're willing to serve. The map binds each URL
-// segment to the node_modules path that produces it. Requests for anything
-// not in this map fall through to 404, so a compromised client can't
-// traverse into arbitrary node_modules paths.
-const VENDOR_XTERM: Record<string, string> = {
-  'xterm.js':            'node_modules/@xterm/xterm/lib/xterm.js',
-  'xterm.css':           'node_modules/@xterm/xterm/css/xterm.css',
-  'addon-fit.js':        'node_modules/@xterm/addon-fit/lib/addon-fit.js',
-  'addon-web-links.js':  'node_modules/@xterm/addon-web-links/lib/addon-web-links.js',
-};
-
-function serveVendorXterm(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  const urlPath = (req.url || '/').split('?')[0];
-  const m = urlPath.match(/^\/vendor\/xterm\/([a-z0-9.-]+)$/i);
-  if (!m) return false;
-  const rel = VENDOR_XTERM[m[1]];
-  if (!rel) return false;
-  const file = path.join(STATION_ROOT, rel);
-  if (!fs.existsSync(file)) return false;
-  const ext  = path.extname(file).toLowerCase();
-  const mime = MIME[ext] ?? 'application/octet-stream';
-  res.writeHead(200, {
-    'Content-Type':  mime,
-    // xterm bundles are immutable per install — safe to cache aggressively.
-    // Clients pick up upgrades via cache-busting query strings from index.html.
-    'Cache-Control': 'public, max-age=604800, immutable',
-  });
-  fs.createReadStream(file).pipe(res);
-  return true;
-}
-
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.css':  'text/css; charset=utf-8',
-  '.js':   'application/javascript; charset=utf-8',
-  '.svg':  'image/svg+xml',
-  '.png':  'image/png',
-  '.ico':  'image/x-icon',
-  '.json': 'application/json',
-};
-
-// Security headers applied only to HTML responses (index.html, /setup SPA
-// route). JSON/SSE responses are framework-style content, not documents, so
-// applying CSP to them just adds noise in devtools. The policy allows inline
-// <script>/<style> because the current dashboard uses them and innerHTML
-// throughout; tightening to nonces is a future pass. `connect-src` covers the
-// loopback WebSocket and any outbound nostr relay (wss://). frame-ancestors
-// 'none' prevents clickjacking; X-Frame-Options is kept as a belt-and-braces
-// for older browsers.
-const HTML_SECURITY_HEADERS: Record<string, string> = {
-  'X-Frame-Options': 'DENY',
-  'X-Content-Type-Options': 'nosniff',
-  // `same-origin` (not `no-referrer`) is intentional: browsers don't always
-  // send Origin on same-origin GETs, but they DO send Referer under this
-  // policy, which the `?token=` fetch-guard needs to distinguish a
-  // dashboard-initiated EventSource from a cross-origin attacker request.
-  // Cross-origin requests get zero Referer info, same as `no-referrer`.
-  'Referrer-Policy': 'same-origin',
-  'Content-Security-Policy': [
-    "default-src 'self'",
-    "frame-ancestors 'none'",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-    "script-src 'self' 'unsafe-inline'",
-    "style-src 'self' 'unsafe-inline'",
-    "connect-src 'self' ws://127.0.0.1:* ws://localhost:* wss:",
-    "img-src 'self' data: https:",
-    "font-src 'self' data:",
-    // Loopback only — used by the chat panel's live-preview iframe to embed
-    // a project's local Vite dev server (default :5173). Cross-origin frames
-    // are still rejected. frame-ancestors above keeps the dashboard itself
-    // un-embeddable.
-    "frame-src 'self' http://127.0.0.1:* http://localhost:*",
-  ].join('; '),
-};
-
-function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  const urlPath = (req.url || '/').split('?')[0];
-  const rel = urlPath === '/' ? '/index.html' : urlPath;
-  // Block traversal — we never serve outside WEB_DIR.
-  const resolved = path.resolve(WEB_DIR, '.' + rel);
-  if (!resolved.startsWith(WEB_DIR)) return false;
-  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) return false;
-
-  const ext  = path.extname(resolved).toLowerCase();
-  const mime = MIME[ext] ?? 'application/octet-stream';
-  const headers: Record<string, string> = { 'Content-Type': mime, 'Cache-Control': 'no-cache' };
-  if (mime.startsWith('text/html')) Object.assign(headers, HTML_SECURITY_HEADERS);
-  res.writeHead(200, headers);
-  fs.createReadStream(resolved).pipe(res);
-  return true;
-}
-
-// ── Provider config (legacy single-provider /api/config + /api/chat path) ────
-//
-// `ProviderConfig` and the streaming helpers (`streamAnthropic`,
-// `streamOpenAICompat`) moved to routes/ai.ts and are re-imported above.
-// Everything below this line is the legacy bootstrap-from-claude_env
-// flow that still backs `/api/config` and `/api/chat` until the Chat
-// pane fully switches over to `/api/ai/chat`.
-
-function parseClaudeEnv(homeDir: string): { baseUrl: string; model: string } {
-  const envPath = path.join(homeDir, '.claude_env');
-  try {
-    const content    = fs.readFileSync(envPath, 'utf8');
-    const baseMatch  = content.match(/^export ANTHROPIC_BASE_URL="([^"]+)"/m);
-    const modelMatch = content.match(/^export CLAUDE_MODEL="([^"]+)"/m);
-    return { baseUrl: baseMatch?.[1] ?? '', model: modelMatch?.[1] ?? '' };
-  } catch {
-    return { baseUrl: '', model: '' };
-  }
-}
-
-function inferProviderName(baseUrl: string): string {
-  // Display-name lookup for the legacy ~/.claude_env migration path.
-  // Curated providers map to their registry display name; everything
-  // else lands under "Custom Provider" — same as the Custom entry in
-  // ai-providers.ts.
-  if (baseUrl.includes('opencode.ai')) return 'OpenCode Zen';
-  if (baseUrl.includes('routstr'))     return 'Routstr';
-  if (baseUrl.includes('ppq.ai'))      return 'PayPerQ';
-  return 'Custom Provider';
-}
-
-// Describes what we can show in the UI without an API key (provider name,
-// model, context presence). `configured` is false when an API key is still
-// missing — in that case the Chat panel shows an onboarding callout instead
-// of proxying requests, but Status/Relay/Logs/Config panels are unaffected.
-//
-// Resolution order matches /api/ai/chat (routes/ai.ts):
-//   1. ai-config.json `defaults.chat` provider — the modern multi-provider
-//      layout the setup wizard, Config panel, and Chat dropdown all write
-//      to. Key resolved from keychain slot `ai:<id>`, with an
-//      ANTHROPIC_API_KEY env-var + legacy `ai-api-key` slot fallback for
-//      anthropic so users mid-migration still see "configured".
-//   2. Legacy ~/.claude_env + `ai-api-key` slot — the v0.x single-provider
-//      layout. Only consulted when ai-config.json has no chat default,
-//      which means migrateIfNeeded() decided not to migrate (no key found
-//      at boot) and the user hasn't touched Config / wizard since.
-async function loadProviderConfig(): Promise<{ cfg: ProviderConfig | null; meta: { provider: string; model: string; baseUrl: string | null; configured: boolean; reason?: string } }> {
-  const bareKeys = new Set(['none', 'ollama', 'lm-studio', 'maple-desktop-auto']);
-
-  // ── Phase-2 path: ai-config.json + per-provider keychain ─────────────
-  const aiCfg  = readAiConfig();
-  const chatId = aiCfg.defaults.chat;
-  if (chatId) {
-    const provider = getProvider(chatId);
-    if (provider && provider.type === 'api') {
-      const apiP    = provider as ApiProvider;
-      const entry   = aiCfg.providers[chatId];
-      const baseUrl = entry?.baseUrl ?? apiP.baseUrl;
-      const model   = entry?.model   ?? apiP.defaultModel;
-      const isAnthropic = apiP.flavor === 'anthropic';
-
-      let apiKey = '';
-      if (apiP.bareKey) {
-        apiKey = apiP.bareKey;
-      } else {
-        try {
-          apiKey = (await getKeychain().retrieve(keychainAccountFor(chatId))) ?? '';
-        } catch { apiKey = ''; }
-        // Anthropic env-var + legacy-slot fallback. Mirrors the chat
-        // path so the header reports "configured" for users who set
-        // ANTHROPIC_API_KEY in their shell env or who haven't yet
-        // re-saved their key under the new `ai:anthropic` slot.
-        if (!apiKey && chatId === 'anthropic') {
-          apiKey = process.env.ANTHROPIC_API_KEY ?? '';
-          if (!apiKey) {
-            try { apiKey = (await getKeychain().retrieve('ai-api-key')) ?? ''; }
-            catch { apiKey = ''; }
-          }
-        }
-      }
-
-      const meta = {
-        provider:   provider.displayName,
-        model,
-        baseUrl:    isAnthropic ? null : baseUrl,
-        configured: false as boolean,
-        reason:     undefined as string | undefined,
-      };
-      const isBare = bareKeys.has(apiKey);
-      if (!apiKey && !apiP.bareKey) {
-        meta.reason = `${provider.displayName} API key not set — add one in Config`;
-        return { cfg: null, meta };
-      }
-      meta.configured = true;
-      return {
-        cfg: {
-          isAnthropic,
-          baseUrl,
-          model,
-          apiKey: isBare ? '' : apiKey,
-          providerName: provider.displayName,
-        },
-        meta,
-      };
-    }
-  }
-
-  // ── Legacy v0.x fallback (~/.claude_env + `ai-api-key` slot) ─────────
-  const homeDir = os.homedir();
-  const { baseUrl, model } = parseClaudeEnv(homeDir);
-  const isAnthropic = !baseUrl;
-  const providerName = isAnthropic ? 'Anthropic' : inferProviderName(baseUrl);
-  const resolvedModel = model || (isAnthropic ? 'claude-opus-4-6' : 'default');
-  const meta = { provider: providerName, model: resolvedModel, baseUrl: baseUrl || null, configured: false as boolean, reason: undefined as string | undefined };
-
-  let apiKey = '';
-  try {
-    if (isAnthropic) {
-      apiKey = process.env.ANTHROPIC_API_KEY
-        || (await getKeychain().retrieve('ai-api-key'))
-        || '';
-    } else {
-      apiKey = (await getKeychain().retrieve('ai-api-key')) ?? '';
-    }
-  } catch {}
-
-  const isBare = bareKeys.has(apiKey);
-  if (isAnthropic && !apiKey) {
-    meta.reason = 'Anthropic API key not set — add one in Config';
-    return { cfg: null, meta };
-  }
-
-  meta.configured = true;
-  return {
-    cfg: {
-      isAnthropic,
-      baseUrl,
-      model: resolvedModel,
-      apiKey: isBare ? '' : apiKey,
-      providerName,
-    },
-    meta,
-  };
-}
-
-function getContextContent(homeDir: string): string {
-  const contextPath = path.join(homeDir, 'nostr-station', 'projects', 'NOSTR_STATION.md');
-  try { return fs.readFileSync(contextPath, 'utf8'); }
-  catch { return 'You are a helpful assistant for Nostr protocol development.'; }
-}
-
-// Whether the legacy on-disk seed file is present. The Chat CLI uses this
-// to print a one-time hint; the dashboard panel reports the richer status
-// from getContextStatus() below since the new /api/ai/chat path uses
-// buildAiContext()'s in-memory station fallback regardless of this file.
-export function contextExists(): boolean {
-  return fs.existsSync(path.join(os.homedir(), 'nostr-station', 'projects', 'NOSTR_STATION.md'));
-}
-
-export interface ContextStatus {
-  // True whenever a context block will be injected into /api/ai/chat. With
-  // the station fallback in ai-context.ts this is effectively always true,
-  // but we still compute it from buildAiContext() so any future change to
-  // the resolver (e.g. an explicit "no context" mode) flows through.
-  hasContext:   boolean;
-  source:       'project' | 'station';
-  projectName?: string;
-  // Diagnostic: legacy seed file at ~/nostr-station/projects/NOSTR_STATION.md.
-  // The panel uses this to distinguish "file-backed" from "built-in" station
-  // context in its label.
-  hasContextFile: boolean;
-}
-
-// `scope` chooses which context the caller wants to see:
-//   'active' (default) — match what the next /api/ai/chat turn will use,
-//                        i.e. the project opened in chat or station fallback.
-//   'global'           — always describe the station-level context, ignoring
-//                        whichever project is currently active in chat.
-// The Config panel passes 'global' so its row reflects the station setup
-// regardless of chat state; the chat header keeps the default so it labels
-// the live chat context.
-export function getContextStatus(scope: 'active' | 'global' = 'active'): ContextStatus {
-  const projectId = scope === 'global' ? null : getActiveChatProjectId();
-  const ctx = buildAiContext(projectId);
-  return {
-    hasContext:     ctx.text.length > 0,
-    source:         ctx.source,
-    projectName:    ctx.projectName,
-    hasContextFile: contextExists(),
-  };
-}
-
-// ── Chat proxy (streaming SSE) ────────────────────────────────────────────────
-//
-// `readBody`, `streamExec`, `streamExecError`, `CmdSpec`, `CLI_BIN`,
-// `CLI_SPAWN`, and the active-chat-project-id state moved to
-// `routes/_shared.ts`. The streaming helpers (`streamAnthropic`,
-// `streamOpenAICompat`, `completionsUrl`, `Msg`, `ProviderConfig`) and
-// the `/api/ai/*` route surface moved to `routes/ai.ts` — imported
-// above for re-use by the legacy `/api/chat` proxy below.
-
-async function proxyChat(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  cfg: ProviderConfig,
-): Promise<void> {
-  let messages: Msg[];
-  try {
-    const body = await readBody(req);
-    ({ messages } = JSON.parse(body));
-  } catch {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Invalid request body' }));
-    return;
-  }
-
-  const activeProjectId = getActiveChatProjectId();
-  const activeProject = activeProjectId ? getProject(activeProjectId) : null;
-  const system = activeProjectId
-    ? resolveProjectContext(activeProject).content
-    : getContextContent(os.homedir());
-  res.writeHead(200, {
-    'Content-Type':  'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection':    'keep-alive',
-  });
-
-  try {
-    if (cfg.isAnthropic) await streamAnthropic(messages, system, cfg, res);
-    else                 await streamOpenAICompat(messages, system, cfg, res);
-  } catch (e: any) {
-    res.write(`data: ${JSON.stringify({ error: String(e.message ?? e) })}\n\n`);
-  }
-  res.write('data: [DONE]\n\n');
-  res.end();
-}
+// The legacy /api/config + /api/chat surface (loadProviderConfig +
+// proxyChat + getContextStatus + contextExists) moved to ./legacy-chat.ts.
+// Re-exported below to preserve external imports (Chat.tsx pulls
+// `contextExists` directly from this module).
+export { contextExists, getContextStatus, type ContextStatus } from './legacy-chat.js';
+import {
+  loadProviderConfig, proxyChat, getContextStatus,
+} from './legacy-chat.js';
 
 // ── Relay-adjacent helpers ────────────────────────────────────────────────────
 
@@ -530,129 +176,45 @@ export function getAutoSyncManager(): AutoSyncManager | null {
 // timer doesn't keep the event loop alive across hot-restarts.
 let nvpnLogTailer: { stop: () => void } | null = null;
 
+// Cache /api/status with stale-while-revalidate semantics. gatherStatus()
+// is the dashboard's hot path — the Status panel polls every 3-5s, and
+// several other dashboard panels call it on render. Each call shells
+// out to nc, nvpn (up to 4s on a wedged daemon socket — the nvpn CLI
+// doesn't fast-fail), and ~4 binary `--version` probes.
+//
+// With SWR: the first /api/status request after boot blocks once
+// (~4 s worst case if nvpn is wedged). Every subsequent request is
+// instant from cache; after the TTL elapses, callers still get the
+// cached value immediately while a background refresh updates it.
+// Plain TTL caching would re-block every TTL window — meaningful on
+// a healthy daemon (~ms), brutal on a wedged one (~4 s).
+//
+// 3 s TTL stays — short enough that user-driven state changes
+// (start/stop relay, connect/disconnect nvpn) feel responsive on the
+// next panel refresh once the background fetch resolves.
+const cachedGatherStatus = memoizeWithSwr(async () => gatherStatus(), 3_000);
+
+// State-change → cache-invalidate wiring. Without this, the SWR cache's
+// TTL window (3 s) is the floor on how long a user waits to see the
+// effect of an action they just took (Stop nvpn → Status row says
+// "running" for up to 3 s). With invalidate on action, the next read
+// re-fetches immediately and reflects the new state.
+//
+// nvpn action helpers already emit `state-changed` on nvpnEvents (see
+// nvpn.ts); probeNvpnStatus + probeNvpnServiceStatus auto-invalidate on
+// the same event. /api/status surfaces nvpn state via gatherStatus, so
+// it needs the same wiring — otherwise the dashboard's Status panel
+// keeps showing the pre-action world for a TTL slice. Relay and
+// watchdog actions invalidate inline at their endpoints below
+// (search for `cachedGatherStatus.invalidate` in this file).
+nvpnEvents.on('state-changed', () => { cachedGatherStatus.invalidate(); });
+
 function shouldStartInprocRelay(): boolean {
   return process.env.STATION_INPROC_RELAY !== '0';
 }
 
-// Live verification (Phase 4 of the user-journey spec). Asks the saved
-// bunker client (Amber on the user's phone) to sign a kind-1 test event,
-// publishes it to the running in-process relay over ws://, and reads it
-// back via a REQ subscription. Each step is named so the client can
-// render a checklist; failures stop at the first broken step.
-//
-// Why ws:// instead of calling the relay's store directly: the test is
-// trying to prove "your apps will be able to talk to this relay." Going
-// through the WebSocket layer exercises the same path the user's apps
-// will use (NIP-01 over WS), which is what we want to verify.
-
-interface VerifyStep { name: string; ok: boolean; detail?: string }
-interface VerifyResult {
-  ok:      boolean;
-  steps:   VerifyStep[];
-  eventId?: string;
-  npub?:    string;
-  error?:   string;
-}
-
-async function runSetupVerify(): Promise<VerifyResult> {
-  const steps: VerifyStep[] = [];
-  const ident = readIdentity();
-  // Step 1 — sign via Amber. Generic event template; signEventWithSavedBunker
-  // returns a fully-signed event whose pubkey is the user's main pubkey.
-  const template = {
-    kind:       1,
-    created_at: Math.floor(Date.now() / 1000),
-    tags:       [['client', 'nostr-station-setup-verify']],
-    content:    'nostr-station: setup verification — you can ignore this event.',
-  };
-  let signed: any;
-  try {
-    const r = await signEventWithSavedBunker(template, 60_000);
-    if (!r.ok || !r.signedEvent) {
-      steps.push({ name: 'sign-via-amber', ok: false, detail: r.error || 'signing failed' });
-      return { ok: false, steps, error: 'Amber did not sign the test event' };
-    }
-    signed = r.signedEvent;
-    steps.push({ name: 'sign-via-amber', ok: true, detail: `signed by ${signed.pubkey.slice(0, 8)}…` });
-  } catch (e: any) {
-    steps.push({ name: 'sign-via-amber', ok: false, detail: String(e?.message ?? e) });
-    return { ok: false, steps, error: 'sign step failed' };
-  }
-
-  // Resolve relay URL — same env vars maybeStartInprocRelay sets.
-  const relayHost = process.env.RELAY_HOST || '127.0.0.1';
-  const relayPort = process.env.RELAY_PORT || '7777';
-  const relayUrl  = `ws://${relayHost}:${relayPort}`;
-
-  // Steps 2 + 3 — publish + read back, both over a single WS connection.
-  // Lazy-import ws so we don't pay the cost on cold-path requests.
-  const { WebSocket } = await import('ws');
-  const ws = new WebSocket(relayUrl);
-
-  // Generic JSON-frame waiter so each step can wait for the message it
-  // cares about without racing on the buffer's order.
-  const waiters: Array<{ pred: (m: any[]) => boolean; resolve: (m: any[]) => void; reject: (e: Error) => void; timer?: NodeJS.Timeout }> = [];
-  const buffer: any[][] = [];
-  ws.on('message', d => {
-    try {
-      const msg = JSON.parse(d.toString());
-      if (!Array.isArray(msg)) return;
-      const idx = waiters.findIndex(w => w.pred(msg));
-      if (idx >= 0) {
-        const [w] = waiters.splice(idx, 1);
-        if (w.timer) clearTimeout(w.timer);
-        w.resolve(msg);
-      } else {
-        buffer.push(msg);
-      }
-    } catch { /* not JSON / not array — ignore */ }
-  });
-  const next = (pred: (m: any[]) => boolean, ms = 5_000): Promise<any[]> => {
-    const idx = buffer.findIndex(pred);
-    if (idx >= 0) return Promise.resolve(buffer.splice(idx, 1)[0]);
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const i = waiters.findIndex(w => w.pred === pred);
-        if (i >= 0) waiters.splice(i, 1);
-        reject(new Error(`timeout after ${ms}ms`));
-      }, ms);
-      waiters.push({ pred, resolve, reject, timer });
-    });
-  };
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      ws.once('open',  () => resolve());
-      ws.once('error', reject);
-    });
-
-    // Step 2 — publish.
-    ws.send(JSON.stringify(['EVENT', signed]));
-    const ok = await next(m => m[0] === 'OK' && m[1] === signed.id, 10_000);
-    if (ok[2] !== true) {
-      steps.push({ name: 'publish-to-relay', ok: false, detail: ok[3] || 'relay rejected event' });
-      ws.close();
-      return { ok: false, steps, error: 'relay rejected the test event' };
-    }
-    steps.push({ name: 'publish-to-relay', ok: true, detail: `accepted by ${relayUrl}` });
-
-    // Step 3 — read back via REQ. The store is local and the round-trip
-    // takes single-digit ms, so a 5s timeout is generous slack.
-    const subId = 'setup-verify';
-    ws.send(JSON.stringify(['REQ', subId, { ids: [signed.id] }]));
-    await next(m => m[0] === 'EVENT' && m[1] === subId && m[2]?.id === signed.id, 5_000);
-    await next(m => m[0] === 'EOSE'  && m[1] === subId, 5_000);
-    ws.send(JSON.stringify(['CLOSE', subId]));
-    steps.push({ name: 'read-back-from-relay', ok: true, detail: 'event found in store' });
-  } catch (e: any) {
-    steps.push({ name: 'read-back-from-relay', ok: false, detail: String(e?.message ?? e) });
-    try { ws.close(); } catch {}
-    return { ok: false, steps, error: 'relay round-trip failed' };
-  }
-  try { ws.close(); } catch {}
-
-  return { ok: true, steps, eventId: signed.id, npub: ident.npub };
-}
+// runSetupVerify (Phase 4 user-journey verification) moved to
+// ./setup-verify.ts. Imported at the top of this file.
 
 async function maybeStartInprocRelay(): Promise<void> {
   if (!shouldStartInprocRelay()) return;
@@ -742,7 +304,7 @@ async function ensureSeedPubkeyWhitelisted(): Promise<void> {
   }
 }
 
-export async function startWebServer(port: number): Promise<void> {
+export async function startWebServer(port: number): Promise<http.Server> {
   // Sessions are in-memory only and never survive a server restart — the
   // user re-authenticates after a nostr-station chat restart. Explicit here
   // for clarity in case the module is imported multiple times.
@@ -811,7 +373,7 @@ export async function startWebServer(port: number): Promise<void> {
     } catch { return false; }
   };
 
-  return new Promise((resolve, reject) => {
+  return new Promise<http.Server>((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       const url    = (req.url || '/').split('?')[0];
       // The inline route checks below (e.g. `if (url === '/api/auth/status')`)
@@ -1174,8 +736,9 @@ export async function startWebServer(port: number): Promise<void> {
       }
 
       if (url === '/api/status' && method === 'GET') {
+        const rows = await cachedGatherStatus();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(gatherStatus()));
+        res.end(JSON.stringify(rows));
         return;
       }
 
@@ -1278,6 +841,9 @@ export async function startWebServer(port: number): Promise<void> {
           if (action === 'start' || action === 'restart') {
             await maybeStartInprocRelay();
           }
+          // Drop the /api/status cache so the next Status panel poll
+          // sees the post-action world (relay row flips immediately).
+          cachedGatherStatus.invalidate();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, action, up: inprocRelay !== null }));
         } catch (e: any) {
@@ -1485,6 +1051,7 @@ export async function startWebServer(port: number): Promise<void> {
       if (url === '/api/watchdog/start' && method === 'POST') {
         try {
           await maybeStartWatchdog();
+          cachedGatherStatus.invalidate();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, status: watchdog?.status() ?? null }));
         } catch (e: any) {
@@ -1498,6 +1065,7 @@ export async function startWebServer(port: number): Promise<void> {
           watchdog.stop();
           watchdog = null;
         }
+        cachedGatherStatus.invalidate();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -1535,6 +1103,11 @@ export async function startWebServer(port: number): Promise<void> {
             emit({ line: String(e?.message || e), stream: 'stderr' });
             emit({ done: true, code: -1 });
           }
+          // A newly-installed binary changes findBin(slug)'s answer, which
+          // gatherStatus surfaces as the row's "installed" state. Drop the
+          // SWR cache so the dashboard's post-install refreshHealth() poll
+          // sees the new world instead of the pre-install snapshot.
+          cachedGatherStatus.invalidate();
           try { res.end(); } catch {}
           return;
         }
@@ -1550,6 +1123,7 @@ export async function startWebServer(port: number): Promise<void> {
             emit({ line: String(e?.message || e), stream: 'stderr' });
             emit({ done: true, code: -1 });
           }
+          cachedGatherStatus.invalidate();
           try { res.end(); } catch {}
           return;
         }
@@ -1575,6 +1149,7 @@ export async function startWebServer(port: number): Promise<void> {
           emit({ line: String(e?.message || e), stream: 'stderr' });
           emit({ done: true, code: -1 });
         }
+        cachedGatherStatus.invalidate();
         try { res.end(); } catch {}
         return;
       }
@@ -2100,9 +1675,28 @@ export async function startWebServer(port: number): Promise<void> {
       // the dashboard binds so a relay-port collision doesn't prevent
       // the dashboard from coming up — the relay will surface its own
       // EADDRINUSE in stderr if 7777 is taken.
-      void maybeStartInprocRelay().catch(e => {
-        process.stderr.write(`[relay] failed to start: ${(e as Error).message}\n`);
-      });
+      void maybeStartInprocRelay()
+        .then(() => {
+          // Pre-warm the SWR caches in the background. The first
+          // /api/status / Logs-SSE request would otherwise pay the
+          // cold probe cost (nc + nvpn + ~5 binary --version probes,
+          // ~1-4 s wall-clock on a wedged nvpn daemon). Kicking them
+          // off here means the dashboard's first poll usually rides
+          // an already-resolved cache. The three caches are
+          // independent — if any of them hangs (e.g. nvpn wedged),
+          // the other two still warm in parallel.
+          //
+          // Fire-and-forget: rejection paths inside the caches just
+          // leave the slot empty so the user's first request takes
+          // the cold hit (same as before this commit), they don't
+          // crash startup.
+          void cachedGatherStatus();
+          void probeNvpnStatus();
+          void probeNvpnServiceStatus();
+        })
+        .catch(e => {
+          process.stderr.write(`[relay] failed to start: ${(e as Error).message}\n`);
+        });
       // nvpn daemon log tailer — best-effort. Sits idle until the daemon
       // log file appears, then pumps lines into logBuffers.vpn so the
       // Logs panel's nostr-vpn tab streams real output. Single instance
@@ -2114,7 +1708,7 @@ export async function startWebServer(port: number): Promise<void> {
           process.stderr.write(`[nvpn] log tailer failed to start: ${e?.message || e}\n`);
         }
       }
-      resolve();
+      resolve(server);
     });
   });
 }

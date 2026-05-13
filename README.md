@@ -60,6 +60,13 @@ Available today: `ngit` (Nostr-native git), `nak` (event/relay CLI),
 `stacks` (Soapbox app scaffolder), `nsyte` (static-site publishing). The
 wizard never asks about these — opt in when you need each one.
 
+## Shell completion
+
+```
+nostr-station completion --shell zsh --install   # zsh or bash
+nostr-station completion --shell bash --print    # write the script yourself
+```
+
 ## Build loop
 
 Inside the dashboard:
