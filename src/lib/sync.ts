@@ -196,7 +196,22 @@ export async function getProjectGitState(project: Project): Promise<GitState> {
 
 // ── syncProject ───────────────────────────────────────────────────────────
 
-export async function syncProject(project: Project): Promise<SyncResult> {
+export interface SyncOptions {
+  // Include a `git push origin HEAD` phase after the pull/merge.
+  //
+  // Off by default to preserve the AutoSyncManager's read-only contract:
+  // unattended scheduled syncs must never push WIP commits without the
+  // user's consent. Explicit user actions (the dashboard's Sync button)
+  // pass push:true to get bidirectional behavior — what users expect
+  // when they reach for a "Sync" verb, and what Shakespeare's clean
+  // sync popover does on every click.
+  push?: boolean;
+}
+
+export async function syncProject(
+  project: Project,
+  opts: SyncOptions = {},
+): Promise<SyncResult> {
   const backend = detectBackend(project);
 
   if (backend === 'local-only') {
@@ -251,26 +266,53 @@ export async function syncProject(project: Project): Promise<SyncResult> {
         behind: state.behind,
       };
     }
+    // 3. ff-only merge if anything's behind. Skipped when behind === 0
+    //    (nothing to merge); we still flow through to the optional push
+    //    phase below so an "ahead only" project still gets pushed when
+    //    the caller asked for bidirectional sync.
+    if (state.behind > 0) {
+      try {
+        await execFileAsync(gitBin, ['merge', '--ff-only', '@{u}'],
+          { cwd: project.path, timeout: 15_000 });
+      } catch (e: any) {
+        return {
+          ok: false, backend: 'git',
+          message: `ff-only merge failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`,
+          ahead:  state.ahead,
+          behind: state.behind,
+        };
+      }
+    }
+
+    // 4. Optional push phase (see SyncOptions.push). Same explicit
+    //    `origin HEAD` refspec as the ngit branch so we don't depend
+    //    on the local branch having upstream tracking set.
+    if (opts.push && state.ahead > 0) {
+      try {
+        await execFileAsync(gitBin, ['push', 'origin', 'HEAD'],
+          { cwd: project.path, timeout: 60_000 });
+      } catch (e: any) {
+        return {
+          ok: false, backend: 'git',
+          message: `git push failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`,
+          ahead:  state.ahead,
+          behind: 0,
+        };
+      }
+      return {
+        ok: true, backend: 'git',
+        message: state.behind > 0
+          ? `synced (${state.behind} pulled, ${state.ahead} pushed)`
+          : `pushed ${state.ahead} commits`,
+        ahead: 0, behind: 0,
+      };
+    }
     if (state.behind === 0) {
       return {
         ok: true, backend: 'git',
         message: state.ahead > 0 ? `up to date with remote (${state.ahead} local ahead)` : 'already up to date',
         ahead:  state.ahead,
         behind: 0,
-      };
-    }
-
-    // 3. ff-only merge — the only safe sync that doesn't rewrite
-    // history or fabricate merge commits without consent.
-    try {
-      await execFileAsync(gitBin, ['merge', '--ff-only', '@{u}'],
-        { cwd: project.path, timeout: 15_000 });
-    } catch (e: any) {
-      return {
-        ok: false, backend: 'git',
-        message: `ff-only merge failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`,
-        ahead:  state.ahead,
-        behind: state.behind,
       };
     }
     return {
@@ -311,8 +353,13 @@ export async function syncProject(project: Project): Promise<SyncResult> {
     return { ok: false, backend: 'ngit', message: 'git not found on PATH' };
   }
 
+  // Explicit `origin HEAD` (not bare `git pull`) so the command works
+  // regardless of branch.<name>.merge config. Without explicit refs,
+  // pull bails on a freshly-ngit-init'd branch that hasn't had upstream
+  // tracking set up — that branch shows "ahead of origin/main" in git
+  // status but `@{u}` is undefined.
   try {
-    await execFileAsync(gitBinNgit, ['pull', '--no-rebase', '--ff-only'],
+    await execFileAsync(gitBinNgit, ['pull', '--no-rebase', '--ff-only', 'origin', 'HEAD'],
       { cwd: project.path, timeout: 30_000 });
   } catch (e: any) {
     return {
@@ -321,12 +368,32 @@ export async function syncProject(project: Project): Promise<SyncResult> {
     };
   }
 
+  // Push phase — opt-in (see SyncOptions.push). Runs only when the
+  // caller explicitly asked for bidirectional sync. The dashboard's
+  // Sync button passes push:true; AutoSyncManager keeps the default
+  // (read-only).
+  if (opts.push) {
+    try {
+      await execFileAsync(gitBinNgit, ['push', 'origin', 'HEAD'],
+        { cwd: project.path, timeout: 60_000 });
+    } catch (e: any) {
+      return {
+        ok: false, backend: 'ngit',
+        message: `git push failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`,
+      };
+    }
+  }
+
   // Resolve the repo coords (pubkey + d-tag) from the stored remote.
   // Proposals are queried by `a` tag = `30617:<pubkey>:<d-tag>` per
   // NIP-34. If we can't decode the remote, the pull itself succeeded,
   // so we still return ok with an empty proposals list.
   const proposals = await fetchNgitProposals(project).catch(() => [] as NgitProposal[]);
-  return { ok: true, backend: 'ngit', message: 'pulled', proposals };
+  return {
+    ok: true, backend: 'ngit',
+    message: opts.push ? 'synced' : 'pulled',
+    proposals,
+  };
 }
 
 // ── ngit proposals (kind-1617) ────────────────────────────────────────────
