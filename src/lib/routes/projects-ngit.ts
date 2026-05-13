@@ -11,6 +11,8 @@
  *   POST   /api/projects/:id/ngit/send          — SSE: ngit send --defaults
  *   POST   /api/projects/:id/ngit/download      — SSE: ngit pr checkout <id>
  *   POST   /api/projects/:id/ngit/init          — SSE: ngit init (signer-gated)
+ *   POST   /api/projects/:id/ngit/proposal/new  — SSE: one-click PR submit
+ *                                                 (branch + optional reset + send)
  *
  * Contract identical to handleProjects: returns true iff a response was
  * written; false lets the parent fall through to the next route group.
@@ -291,6 +293,205 @@ export async function handleProjectsNgit(
       { bin: 'ngit', args, env: { NO_COLOR: '1', TERM: 'dumb' } },
       res, req, project.path,
     );
+    return true;
+  }
+
+  // ── New-proposal one-click flow ─────────────────────────────────
+  //
+  // The "I want to send a PR" verb. Wraps the multi-step git dance
+  // (create branch, optional reset of default, checkout, ngit send)
+  // in one SSE stream so contributors never need to drop to a
+  // terminal. Driven from the Pull-requests tab's "Submit your local
+  // commits as a PR" CTA card (app.js renderProposalsTab).
+  //
+  // Body:
+  //   { branchName: string,
+  //     resetMain?: boolean }
+  //
+  // resetMain=true moves the default branch back to origin/HEAD after
+  // the feature branch is created. Off by default — that's the safer
+  // choice (user keeps local main mirroring origin OR keeps the
+  // commits on main too, depending on whether they reset). On, it
+  // matches the GitHub mental model of "branch off upstream, send PR."
+  //
+  // Validation up-front so we never leave the repo in a half-applied
+  // state: clean working tree, on the default branch, ahead > 0,
+  // branch name is safe + doesn't already exist.
+  if (tail === 'ngit/proposal/new' && method === 'POST') {
+    if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+    if (!project.remotes.ngit) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'project has no ngit remote — run ngit init first' }));
+      return true;
+    }
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+
+    const branchName = typeof parsed.branchName === 'string' ? parsed.branchName.trim() : '';
+    // Strict branch-name rules: alphanumerics + dot/dash/underscore,
+    // no slashes (git allows them but they complicate UI; we can
+    // relax later), 1-64 chars, must start with a letter so refs
+    // like "-foo" can't slip through and get misread as a flag.
+    if (!/^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(branchName)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'branchName must be 1-64 chars starting with a letter: alphanumerics + . _ -' }));
+      return true;
+    }
+    const resetMain = parsed.resetMain === true;
+
+    // Resolve default branch via symbolic-ref. Falls back to "main"
+    // if origin/HEAD isn't set (rare but possible for freshly-init'd
+    // ngit repos where the symbolic ref wasn't published).
+    let defaultBranch = 'main';
+    try {
+      const out = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], {
+        cwd: project.path, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+      }).toString().trim();
+      if (out.startsWith('origin/')) defaultBranch = out.slice('origin/'.length);
+    } catch { /* keep "main" default */ }
+
+    // Current branch + dirty check + ahead count. Done up-front so
+    // any pre-condition failure errors cleanly before we touch refs.
+    let currentBranch = '';
+    try {
+      currentBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: project.path, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+      }).toString().trim();
+    } catch (e: any) {
+      streamExecError(res, req, `git rev-parse failed: ${(e?.message ?? '').slice(0, 160)}`);
+      return true;
+    }
+    if (currentBranch !== defaultBranch) {
+      streamExecError(res, req,
+        `you're on '${currentBranch}', not the default branch '${defaultBranch}'. ` +
+        `Use the Settings → ngit signer + sync → Send as proposal button instead.`);
+      return true;
+    }
+
+    try {
+      const dirty = execFileSync('git', ['status', '--porcelain'], {
+        cwd: project.path, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+      }).toString().trim();
+      if (dirty.length > 0) {
+        streamExecError(res, req,
+          'working tree has uncommitted changes — commit (Snapshot) or stash before submitting a PR');
+        return true;
+      }
+    } catch (e: any) {
+      streamExecError(res, req, `git status failed: ${(e?.message ?? '').slice(0, 160)}`);
+      return true;
+    }
+
+    // Branch must not already exist locally — otherwise `git branch`
+    // would error and the user would see a confusing partial failure.
+    try {
+      execFileSync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`], {
+        cwd: project.path, stdio: ['ignore', 'ignore', 'ignore'], timeout: 5_000,
+      });
+      // Exit 0 → branch exists.
+      streamExecError(res, req, `branch '${branchName}' already exists locally — pick another name or delete it first`);
+      return true;
+    } catch { /* exit non-zero → branch does not exist, good */ }
+
+    // Ahead count vs origin/<default>. ngit send needs commits to
+    // propose; without any, the proposal would be empty.
+    let ahead = 0;
+    try {
+      const out = execFileSync('git', ['rev-list', '--count', `origin/${defaultBranch}..HEAD`], {
+        cwd: project.path, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
+      }).toString().trim();
+      ahead = parseInt(out, 10) || 0;
+    } catch { /* leave 0 — the check below catches it */ }
+    if (ahead < 1) {
+      streamExecError(res, req,
+        `no local commits ahead of origin/${defaultBranch} — make a snapshot or commit first`);
+      return true;
+    }
+
+    // All pre-conditions passed. SSE stream the multi-phase flow.
+    // Mirrors the runPhase pattern from /ngit/sync above.
+    res.writeHead(200, {
+      'Content-Type':  'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection':    'keep-alive',
+    });
+    const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+    const env = { ...process.env, NO_COLOR: '1', TERM: 'dumb' };
+    const cwd = project.path;
+    let killed = false;
+    req.on('close', () => { killed = true; });
+
+    const runPhase = (label: string, bin: string, args: string[], timeoutMs = 30_000): Promise<number> =>
+      new Promise((resolve) => {
+        if (killed) return resolve(-1);
+        emit({ line: `▸ ${label}`, stream: 'stdout' });
+        const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], env, cwd });
+        const pipe = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+          for (const line of chunk.toString().split('\n')) {
+            if (line.length) emit({ line, stream });
+          }
+        };
+        child.stdout.on('data', pipe('stdout'));
+        child.stderr.on('data', pipe('stderr'));
+        child.on('error', (e) => {
+          emit({ line: String(e.message || e), stream: 'stderr' });
+          resolve(-1);
+        });
+        child.on('close', (code) => resolve(code ?? -1));
+        const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} resolve(-2); }, timeoutMs);
+        child.on('close', () => clearTimeout(timer));
+      });
+
+    try {
+      // 1. Create the feature branch at current HEAD (still on default
+      //    branch at this point — the branch is a pointer-only op).
+      const branchCode = await runPhase(`git branch ${branchName}`, 'git', ['branch', branchName]);
+      if (branchCode !== 0) {
+        emit({ line: `branch create failed (exit ${branchCode}) — aborting`, stream: 'stderr' });
+        emit({ done: true, code: branchCode });
+        try { res.end(); } catch {}
+        return true;
+      }
+
+      // 2. Optionally move default branch back to origin's HEAD. The
+      //    new feature branch retains the commits (its pointer was
+      //    set in step 1 before this reset).
+      if (resetMain) {
+        const resetCode = await runPhase(
+          `git reset --hard origin/${defaultBranch}`,
+          'git', ['reset', '--hard', `origin/${defaultBranch}`],
+        );
+        if (resetCode !== 0) {
+          emit({ line: `default-branch reset failed (exit ${resetCode}); branch '${branchName}' was created — switching to it`, stream: 'stderr' });
+          // Continue: we still want to be on the feature branch.
+        }
+      }
+
+      // 3. Switch to the feature branch. ngit send picks up the
+      //    current branch's state, so this matters for step 4.
+      const coCode = await runPhase(`git checkout ${branchName}`, 'git', ['checkout', branchName]);
+      if (coCode !== 0) {
+        emit({ line: `checkout failed (exit ${coCode}) — branch exists but you're still on ${defaultBranch}`, stream: 'stderr' });
+        emit({ done: true, code: coCode });
+        try { res.end(); } catch {}
+        return true;
+      }
+
+      // 4. Open the proposal. Same invocation as the Settings → Send
+      //    button (ngit send --defaults). Amber sign prompt fires
+      //    during this step; we use a generous 3-min timeout to
+      //    accommodate Amber's user-confirm round-trip + grasp
+      //    server upload.
+      const sendCode = await runPhase(
+        'ngit send --defaults',
+        'ngit', ['send', '--defaults'],
+        180_000,
+      );
+      emit({ done: true, code: sendCode });
+    } finally {
+      try { res.end(); } catch {}
+    }
     return true;
   }
 

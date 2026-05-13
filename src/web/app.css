@@ -6906,6 +6906,66 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
 }
 .proposals-head-actions { display: flex; gap: 8px; }
 
+/* "Submit your local commits as a PR" CTA card on the Pull requests
+   tab. Conditional render — only when on the default branch with
+   commits ahead. Wraps the multi-step git dance (branch + optional
+   reset + ngit send) in one click so contributors don't drop to a
+   terminal. */
+.proposal-new-cta {
+  background: var(--bg-card, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.proposal-new-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.proposal-new-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.proposal-new-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.proposal-new-row > span:first-child {
+  min-width: 90px;
+  color: var(--text-dim);
+}
+.proposal-new-branch {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--bg-input, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: 4px;
+  color: inherit;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.proposal-new-branch:focus { outline: 1px solid var(--accent, #6cf); }
+.proposal-new-reset {
+  /* Checkbox row needs the box and label in a single line — different
+     from the labeled-input rows above. */
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.proposal-new-reset > span { min-width: 0; color: inherit; }
+.proposal-new-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.proposal-new-submit[disabled] { opacity: 0.5; cursor: not-allowed; }
+
 .proposals-series-list {
   display: flex;
   flex-direction: column;
