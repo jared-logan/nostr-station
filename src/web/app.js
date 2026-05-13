@@ -7650,24 +7650,44 @@ const ProjectsPanel = (() => {
       });
       body.querySelector('.pdetail-copy').appendChild(copyBtn(activeRev.rootId));
 
-      // Phase 4 — Merge button + status dropdown. Merge runs
-      // ngit pr_merge after a dirty-tree preflight (server-side).
+      // Phase 4 — Merge button + status dropdown. Merge runs a
+      // five-phase server-side flow: fetch → checkout default →
+      // ff-only merge → push → publish kind-1631. ngit's own
+      // `pr merge` only handles the last phase (announcement); the
+      // rest is done explicitly with plain git because ngit 2.x's
+      // pr-merge doesn't actually integrate the patch.
+      //
       // The status dropdown lets the user / a maintainer mark a PR
       // open / draft / closed via ngit pr_status.
       body.querySelector('.pdetail-merge').addEventListener('click', () => {
+        // branchName comes from the patch event's branch-name tag
+        // (surfaced by routes/patches.ts's detail enrichment). If
+        // the event somehow lacks it, surface a clear error rather
+        // than letting the server's validation reject — gives the
+        // user a faster path to the actual problem.
+        if (!activeRev.branchName) {
+          toast(
+            'Cannot merge',
+            'This PR\'s patch event has no branch-name tag — merge unavailable. ' +
+            'You can still merge from a terminal via git checkout + git merge.',
+            'err',
+          );
+          return;
+        }
         confirmDestructive({
           title: 'Merge this proposal?',
-          description: `Runs ngit pr_merge for the v${activeRev.version} root locally. ` +
-            `This creates a merge commit, pushes refs, and publishes a kind-1631 status event. ` +
-            `The working tree must be clean.`,
+          description:
+            `Fast-forwards your default branch with the commits from ${activeRev.branchName}, ` +
+            `pushes to origin, then publishes a kind-1631 status event. ` +
+            `Working tree must be clean. Refuses if the default branch has diverged.`,
           confirmLabel: 'Merge',
         }).then((ok) => {
           if (!ok) return;
           openExecModal({
             title:    `Merge · ${p.name}`,
-            subtitle: `ngit pr_merge ${activeRev.rootId.slice(0, 12)}…`,
+            subtitle: `fast-forward ${activeRev.branchName} → default branch, then ngit announce`,
             endpoint: `/api/projects/${p.id}/merge`,
-            body:     { rootId: activeRev.rootId },
+            body:     { rootId: activeRev.rootId, branchName: activeRev.branchName },
           }).then((r) => {
             if (r.ok) {
               toast('Merged', detail.subject, 'ok');
