@@ -140,3 +140,28 @@ vite.config.ts.timestamp-*
 
 # personal workspace files (Claude Code)
 CLAUDE.md
+
+# When users install via install.sh, the source tree lives at
+# ~/nostr-station/ and their projects land at ~/nostr-station/projects/.
+# Ignore that directory in this repo so `git status` inside a clone
+# never shows a user's projects as untracked (or worse: lets them
+# accidentally `git add .` them into the source tree).
+projects/
+
+# OS metadata
+.DS_Store
+
+# Editor backups (Vim, Emacs/Vi)
+*.swp
+*.swo
+*~
+
+# JetBrains IDEs (WebStorm, IntelliJ, etc.) — per-user project state.
+# Contributors opening this repo in JetBrains will create this dir;
+# none of it should land in the shared history.
+.idea/
+
+# Claude Code's per-user local state. The shared CLAUDE.md is already
+# ignored above; this catches the settings dir Claude Code creates
+# alongside it when contributors run it against this repo.
+.claude/
