@@ -788,16 +788,71 @@ export async function handleStatus(
         return true;
       }
 
-      // 5. Finally — announce on Nostr. We publish kind-1631 only AFTER
-      //    the actual merge + push succeeded so there's no inconsistent
-      //    "announced as merged but no merge on GRASP" state (the exact
-      //    bug ngit pr merge exhibits on its own).
-      const announceCode = await runPhase(
-        `ngit pr merge ${rootId}`,
-        'ngit', ['pr', 'merge', rootId],
-        180_000,
-      );
-      emit({ done: true, code: announceCode });
+      // 5. Finally — announce on Nostr. We try to publish a kind-1631
+      //    status event ourselves, AFTER the actual merge + push, so
+      //    there's no inconsistent "announced as merged but no merge
+      //    on GRASP" state (the exact bug ngit pr merge exhibits when
+      //    invoked alone).
+      //
+      //    HOWEVER — when pushing to a nostr:// remote (phase 4),
+      //    git-remote-nostr already publishes a kind-1631 itself as
+      //    part of the protocol. By the time this phase runs, ngit
+      //    detects the PR is already marked merged and exits 1 with
+      //    "PR is already applied/merged" written to stderr. That's
+      //    the happy path, not a failure: the announcement is on the
+      //    network either way.
+      //
+      //    So this phase uses a custom inline spawn (rather than the
+      //    shared runPhase helper) so we can both stream output AND
+      //    detect the "already" marker in stderr. Exit 0 or "already"
+      //    → emit success; anything else → propagate the exit code.
+      emit({ line: `▸ ngit pr merge ${rootId}`, stream: 'stdout' });
+      const announceResult: { code: number; alreadyMerged: boolean } =
+        await new Promise((resolve) => {
+          if (killed) return resolve({ code: -1, alreadyMerged: false });
+          let alreadyMerged = false;
+          const child = spawn('ngit', ['pr', 'merge', rootId], {
+            stdio: ['ignore', 'pipe', 'pipe'], env, cwd,
+          });
+          const handle = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+            for (const line of chunk.toString().split('\n')) {
+              if (!line.length) continue;
+              if (/already\s+(applied|merged)/i.test(line)) alreadyMerged = true;
+              emit({ line, stream });
+            }
+          };
+          child.stdout.on('data', handle('stdout'));
+          child.stderr.on('data', handle('stderr'));
+          let resolved = false;
+          const finish = (code: number) => {
+            if (resolved) return;
+            resolved = true;
+            resolve({ code, alreadyMerged });
+          };
+          child.on('error', (e) => {
+            emit({ line: String(e.message || e), stream: 'stderr' });
+            finish(-1);
+          });
+          child.on('close', (code) => finish(code ?? -1));
+          const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} finish(-2); }, 180_000);
+          child.on('close', () => clearTimeout(timer));
+        });
+
+      if (announceResult.code === 0 || announceResult.alreadyMerged) {
+        if (announceResult.alreadyMerged && announceResult.code !== 0) {
+          // Helpful explanatory line so users reading the modal scrollback
+          // understand WHY ngit said "already merged" — without it, the
+          // last visible line is a scary "Error: PR is already
+          // applied/merged" that we then magically treat as success.
+          emit({
+            line: '(merge announcement was already published by git-remote-nostr during the push — treating as success.)',
+            stream: 'stdout',
+          });
+        }
+        emit({ done: true, code: 0 });
+      } else {
+        emit({ done: true, code: announceResult.code });
+      }
     } finally {
       try { res.end(); } catch {}
     }
