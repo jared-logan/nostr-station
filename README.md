@@ -1,6 +1,5 @@
 # nostr-station
 
-[![npm version](https://badge.fury.io/js/nostr-station.svg)](https://www.npmjs.com/package/nostr-station)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
 A local Nostr dev environment in one Node process — relay, dashboard, AI chat,
@@ -17,9 +16,15 @@ touch the machine; your work never leaves the machine unless you push it.
 curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/install.sh | bash
 ```
 
-Installs Node 22+ if needed, installs the `nostr-station` npm package, and
-launches it. Total time: ~10 seconds on a warm machine. No Docker, no Rust
-toolchain, no system service files, no `sudo`.
+Installs Node 22+ if needed, clones nostr-station to `~/nostr-station`,
+builds it, links the `nostr-station` command globally, and launches the
+dashboard. Total time: ~30-45 seconds on a warm machine. No Docker, no
+Rust toolchain, no system service files, no `sudo`.
+
+Re-running the same one-liner upgrades an existing install (fast-forward
+pull, rebuild, relaunch). Git is the only added prerequisite — every
+mainstream macOS / Linux setup ships with it, and the installer prints
+a clear install hint if it's missing.
 
 Your browser opens at `http://localhost:3000/setup` for first-run pairing.
 

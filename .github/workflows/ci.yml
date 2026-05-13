@@ -140,7 +140,7 @@ jobs:
       # README curl-pipe-to-bash contract depend on. These are cheap
       # grep-level assertions; they catch the realistic drift modes
       # (someone bumps engines.node without touching install.sh,
-      # someone renames the npm package, someone deletes the OS guard).
+      # someone renames the repo, someone deletes the OS guard).
       - name: install.sh contract
         run: |
           set -euo pipefail
@@ -153,20 +153,36 @@ jobs:
           fi
           echo "✓ REQUIRED_NODE in sync ($script_node)"
 
-          # 2. NPM_PKG in install.sh matches name in package.json.
-          script_pkg=$(grep -E '^NPM_PKG=' install.sh | head -1 | cut -d= -f2 | tr -d '"')
-          pkg_name=$(node -p "require('./package.json').name")
-          if [[ "$script_pkg" != "$pkg_name" ]]; then
-            echo "❌ install.sh NPM_PKG=$script_pkg but package.json name=$pkg_name"; exit 1
-          fi
-          echo "✓ NPM_PKG in sync ($script_pkg)"
+          # 2. REPO_URL points at this repo. Catches a rename / fork-drift
+          #    that would otherwise have curl-pipe-to-bash silently install
+          #    the wrong project.
+          grep -qE '^REPO_URL=.*github\.com[:/]jared-logan/nostr-station' install.sh \
+            || { echo "❌ install.sh REPO_URL doesn't point at jared-logan/nostr-station"; exit 1; }
+          echo "✓ REPO_URL points at this repo"
 
-          # 3. OS guard — refuse non-Darwin / non-Linux.
+          # 3. INSTALL_DIR is the documented ~/nostr-station path. The
+          #    README's project-directory layout assumes this, and the
+          #    source-tree .gitignore excludes projects/ on this basis.
+          grep -qE '^INSTALL_DIR="\$\{HOME\}/nostr-station"' install.sh \
+            || { echo "❌ install.sh INSTALL_DIR isn't \${HOME}/nostr-station"; exit 1; }
+          echo "✓ INSTALL_DIR is \${HOME}/nostr-station"
+
+          # 4. The clone-and-build steps are all present. Without any one
+          #    of these, the script would either skip dependency
+          #    installation, ship an unbuilt dist/, or fail to expose the
+          #    nostr-station command globally.
+          for needle in 'git clone' 'npm install' 'npm run build' 'npm link'; do
+            grep -qE "$needle" install.sh \
+              || { echo "❌ install.sh is missing step: $needle"; exit 1; }
+          done
+          echo "✓ clone + install + build + link steps present"
+
+          # 5. OS guard — refuse non-Darwin / non-Linux.
           grep -qE 'Darwin\|Linux' install.sh \
             || { echo "❌ install.sh OS guard for Darwin|Linux missing"; exit 1; }
           echo "✓ OS guard present"
 
-          # 4. The script launches the dashboard at the end. Without this,
+          # 6. The script launches the dashboard at the end. Without this,
           #    `curl … | bash` returns to the shell instead of dropping
           #    the user into the dashboard — the entire UX contract.
           grep -qE '^exec nostr-station' install.sh \
