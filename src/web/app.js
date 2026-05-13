@@ -13937,10 +13937,12 @@ AuthScreen = (() => {
           </div>
         </div>
         <div class="auth-owner">
-          <div class="avatar">${pixelAvatar(npub, 32)}</div>
-          <div>
+          <div class="avatar" id="auth-owner-avatar">${pixelAvatar(npub, 32)}</div>
+          <div class="meta">
             <div class="role">Station owner</div>
-            <div class="name">${escapeHtml(truncated)}</div>
+            <div class="name" id="auth-owner-name">${escapeHtml(truncated)}</div>
+            <div class="nip05" id="auth-owner-nip05" hidden></div>
+            <div class="npub muted" id="auth-owner-npub" hidden>${escapeHtml(truncated)}</div>
           </div>
         </div>
 
@@ -14002,6 +14004,45 @@ AuthScreen = (() => {
     if (!ext) {
       // No extension → expand bunker section and default to QR tab.
       activateTab('qr');
+    }
+
+    hydrateOwnerProfile(npub);
+  }
+
+  // Fetch kind-0 metadata for the configured owner and swap the placeholder
+  // avatar / truncated-npub for the real picture + display name + NIP-05.
+  // Endpoint is the same one the setup wizard preview uses; it's pre-auth
+  // safe and the server already sanitizes picture URLs via safeHttpUrl.
+  async function hydrateOwnerProfile(npub) {
+    if (!npub) return;
+    let p;
+    try {
+      const res = await fetch(`/api/identity/profile/preview?npub=${encodeURIComponent(npub)}`);
+      if (!res.ok) return;
+      p = await res.json();
+    } catch { return; }
+    if (!p || p.error || p.empty) return;
+
+    // DOM may have been torn down (successful sign-in races with the fetch).
+    const avatarEl = $('auth-owner-avatar');
+    const nameEl   = $('auth-owner-name');
+    const nip05El  = $('auth-owner-nip05');
+    const npubEl   = $('auth-owner-npub');
+    if (!avatarEl || !nameEl) return;
+
+    if (p.picture) {
+      avatarEl.innerHTML =
+        `<img src="${escapeHtml(p.picture)}" alt="" width="32" height="32">`;
+    }
+    if (p.name) {
+      nameEl.textContent = p.name;
+      // Move the truncated npub to its own line so the display name is primary.
+      if (npubEl) npubEl.hidden = false;
+    }
+    if (p.nip05 && nip05El) {
+      nip05El.hidden = false;
+      nip05El.innerHTML = escapeHtml(p.nip05) +
+        (p.nip05Verified ? ' <span class="ok">✓</span>' : '');
     }
   }
 
