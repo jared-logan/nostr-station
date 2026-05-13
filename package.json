@@ -4,9 +4,10 @@
   "description": "One-command Nostr dev environment — relay, mesh VPN, ngit, Claude Code, Stacks",
   "type": "module",
   "bin": {
-    "nostr-station": "dist/cli.js"
+    "nostr-station": "bin/nostr-station.sh"
   },
   "files": [
+    "bin",
     "dist",
     "install.sh",
     "README.md"

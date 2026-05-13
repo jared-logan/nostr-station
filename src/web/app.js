@@ -15280,6 +15280,7 @@ function bootDashboard(localhostExempt) {
     __bootStarted = true;
     refreshHeader();
     refreshHealth();
+    Updates.init();
     activatePanel(currentPanel());
     // Terminal panel is opt-in per session (user clicks to open) but the
     // capability probe + reconnect-if-live runs during boot so a refreshed
@@ -15338,6 +15339,257 @@ function toggleLocalhostBanner(on) {
     el.remove();
   }
 }
+
+// ── One-click update ─────────────────────────────────────────────────────
+//
+// Server-side, an update-check poller hits the GitHub compare API every
+// ~30 min; that result is cached and read here via /api/update-status.
+// The browser additionally re-checks the local cache every 5 minutes so
+// the pill clears promptly after the user updates (no network cost — it's
+// just a local HTTP GET against the in-memory snapshot).
+//
+// Clicking the pill opens a modal that POSTs /api/update, streams progress
+// SSE-style, and on a successful restart polls /api/auth/status until the
+// dashboard comes back, then reloads the tab. The browser-side session
+// token lives in localStorage and the server snapshots in-memory sessions
+// across the restart (see auth.ts) so the reload lands logged-in.
+const Updates = (() => {
+  const PILL_ID = 'update-pill';
+  const BROWSER_REPOLL_MS = 5 * 60 * 1000;
+  const RESTART_POLL_MS   = 1000;
+  const RESTART_POLL_MAX  = 120; // 2 min ceiling
+  let inited = false;
+
+  function pill() { return document.getElementById(PILL_ID); }
+
+  function renderPill(status) {
+    const el = pill();
+    if (!el) return;
+    if (!status?.supported || !status?.available) {
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    const textEl = el.querySelector('.update-pill-text');
+    if (textEl) {
+      const n = status.behindBy || 1;
+      textEl.textContent = n > 1 ? `${n} updates available` : 'Update available';
+    }
+    el.title = (status.commits || [])
+      .slice(0, 5)
+      .map(c => `· ${c.message}`)
+      .join('\n') || 'New commits available on origin/main';
+  }
+
+  async function refresh(force) {
+    try {
+      // Optional: kick a server-side re-poll when the user opens the
+      // modal so any commits merged since the last 30-min tick show up.
+      if (force) {
+        try {
+          await fetch('/api/update-status/refresh', {
+            method:  'POST',
+            headers: { 'Authorization': `Bearer ${getSessionToken() || ''}` },
+          });
+        } catch {}
+        // Small grace for the async poll started by the refresh endpoint
+        // to land before we read /api/update-status.
+        await new Promise(r => setTimeout(r, 1500));
+      }
+      const status = await api('/api/update-status', undefined, { silent: true });
+      renderPill(status);
+      return status;
+    } catch {
+      // Auth or network — pill stays hidden, no toast (background poll).
+      renderPill(null);
+      return null;
+    }
+  }
+
+  function openUpdateModal(initialStatus) {
+    const body = document.createElement('div');
+    body.className = 'exec-body';
+    const commits = (initialStatus?.commits || [])
+      .slice(0, 10)
+      .map(c => `<li><code class="upd-sha">${escapeHtml(c.sha.slice(0,7))}</code> ${escapeHtml(c.message)}</li>`)
+      .join('');
+    body.innerHTML = `
+      ${commits ? `<div class="upd-commits"><div class="upd-commits-title">What's new</div><ul class="upd-commit-list">${commits}</ul></div>` : ''}
+      <div class="term exec-term"><span class="line sys">Ready to update. Click Install to begin.</span><span class="cursor"></span></div>
+    `;
+    const statusPill = document.createElement('span');
+    statusPill.className = 'status-pill';
+    statusPill.textContent = 'idle';
+
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.alignItems = 'center'; foot.style.width = '100%';
+    const statusWrap = document.createElement('div'); statusWrap.style.flex = '1';
+    statusWrap.appendChild(statusPill);
+    const installBtn = document.createElement('button');
+    installBtn.textContent = 'Install update'; installBtn.className = 'primary';
+    const closeBtn = document.createElement('button'); closeBtn.textContent = 'close';
+    closeBtn.style.marginLeft = '8px';
+    foot.appendChild(statusWrap); foot.appendChild(closeBtn); foot.appendChild(installBtn);
+
+    const modal = openModal({
+      title:    'Update nostr-station',
+      subtitle: initialStatus?.behindBy
+        ? `${initialStatus.behindBy} commit${initialStatus.behindBy === 1 ? '' : 's'} behind origin/main`
+        : 'Pulling origin/main',
+      body, footer: foot,
+    });
+    modal.root.classList.add('exec-modal');
+
+    const term = body.querySelector('.exec-term');
+    const cursor = term.querySelector('.cursor');
+    const addLine = (text, cls = '') => {
+      const span = document.createElement('span');
+      span.className = 'line ' + cls;
+      span.textContent = text + '\n';
+      if (cursor.parentNode === term) term.insertBefore(span, cursor);
+      else term.appendChild(span);
+      term.scrollTop = term.scrollHeight;
+    };
+
+    let running = false;
+    let reader = null;
+
+    closeBtn.addEventListener('click', () => {
+      if (running) return; // disabled visually too
+      modal.close();
+    });
+
+    installBtn.addEventListener('click', async () => {
+      if (running) return;
+      running = true;
+      installBtn.disabled = true;
+      closeBtn.disabled = true;
+      statusPill.className = 'status-pill running';
+      statusPill.innerHTML = '<span class="spinner"></span>running';
+      // Clear the placeholder line.
+      while (term.firstChild && term.firstChild !== cursor) term.removeChild(term.firstChild);
+
+      let res;
+      try {
+        res = await fetch('/api/update', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${getSessionToken() || ''}` },
+        });
+      } catch (e) {
+        addLine(String(e.message || e), 'err');
+        running = false;
+        statusPill.className = 'status-pill error'; statusPill.textContent = 'error';
+        installBtn.disabled = false; closeBtn.disabled = false;
+        return;
+      }
+      if (!res.ok) {
+        addLine(`HTTP ${res.status} — ${await res.text().catch(() => '')}`, 'err');
+        running = false;
+        statusPill.className = 'status-pill error'; statusPill.textContent = 'error';
+        installBtn.disabled = false; closeBtn.disabled = false;
+        return;
+      }
+
+      reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let result = { ok: false, restart: false, error: null };
+      outer: while (true) {
+        let read;
+        try { read = await reader.read(); } catch { break outer; }
+        if (read.done) break;
+        buf += dec.decode(read.value, { stream: true });
+        const lines = buf.split('\n'); buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+          let msg;
+          try { msg = JSON.parse(raw); } catch { continue; }
+          if (msg.done) {
+            result = { ok: !!msg.ok, restart: !!msg.restart, error: msg.error || null };
+            break outer;
+          }
+          if (msg.phase) {
+            const label = {
+              fetch:    'Fetching latest changes…',
+              pull:     'Applying changes…',
+              install:  'Installing dependencies…',
+              build:    'Building…',
+              rollback: 'Rolling back…',
+              restart:  'Restarting…',
+              step:     null,
+            }[msg.phase];
+            if (label) addLine(`• ${label}`, 'sys');
+          }
+          if (msg.line) {
+            const cls = msg.stream === 'stderr' ? 'err' : '';
+            addLine(msg.line.replace(/\x1b\[[0-9;]*m/g, ''), cls);
+          }
+        }
+      }
+      try { cursor.remove(); } catch {}
+
+      if (result.ok && result.restart) {
+        statusPill.className = 'status-pill running';
+        statusPill.innerHTML = '<span class="spinner"></span>restarting';
+        addLine('Waiting for dashboard to come back online…', 'sys');
+        await waitForServerBack();
+        addLine('Server is back. Reloading…', 'ok');
+        statusPill.className = 'status-pill done'; statusPill.textContent = 'done';
+        // localStorage session survives the reload; server-side persisted
+        // sessions survive the restart — landing here logged-in.
+        setTimeout(() => location.reload(), 250);
+        return;
+      }
+
+      running = false;
+      if (result.ok) {
+        addLine('Already up to date.', 'ok');
+        statusPill.className = 'status-pill done'; statusPill.textContent = 'up to date';
+        // Pill should have already been cleared by the server's poll
+        // refresh; do a UI refresh to be sure.
+        void refresh(false);
+      } else {
+        addLine(result.error ? `Update failed: ${result.error}` : 'Update failed.', 'err');
+        statusPill.className = 'status-pill error'; statusPill.textContent = 'error';
+      }
+      installBtn.disabled = false;
+      closeBtn.disabled = false;
+    });
+  }
+
+  async function waitForServerBack() {
+    for (let i = 0; i < RESTART_POLL_MAX; i++) {
+      await new Promise(r => setTimeout(r, RESTART_POLL_MS));
+      try {
+        const res = await fetch('/api/auth/status', { cache: 'no-store' });
+        if (res.ok) return true;
+      } catch {}
+    }
+    return false;
+  }
+
+  function init() {
+    if (inited) return;
+    inited = true;
+    const el = pill();
+    if (el) {
+      el.addEventListener('click', async () => {
+        const status = await refresh(true);
+        if (!status?.available) {
+          toast('Already up to date', '', 'ok');
+          return;
+        }
+        openUpdateModal(status);
+      });
+    }
+    void refresh(false);
+    setInterval(() => { void refresh(false); }, BROWSER_REPOLL_MS);
+  }
+
+  return { init, refresh };
+})();
 
 // Entry point: /setup launches the first-run wizard; anywhere else
 // falls through to the auth gate → either dashboard or sign-in.

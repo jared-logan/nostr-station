@@ -7476,3 +7476,62 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
   align-items: center;
   margin-left: auto;            /* push dropdown to the right of the merge button */
 }
+
+/* ── One-click update pill (header) ────────────────────────────────────── */
+.update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-bright, #c79bff);
+  background: var(--accent-soft, rgba(167,108,255,0.12));
+  border: 1px solid var(--accent-dim, rgba(167,108,255,0.4));
+  border-radius: var(--r-sm, 6px);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, transform 80ms ease;
+}
+.update-pill:hover {
+  background: var(--accent-soft, rgba(167,108,255,0.22));
+  border-color: var(--accent, rgba(167,108,255,0.7));
+}
+.update-pill:active { transform: translateY(1px); }
+.update-pill svg { display: block; }
+.update-pill[hidden] { display: none; }
+
+/* Update modal — commit list above the streamed log */
+.upd-commits {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-elev);
+}
+.upd-commits-title {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.upd-commit-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+}
+.upd-commit-list li {
+  padding: 2px 0;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.upd-sha {
+  color: var(--muted);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  flex-shrink: 0;
+}

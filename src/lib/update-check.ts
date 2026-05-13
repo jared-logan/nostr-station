@@ -1,0 +1,415 @@
+/**
+ * One-click self-update for nostr-station.
+ *
+ * The dashboard runs out of a `git clone` at the install root (see
+ * install.sh — defaults to ~/nostr-station). This module:
+ *
+ *   1. Periodically asks GitHub if `origin/main` has advanced past the
+ *      currently-checked-out SHA, using the compare API (one cheap HTTP
+ *      call per poll, cached). Result drives the "Update available" pill.
+ *
+ *   2. On user click, fast-forwards the working tree, reruns
+ *      `npm install` + `npm run build`, and exits with code 75 so the
+ *      `bin/nostr-station.sh` wrapper respawns into the new build.
+ *      Any failure mid-flow rolls the checkout back to the pre-update
+ *      SHA so the wrapper boots into a known-good state.
+ *
+ * Polling cadence is deliberately low (every 30 minutes after a short
+ * startup delay) so an idle dashboard does ~50 GitHub requests/day —
+ * comfortably under the 60/hour unauthenticated rate limit, and
+ * imperceptible to the user.
+ */
+
+import { spawn, execFile, type ChildProcess } from 'child_process';
+import { promisify } from 'util';
+import http from 'http';
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { persistSessions } from './auth.js';
+
+const execFileP = promisify(execFile);
+
+const REPO_OWNER = 'jared-logan';
+const REPO_NAME  = 'nostr-station';
+const BRANCH     = 'main';
+
+const POLL_INTERVAL_MS = 30 * 60 * 1000; // 30 min
+const STARTUP_DELAY_MS = 60 * 1000;      // 1 min after boot
+const REQUEST_TIMEOUT_MS = 8_000;
+
+// Exit code the wrapper script (bin/nostr-station.sh) interprets as
+// "rebuild done, restart me." Anything else propagates to the user.
+export const UPDATE_RESTART_EXIT_CODE = 75;
+
+// ── Install root resolution ─────────────────────────────────────────────────
+
+// dist/lib/update-check.js → install root is two levels up. In dev mode the
+// module is hosted from src/lib/update-check.ts; same relative position.
+function installRoot(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(here, '..', '..');
+}
+
+function isGitCheckout(root: string): boolean {
+  try { return fs.statSync(path.join(root, '.git')).isDirectory(); }
+  catch { return false; }
+}
+
+// ── Status cache ────────────────────────────────────────────────────────────
+
+export interface UpdateStatus {
+  // True only when this install was cloned from git AND the repo has a
+  // remote we can compare against. npm-registry installs (hypothetical
+  // future) would be supported:false → pill stays hidden.
+  supported:    boolean;
+  // Whether origin/main is ahead of the local checkout.
+  available:    boolean;
+  currentSha:   string | null;
+  latestSha:    string | null;
+  // Commits we're behind, capped at whatever GitHub returned.
+  behindBy:     number;
+  // Short messages of the commits we'd pull, latest first. Empty when
+  // either supported:false, available:false, or the network is down.
+  commits:      Array<{ sha: string; message: string; url: string }>;
+  // ms-since-epoch of the last successful poll. null until we've
+  // managed at least one. Drives "checked X minutes ago" if we ever
+  // want to surface it.
+  lastCheckedAt: number | null;
+  // Last poll error, surfaced to the UI for debugging. Null when the
+  // most recent poll succeeded.
+  lastError:    string | null;
+  // True while applyUpdate() is running. UI disables the button.
+  applying:     boolean;
+}
+
+const status: UpdateStatus = {
+  supported:     false,
+  available:     false,
+  currentSha:    null,
+  latestSha:     null,
+  behindBy:      0,
+  commits:       [],
+  lastCheckedAt: null,
+  lastError:     null,
+  applying:      false,
+};
+
+export function getUpdateStatus(): UpdateStatus {
+  // Shallow clone so callers can JSON.stringify without us worrying
+  // about a poll racing the serialization.
+  return { ...status, commits: status.commits.slice() };
+}
+
+// ── Git helpers ─────────────────────────────────────────────────────────────
+
+async function gitSha(root: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP('git', ['rev-parse', 'HEAD'], { cwd: root });
+    const sha = stdout.trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch { return null; }
+}
+
+async function gitIsClean(root: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileP(
+      'git', ['status', '--porcelain', '--untracked-files=no'],
+      { cwd: root },
+    );
+    return stdout.trim().length === 0;
+  } catch { return false; }
+}
+
+// ── GitHub compare ──────────────────────────────────────────────────────────
+
+interface GhCompareResult {
+  status:    string;        // "ahead" | "behind" | "identical" | "diverged"
+  ahead_by:  number;
+  behind_by: number;
+  base_commit?: { sha: string };
+  merge_base_commit?: { sha: string };
+  commits?: Array<{ sha: string; commit: { message: string }; html_url: string }>;
+}
+
+function ghCompare(currentSha: string): Promise<GhCompareResult> {
+  return new Promise((resolve, reject) => {
+    const url = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/compare/${currentSha}...${BRANCH}`;
+    const req = https.get(url, {
+      headers: {
+        'User-Agent':            'nostr-station-update-check',
+        'Accept':                'application/vnd.github+json',
+        'X-GitHub-Api-Version':  '2022-11-28',
+      },
+      timeout: REQUEST_TIMEOUT_MS,
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode !== 200) {
+          // 404 typically means the base SHA isn't on origin yet (the
+          // user committed locally and hasn't pushed). Surface a clear
+          // message rather than the raw HTTP code.
+          if (res.statusCode === 404) {
+            return reject(new Error('local commit not found on origin (did you commit but not push?)'));
+          }
+          if (res.statusCode === 403 || res.statusCode === 429) {
+            return reject(new Error('GitHub rate limit hit — retrying later'));
+          }
+          return reject(new Error(`GitHub returned HTTP ${res.statusCode}`));
+        }
+        try { resolve(JSON.parse(body)); }
+        catch (e: any) { reject(new Error(`bad GitHub response: ${e?.message || e}`)); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(new Error('GitHub request timed out')); });
+    req.on('error', reject);
+  });
+}
+
+// ── Poller ──────────────────────────────────────────────────────────────────
+
+let pollTimer: NodeJS.Timeout | null = null;
+
+async function pollOnce(): Promise<void> {
+  const root = installRoot();
+  if (!isGitCheckout(root)) {
+    status.supported     = false;
+    status.lastCheckedAt = Date.now();
+    return;
+  }
+  status.supported = true;
+  const current = await gitSha(root);
+  if (!current) {
+    status.lastError     = 'could not read current git SHA';
+    status.lastCheckedAt = Date.now();
+    return;
+  }
+  status.currentSha = current;
+
+  try {
+    const cmp = ghCompare(current);
+    const result = await cmp;
+    const ahead = result.status === 'behind' || result.status === 'diverged';
+    status.available = ahead && (result.behind_by ?? 0) > 0;
+    status.behindBy  = result.behind_by ?? 0;
+    status.commits   = (result.commits ?? [])
+      .slice(-10)
+      .reverse()
+      .map(c => ({
+        sha:     c.sha,
+        message: (c.commit?.message || '').split('\n')[0].slice(0, 200),
+        url:     c.html_url,
+      }));
+    // The compare API doesn't give us origin/main's head SHA directly,
+    // but the last entry of `commits` IS the head. Fall back to null
+    // when we're already up to date.
+    status.latestSha =
+      (result.commits && result.commits.length > 0)
+        ? result.commits[result.commits.length - 1].sha
+        : current;
+    status.lastError     = null;
+    status.lastCheckedAt = Date.now();
+  } catch (e: any) {
+    status.lastError     = String(e?.message || e).slice(0, 200);
+    status.lastCheckedAt = Date.now();
+  }
+}
+
+export function startUpdatePoller(): void {
+  if (pollTimer) return;
+  // Defer the first check so we don't compete with startup work
+  // (npm install, in-process relay boot, etc.) on a fresh install.
+  const kick = () => {
+    void pollOnce();
+    pollTimer = setInterval(() => { void pollOnce(); }, POLL_INTERVAL_MS);
+    if (pollTimer && typeof (pollTimer as any).unref === 'function') {
+      (pollTimer as any).unref();
+    }
+  };
+  const startTimer = setTimeout(kick, STARTUP_DELAY_MS);
+  if (typeof (startTimer as any).unref === 'function') {
+    (startTimer as any).unref();
+  }
+}
+
+export function stopUpdatePoller(): void {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+// ── Apply update (SSE-streamed) ─────────────────────────────────────────────
+
+type SseEmit = (event: { line?: string; stream?: 'stdout' | 'stderr'; phase?: string; done?: boolean; ok?: boolean; restart?: boolean; error?: string }) => void;
+
+function runStep(
+  step: { bin: string; args: string[] },
+  cwd: string,
+  emit: SseEmit,
+): Promise<number> {
+  return new Promise((resolve) => {
+    emit({ phase: 'step', line: `$ ${step.bin} ${step.args.join(' ')}`, stream: 'stdout' });
+    let child: ChildProcess;
+    try {
+      child = spawn(step.bin, step.args, {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, CI: '1' },
+      });
+    } catch (e: any) {
+      emit({ line: `failed to spawn ${step.bin}: ${e?.message || e}`, stream: 'stderr' });
+      return resolve(-1);
+    }
+
+    const onData = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+      const text = chunk.toString();
+      for (const line of text.split('\n')) {
+        if (line.length > 0) emit({ line, stream });
+      }
+    };
+    child.stdout?.on('data', onData('stdout'));
+    child.stderr?.on('data', onData('stderr'));
+    child.on('error', (e) => {
+      emit({ line: String(e.message || e), stream: 'stderr' });
+      resolve(-1);
+    });
+    child.on('close', (code) => { resolve(code ?? -1); });
+  });
+}
+
+export async function applyUpdate(emit: SseEmit): Promise<void> {
+  if (status.applying) {
+    emit({ done: true, ok: false, error: 'update already in progress' });
+    return;
+  }
+  const root = installRoot();
+  if (!isGitCheckout(root)) {
+    emit({ done: true, ok: false, error: 'install is not a git checkout — cannot self-update' });
+    return;
+  }
+  status.applying = true;
+
+  try {
+    if (!(await gitIsClean(root))) {
+      emit({
+        line: 'aborting: local changes detected in the install directory.',
+        stream: 'stderr',
+      });
+      emit({
+        line: 'commit, stash, or revert them before updating, then click Update again.',
+        stream: 'stderr',
+      });
+      emit({ done: true, ok: false, error: 'working tree not clean' });
+      return;
+    }
+
+    const beforeSha = await gitSha(root);
+    if (!beforeSha) {
+      emit({ done: true, ok: false, error: 'could not read current git SHA' });
+      return;
+    }
+
+    emit({ phase: 'fetch' });
+    let code = await runStep({ bin: 'git', args: ['fetch', 'origin', BRANCH, '--quiet'] }, root, emit);
+    if (code !== 0) {
+      emit({ done: true, ok: false, error: 'git fetch failed (network?)' });
+      return;
+    }
+
+    emit({ phase: 'pull' });
+    code = await runStep({ bin: 'git', args: ['merge', '--ff-only', `origin/${BRANCH}`] }, root, emit);
+    if (code !== 0) {
+      emit({ done: true, ok: false, error: 'fast-forward merge failed — local commits or conflicts' });
+      return;
+    }
+
+    const afterSha = await gitSha(root);
+    if (afterSha === beforeSha) {
+      emit({ line: 'already up to date — nothing to install.', stream: 'stdout' });
+      // Refresh the cached status so the pill clears without waiting
+      // for the next poll cycle.
+      void pollOnce();
+      emit({ done: true, ok: true, restart: false });
+      return;
+    }
+
+    emit({ phase: 'install' });
+    code = await runStep({ bin: 'npm', args: ['install', '--silent', '--no-audit', '--no-fund'] }, root, emit);
+    if (code !== 0) {
+      await rollback(root, beforeSha, emit);
+      emit({ done: true, ok: false, error: 'npm install failed — rolled back' });
+      return;
+    }
+
+    emit({ phase: 'build' });
+    code = await runStep({ bin: 'npm', args: ['run', 'build', '--silent'] }, root, emit);
+    if (code !== 0) {
+      await rollback(root, beforeSha, emit);
+      // Best-effort: re-run npm install in case the rolled-back tree
+      // has different deps than the failed-build tree. Failure here
+      // just means the next start might need a manual `npm install`.
+      await runStep({ bin: 'npm', args: ['install', '--silent', '--no-audit', '--no-fund'] }, root, emit);
+      emit({ done: true, ok: false, error: 'build failed — rolled back' });
+      return;
+    }
+
+    // Success: tell the client to start polling for a fresh server,
+    // then exit with the magic code so the wrapper respawns. The
+    // 200ms delay gives the SSE response a chance to flush.
+    emit({ phase: 'restart', line: 'update complete — restarting…', stream: 'stdout' });
+    emit({ done: true, ok: true, restart: true });
+    // Refresh status so post-restart the pill is cleared.
+    status.available = false;
+    status.behindBy  = 0;
+    status.commits   = [];
+    // Persist sessions BEFORE exiting so the reload after restart
+    // lands the user back in authenticated.
+    persistSessions();
+    setTimeout(() => {
+      process.exit(UPDATE_RESTART_EXIT_CODE);
+    }, 300);
+  } finally {
+    status.applying = false;
+  }
+}
+
+async function rollback(root: string, sha: string, emit: SseEmit): Promise<void> {
+  emit({ phase: 'rollback', line: `rolling back to ${sha.slice(0, 7)}`, stream: 'stderr' });
+  await runStep({ bin: 'git', args: ['reset', '--hard', sha] }, root, emit);
+}
+
+// ── SSE wrapper ─────────────────────────────────────────────────────────────
+
+export function streamApplyUpdate(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): void {
+  res.writeHead(200, {
+    'Content-Type':  'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection':    'keep-alive',
+  });
+  const emit: SseEmit = (event) => {
+    try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch {}
+  };
+  let closed = false;
+  const onClose = () => { closed = true; };
+  req.on('close', onClose);
+  req.on('error', onClose);
+
+  void applyUpdate((event) => {
+    if (closed) return;
+    emit(event);
+    if (event.done) {
+      try { res.end(); } catch {}
+    }
+  });
+}
+
+// Exposed for the API: kick a poll right after the user clicks the pill
+// (so a stale "Update available" disappears immediately if they were
+// already on latest).
+export function refreshUpdateStatus(): Promise<void> {
+  return pollOnce();
+}
