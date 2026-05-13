@@ -1077,6 +1077,60 @@ const IdentityDrawer = (() => {
     sync.appendChild(syncBtn);
     body.appendChild(sync);
 
+    // Updates row — quick access to the same flow as Config → About,
+    // mirroring the sync-row layout (status text left, button right).
+    // Forces a server-side re-poll on click so the user doesn't wait
+    // for the 30-min background tick; hands off to Updates.openModal
+    // when an update is available so the install UX is identical to
+    // the header pill + Config button.
+    const updRow = document.createElement('div');
+    updRow.className = 'sync-row drawer-update-row';
+    const updMsg = document.createElement('span');
+    updMsg.className = 'drawer-update-msg';
+    updMsg.textContent = 'Updates';
+    const updBtn = document.createElement('button');
+    updBtn.textContent = 'check for updates';
+    updBtn.addEventListener('click', async () => {
+      updBtn.disabled = true;
+      const prev = updBtn.textContent;
+      updBtn.textContent = 'checking…';
+      updMsg.className = 'drawer-update-msg';
+      try {
+        const status = await Updates.refresh(true);
+        if (!status) {
+          updMsg.textContent = 'check failed';
+          updMsg.classList.add('err');
+        } else if (!status.supported) {
+          updMsg.textContent = 'self-update unavailable';
+          updMsg.classList.add('warn');
+        } else if (status.lastError) {
+          updMsg.textContent = `check failed: ${status.lastError}`;
+          updMsg.classList.add('err');
+        } else if (status.available) {
+          const n = status.behindBy || 1;
+          updMsg.textContent = `${n} update${n === 1 ? '' : 's'} available`;
+          updMsg.classList.add('ok');
+          // Replace the check button with Install so the row stays
+          // single-action and minimal.
+          updBtn.textContent = 'install';
+          updBtn.disabled = false;
+          updBtn.onclick = () => Updates.openModal(status);
+          return;
+        } else {
+          updMsg.textContent = 'up to date';
+          updMsg.classList.add('ok');
+        }
+      } finally {
+        if (updBtn.textContent === 'checking…') {
+          updBtn.disabled = false;
+          updBtn.textContent = prev;
+        }
+      }
+    });
+    updRow.appendChild(updMsg);
+    updRow.appendChild(updBtn);
+    body.appendChild(updRow);
+
     // Signing
     const signing = document.createElement('div');
     signing.className = 'drawer-section';

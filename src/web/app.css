@@ -3704,6 +3704,10 @@ details.config-section .cfg-summary-meta {
   color: var(--muted);
   margin-top: 6px;
 }
+.drawer .drawer-update-row { margin-top: 4px; }
+.drawer .drawer-update-msg.ok   { color: var(--success); }
+.drawer .drawer-update-msg.warn { color: var(--warn); }
+.drawer .drawer-update-msg.err  { color: var(--error); }
 
 /* ── Identity drawer · NSITE section ──────────────────────────────────── */
 
