@@ -20,7 +20,7 @@
  *     Returns { status, statusEventId, lastChangedAt } per root.
  *
  *   POST /api/projects/:id/status                 (SSE)
- *     Shells out to `ngit pr_status` / `ngit issue_status` based on
+ *     Shells out to `ngit pr status` / `ngit issue status` based on
  *     the supplied `kind` ("patch" | "issue"). Maintainer / author
  *     authority is enforced server-side: refuses if the signer can't
  *     legitimately publish the change (cheap pre-flight before
@@ -452,9 +452,15 @@ async function fetchRootAuthors(
 }
 
 /**
- * Compose `ngit pr_status` / `ngit issue_status` argv.
+ * Compose `ngit pr status` / `ngit issue status` argv.
  * Accepts `kind: 'patch' | 'issue'` and `status` ∈ valid set per kind.
  * Returns null for malformed input.
+ *
+ * ngit 2.x normalized underscore-form subcommands (`pr_status`,
+ * `issue_status`) to spaced form (`pr status`, `issue status`) —
+ * same shift `pr checkout` and `pr merge` already used. The old form
+ * errors with `unrecognized subcommand 'pr_status'` and `tip: a
+ * similar subcommand exists: 'pr'`.
  */
 export function buildStatusArgs(input: {
   kind:    unknown;
@@ -473,12 +479,12 @@ export function buildStatusArgs(input: {
   if (kind === 'patch') {
     if (!patchAllowed.has(status)) return null;
     const flag = '--' + status;
-    return ['pr_status', flag, rootId];
+    return ['pr', 'status', flag, rootId];
   }
   if (kind === 'issue') {
     if (!issueAllowed.has(status)) return null;
     const flag = '--' + status;
-    return ['issue_status', flag, rootId];
+    return ['issue', 'status', flag, rootId];
   }
   return null;
 }
