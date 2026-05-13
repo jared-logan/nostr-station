@@ -147,20 +147,28 @@ export function watchdogStateFor(p: WatchdogProbe): { value: string; state: Serv
   return { value: `heartbeat ${ageMin}m ago — stale`, state: 'warn', ok: false };
 }
 
-// nvpn probe — separate from watchdog so each can fail cleanly. Three
+// nvpn probe — separate from watchdog so each can fail cleanly. Four
 // sub-states stack underneath the binary-present split:
-//   binary missing     → err  · "not installed"
-//   binary present, no daemon response within timeout → warn · "not connected"
-//   binary present + daemon up + tunnel_ip set         → ok   · tunnel IP
+//   binary missing                                     → err  · "not installed"
+//   binary present, no daemon response within timeout  → warn · "not connected"
+//   binary present, daemon.running:false               → warn · "not connected"
+//   binary present + daemon running + tunnel_ip set    → ok   · tunnel IP
 // `nvpn status --json` may hang indefinitely on a daemon socket that's
 // listening but wedged; we cap it (a few seconds) and treat any failure
 // as "not connected" rather than blocking the whole /api/status call.
+// `daemon.running:false` is authoritative — when the daemon is stopped
+// the CLI can still return JSON with a stale `tunnel_ip` from config,
+// which would otherwise flip the dashboard green while the detail page
+// (which gates on running) correctly reads stopped. Mirrors
+// nvpnRowStateFor in lib/nvpn.ts so both surfaces agree.
 export interface NvpnProbe {
   binPresent: boolean;
+  running:    boolean;
   meshIp:     string | null;
 }
 export function nvpnStateFor(p: NvpnProbe): { value: string; state: ServiceState; ok: boolean } {
   if (!p.binPresent) return { value: 'not installed', state: 'err', ok: false };
+  if (!p.running)    return { value: 'not connected', state: 'warn', ok: false };
   if (p.meshIp)      return { value: p.meshIp, state: 'ok', ok: true };
   return { value: 'not connected', state: 'warn', ok: false };
 }
@@ -187,14 +195,23 @@ export function gatherStatus(): ServiceStatus[] {
   // is forgiving enough that a healthy-but-loaded daemon doesn't get
   // mis-reported as "not connected" on a transient stall.
   const nvpnPath = findBin('nvpn');
-  const meshIp = (() => {
-    if (!nvpnPath) return null;
+  const nvpnProbe = (() => {
+    if (!nvpnPath) return { running: false, meshIp: null as string | null };
     try {
       const out = cmd(`${nvpnPath} status --json`, 4000);
-      return out ? JSON.parse(out)?.tunnel_ip ?? null : null;
-    } catch { return null; }
+      if (!out) return { running: false, meshIp: null };
+      const j = JSON.parse(out);
+      return {
+        running: !!j?.daemon?.running,
+        meshIp: (j?.tunnel_ip as string) ?? null,
+      };
+    } catch { return { running: false, meshIp: null }; }
   })();
-  const vpnRow = nvpnStateFor({ binPresent: !!nvpnPath, meshIp });
+  const vpnRow = nvpnStateFor({
+    binPresent: !!nvpnPath,
+    running:    nvpnProbe.running,
+    meshIp:     nvpnProbe.meshIp,
+  });
 
   // Watchdog probe — file mtime tells us whether the in-Node loop has
   // fired recently. ageMs:null when missing entirely (never started),

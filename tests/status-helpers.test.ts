@@ -65,28 +65,38 @@ test('watchdogStateFor: 30m ago → warn / stale', () => {
 
 // ──────────────────────────────────────────────────────────────────────────
 // nvpnStateFor
-//   bin missing                    → err  · 'not installed'
-//   bin present, no mesh IP        → warn · 'not connected'
-//   bin present, mesh IP set       → ok   · <ip>
+//   bin missing                              → err  · 'not installed'
+//   bin present, daemon not running          → warn · 'not connected'
+//   bin present, running, no mesh IP         → warn · 'not connected'
+//   bin present, running, mesh IP set        → ok   · <ip>
 // ──────────────────────────────────────────────────────────────────────────
 
 test('nvpnStateFor: no binary → err / not installed', () => {
-  const r = nvpnStateFor({ binPresent: false, meshIp: null });
+  const r = nvpnStateFor({ binPresent: false, running: false, meshIp: null });
   assert.deepEqual(r, { value: 'not installed', state: 'err', ok: false });
 });
 
-test('nvpnStateFor: binary present but no IP → warn / not connected', () => {
-  const r = nvpnStateFor({ binPresent: true, meshIp: null });
+test('nvpnStateFor: daemon stopped → warn / not connected (even with stale tunnel IP)', () => {
+  // Regression: when the daemon is stopped, `nvpn status --json` can still
+  // emit a cached `tunnel_ip` from config. The dashboard must gate on
+  // `daemon.running` first, otherwise the SERVICES card flips green while
+  // the detail page correctly shows stopped.
+  const r = nvpnStateFor({ binPresent: true, running: false, meshIp: '10.44.247.100/32' });
   assert.deepEqual(r, { value: 'not connected', state: 'warn', ok: false });
 });
 
-test('nvpnStateFor: binary present + tunnel IP → ok', () => {
-  const r = nvpnStateFor({ binPresent: true, meshIp: '100.64.0.5' });
+test('nvpnStateFor: binary present, running but no IP → warn / not connected', () => {
+  const r = nvpnStateFor({ binPresent: true, running: true, meshIp: null });
+  assert.deepEqual(r, { value: 'not connected', state: 'warn', ok: false });
+});
+
+test('nvpnStateFor: binary present + running + tunnel IP → ok', () => {
+  const r = nvpnStateFor({ binPresent: true, running: true, meshIp: '100.64.0.5' });
   assert.deepEqual(r, { value: '100.64.0.5', state: 'ok', ok: true });
 });
 
-test('nvpnStateFor: empty-string IP is treated as missing → warn', () => {
-  const r = nvpnStateFor({ binPresent: true, meshIp: '' });
+test('nvpnStateFor: empty-string IP (running) is treated as missing → warn', () => {
+  const r = nvpnStateFor({ binPresent: true, running: true, meshIp: '' });
   assert.equal(r.state, 'warn');
   assert.equal(r.value, 'not connected');
 });
