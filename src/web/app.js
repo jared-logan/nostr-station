@@ -738,6 +738,42 @@ function activatePanel(name) {
 
 window.addEventListener('hashchange', () => activatePanel(currentPanel()));
 
+// ── Mobile sidebar toggle ────────────────────────────────────────────────
+// On screens ≤900px the sidebar collapses into an off-canvas drawer driven
+// by `body.sidebar-open`. The hamburger in the header flips the state; tapping
+// a nav link or the scrim — or hitting Escape — closes it. The CSS does all
+// the layout work; this just toggles the class and ARIA state.
+(function initSidebarToggle() {
+  const body   = document.body;
+  const btn    = document.getElementById('sidebar-toggle');
+  const scrim  = document.getElementById('sidebar-scrim');
+  const nav    = document.getElementById('nav');
+  if (!btn || !scrim || !nav) return;
+
+  const setOpen = (open) => {
+    body.classList.toggle('sidebar-open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    scrim.setAttribute('aria-hidden', open ? 'false' : 'true');
+  };
+
+  btn.addEventListener('click', () => setOpen(!body.classList.contains('sidebar-open')));
+  scrim.addEventListener('click', () => setOpen(false));
+  // Hash navigation already triggers activatePanel; we just need to close
+  // the drawer when the user picks a destination.
+  nav.addEventListener('click', (e) => {
+    if (e.target.closest('a')) setOpen(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && body.classList.contains('sidebar-open')) setOpen(false);
+  });
+  // If the viewport grows past the breakpoint (rotation, devtools resize),
+  // make sure we don't leave the body in sidebar-open state — the CSS hides
+  // the toggle there but the class would still apply transforms.
+  const mq = window.matchMedia('(min-width: 901px)');
+  const onChange = () => { if (mq.matches) setOpen(false); };
+  mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
+})();
+
 // ── Providers (mirrors src/lib/ai-providers.ts PROVIDERS) ────────────────
 // Display labels + per-provider default model lists for the chat/config
 // switcher. Curated list — Anthropic + Nostr-native paid relays + a

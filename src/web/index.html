@@ -112,9 +112,12 @@
 <div class="app">
 
   <header class="header">
+    <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">
+      <span class="sidebar-toggle-bars" aria-hidden="true"><span></span><span></span><span></span></span>
+    </button>
     <div class="brand">
       <img class="nori" src="/nori.svg" alt="Nori the ostrich">
-      <div>
+      <div class="brand-text">
         <div class="wordmark">nostr-station</div>
         <div class="tagline">Nori · Nostr-native dev environment</div>
       </div>
@@ -135,7 +138,9 @@
     </div>
   </header>
 
-  <aside class="sidebar">
+  <div class="sidebar-scrim" id="sidebar-scrim" aria-hidden="true"></div>
+
+  <aside class="sidebar" id="sidebar">
     <div>
       <div class="section-title">Navigation</div>
       <nav class="nav" id="nav">

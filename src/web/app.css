@@ -2612,10 +2612,242 @@ details.config-section .cfg-summary-meta {
 ::-webkit-scrollbar-thumb { background: #222; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #333; }
 
-/* responsive — collapse sidebar on narrow */
-@media (max-width: 720px) {
-  .app { grid-template-columns: 0 1fr; }
-  .sidebar { display: none; }
+/* ── responsive: mobile + tablet ──────────────────────────────────────────
+   The dashboard was built desktop-first (fixed 224px sidebar + multi-column
+   grids + chat split-pane). The rules below collapse the shell into a
+   single-column app on tablet (≤900px) and mobile (≤640px) without touching
+   any of the data-flow or panel semantics:
+     • Sidebar becomes an off-canvas drawer toggled by .sidebar-toggle in
+       the header. body.sidebar-open shows it; clicking a nav link or the
+       scrim closes it (see app.js).
+     • Header gets a hamburger and the tagline / chip wrap or hide.
+     • Panel-head + panel-body shrink padding so content reaches edge-to-edge.
+     • Fixed-column grids (events row, vpn-kv, project-tab kv) collapse to
+       stacked rows.
+     • Drawers, modals, terminal panel all gain mobile-friendly sizes. */
+
+.sidebar-toggle {
+  /* Hidden on desktop; the mobile media query reveals it. Sits at the
+     very left of the header so it lines up with the brand logo. */
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  margin-right: 4px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--text);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.sidebar-toggle:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--accent-bright); }
+.sidebar-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sidebar-toggle-bars {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 18px;
+}
+.sidebar-toggle-bars span {
+  display: block;
+  height: 2px;
+  background: currentColor;
+  border-radius: 2px;
+  transition: transform 180ms ease, opacity 180ms ease;
+}
+body.sidebar-open .sidebar-toggle-bars span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+body.sidebar-open .sidebar-toggle-bars span:nth-child(2) { opacity: 0; }
+body.sidebar-open .sidebar-toggle-bars span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+/* Scrim that dims the main content while the sidebar drawer is open.
+   Hidden on desktop where the sidebar is always-on. Sits above the
+   terminal-shell (z-index 40) so the bar dims along with everything else. */
+.sidebar-scrim {
+  display: none;
+  position: fixed;
+  inset: var(--header-h) 0 0 0;
+  background: rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+  z-index: 45;
+}
+
+@media (max-width: 900px) {
+  /* ── shell: collapse to single column + off-canvas sidebar ───────── */
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "header"
+      "main";
+  }
+  .sidebar-toggle { display: inline-flex; }
+
+  .sidebar {
+    position: fixed;
+    top: var(--header-h);
+    left: 0;
+    bottom: 0;
+    width: min(280px, 84vw);
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    box-shadow: 14px 0 40px rgba(0, 0, 0, 0.5);
+  }
+  body.sidebar-open .sidebar { transform: translateX(0); }
+  body.sidebar-open .sidebar-scrim {
+    display: block;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* Header tightens up. Tagline drops to make room for the chip + identity. */
+  .header { padding: 0 12px; gap: 10px; }
+  .brand { gap: 8px; min-width: 0; flex: 1 1 auto; }
+  .brand .nori { width: 30px; height: 30px; }
+  .brand .wordmark { font-size: 13px; }
+  .brand .tagline { display: none; }
+
+  .hdr-meta { gap: 10px; flex: 0 0 auto; }
+  .hdr-meta .chip { padding: 3px 7px; }
+
+  /* Identity chip slims down — keep the avatar, hide the npub subline. */
+  .identity-chip { max-width: 200px; padding: 3px 8px 3px 3px; }
+  .identity-chip .identity-name { max-width: 130px; font-size: 11px; }
+  .identity-chip .identity-sub { display: none; }
+  .update-pill .update-pill-text { display: none; }
+  .update-pill { padding: 4px 7px; }
+
+  /* Panel padding shrinks so cards reach closer to the edge. */
+  .panel-head {
+    padding: 12px 14px 10px;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .panel-head .title { font-size: 14px; }
+  .panel-body { padding: 14px; }
+
+  /* Tabs / chat-controls / log-status all share the panel padding. */
+  .tabs { padding: 0 14px; }
+  .chat-controls { padding: 10px 14px; }
+  .logs-status,
+  .logs-meta { margin-left: 14px; margin-right: 14px; }
+  .chat-feed { padding: 16px 14px; }
+  .chat-bar { padding: 10px 14px; }
+  .log-view { padding: 12px 14px; }
+  .vpn-section { padding: 14px; }
+  .vpn-status-strip { padding: 10px 14px; }
+
+  /* Dashboard / projects: single column. Cards are wide enough already. */
+  .dashboard-cards { grid-template-columns: 1fr; }
+  .relay-stats { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+
+  /* Service-health overview table — let the long values wrap freely
+     instead of forcing 110px label columns. */
+  .status-row .status-detail-grid { grid-template-columns: 1fr; gap: 2px 0; }
+  .status-row .status-detail-grid dt { margin-top: 6px; }
+  .status-row .status-detail-grid dt:first-child { margin-top: 0; }
+
+  /* Relay event row is a fixed-4-col grid → reflow to stacked. */
+  .event {
+    grid-template-columns: auto 1fr;
+    gap: 4px 10px;
+  }
+  .event .content { white-space: normal; grid-column: 1 / -1; }
+  .event .ts { grid-column: 1 / -1; text-align: left; }
+
+  /* VPN key-value rows: label on top, value below. */
+  .vpn-kv-row { grid-template-columns: 1fr; gap: 2px; }
+
+  /* Config rows: same treatment so long values get the full width. */
+  .config-row { grid-template-columns: 1fr; gap: 2px; padding: 8px 0; }
+  .config-row + .config-row { border-top: 1px solid var(--border); }
+
+  /* Project overview kv: drop the 120px label column. */
+  .overview-kv { grid-template-columns: 1fr auto; }
+  .overview-kv .k { grid-column: 1 / -1; }
+
+  /* Stepper step summary truncated to 220px on desktop — let it wrap. */
+  .stepper-step .step-summary { max-width: none; white-space: normal; }
+
+  /* Drawer: full-width sheet on tablet/mobile. */
+  .drawer { width: 100vw; max-width: 100vw; }
+  .drawer.project-drawer { width: 100vw; }
+
+  /* Modal hugs the viewport edges. */
+  .modal { width: calc(100vw - 20px); }
+
+  /* Identity drawer + project drawer scrim sit above the sidebar scrim. */
+  .drawer-scrim { z-index: 800; }
+}
+
+@media (max-width: 640px) {
+  /* Smaller header — drop the brand text wordmark to a single line and
+     hide the relay chip (the dashboard cards already surface it). */
+  .header { padding: 0 10px; }
+  .hdr-meta { gap: 8px; }
+  .hdr-meta > .chip { display: none; }
+  .brand .wordmark { font-size: 12px; letter-spacing: 0.4px; }
+
+  /* Tighter panel chrome. */
+  .panel-head { padding: 12px 12px 8px; }
+  .panel-body { padding: 12px; }
+  .tabs { padding: 0 12px; overflow-x: auto; }
+  .tab { padding: 9px 10px; white-space: nowrap; }
+
+  .chat-controls { padding: 8px 12px; gap: 8px; }
+  .chat-controls select { min-width: 0; width: 100%; }
+  .chat-controls .group { width: 100%; }
+  .chat-feed { padding: 14px 12px; }
+  .chat-bar { padding: 8px 12px; }
+  .log-view { padding: 10px 12px; }
+  .logs-status,
+  .logs-meta { margin-left: 12px; margin-right: 12px; }
+  .vpn-section { padding: 12px; }
+  .vpn-status-strip { padding: 10px 12px; }
+
+  /* Relay stats: stack to one column for readability on phone widths. */
+  .relay-stats { grid-template-columns: 1fr; }
+
+  /* Help-card pre rows have a flex layout w/ a copy button — switch to
+     vertical so the command isn't squeezed by the action. */
+  .help-card pre { flex-direction: column; align-items: stretch; gap: 6px; }
+  .help-card pre .code { white-space: pre-wrap; }
+
+  /* Danger zone: stack description above the action button. */
+  .danger-zone .row { flex-direction: column; align-items: stretch; }
+  .danger-zone .row button { align-self: flex-start; }
+
+  /* Whitelist + project-card meta rows: keep them readable when narrow. */
+  .whitelist-manager .item-row { flex-wrap: wrap; }
+  .project-card .pc-meta-row { flex-direction: column; gap: 2px; }
+  .project-card .pc-meta-row .k { width: auto; }
+
+  /* Identity chip: avatar only — the npub fingerprint already lives in
+     the drawer that opens on tap. */
+  .identity-chip { padding: 3px; max-width: none; }
+  .identity-chip .identity-text { display: none; }
+
+  /* Setup wizard padding shrinks too. */
+  .setup-card { padding: 20px 18px; }
+
+  /* Terminal panel: don't crowd content area when expanded. The bar still
+     hugs the bottom; expanded mode is uncommon on phones but still works. */
+  :root { --term-h: 240px; }
+}
+
+@media (max-width: 420px) {
+  /* Phone-portrait tweaks — anything with an absolute small width gets
+     a final pass so 360px-wide devices still feel laid out, not crammed. */
+  .brand .nori { width: 26px; height: 26px; }
+  .brand .wordmark { font-size: 11px; }
+  .panel-head-actions { width: 100%; }
+  .panel-head-actions button { flex: 1 1 auto; }
+  .vpn-strip-actions { width: 100%; }
+  .vpn-strip-actions button { flex: 1 1 auto; }
 }
 
 /* ── toasts ───────────────────────────────────────────────────────────── */
