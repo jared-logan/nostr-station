@@ -13934,12 +13934,15 @@ AuthScreen = (() => {
     setStatus(`Requesting signature from ${extName}…`);
 
     try {
-      const { challenge } = await fetch('/api/auth/challenge', { method: 'POST' }).then(r => r.json());
+      const { challenge, expectedUrl } = await fetch('/api/auth/challenge', { method: 'POST' }).then(r => r.json());
+      // Server pins its expected `u` tag to the canonical loopback URL
+      // (`http://127.0.0.1:PORT`) regardless of which hostname the browser
+      // is using, so sign against that — not window.location.origin.
       const template = {
         kind: 27235,
         created_at: Math.floor(Date.now() / 1000),
         tags: [
-          ['u', window.location.origin],
+          ['u', expectedUrl || window.location.origin],
           ['method', 'POST'],
         ],
         content: challenge,
