@@ -23,7 +23,7 @@
 #   - run sudo or apt-get
 #   - publish or consume an npm registry package
 #
-# Total time on a warm machine: ~30-45 seconds (npm install is the bulk).
+# Total time on a warm machine: ~30-45 seconds (npm ci is the bulk).
 
 set -euo pipefail
 
@@ -108,7 +108,15 @@ fi
 cd "${INSTALL_DIR}"
 
 log "Installing dependencies…"
-npm install --silent
+# `npm ci` (not `npm install`) so the working tree stays clean across
+# installs. `npm install` can nudge package-lock.json on every run
+# (npm-version drift, platform-specific optional deps, registry
+# metadata refresh) which would leave a fresh install with a dirty
+# lockfile — the in-app one-click update flow refuses to pull on a
+# dirty tree, so a user's first Update click would fail until they
+# manually `git checkout package-lock.json`. `npm ci` strictly
+# installs from the committed lockfile and never writes back.
+npm ci --silent --no-audit --no-fund
 
 log "Building…"
 npm run build --silent
