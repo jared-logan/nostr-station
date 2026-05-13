@@ -192,9 +192,23 @@ async function pollOnce(): Promise<void> {
   try {
     const cmp = ghCompare(current);
     const result = await cmp;
-    const ahead = result.status === 'behind' || result.status === 'diverged';
-    status.available = ahead && (result.behind_by ?? 0) > 0;
-    status.behindBy  = result.behind_by ?? 0;
+    // GitHub's compare API takes `<base>...<head>` and reports `status`
+    // and `ahead_by` / `behind_by` from the head's perspective:
+    //   status === "ahead"  → head has commits not in base
+    //   ahead_by            → how many such commits there are
+    //   status === "behind" → base has commits not in head (we don't
+    //                         care; that'd mean local diverged ahead
+    //                         of origin)
+    // We pass currentSha as base and `main` as head, so "ahead" /
+    // "diverged" with ahead_by > 0 is exactly the case where the user
+    // has updates to pull.
+    const hasUpdates = result.status === 'ahead' || result.status === 'diverged';
+    const newCount   = result.ahead_by ?? 0;
+    status.available = hasUpdates && newCount > 0;
+    // We surface this as "behindBy" in the UI because that's how it
+    // reads to the user ("you're N commits behind origin/main") even
+    // though GitHub's response calls it ahead_by.
+    status.behindBy  = newCount;
     status.commits   = (result.commits ?? [])
       .slice(-10)
       .reverse()
