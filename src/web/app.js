@@ -12425,11 +12425,38 @@ const ConfigPanel = (() => {
           ${renderDittoCard()}
         </div>
       </details>
+
+      <details class="config-section cfg-collapsible" id="cfg-about-section" open>
+        <summary>
+          <h3>About</h3>
+          <span class="cfg-summary-meta">version &amp; updates</span>
+        </summary>
+        <div class="cfg-section-body">
+          <div class="config-row">
+            <div class="k">Check for updates</div>
+            <div class="v">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <button id="cfg-check-updates" class="primary">Check for updates</button>
+                <span id="cfg-updates-result" class="cfg-updates-result"></span>
+              </div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
+                Pulls from <code>origin/main</code> on GitHub, rebuilds, and restarts the dashboard. Your identity, keychain, projects, and relay data are kept; the tab reloads logged-in.
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
     `;
 
     // Appearance — accent theme picker + Ditto sync card
     wireThemePicker();
     wireDittoCard();
+
+    // About — manual update check. Forces a server-side re-poll
+    // (so we don't have to wait for the 30-min background tick),
+    // shows the result inline, and offers an Install button that
+    // hands off to the same modal the header pill uses.
+    wireCheckUpdates();
 
     // Wire toggles
     $('cfg-auth').addEventListener('change', (e) => saveRelayFlag('auth', e.target.checked));
@@ -13494,6 +13521,57 @@ const ConfigPanel = (() => {
         r,
       );
     } catch (e) { toast('Save failed', e.message, 'err'); load(); }
+  }
+
+  // About section — manual update check. Server-side poll runs every
+  // 30 min; this button forces an immediate re-poll so the user doesn't
+  // have to wait. Result renders inline. When updates are available, an
+  // Install button hands off to the shared Updates.openModal flow so
+  // the UX is identical to clicking the header pill.
+  function wireCheckUpdates() {
+    const btn = $('cfg-check-updates');
+    const result = $('cfg-updates-result');
+    if (!btn || !result) return;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const prev = btn.textContent;
+      btn.textContent = 'Checking…';
+      result.textContent = '';
+      result.className = 'cfg-updates-result';
+      try {
+        const status = await Updates.refresh(true);
+        if (!status) {
+          result.textContent = 'Check failed — see console.';
+          result.classList.add('err');
+          return;
+        }
+        if (!status.supported) {
+          result.textContent = 'Self-update is unavailable (install is not a git checkout).';
+          result.classList.add('warn');
+          return;
+        }
+        if (status.lastError) {
+          result.textContent = `Check failed: ${status.lastError}`;
+          result.classList.add('err');
+          return;
+        }
+        if (status.available) {
+          const n = status.behindBy || 1;
+          result.innerHTML = `<span class="ok-strong">${n} update${n === 1 ? '' : 's'} available</span> `;
+          const install = document.createElement('button');
+          install.className = 'primary';
+          install.textContent = 'Install update';
+          install.addEventListener('click', () => Updates.openModal(status));
+          result.appendChild(install);
+        } else {
+          result.textContent = 'You’re up to date.';
+          result.classList.add('ok');
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+      }
+    });
   }
 
   return {
@@ -15608,7 +15686,7 @@ const Updates = (() => {
     setInterval(() => { void refresh(false); }, BROWSER_REPOLL_MS);
   }
 
-  return { init, refresh };
+  return { init, refresh, openModal: openUpdateModal };
 })();
 
 // Entry point: /setup launches the first-run wizard; anywhere else
