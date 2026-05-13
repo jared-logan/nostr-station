@@ -735,6 +735,65 @@ export function readNvpnRoster(): NvpnRoster {
   };
 }
 
+// Multi-network summary. nvpn supports a `[[networks]]` array in
+// config.toml where only the first entry is active at runtime; the rest
+// stay saved for later activation. The dashboard's Network sub-tab uses
+// this to show "you have other networks configured" so a user with
+// multiple saved networks isn't surprised that adding a peer to the
+// roster only affects the active one.
+//
+// Each summary returns the network's stable id, optional name, and
+// participant/admin counts — enough to render a sidebar/list without
+// reading the full roster of every inactive network.
+export interface NvpnNetworkSummary {
+  networkId:        string | null;
+  name:             string | null;
+  participantCount: number;
+  adminCount:       number;
+  active:           boolean;
+}
+
+// Walk all `[[networks]]` blocks. Mirrors extractFirstNetworksSection's
+// regex-only approach (no TOML dep) — bounds each block at the next
+// top-level table heading so we don't bleed into [peer_aliases]/[nat]/
+// [nostr] etc.
+export function extractAllNetworksSections(toml: string): string[] {
+  const out: string[] = [];
+  const re = /^\s*\[\[networks\]\][^\S\r\n]*\r?\n?/gm;
+  const matches: Array<{ start: number; end: number }> = [];
+  for (const m of toml.matchAll(re)) {
+    if (m.index === undefined) continue;
+    matches.push({ start: m.index + m[0].length, end: -1 });
+  }
+  for (let i = 0; i < matches.length; i++) {
+    const after = toml.slice(matches[i].start);
+    const next = after.search(/^\s*\[(?:\[)?/m);
+    out.push(next >= 0 ? after.slice(0, next) : after);
+  }
+  return out;
+}
+
+// All configured networks, with the first marked active. Returns an
+// empty list when the config file is missing or unreadable — callers
+// render an empty-state in that case rather than blocking.
+export function readNvpnNetworks(): NvpnNetworkSummary[] {
+  const configPath = findNvpnConfigPath();
+  if (!configPath) return [];
+  let toml = '';
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch { return []; }
+  const sections = extractAllNetworksSections(toml);
+  return sections.map((section, idx) => ({
+    networkId:        extractTomlString(section, 'network_id'),
+    // `name` is the user-facing label. Older configs may omit it; the
+    // UI falls back to the network_id when null.
+    name:             extractTomlString(section, 'name'),
+    participantCount: extractTomlList(section, 'participants').length,
+    adminCount:       extractTomlList(section, 'admins').length,
+    active:           idx === 0,
+  }));
+}
+
 // ── Discovery relays (Nostr presence/signaling) ──────────────────────
 //
 // nvpn discovers peers by publishing/subscribing to presence events on a

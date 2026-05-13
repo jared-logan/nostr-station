@@ -3,21 +3,35 @@ import assert from 'node:assert/strict';
 import { nvpnStateFor, watchdogStateFor } from '../src/commands/Status.tsx';
 
 test('nvpnStateFor: binary missing → err / not installed', () => {
-  const r = nvpnStateFor({ binPresent: false, meshIp: null });
+  const r = nvpnStateFor({ binPresent: false, running: false, meshIp: null });
   assert.equal(r.state, 'err');
   assert.equal(r.ok, false);
   assert.equal(r.value, 'not installed');
 });
 
-test('nvpnStateFor: binary present, no mesh → warn / not connected', () => {
-  const r = nvpnStateFor({ binPresent: true, meshIp: null });
+test('nvpnStateFor: binary present, daemon stopped → warn / not connected', () => {
+  const r = nvpnStateFor({ binPresent: true, running: false, meshIp: null });
   assert.equal(r.state, 'warn');
   assert.equal(r.ok, false);
   assert.equal(r.value, 'not connected');
 });
 
-test('nvpnStateFor: binary present + mesh ip → ok / shows ip', () => {
-  const r = nvpnStateFor({ binPresent: true, meshIp: '10.42.0.7' });
+test('nvpnStateFor: daemon stopped with stale tunnel IP → warn / not connected', () => {
+  const r = nvpnStateFor({ binPresent: true, running: false, meshIp: '10.44.247.100/32' });
+  assert.equal(r.state, 'warn');
+  assert.equal(r.ok, false);
+  assert.equal(r.value, 'not connected');
+});
+
+test('nvpnStateFor: binary present, running, no mesh → warn / not connected', () => {
+  const r = nvpnStateFor({ binPresent: true, running: true, meshIp: null });
+  assert.equal(r.state, 'warn');
+  assert.equal(r.ok, false);
+  assert.equal(r.value, 'not connected');
+});
+
+test('nvpnStateFor: binary present + running + mesh ip → ok / shows ip', () => {
+  const r = nvpnStateFor({ binPresent: true, running: true, meshIp: '10.42.0.7' });
   assert.equal(r.state, 'ok');
   assert.equal(r.ok, true);
   assert.equal(r.value, '10.42.0.7');

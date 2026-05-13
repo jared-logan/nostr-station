@@ -35,7 +35,7 @@ import {
   uninstallNvpnCli, probeNvpnServiceStatus,
   nvpnRowStateFor,
   addParticipants, removeParticipants, addAdmins, removeAdmins,
-  publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster,
+  publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster, readNvpnNetworks,
   pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork,
   pingNvpnPeer, netcheckNvpn, doctorNvpn, natDiscoverNvpn,
   setNvpnSettings, statsNvpn,
@@ -156,6 +156,17 @@ export async function handleNvpn(
   if (url === '/api/nvpn/roster' && method === 'GET') {
     const roster = readNvpnRoster();
     await writeJson(res, 200, roster);
+    return true;
+  }
+
+  // ── Configured networks ──────────────────────────────────────────
+  // Returns every `[[networks]]` block in config.toml so the dashboard
+  // can show "X also configured" alongside the active network. The
+  // active one is always index 0; inactive networks stay saved until
+  // re-activated via `nvpn set --network-id <id>`.
+  if (url === '/api/nvpn/networks' && method === 'GET') {
+    const networks = readNvpnNetworks();
+    await writeJson(res, 200, { networks });
     return true;
   }
 
