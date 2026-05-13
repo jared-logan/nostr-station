@@ -27,7 +27,7 @@
  *     burning an Amber prompt).
  *
  *   POST /api/projects/:id/merge                  (SSE)
- *     Shells out to `ngit pr_merge <patch-root-id>`. Preflight:
+ *     Shells out to `ngit pr merge <patch-root-id>`. Preflight:
  *     refuses on dirty working tree (`git status --porcelain`
  *     non-empty) so a half-finished local edit can't be silently
  *     merged into.
@@ -587,7 +587,7 @@ export async function handleStatus(
       streamExecError(res, req, 'invalid rootId'); return true;
     }
     // Dirty-tree refusal — see Phase 4 design notes. The user told
-    // us merges should appear identical to a terminal `ngit pr_merge`,
+    // us merges should appear identical to a terminal `ngit pr merge`,
     // and a terminal would refuse silently / clobber depending on
     // state. We refuse loudly so the user always knows.
     try {
@@ -603,12 +603,16 @@ export async function handleStatus(
       streamExecError(res, req,
         `git status failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`); return true;
     }
-    // ngit pr_merge takes the root patch id and handles the full
-    // sequence: checkout the PR branch locally, merge into the
-    // target branch, push refs, publish kind 1631 with the merge
-    // commit + applied-as-commits tags.
+    // `ngit pr merge <root-id>` handles the full sequence: checkout
+    // the PR branch locally, merge into the target branch, push refs,
+    // publish kind 1631 with the merge commit + applied-as-commits tags.
+    //
+    // ngit 2.x normalized its subcommand surface from underscore-form
+    // (`pr_merge`) to spaced form (`pr merge`) — same shift `pr checkout`
+    // already used. The old form errors with `unrecognized subcommand
+    // 'pr_merge'` / `tip: a similar subcommand exists: 'pr'`.
     streamExec(
-      { bin: 'ngit', args: ['pr_merge', rootId], env: { NO_COLOR: '1', TERM: 'dumb' }, timeoutMs: 180_000 },
+      { bin: 'ngit', args: ['pr', 'merge', rootId], env: { NO_COLOR: '1', TERM: 'dumb' }, timeoutMs: 180_000 },
       res, req, project.path,
     );
     return true;

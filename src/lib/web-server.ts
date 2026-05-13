@@ -1346,7 +1346,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
 
       // ── Status + merge (extracted to routes/status.ts) ────────────────
       // Effective-status compute over kind 1630-1633 events, plus
-      // SSE POSTs to ngit pr_status / issue_status / pr_merge.
+      // SSE POSTs to ngit pr / issue subcommands (pr merge, pr status, etc).
       // Merge enforces a dirty-tree refusal before spawning ngit.
       if (await handleStatus(req, res, fullUrl, method)) return;
 
