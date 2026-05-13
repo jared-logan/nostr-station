@@ -10259,10 +10259,11 @@ const VpnPanel = (() => {
   let currentTab = 'status';
   // Cached payloads — shared across sub-tab renders so flipping tabs
   // doesn't refetch what we already have. Each onEnter() refreshes.
-  let lastStatus  = null;     // GET /api/nvpn/status
-  let lastService = null;     // GET /api/nvpn/service/status
-  let lastRoster  = null;     // GET /api/nvpn/roster
-  let lastRelays  = null;     // GET /api/nvpn/relays
+  let lastStatus   = null;    // GET /api/nvpn/status
+  let lastService  = null;    // GET /api/nvpn/service/status
+  let lastRoster   = null;    // GET /api/nvpn/roster
+  let lastRelays   = null;    // GET /api/nvpn/relays
+  let lastNetworks = null;    // GET /api/nvpn/networks  (full [[networks]] list)
   // 60s TTL for the auto-fired netcheck — same idea as ConfigPanel's
   // cache. Manual "Check reachability" passes { force:true } to bypass.
   let relayHealthCache = null; // { fetchedAt: ms, raw: object|null }
@@ -10376,16 +10377,18 @@ const VpnPanel = (() => {
   // whole panel — each sub-tab handles missing data with its own
   // empty-state.
   async function refresh() {
-    const [s, svc, roster, relays] = await Promise.all([
+    const [s, svc, roster, relays, networks] = await Promise.all([
       api('/api/nvpn/status').catch(() => null),
       api('/api/nvpn/service/status').catch(() => null),
       api('/api/nvpn/roster').catch(() => null),
       api('/api/nvpn/relays').catch(() => null),
+      api('/api/nvpn/networks').catch(() => null),
     ]);
-    lastStatus  = s;
-    lastService = svc;
-    lastRoster  = roster;
-    lastRelays  = relays;
+    lastStatus   = s;
+    lastService  = svc;
+    lastRoster   = roster;
+    lastRelays   = relays;
+    lastNetworks = networks;
     renderStatusStrip();
     renderActiveTab();
   }
@@ -10461,7 +10464,8 @@ const VpnPanel = (() => {
   // set (config.toml); live peers come from `nvpn status --json`. Merged
   // so the user sees roster vs actually-online. Share invite / Import
   // invite / Publish roster live here, along with the add-peer form
-  // and per-peer actions (ping / alias / promote / demote / remove).
+  // and per-peer actions (ping / whois / alias / promote / demote /
+  // remove).
   function renderNetworkBody() {
     const r = lastStatus && lastStatus.raw ? lastStatus.raw : null;
     const roster = lastRoster;
@@ -10475,16 +10479,44 @@ const VpnPanel = (() => {
     const livePeers = normalizeNvpnPeers(r?.peers);
     const merged = mergePeers(rosterParts, rosterAdmins, livePeers, aliases);
     const onlineCount = merged.filter(p => p.connected).length;
-    const netIdHtml = networkId
+
+    // Multi-network awareness — config.toml supports a [[networks]]
+    // array but only the first entry is active at a time. Pull the
+    // active entry's name (if set) and surface inactive ones as a
+    // muted "also configured" line so the user knows roster mutations
+    // only affect the active network.
+    const allNetworks = (lastNetworks && Array.isArray(lastNetworks.networks))
+      ? lastNetworks.networks : [];
+    const activeNet = allNetworks.find(n => n.active) || null;
+    const inactiveNets = allNetworks.filter(n => !n.active);
+    const activeName = activeNet?.name || null;
+    const networkIdHtml = networkId
       ? `<code class="vpn-kv-val vpn-net-id">${escapeHtml(networkId)}</code>
          <span class="vpn-net-id-copy"></span>`
       : '<span class="vpn-kv-val muted">unconfigured</span>';
+    const activeRowHtml = activeName
+      ? `<div class="vpn-kv-row">
+          <span class="vpn-kv-key">active network</span>
+          <span class="vpn-kv-val">${escapeHtml(activeName)}</span>
+        </div>`
+      : '';
+    const inactiveLine = inactiveNets.length > 0
+      ? `<div class="vpn-section-footer muted" style="margin-top:6px">
+          Also configured: ${inactiveNets.map(n => {
+            const label = n.name || (n.networkId ? n.networkId.slice(0, 12) + '…' : '(unnamed)');
+            return `<code class="cmd-inline">${escapeHtml(label)}</code>`;
+          }).join(', ')}
+          · roster mutations apply to the active network only.
+        </div>`
+      : '';
+
     return `
       <div class="vpn-section">
         <div class="vpn-kv">
+          ${activeRowHtml}
           <div class="vpn-kv-row">
             <span class="vpn-kv-key">network id</span>
-            ${netIdHtml}
+            ${networkIdHtml}
           </div>
           <div class="vpn-kv-row">
             <span class="vpn-kv-key">roster</span>
@@ -10495,6 +10527,7 @@ const VpnPanel = (() => {
             </span>
           </div>
         </div>
+        ${inactiveLine}
         <div class="vpn-net-actions" style="margin-top:14px">
           <button id="vpn-share-invite" class="primary">Share invite</button>
           <button id="vpn-import-invite">Import invite</button>
@@ -10578,8 +10611,9 @@ const VpnPanel = (() => {
     }
 
     // Per-row buttons. Wired by data-action so renderPeerRow can drop
-    // them in without a bespoke listener per row. Ping is read-only;
-    // alias opens a prompt; remove/promote/demote mutate the roster.
+    // them in without a bespoke listener per row. Ping + whois are
+    // read-only and render inline; alias opens a prompt;
+    // remove/promote/demote mutate the roster.
     bodyEl.querySelectorAll('.vpn-meta-peer button[data-action]').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
@@ -10602,6 +10636,27 @@ const VpnPanel = (() => {
                 out.textContent = (resp?.output || resp?.detail || 'no output').slice(0, 800);
                 out.classList.toggle('vpn-meta-peer-pingout-err', resp?.ok === false);
               } catch { out.textContent = 'ping error'; }
+            }
+          } else if (btn.dataset.action === 'whois') {
+            const target = btn.dataset.target || id;
+            const out = peerEl.querySelector('.vpn-meta-peer-pingout');
+            if (out) {
+              out.hidden = false;
+              out.textContent = `whois ${target}…`;
+              try {
+                const resp = await api('/api/nvpn/whois', {
+                  method: 'POST', headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ query: target }),
+                });
+                // Prefer the structured `raw` payload; fall back to
+                // the detail line when the daemon returned no JSON
+                // (older nvpn build, or a connection-level failure).
+                const body = resp?.raw
+                  ? JSON.stringify(resp.raw, null, 2)
+                  : (resp?.detail || 'no output');
+                out.textContent = String(body).slice(0, 1200);
+                out.classList.toggle('vpn-meta-peer-pingout-err', resp?.ok === false);
+              } catch { out.textContent = 'whois error'; }
             }
           } else if (btn.dataset.action === 'alias') {
             const current = peerEl.dataset.alias || '';
@@ -10848,6 +10903,13 @@ const VpnPanel = (() => {
   function renderSettingsBody() {
     const r = lastStatus && lastStatus.raw ? lastStatus.raw : null;
     if (!r) return '<div class="vpn-empty muted">loading…</div>';
+    // Current exit-node selection — nvpn has shipped this under a few
+    // names across releases; check the common shapes and fall back to
+    // null when none match.
+    const currentExitNode = (typeof r.exit_node === 'string' && r.exit_node)
+      || (typeof r.exitNode === 'string' && r.exitNode)
+      || (typeof r.selected_exit_node === 'string' && r.selected_exit_node)
+      || null;
     const cur = {
       'node-name':           '',
       'listen-port':         r.listen_port          ?? r.configured_listen_port ?? '',
@@ -10877,6 +10939,49 @@ const VpnPanel = (() => {
         <input type="${type}" data-key="${escapeHtml(key)}" value="${escapeHtml(val)}" placeholder="${escapeHtml(val)}" spellcheck="false">
       </label>`;
     };
+
+    // exit-node select. Options:
+    //   "(no change)" — blank, skipped by the blank-skip save logic
+    //   "off"         — explicitly clear the selection
+    //   each roster peer (alias if available, else truncated npub)
+    // Pre-selects the current value when known, including the case
+    // where it's set to a peer no longer in the roster (we still show
+    // it so the user can see what's set).
+    const rosterParts = (lastRoster && Array.isArray(lastRoster.participants))
+      ? lastRoster.participants : [];
+    const aliases = (lastRoster && lastRoster.aliases && typeof lastRoster.aliases === 'object')
+      ? lastRoster.aliases : {};
+    // Treat both "no selection" (null/missing field) and the literal
+    // string "off" as "off" for pre-selection purposes — different nvpn
+    // versions report the un-set state either way.
+    const exitNodeIsOff = currentExitNode === null || currentExitNode === 'off';
+    const exitNodeOptions = [
+      `<option value="">(no change)</option>`,
+      `<option value="off"${exitNodeIsOff ? ' selected' : ''}>off (no exit node)</option>`,
+    ];
+    const rosterKeys = new Set(rosterParts.map(p => String(p).toLowerCase()));
+    for (const p of rosterParts) {
+      const alias = aliases[p] || '';
+      const truncId = p.length > 20 ? `${p.slice(0, 12)}…${p.slice(-6)}` : p;
+      const label = alias ? `${alias} (${truncId})` : truncId;
+      const selected = !exitNodeIsOff && currentExitNode && currentExitNode.toLowerCase() === p.toLowerCase() ? ' selected' : '';
+      exitNodeOptions.push(`<option value="${escapeHtml(p)}"${selected}>${escapeHtml(label)}</option>`);
+    }
+    // Edge case: the configured exit-node is set to a value that isn't
+    // in the current roster (peer removed, or pre-import). Surface it
+    // explicitly so the user can see the stale selection and choose
+    // "off" to clear it.
+    if (!exitNodeIsOff && currentExitNode && !rosterKeys.has(currentExitNode.toLowerCase())) {
+      const truncId = currentExitNode.length > 20
+        ? `${currentExitNode.slice(0, 12)}…${currentExitNode.slice(-6)}`
+        : currentExitNode;
+      exitNodeOptions.push(`<option value="${escapeHtml(currentExitNode)}" selected>${escapeHtml(truncId)} (not in roster)</option>`);
+    }
+    const exitNodeField = `<label class="vpn-meta-set-field">
+      <span class="vpn-meta-set-label">exit node</span>
+      <select data-key="exit-node">${exitNodeOptions.join('')}</select>
+    </label>`;
+
     return `
       <div class="vpn-section vpn-meta-set">
         <div class="vpn-meta-set-body">
@@ -10889,6 +10994,7 @@ const VpnPanel = (() => {
             ${fld('autoconnect', 'autoconnect', 'bool')}
             ${fld('advertise-exit-node', 'advertise exit node', 'bool')}
             ${fld('relay-for-others', 'relay for others', 'bool')}
+            ${exitNodeField}
           </div>
           <div class="vpn-meta-set-actions">
             <button id="vpn-set-save" class="primary">Save &amp; reload</button>
@@ -11303,6 +11409,10 @@ const VpnPanel = (() => {
     const pingBtn = pingTarget
       ? `<button data-action="ping" data-target="${escapeHtml(pingTarget)}" title="Ping ${escapeHtml(pingTarget)}">ping</button>`
       : '';
+    // whois — non-mutating peer lookup. Renders into the same inline
+    // output slot as ping; runs the local-only fast path
+    // (--discover-secs 0) so a click is snappy.
+    const whoisBtn = `<button data-action="whois" data-target="${escapeHtml(id)}" title="Whois ${escapeHtml(id)}">whois</button>`;
     const aliasBtn = p.roster
       ? `<button data-action="alias" title="${p.alias ? 'Rename peer' : 'Set alias'}">${p.alias ? 'rename' : 'alias'}</button>`
       : '';
@@ -11323,7 +11433,7 @@ const VpnPanel = (() => {
         ${labelHtml}
         ${adminBadge}
         ${sub ? `<span class="muted vpn-meta-peer-sub">${escapeHtml(sub)}</span>` : ''}
-        <span class="vpn-meta-peer-actions">${pingBtn}${aliasBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
+        <span class="vpn-meta-peer-actions">${pingBtn}${whoisBtn}${aliasBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
         <div class="vpn-meta-peer-pingout" hidden></div>
       </div>`;
   }

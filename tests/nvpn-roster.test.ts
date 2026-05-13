@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   isValidParticipant,
   extractFirstNetworksSection,
+  extractAllNetworksSections,
   extractTomlList,
   extractTomlString,
 } from '../src/lib/nvpn.ts';
@@ -104,4 +105,59 @@ test('extractTomlString picks up scalar string values', () => {
   assert.equal(extractTomlString(section, 'network_id'), '30888794e905e677');
   assert.equal(extractTomlString(section, 'name'), 'Network 1');
   assert.equal(extractTomlString(section, 'missing'), null);
+});
+
+// ── extractAllNetworksSections — multi-network awareness ──────────────
+
+const MULTI_NETWORK_TOML = `
+node_name = "vm"
+autoconnect = true
+
+[[networks]]
+name = "Home"
+network_id = "11111111"
+participants = ["npub1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+admins = ["npub1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+
+[[networks]]
+name = "Work"
+network_id = "22222222"
+participants = [
+  "npub1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "npub1ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+]
+admins = []
+
+[[networks]]
+network_id = "33333333"
+participants = []
+admins = []
+
+[peer_aliases]
+npub1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = "alice"
+`;
+
+test('extractAllNetworksSections returns every [[networks]] block in order', () => {
+  const sections = extractAllNetworksSections(MULTI_NETWORK_TOML);
+  assert.equal(sections.length, 3);
+  assert.equal(extractTomlString(sections[0], 'network_id'), '11111111');
+  assert.equal(extractTomlString(sections[1], 'network_id'), '22222222');
+  assert.equal(extractTomlString(sections[2], 'network_id'), '33333333');
+});
+
+test('extractAllNetworksSections bounds each block at the next table header', () => {
+  const sections = extractAllNetworksSections(MULTI_NETWORK_TOML);
+  // The last block must not bleed into [peer_aliases].
+  assert.equal(sections[2].includes('[peer_aliases]'), false);
+  assert.equal(sections[2].includes('alice'), false);
+});
+
+test('extractAllNetworksSections returns single block for single-network config', () => {
+  const sections = extractAllNetworksSections(SAMPLE_TOML);
+  assert.equal(sections.length, 1);
+  assert.equal(extractTomlString(sections[0], 'network_id'), '30888794e905e677');
+});
+
+test('extractAllNetworksSections returns [] when no [[networks]] header', () => {
+  assert.deepEqual(extractAllNetworksSections('node_name = "x"\n[nat]\nenabled = true\n'), []);
 });
