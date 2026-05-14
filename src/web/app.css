@@ -5012,8 +5012,12 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
   border-radius: 999px;
   text-transform: lowercase;
 }
-.env-chip.env-chip-dev  { background: rgba(70, 200, 120, 0.12); color: #4cc97d; border: 1px solid rgba(70, 200, 120, 0.30); }
-.env-chip.env-chip-prod { background: rgba(240, 170, 70, 0.12); color: #e8a64a; border: 1px solid rgba(240, 170, 70, 0.30); }
+.env-chip.env-chip-dev    { background: rgba(70, 200, 120, 0.12); color: #4cc97d; border: 1px solid rgba(70, 200, 120, 0.30); }
+.env-chip.env-chip-prod   { background: rgba(240, 170, 70, 0.12); color: #e8a64a; border: 1px solid rgba(240, 170, 70, 0.30); }
+/* Public-Nostr label on the Client panel header — visually distinct
+   from dev/prod (which belong to project active-env) so users see at
+   a glance that the panel is a different scope entirely. */
+.env-chip.env-chip-public { background: rgba(120, 160, 240, 0.12); color: #8fb0ff; border: 1px solid rgba(120, 160, 240, 0.30); margin-left: 8px; vertical-align: middle; font-size: 9px; }
 
 .env-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border, rgba(255,255,255,0.1)); }
 .env-tab {

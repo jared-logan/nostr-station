@@ -8959,10 +8959,13 @@ const ProjectsPanel = (() => {
       root.innerHTML = `
         <div class="muted" style="margin-bottom:10px">
           This project hasn't been isolated to local dev infrastructure yet.
-          Public read relays inherit from the station owner's identity.
           Click below to flip it into dev mode against the running local
-          relay — your app will see <code>NOSTR_STATION_RELAY=ws://localhost:&lt;port&gt;</code>
-          when spawned via the dashboard.
+          relay &mdash; spawned dev servers (<code>npm run dev</code>,
+          deploy, exec) will then see
+          <code>NOSTR_STATION_RELAY=ws://localhost:&lt;port&gt;</code> via
+          environment variables. This setting affects only this project's
+          spawned subprocesses; the Client panel (public Nostr) stays on
+          your public relays regardless.
         </div>
         <div class="step-actions">
           <button class="primary isolate-btn">Isolate to local infra</button>
@@ -8998,7 +9001,7 @@ const ProjectsPanel = (() => {
       <div class="env-header">
         <div class="env-active-row">
           <span class="env-chip env-chip-${env.active}">${env.active}</span>
-          <span class="muted">active environment — spawned dev servers + the built-in client see this block</span>
+          <span class="muted">active environment for this project &mdash; spawned dev servers (<code>npm run dev</code>, deploy, exec) read this block via <code>NOSTR_STATION_RELAY</code> / <code>_BLOSSOM</code>. The Client panel is unaffected; it always queries public relays.</span>
         </div>
         <div class="step-actions" style="margin-top:6px">
           <button class="${env.active === 'dev'  ? 'primary' : ''} env-flip-dev">use dev</button>
