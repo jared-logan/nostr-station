@@ -281,3 +281,17 @@ export function getInprocRelayPort():    number | null { return inprocRelayPort;
 export function getInprocBlossomPort():  number | null { return inprocBlossomPort; }
 export function setInprocRelayPort(p:   number | null): void { inprocRelayPort   = p; }
 export function setInprocBlossomPort(p: number | null): void { inprocBlossomPort = p; }
+
+// Whitelist bridge — same pattern as autoSyncRef. The in-process relay's
+// WhitelistStore is owned by web-server.ts (via the Relay instance). The
+// test-identities module (created in Phase B) needs to add new test
+// pubkeys to the whitelist on create + remove them on delete. Wiring
+// through here keeps test-identities from importing the relay layer.
+export interface WhitelistRef {
+  add:    (hex: string) => boolean;
+  remove: (hex: string) => boolean;
+  has:    (hex: string) => boolean;
+}
+let whitelistRef: WhitelistRef | null = null;
+export function getWhitelistRef(): WhitelistRef | null { return whitelistRef; }
+export function setWhitelistRef(ref: WhitelistRef | null): void { whitelistRef = ref; }

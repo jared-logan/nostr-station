@@ -61,6 +61,7 @@ import { handleProjectsNgit } from './projects-ngit.js';
 import { handleProjectsGit }  from './projects-git.js';
 import { handleProjectsSync } from './projects-sync.js';
 import { handleProjectsExec } from './projects-exec.js';
+import { handleTestIdentities } from './test-identities.js';
 import {
   readBody, setActiveChatProjectId, getAutoSyncRef,
 } from './_shared.js';
@@ -332,6 +333,10 @@ export async function handleProjects(
 
     if (tail.startsWith('ngit/')) {
       if (await handleProjectsNgit(req, res, project, tail, method)) return true;
+    }
+
+    if (tail.startsWith('test-identities')) {
+      if (await handleTestIdentities(req, res, project, tail, method)) return true;
     }
 
     // ── Sync surface (Item 2) ────────────────────────────────────────

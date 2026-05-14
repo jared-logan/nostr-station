@@ -8756,6 +8756,17 @@ const ProjectsPanel = (() => {
         <div class="env-body"></div>
       </div>
 
+      <div class="tab-section" id="test-users-section">
+        <h3>Test users</h3>
+        <div class="muted" style="margin-bottom:8px">
+          Per-project throwaway keys for local development. Each test
+          user is auto-whitelisted on the local relay; events they sign
+          carry a <code>["client","nostr-station-test"]</code> tag so
+          they never leak to public infrastructure.
+        </div>
+        <div class="test-users-body">loading…</div>
+      </div>
+
       <div class="tab-section" id="pcfg-section">
         <h3>AI configuration</h3>
         <div class="muted">
@@ -8884,6 +8895,7 @@ const ProjectsPanel = (() => {
     // be re-used after every patch (active-env toggle, list edits) and
     // by future Phase E flows that need to show the same widget.
     paintEnvironment(container.querySelector('#environment-section .env-body'), p);
+    paintTestUsers(container.querySelector('#test-users-section .test-users-body'), p);
 
     container.querySelector('.remove-btn').addEventListener('click', async () => {
       const ok = await confirmDestructive({
@@ -9163,6 +9175,115 @@ const ProjectsPanel = (() => {
       dev:  { relays: (src.dev?.relays  || []).slice(), blossoms: (src.dev?.blossoms  || []).slice() },
       prod: { relays: (src.prod?.relays || []).slice(), blossoms: (src.prod?.blossoms || []).slice() },
     };
+  }
+
+  // Renders the per-project Test users section. Two states:
+  //   - file mode 0600 + parseable → list + add + reset controls
+  //   - file mode wrong / parse failure → big red banner with a
+  //     "Fix permissions" button that chmods the file back to 0600
+  async function paintTestUsers(root, p) {
+    if (!root) return;
+    if (!p.path) {
+      root.innerHTML = `<div class="muted">Project has no local path — test users require a path.</div>`;
+      return;
+    }
+    let resp = null;
+    try { resp = await api(`/api/projects/${p.id}/test-identities`); }
+    catch (e) {
+      // Server returned 4xx (e.g. bad-mode) — body is JSON with { error, mode? }.
+      const message = e?.body?.error || e?.message || 'unknown error';
+      const isBadMode = message === 'bad-mode';
+      root.innerHTML = `
+        <div class="pc-banner err">
+          <div><b>Cannot load test identities</b></div>
+          <div class="muted" style="margin-top:4px">${escapeHtml(message)}</div>
+          ${isBadMode ? `
+            <div class="step-actions" style="margin-top:8px">
+              <button class="primary tu-fix-perms">Fix permissions (chmod 600)</button>
+            </div>
+          ` : ''}
+        </div>
+      `;
+      // No server-side "fix permissions" endpoint yet — point user at the path.
+      root.querySelector('.tu-fix-perms')?.addEventListener('click', () => {
+        const fp = `${p.path}/.nostr-station/test-identities.json`;
+        toast('Run in your terminal',
+          `chmod 600 "${fp}"`, 'warn');
+      });
+      return;
+    }
+
+    const identities = resp?.identities || [];
+    const rows = identities.length === 0
+      ? `<div class="muted">No test users yet.</div>`
+      : identities.map(id => `
+        <div class="test-user-row" data-tid="${escapeHtml(id.id)}">
+          <div class="test-user-meta">
+            <div><b>${escapeHtml(id.label)}</b> <span class="muted" style="font-size:11px">· ${escapeHtml(id.role || 'no role')}</span></div>
+            <div class="muted" style="font-size:11px"><code>${escapeHtml(id.npub.slice(0, 14))}…${escapeHtml(id.npub.slice(-6))}</code></div>
+          </div>
+          <button class="tu-delete" data-tid="${escapeHtml(id.id)}">remove</button>
+        </div>
+      `).join('');
+
+    root.innerHTML = `
+      <div class="test-user-list">${rows}</div>
+      <div class="field-row" style="margin-top:10px">
+        <input type="text" class="tu-label" placeholder="label (e.g. teacher-alice)" style="flex:2">
+        <input type="text" class="tu-role"  placeholder="role (optional)" style="flex:1">
+        <button class="tu-add">add test user</button>
+      </div>
+      ${identities.length ? `
+        <div class="step-actions" style="margin-top:10px">
+          <button class="danger tu-reset">Reset all (regenerate)</button>
+        </div>
+      ` : ''}
+    `;
+
+    root.querySelectorAll('.tu-delete').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const tid = btn.dataset.tid;
+        const ok = await confirmDestructive({
+          title: 'Remove test user?',
+          description: 'Deletes the keypair and removes the pubkey from the local relay\'s whitelist. Any events they\'ve published stay in the relay store.',
+          confirmLabel: 'Remove',
+        });
+        if (!ok) return;
+        try {
+          await api(`/api/projects/${p.id}/test-identities/${tid}`, { method: 'DELETE' });
+          paintTestUsers(root, p);
+        } catch (e) { toast('Remove failed', e?.message || '', 'err'); }
+      });
+    });
+
+    root.querySelector('.tu-add')?.addEventListener('click', async () => {
+      const label = root.querySelector('.tu-label').value.trim();
+      const role  = root.querySelector('.tu-role').value.trim();
+      if (!label) return toast('Label required', 'pick something like teacher-alice', 'warn');
+      try {
+        await api(`/api/projects/${p.id}/test-identities`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify({ label, role }),
+        });
+        paintTestUsers(root, p);
+      } catch (e) {
+        toast('Add failed', e?.message || '', 'err');
+      }
+    });
+
+    root.querySelector('.tu-reset')?.addEventListener('click', async () => {
+      const ok = await confirmDestructive({
+        title: 'Reset all test users?',
+        description: `Removes all ${identities.length} test user(s) from this project and the relay whitelist. Cannot be undone.`,
+        confirmLabel: 'Reset',
+      });
+      if (!ok) return;
+      try {
+        await api(`/api/projects/${p.id}/test-identities/reset`, { method: 'POST' });
+        paintTestUsers(root, p);
+      } catch (e) { toast('Reset failed', e?.message || '', 'err'); }
+    });
   }
 
   // Renders the per-project git-identity row in Settings: shows the

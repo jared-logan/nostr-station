@@ -76,6 +76,7 @@ import {
   setAutoSyncRef,
   setInprocRelayPort,
   setInprocBlossomPort,
+  setWhitelistRef,
   type CmdSpec,
 } from './routes/_shared.js';
 import { readStationContext, stationContextPath } from './ai-context.js';
@@ -83,6 +84,8 @@ import { seedStationContext, USER_REGION_BEGIN, USER_REGION_END } from './editor
 import { handleProjects } from './routes/projects.js';
 import { handleBlossomConfig } from './routes/blossom-config.js';
 import type { BlossomServer } from '../blossom/index.js';
+import { readProjects } from './projects.js';
+import { listAllTestPubkeys } from './test-identities.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleDitto } from './routes/ditto.js';
 import { handleClient } from './routes/client.js';
@@ -270,11 +273,15 @@ async function maybeStartInprocRelay(): Promise<void> {
   });
   await r.start();
   inprocRelay = r;
-  // Bridge the running port through routes/_shared so project-scaffold
-  // can seed `environment.dev.relays` with the live URL on new local
-  // projects (avoids a routes/projects → project-scaffold → web-server
-  // import cycle).
+  // Bridge the running port + whitelist handle through routes/_shared
+  // so project-scaffold and test-identities (Phase B) can consume
+  // without importing the relay layer.
   setInprocRelayPort(port);
+  setWhitelistRef({
+    add:    (hex) => r.whitelist.add(hex),
+    remove: (hex) => r.whitelist.remove(hex),
+    has:    (hex) => r.whitelist.has(hex),
+  });
   // Publish the relay address via env so gatherStatus probes the right
   // port, and any descendant tooling (e.g. nak commands) sees the same
   // source of truth.
@@ -326,10 +333,17 @@ async function startInprocBlossom(): Promise<void> {
         try { return inprocRelay.whitelist.has(hex.toLowerCase()); }
         catch { return false; }
       },
-      // Test-identity classification lands in Phase B; for now no test
-      // identities exist, so the predicate is a flat false. Wiring goes
-      // through here so adding the registry later is a one-line change.
-      isTestIdentity: (_hex) => false,
+      // Test-identity classification walks every project's
+      // test-identities.json on each call so freshly-added keys are
+      // recognized without a Blossom restart. The list is single-digit
+      // bounded in any real install, so the per-request cost is in the
+      // noise.
+      isTestIdentity: (hex) => {
+        try {
+          const list = listAllTestPubkeys(readProjects());
+          return list.some(e => e.pubkey.toLowerCase() === hex.toLowerCase());
+        } catch { return false; }
+      },
     },
     onLog: (level, text) => logBuffers.relay.push(level, `[blossom] ${text}`),
   });
@@ -959,6 +973,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
               await inprocRelay.stop();
               inprocRelay = null;
               setInprocRelayPort(null);
+              setWhitelistRef(null);
             }
           }
           if (action === 'start' || action === 'restart') {
