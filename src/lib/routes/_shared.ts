@@ -267,3 +267,17 @@ export function getAutoSyncRef(): { reconcile: (id: string) => void } | null {
 export function setAutoSyncRef(ref: { reconcile: (id: string) => void } | null): void {
   autoSyncRef = ref;
 }
+
+// In-process local-infra port bridges. `web-server.ts` calls the setters
+// when the in-process relay (and, in Phase C, Blossom) finish starting up;
+// `project-scaffold.ts` reads via the getters so new local projects seed
+// `environment.dev.{relays,blossoms}` against the actually-running ports
+// rather than hardcoded 7777 / 8081 defaults. Bridged through here to
+// avoid a routes/projects → project-scaffold → web-server import cycle.
+// null means "not running" — callers seed an empty array for that side.
+let inprocRelayPort:   number | null = null;
+let inprocBlossomPort: number | null = null;
+export function getInprocRelayPort():    number | null { return inprocRelayPort;   }
+export function getInprocBlossomPort():  number | null { return inprocBlossomPort; }
+export function setInprocRelayPort(p:   number | null): void { inprocRelayPort   = p; }
+export function setInprocBlossomPort(p: number | null): void { inprocBlossomPort = p; }

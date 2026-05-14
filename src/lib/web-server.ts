@@ -74,6 +74,7 @@ import {
   CLI_BIN, CLI_SPAWN,
   getActiveChatProjectId,
   setAutoSyncRef,
+  setInprocRelayPort,
   type CmdSpec,
 } from './routes/_shared.js';
 import { readStationContext, stationContextPath } from './ai-context.js';
@@ -261,6 +262,11 @@ async function maybeStartInprocRelay(): Promise<void> {
   });
   await r.start();
   inprocRelay = r;
+  // Bridge the running port through routes/_shared so project-scaffold
+  // can seed `environment.dev.relays` with the live URL on new local
+  // projects (avoids a routes/projects → project-scaffold → web-server
+  // import cycle).
+  setInprocRelayPort(port);
   // Publish the relay address via env so gatherStatus probes the right
   // port, and any descendant tooling (e.g. nak commands) sees the same
   // source of truth.
@@ -886,6 +892,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
             if (inprocRelay) {
               await inprocRelay.stop();
               inprocRelay = null;
+              setInprocRelayPort(null);
             }
           }
           if (action === 'start' || action === 'restart') {
@@ -1676,6 +1683,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // swallowed because a half-stopped relay during shutdown is no
       // worse than a dropped log line.
       void inprocRelay?.stop().catch(() => {});
+      setInprocRelayPort(null);
       inprocRelay = null;
       // nvpn log tailer is independent of the daemon — it just polls a
       // file. Stop it so the polling timer doesn't keep Node alive.

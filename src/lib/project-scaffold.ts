@@ -27,10 +27,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
 import type http from 'http';
-import { createProject } from './projects.js';
+import { createProject, type ProjectEnvironment } from './projects.js';
 import { getTemplate } from './templates.js';
 import { seedProjectConfig } from './project-config.js';
 import { readIdentity } from './identity.js';
+import { getInprocRelayPort, getInprocBlossomPort } from './routes/_shared.js';
 import { seedRepoGitIdentityIfMissing } from './git-identity.js';
 
 export type ScaffoldSource =
@@ -77,6 +78,37 @@ export interface CollisionReport {
   exists: boolean;
   path:   string;
   slug:   string;
+}
+
+// Build the per-project environment seed for a new local / templated
+// scaffold. Direct git-url adoption (cloning someone else's repo without
+// a templateId) skips this entirely so the user keeps that project on
+// public infra by default — they can flip it to local via the
+// "Isolate to local infra" action.
+//
+// dev block: live local relay URL (read from the routes/_shared bridge —
+// null when the relay isn't running, e.g. STATION_INPROC_RELAY=0) +
+// local Blossom URL (null until Phase C ships).
+//
+// prod block: the user's identity.readRelays as a starting point. That
+// list is itself defaulted to DEFAULT_READ_RELAYS in identity.ts so a
+// freshly-installed station with no public-relay configuration still
+// gets a sensible seed.
+function buildEnvironmentSeed(): ProjectEnvironment {
+  const relayPort   = getInprocRelayPort();
+  const blossomPort = getInprocBlossomPort();
+  const ident = readIdentity();
+  return {
+    active: 'dev',
+    dev: {
+      relays:   relayPort   ? [`ws://localhost:${relayPort}`]    : [],
+      blossoms: blossomPort ? [`http://localhost:${blossomPort}`] : [],
+    },
+    prod: {
+      relays:   Array.isArray(ident.readRelays) ? ident.readRelays.slice() : [],
+      blossoms: [],
+    },
+  };
 }
 
 export function checkCollision(name: string): CollisionReport {
@@ -366,6 +398,18 @@ export async function scaffoldProject(
         bunkerUrl:  identity.bunkerUrl || null,
       };
 
+  // Environment seed gate: local-only or template-driven scaffolds are
+  // "new local projects" from the user's POV and start in dev mode against
+  // local infra. Direct git-url adoption (no templateId) is treated as
+  // "I'm cloning someone else's project" — keep environment undefined so
+  // the user explicitly opts in via the dashboard "Isolate to local infra"
+  // button.
+  const shouldSeedEnvironment =
+    source.type === 'local-only' || templateId !== null;
+  const environment: ProjectEnvironment | undefined = shouldSeedEnvironment
+    ? buildEnvironmentSeed()
+    : undefined;
+
   const created = createProject({
     name: name.trim(),
     path: target,
@@ -373,6 +417,7 @@ export async function scaffoldProject(
     identity: projectIdentity,
     remotes:  { github: githubRemote, ngit: null },
     nsite:    { url: null, lastDeploy: null },
+    ...(environment ? { environment } : {}),
   });
 
   if (!created.ok) {
