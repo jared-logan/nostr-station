@@ -8,7 +8,7 @@ import { renderMarkdown, renderCodeBlock } from './markdown.js';
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'config'];
+const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'client', 'config'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -15476,6 +15476,462 @@ const SetupWizard = (() => {
   return { show, hide };
 })();
 
+// ── Panel: client (Nostr social client) ──────────────────────────────────
+//
+// Slim built-in Nostr client: feed (kind-1 from owner's follows), notifications
+// (mentions/reactions/zaps tagging the owner), profile lookup, and compose +
+// publish. Reads from the station owner's identity.readRelays — NOT the
+// in-process relay, which has no inbound sync. Publishes through the persisted
+// bunker pairing and auto-stamps ["client","nostr-station"].
+//
+// Private DMs (NIP-17) are intentionally NOT in v1. The "DMs" tab is rendered
+// as a disabled placeholder so the IA is visible.
+
+const ClientPanel = (() => {
+  const subtitleEl  = $('client-subtitle');
+  const tabsEl      = $('client-tabs');
+  const listEl      = $('client-list');
+  const emptyEl     = $('client-empty');
+  const composeEl   = $('client-compose');
+  const composeIn   = $('client-compose-input');
+  const composeBtn  = $('client-compose-send');
+  const composeCount= $('client-compose-count');
+  const composeCancelBtn = $('client-compose-cancel');
+  const refreshBtn  = $('client-refresh');
+
+  // ── State ──────────────────────────────────────────────────────────────
+  let currentTab = 'feed';
+  // Per-tab cached payloads + load state. Re-rendering a tab without a
+  // refetch is the difference between snappy and "loading…" every nav.
+  const tabCache = {
+    feed:          { events: [], profiles: {}, loadedAt: 0, loading: false, empty: null },
+    notifications: { events: [], profiles: {}, loadedAt: 0, loading: false, empty: null },
+    profile:       { profile: null, loadedAt: 0, loading: false, error: null },
+  };
+  // Reply-target state for the compose box. null = top-level post.
+  let replyTarget = null;
+  let ownerHex = null;
+  let ownerNpub = null;
+
+  // ── Helpers ────────────────────────────────────────────────────────────
+  function timeAgo(unixSec) {
+    if (!unixSec) return '';
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - unixSec);
+    if (s < 60)    return `${s}s ago`;
+    if (s < 3600)  return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return new Date(unixSec * 1000).toLocaleDateString();
+  }
+
+  function profileDisplay(profile, fallbackHex) {
+    if (profile?.name)  return profile.name;
+    const hex = profile?.hex || fallbackHex || '';
+    const npub = profile?.npub || '';
+    return npub ? `${npub.slice(0, 12)}…${npub.slice(-4)}`
+                : `${hex.slice(0, 8)}…`;
+  }
+
+  function avatarOrInitials(profile, fallbackHex) {
+    const name = profileDisplay(profile, fallbackHex);
+    const initial = (name || '?').trim().charAt(0).toUpperCase() || '?';
+    const pic = profile?.picture ? escapeHtml(profile.picture) : '';
+    if (pic) {
+      return `<img class="client-avatar" src="${pic}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'client-avatar client-avatar-fallback',textContent:${JSON.stringify(initial)}}))">`;
+    }
+    return `<div class="client-avatar client-avatar-fallback">${escapeHtml(initial)}</div>`;
+  }
+
+  // Render kind-1 content as plain text with linkified URLs. Deliberately
+  // simple — no NIP-19 nostr:npub… inline rendering in v1 (the dashboard's
+  // existing markdown renderer is overkill and would re-introduce HTML
+  // injection surface). escapeHtml runs first; the only HTML we inject
+  // is <a> tags built from a stripped allowlist.
+  function renderContent(text) {
+    const safe = escapeHtml(String(text || ''));
+    return safe.replace(/(https?:\/\/[^\s<]+)/g, (m) => {
+      const url = m.endsWith(')') ? m.slice(0, -1) : m;
+      const trailing = m.endsWith(')') ? ')' : '';
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer ugc">${url}</a>${trailing}`;
+    });
+  }
+
+  function classifyNotification(ev, mePubkey) {
+    // Map kind+tags to a short label the UI can show.
+    if (ev.kind === 9735) return 'zapped you';
+    if (ev.kind === 7)    return `reacted ${ev.content && ev.content.trim().length <= 4 ? ev.content : '+'}`;
+    if (ev.kind === 6)    return 'reposted';
+    if (ev.kind === 1) {
+      const eTags = ev.tags?.filter(t => Array.isArray(t) && t[0] === 'e') || [];
+      const isReply = eTags.length > 0;
+      // Mentions = p-tagged but not a reply (no e tag pointing to one of
+      // your posts). The owner-side check (was the reply pointing at
+      // *our* event?) is more nuanced than v1 needs; "replied to you"
+      // when there's an e-tag is good enough.
+      return isReply ? 'replied' : 'mentioned you';
+    }
+    return 'engaged';
+  }
+
+  function setEmpty(msg) {
+    if (!msg) { emptyEl.hidden = true; emptyEl.textContent = ''; return; }
+    emptyEl.hidden = false;
+    emptyEl.textContent = msg;
+  }
+
+  // ── Compose box ────────────────────────────────────────────────────────
+  function showCompose(target /* null = top-level */) {
+    replyTarget = target;
+    composeEl.hidden = false;
+    composeCancelBtn.hidden = !target;
+    composeIn.placeholder = target
+      ? `Reply to ${profileDisplay(tabCache.feed.profiles[target.pubkey] || tabCache.notifications.profiles[target.pubkey], target.pubkey)}…  (⌘/Ctrl+⏎ to publish)`
+      : 'What\'s happening on Nostr? (⌘/Ctrl+⏎ to publish)';
+    composeCount.textContent = String(composeIn.value.length);
+    composeIn.focus();
+  }
+  function hideCompose() {
+    replyTarget = null;
+    composeIn.value = '';
+    composeCount.textContent = '0';
+    composeCancelBtn.hidden = true;
+    // The compose box stays visible on Feed (top-level posts) but hides
+    // on tabs where composing inline doesn't make sense.
+    composeEl.hidden = currentTab !== 'feed';
+  }
+
+  composeIn.addEventListener('input', () => {
+    composeCount.textContent = String(composeIn.value.length);
+  });
+  composeIn.addEventListener('keydown', (e) => {
+    // Cmd/Ctrl+Enter publishes — matches the chat panel's send shortcut.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      publish();
+    } else if (e.key === 'Escape' && replyTarget) {
+      hideCompose();
+    }
+  });
+  composeBtn.addEventListener('click', () => publish());
+  composeCancelBtn.addEventListener('click', () => hideCompose());
+
+  async function publish() {
+    const content = composeIn.value.trim();
+    if (!content) { toast('Nothing to publish', 'Type something first', 'warn'); return; }
+    composeBtn.disabled = true;
+    const origLabel = composeBtn.textContent;
+    composeBtn.textContent = 'publishing…';
+    try {
+      const body = { content };
+      if (replyTarget) body.replyTo = replyTarget;
+      const r = await api('/api/client/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const acc = r.accepted ?? 0;
+        toast('Publish failed', `${acc}/${r.targets || 0} relays accepted`, 'err');
+        return;
+      }
+      toast('Published', `Accepted by ${r.accepted}/${r.targets} relays`, 'ok');
+      hideCompose();
+      // Refresh feed so the new post lands at the top.
+      if (currentTab === 'feed') void loadFeed(true);
+    } catch (e) {
+      // api() already toasted; nothing more to do.
+    } finally {
+      composeBtn.disabled = false;
+      composeBtn.textContent = origLabel;
+    }
+  }
+
+  // ── Loaders ────────────────────────────────────────────────────────────
+  async function loadFeed(force = false) {
+    const cache = tabCache.feed;
+    if (cache.loading) return;
+    if (!force && cache.events.length > 0 && (Date.now() - cache.loadedAt) < 30_000) {
+      renderFeed();
+      return;
+    }
+    cache.loading = true;
+    renderLoading('Loading feed…');
+    try {
+      const r = await api('/api/client/feed?limit=50');
+      cache.events   = Array.isArray(r.events)   ? r.events   : [];
+      cache.profiles = r.profiles && typeof r.profiles === 'object' ? r.profiles : {};
+      cache.empty    = r.empty || (cache.events.length === 0 ? 'No posts yet — your follows haven\'t published recently.' : null);
+      cache.loadedAt = Date.now();
+      renderFeed();
+    } catch (e) {
+      renderError('Feed failed to load');
+    } finally {
+      cache.loading = false;
+    }
+  }
+
+  async function loadNotifications(force = false) {
+    const cache = tabCache.notifications;
+    if (cache.loading) return;
+    if (!force && cache.events.length > 0 && (Date.now() - cache.loadedAt) < 30_000) {
+      renderNotifications();
+      return;
+    }
+    cache.loading = true;
+    renderLoading('Loading notifications…');
+    try {
+      const r = await api('/api/client/notifications?limit=50');
+      cache.events   = Array.isArray(r.events)   ? r.events   : [];
+      cache.profiles = r.profiles && typeof r.profiles === 'object' ? r.profiles : {};
+      cache.empty    = r.empty || (cache.events.length === 0 ? 'No notifications yet.' : null);
+      cache.loadedAt = Date.now();
+      renderNotifications();
+    } catch (e) {
+      renderError('Notifications failed to load');
+    } finally {
+      cache.loading = false;
+    }
+  }
+
+  async function loadProfile(force = false) {
+    const cache = tabCache.profile;
+    if (cache.loading) return;
+    if (!force && cache.profile && (Date.now() - cache.loadedAt) < 60_000) {
+      renderProfile();
+      return;
+    }
+    cache.loading = true;
+    cache.error = null;
+    renderLoading('Loading profile…');
+    try {
+      if (!ownerHex) {
+        // Pull owner identity from the existing endpoint the dashboard uses
+        // for the header chip.
+        const ident = await apiCached('/api/identity/config', 60_000).catch(() => null);
+        if (ident?.npub) {
+          ownerNpub = ident.npub;
+          // Best-effort: derive hex via the existing /api/client/profile
+          // endpoint, which accepts hex only. We can shortcut by asking the
+          // server for the kind-0 of the owner — but the route needs hex.
+          // Decode npub → hex client-side via the existing helper.
+          try {
+            ownerHex = npubToHexBrowser(ident.npub);
+          } catch { ownerHex = null; }
+        }
+      }
+      if (!ownerHex) {
+        cache.error = 'No station owner configured. Finish setup in Config first.';
+        renderProfile();
+        return;
+      }
+      const p = await api(`/api/client/profile?pubkey=${ownerHex}`);
+      cache.profile = p;
+      cache.loadedAt = Date.now();
+      renderProfile();
+    } catch (e) {
+      cache.error = 'Profile failed to load';
+      renderProfile();
+    } finally {
+      cache.loading = false;
+    }
+  }
+
+  // Minimal browser-side npub decoder. We avoid pulling in nostr-tools for
+  // a single bech32 decode by reusing the existing `npubToHex` helper if
+  // present, else fall back to a tiny inline bech32 → hex routine. The
+  // dashboard already needs this for several other features, so we expose
+  // a fallback path here without depending on a particular implementation
+  // being loaded first.
+  function npubToHexBrowser(npub) {
+    if (typeof window.__npubToHex === 'function') return window.__npubToHex(npub);
+    if (typeof npub !== 'string' || !npub.startsWith('npub1')) throw new Error('not an npub');
+    // Bech32 polyglot decode (BIP-173): copy of the spec's reference
+    // implementation, pared down to "decode the data part and convert
+    // 5-bit groups back to bytes". 32 bytes out for a valid npub.
+    const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+    const dpos = npub.lastIndexOf('1');
+    const data = npub.slice(dpos + 1);
+    const five = [];
+    for (let i = 0; i < data.length - 6; i++) {
+      const v = CHARSET.indexOf(data.charAt(i));
+      if (v < 0) throw new Error('bad bech32 char');
+      five.push(v);
+    }
+    // 5-bit → 8-bit regrouping.
+    let acc = 0, bits = 0;
+    const out = [];
+    for (const v of five) {
+      acc = (acc << 5) | v;
+      bits += 5;
+      if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); }
+    }
+    if (out.length !== 32) throw new Error('wrong-length npub');
+    return out.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // ── Renderers ──────────────────────────────────────────────────────────
+  function renderLoading(label) {
+    setEmpty(null);
+    listEl.innerHTML = `<div class="client-loading muted">${escapeHtml(label)}</div>`;
+  }
+  function renderError(label) {
+    setEmpty(null);
+    listEl.innerHTML = `<div class="client-loading">${escapeHtml(label)}</div>`;
+  }
+
+  function renderFeed() {
+    const { events, profiles, empty } = tabCache.feed;
+    if (empty && events.length === 0) {
+      listEl.innerHTML = '';
+      setEmpty(empty);
+      return;
+    }
+    setEmpty(null);
+    listEl.innerHTML = events.map(ev => renderNote(ev, profiles[ev.pubkey])).join('');
+    wireNoteActions();
+  }
+
+  function renderNotifications() {
+    const { events, profiles, empty } = tabCache.notifications;
+    if (empty && events.length === 0) {
+      listEl.innerHTML = '';
+      setEmpty(empty);
+      return;
+    }
+    setEmpty(null);
+    listEl.innerHTML = events.map(ev => renderNotification(ev, profiles[ev.pubkey])).join('');
+    wireNoteActions();
+  }
+
+  function renderProfile() {
+    const cache = tabCache.profile;
+    if (cache.error) { listEl.innerHTML = ''; setEmpty(cache.error); return; }
+    if (!cache.profile) { renderLoading('Loading profile…'); return; }
+    const p = cache.profile;
+    const name = profileDisplay(p);
+    const about = p.about ? escapeHtml(p.about) : '';
+    setEmpty(null);
+    listEl.innerHTML = `
+      <div class="client-profile-card">
+        ${avatarOrInitials(p)}
+        <div class="client-profile-meta">
+          <div class="client-profile-name">${escapeHtml(name)}</div>
+          ${p.nip05 ? `<div class="client-profile-nip05 muted">${escapeHtml(p.nip05)}</div>` : ''}
+          <div class="client-profile-npub muted">${escapeHtml(p.npub || '')}</div>
+          ${about ? `<div class="client-profile-about">${about}</div>` : ''}
+        </div>
+      </div>
+      <div class="muted" style="margin-top:14px;font-size:11px">
+        Profile served from your read relays · cached 5 minutes
+      </div>
+    `;
+  }
+
+  function renderNote(ev, profile) {
+    const name = profileDisplay(profile, ev.pubkey);
+    return `
+      <article class="client-note" data-event-id="${escapeHtml(ev.id)}" data-event-pubkey="${escapeHtml(ev.pubkey)}">
+        ${avatarOrInitials(profile, ev.pubkey)}
+        <div class="client-note-body">
+          <div class="client-note-head">
+            <span class="client-note-name">${escapeHtml(name)}</span>
+            <span class="muted">·</span>
+            <span class="muted" title="${new Date(ev.created_at * 1000).toLocaleString()}">${escapeHtml(timeAgo(ev.created_at))}</span>
+          </div>
+          <div class="client-note-content">${renderContent(ev.content)}</div>
+          <div class="client-note-actions">
+            <button class="client-note-action" data-action="reply" title="Reply">↩ reply</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderNotification(ev, profile) {
+    const name  = profileDisplay(profile, ev.pubkey);
+    const label = classifyNotification(ev);
+    const showContent = ev.kind === 1 && typeof ev.content === 'string' && ev.content.length > 0;
+    return `
+      <article class="client-note client-notification" data-event-id="${escapeHtml(ev.id)}" data-event-pubkey="${escapeHtml(ev.pubkey)}">
+        ${avatarOrInitials(profile, ev.pubkey)}
+        <div class="client-note-body">
+          <div class="client-note-head">
+            <span class="client-note-name">${escapeHtml(name)}</span>
+            <span class="muted">${escapeHtml(label)}</span>
+            <span class="muted">·</span>
+            <span class="muted" title="${new Date(ev.created_at * 1000).toLocaleString()}">${escapeHtml(timeAgo(ev.created_at))}</span>
+          </div>
+          ${showContent ? `<div class="client-note-content">${renderContent(ev.content)}</div>` : ''}
+          ${ev.kind === 1 ? `<div class="client-note-actions">
+            <button class="client-note-action" data-action="reply" title="Reply">↩ reply</button>
+          </div>` : ''}
+        </div>
+      </article>
+    `;
+  }
+
+  function wireNoteActions() {
+    listEl.querySelectorAll('[data-action="reply"]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const note = e.target.closest('.client-note');
+        if (!note) return;
+        const id     = note.dataset.eventId;
+        const pubkey = note.dataset.eventPubkey;
+        if (!id || !pubkey) return;
+        // Switch back to feed so the compose box is visible.
+        if (currentTab !== 'feed') {
+          selectTab('feed');
+        }
+        showCompose({ id, pubkey });
+      });
+    });
+  }
+
+  // ── Tab switching ──────────────────────────────────────────────────────
+  function selectTab(name) {
+    if (name === currentTab) return;
+    currentTab = name;
+    $$('#client-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.clientTab === name));
+    // Compose box only renders on feed; hide on others. Also clear any
+    // reply state so a switch doesn't carry a stale target across.
+    if (name === 'feed') {
+      composeEl.hidden = false;
+    } else {
+      composeEl.hidden = true;
+      replyTarget = null;
+      composeCancelBtn.hidden = true;
+    }
+    // Defer the load so the tab-class flip paints first (avoids a janky
+    // "old content visible while loading the new tab" frame).
+    requestAnimationFrame(() => {
+      if (name === 'feed')              loadFeed();
+      else if (name === 'notifications') loadNotifications();
+      else if (name === 'profile')       loadProfile();
+    });
+  }
+
+  tabsEl.addEventListener('click', (e) => {
+    const t = e.target.closest('.tab');
+    if (!t || t.disabled) return;
+    selectTab(t.dataset.clientTab);
+  });
+
+  refreshBtn.addEventListener('click', () => {
+    if (currentTab === 'feed')              return loadFeed(true);
+    if (currentTab === 'notifications')     return loadNotifications(true);
+    if (currentTab === 'profile')           return loadProfile(true);
+  });
+
+  return {
+    onEnter() {
+      // Always show compose box on feed (the default tab).
+      composeEl.hidden = currentTab !== 'feed';
+      if (currentTab === 'feed')              loadFeed();
+      else if (currentTab === 'notifications') loadNotifications();
+      else if (currentTab === 'profile')       loadProfile();
+    },
+  };
+})();
+
 // ── Registry + boot ──────────────────────────────────────────────────────
 
 const Panels = {
@@ -15485,6 +15941,7 @@ const Panels = {
   projects: ProjectsPanel,
   vpn:      VpnPanel,
   logs:     LogsPanel,
+  client:   ClientPanel,
   config:   ConfigPanel,
 };
 

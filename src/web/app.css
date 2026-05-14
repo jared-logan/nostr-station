@@ -7887,3 +7887,196 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
 .cfg-updates-result.warn { color: var(--warn); }
 .cfg-updates-result.err  { color: var(--error); }
 .cfg-updates-result .ok-strong { color: var(--accent-bright, var(--accent, #c79bff)); font-weight: 500; }
+
+/* ── Client panel (built-in Nostr social client) ──────────────────────── */
+
+.client-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 16px;
+}
+.client-compose textarea {
+  width: 100%;
+  min-height: 70px;
+  background: var(--bg-elev);
+  color: var(--text-bright);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+.client-compose textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.client-compose-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.client-compose-hint {
+  font-size: 11px;
+  flex: 1;
+}
+.client-compose-hint code {
+  background: var(--bg-elev);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10.5px;
+}
+.client-compose-count {
+  font-size: 11px;
+  min-width: 36px;
+  text-align: right;
+}
+
+.client-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  background: var(--bg-card);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.client-loading {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 13px;
+}
+
+.client-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.client-note {
+  display: flex;
+  gap: 12px;
+  padding: 14px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.client-note:last-child { border-bottom: none; }
+
+.client-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--bg-elev);
+  object-fit: cover;
+}
+.client-avatar-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-bright);
+  font-weight: 600;
+  font-size: 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+}
+
+.client-note-body {
+  flex: 1;
+  min-width: 0;
+}
+.client-note-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.client-note-name {
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.client-note-content {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.client-note-content a {
+  color: var(--accent-bright);
+  text-decoration: none;
+}
+.client-note-content a:hover {
+  text-decoration: underline;
+}
+.client-note-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+.client-note-action {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.client-note-action:hover {
+  color: var(--accent-bright);
+}
+
+.client-notification {
+  /* No visual difference from a regular note in v1 — the inline label
+     "replied"/"reacted +"/"zapped you" inside .client-note-head carries
+     the distinction. Reserved for future styling. */
+}
+
+.client-profile-card {
+  display: flex;
+  gap: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  align-items: flex-start;
+}
+.client-profile-card .client-avatar {
+  width: 64px;
+  height: 64px;
+}
+.client-profile-card .client-avatar-fallback {
+  font-size: 24px;
+}
+.client-profile-meta {
+  flex: 1;
+  min-width: 0;
+}
+.client-profile-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 4px;
+}
+.client-profile-nip05 {
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.client-profile-npub {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.client-profile-about {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
