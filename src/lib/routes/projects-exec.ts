@@ -16,7 +16,7 @@
  * written; false lets the parent fall through.
  */
 import http from 'http';
-import { isStacksProject } from '../projects.js';
+import { isStacksProject, projectEnvContract } from '../projects.js';
 import type { Project } from '../projects.js';
 import {
   readBody, streamExec, streamExecError,
@@ -46,7 +46,7 @@ export async function handleProjectsExec(
     // the exact stdout format on a real deploy. For now, the user
     // sees the live URL in the exec modal output.
     streamExec(
-      { bin: 'npm', args: ['run', 'deploy'], timeoutMs: 0 },
+      { bin: 'npm', args: ['run', 'deploy'], env: projectEnvContract(project), timeoutMs: 0 },
       res, req, project.path,
       { line: `$ npm run deploy  (cwd: ${project.path})`, stream: 'stdout' },
     );
@@ -71,6 +71,7 @@ export async function handleProjectsExec(
     // is enough for the cheap-review-then-open-in-editor flow.
     if (cmd === 'git-log-patch') spec = { bin: 'git', args: ['log', '-p', '-5'] };
     if (!spec) { res.writeHead(400); res.end('unknown exec cmd'); return true; }
+    spec.env = { ...(spec.env || {}), ...projectEnvContract(project) };
     streamExec(spec, res, req, project.path);
     return true;
   }
@@ -82,7 +83,12 @@ export async function handleProjectsExec(
       // site can legitimately span minutes; the consecutive-line
       // cap inside streamExec still guards against retry-loop
       // floods regardless.
-      { bin: process.execPath, args: [CLI_BIN, 'nsite', 'deploy', '--yes'], env: { NO_COLOR: '1', TERM: 'dumb' }, timeoutMs: 0 },
+      {
+        bin: process.execPath,
+        args: [CLI_BIN, 'nsite', 'deploy', '--yes'],
+        env: { NO_COLOR: '1', TERM: 'dumb', ...projectEnvContract(project) },
+        timeoutMs: 0,
+      },
       res, req, cwd,
     );
     return true;

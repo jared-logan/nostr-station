@@ -188,6 +188,37 @@ function projectsPath(): string {
   return path.join(configDir(), 'projects.json');
 }
 
+// ── Env contract for spawned processes (PTYs + streamExec) ─────────────────
+//
+// Stable contract: every project-bound subprocess sees these variables in
+// its environment. Apps developed inside nostr-station read them at startup
+// to discover which relay / blossom to talk to, which project they're
+// running under, and where their per-project test identities live. Active
+// env (`dev` | `prod`) is the single switch users flip in the dashboard.
+//
+// Projects without an environment block (legacy + cloned/imported) get a
+// degenerate contract — only PROJECT_ID is set, so app code can detect
+// "running under nostr-station" without assuming any specific infra.
+
+export function projectEnvContract(project: Project): Record<string, string> {
+  const out: Record<string, string> = {
+    NOSTR_STATION_PROJECT_ID: project.id,
+  };
+  const env = project.environment;
+  if (!env) return out;
+  const block = env[env.active] || { relays: [], blossoms: [] };
+  out.NOSTR_STATION_ACTIVE_ENV = env.active;
+  out.NOSTR_STATION_RELAY      = block.relays[0]   || '';
+  out.NOSTR_STATION_RELAYS     = block.relays.join(',');
+  out.NOSTR_STATION_BLOSSOM    = block.blossoms[0] || '';
+  out.NOSTR_STATION_BLOSSOMS   = block.blossoms.join(',');
+  if (project.path) {
+    out.NOSTR_STATION_TEST_IDENTITIES_PATH =
+      path.join(project.path, '.nostr-station', 'test-identities.json');
+  }
+  return out;
+}
+
 // ── Read / write ────────────────────────────────────────────────────────────
 
 // Loose http(s) URL validator for the `blossoms` arrays. Mirrors

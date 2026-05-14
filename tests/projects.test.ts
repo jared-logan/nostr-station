@@ -20,6 +20,7 @@ const {
   validateProjectPath,
   resolveSafeAbsolute,
   projectGitLog,
+  projectEnvContract,
   // @ts-expect-error — imported at runtime, not checked against .d.ts
 } = await import('../src/lib/projects.ts');
 
@@ -809,4 +810,70 @@ test('environment round-trips through readProjects()', () => {
   assert.equal(re.environment?.active, 'dev');
   assert.deepEqual(re.environment?.dev,  DEV_BLOCK);
   assert.deepEqual(re.environment?.prod, PROD_BLOCK);
+});
+
+test('projectEnvContract: reflects the active environment block', () => {
+  const r = createProject({
+    name: 'contract',
+    path: projInHome('contract'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    environment: { active: 'dev', dev: DEV_BLOCK, prod: PROD_BLOCK },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+
+  const env = projectEnvContract(r.project);
+  assert.equal(env.NOSTR_STATION_PROJECT_ID,           r.project.id);
+  assert.equal(env.NOSTR_STATION_ACTIVE_ENV,           'dev');
+  assert.equal(env.NOSTR_STATION_RELAY,                'ws://localhost:7777');
+  assert.equal(env.NOSTR_STATION_RELAYS,               'ws://localhost:7777');
+  assert.equal(env.NOSTR_STATION_BLOSSOM,              'http://localhost:8081');
+  assert.equal(env.NOSTR_STATION_BLOSSOMS,             'http://localhost:8081');
+  assert.ok(env.NOSTR_STATION_TEST_IDENTITIES_PATH.endsWith('.nostr-station/test-identities.json'));
+});
+
+test('projectEnvContract: flips on active-env toggle', () => {
+  const r = createProject({
+    name: 'toggle-env',
+    path: projInHome('toggle-env'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    environment: { active: 'dev', dev: DEV_BLOCK, prod: PROD_BLOCK },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+
+  const flipped = updateProject(r.project.id, {
+    environment: { active: 'prod', dev: DEV_BLOCK, prod: PROD_BLOCK },
+  });
+  assert.equal(flipped.ok, true);
+  if (!flipped.ok) return;
+
+  const env = projectEnvContract(flipped.project);
+  assert.equal(env.NOSTR_STATION_ACTIVE_ENV, 'prod');
+  assert.equal(env.NOSTR_STATION_RELAY,      PROD_BLOCK.relays[0]);
+  assert.equal(env.NOSTR_STATION_RELAYS,     PROD_BLOCK.relays.join(','));
+});
+
+test('projectEnvContract: legacy project sets PROJECT_ID only', () => {
+  // Projects without an environment block (cloned / imported / pre-feature)
+  // get a degenerate contract: only PROJECT_ID. App code that reads
+  // ACTIVE_ENV can detect "not yet isolated" and prompt the user to opt in.
+  const r = createProject({
+    name: 'legacy-contract',
+    path: projInHome('legacy-contract'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+
+  const env = projectEnvContract(r.project);
+  assert.equal(env.NOSTR_STATION_PROJECT_ID, r.project.id);
+  assert.equal(env.NOSTR_STATION_ACTIVE_ENV, undefined);
+  assert.equal(env.NOSTR_STATION_RELAY,      undefined);
 });

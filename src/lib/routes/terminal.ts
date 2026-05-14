@@ -75,6 +75,7 @@ export async function handleTerminal(
     catch { res.writeHead(400); res.end('bad json'); return true; }
     const key = String(parsed.key || '');
     let cwd: string | undefined;
+    let project: import('../projects.js').Project | undefined;
     const pid = parsed.projectId ? String(parsed.projectId) : '';
     if (pid) {
       const p = getProject(pid);
@@ -84,8 +85,9 @@ export async function handleTerminal(
         return true;
       }
       if (p.path) cwd = p.path;
+      project = p;
     }
-    const r = await createTerminal({ key, cwd }, CLI_SPAWN);
+    const r = await createTerminal({ key, cwd, project }, CLI_SPAWN);
     if (!r.ok) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: r.error }));
