@@ -1316,6 +1316,19 @@ details.dashboard-health .dashboard-health-sub {
 .vpn-strip-state .vpn-strip-tunnel {
   font-size: 11px;
 }
+.vpn-strip-state .vpn-strip-endpoint {
+  font-size: 11px;
+}
+.vpn-strip-state .vpn-strip-degraded {
+  color: var(--warn, #c79b3a);
+  font-size: 11px;
+  cursor: help;
+}
+.vpn-strip-issues {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+}
 .vpn-strip-actions {
   display: flex;
   gap: 6px;

@@ -33,7 +33,7 @@ import {
   probeNvpnStatus, startNvpn, stopNvpn, restartNvpn,
   installNvpnService, enableNvpnService, disableNvpnService, uninstallNvpnService,
   uninstallNvpnCli, probeNvpnServiceStatus,
-  nvpnRowStateFor,
+  nvpnRowStateFor, nvpnHealthSummary,
   addParticipants, removeParticipants, addAdmins, removeAdmins,
   publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster, readNvpnNetworks,
   pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork,
@@ -90,7 +90,17 @@ export async function handleNvpn(
       running:   status.running,
       tunnelIp:  status.tunnelIp,
     });
-    await writeJson(res, 200, { ...status, row });
+    // Reality check — daemon-claimed state isn't enough on its own
+    // (cf. issue #56). Roll up the raw health[], STUN result, and any
+    // recent publish errors from the relay aggregator into a small
+    // surface the UI can render directly.
+    const health = nvpnHealthSummary({
+      installed: status.installed,
+      running:   status.running,
+      tunnelIp:  status.tunnelIp,
+      raw:       status.raw,
+    });
+    await writeJson(res, 200, { ...status, row, health });
     return true;
   }
 

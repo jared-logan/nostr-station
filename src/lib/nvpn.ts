@@ -1753,6 +1753,109 @@ export function nvpnRowStateFor(p: NvpnRowProbe): NvpnRowState {
   return { state: 'warn', value: 'running, no tunnel ip',             ok: false };
 }
 
+// ── Health summary (reality check) ───────────────────────────────────────
+//
+// Daemon-claimed status is necessary but not sufficient. nvpn can report
+// itself "running" with a tunnel IP while STUN never succeeded, no public
+// endpoint was discovered, and presence publishes are being rate-limited
+// into the void. The dashboard's row indicator can light up green in that
+// state, which is exactly when the user most needs to know it's broken.
+//
+// nvpnHealthSummary inspects the raw status payload (the same JSON shape
+// nvpn ships) plus the optional Relays-tab aggregator snapshot, and rolls
+// it up into a small set of UI-grade signals:
+//
+//   * state — 'ok' / 'degraded' / 'down' / 'unknown'
+//   * publicEndpoint — STUN-discovered ip:port (when present), so the UI
+//     can show "I'm reachable at X" prominently instead of burying it
+//     three levels deep in raw JSON
+//   * issues[] — short human-readable strings the UI can list as a hint
+//     ("STUN did not complete", "3 publish errors in last 5min", etc.)
+//
+// Pure + exported for tests. Inputs are deliberately the wire shape so
+// the route handler can pass the JSON it already has.
+
+export interface NvpnHealthSummaryInput {
+  // Subset of the NvpnStatus shape this function actually cares about.
+  installed:     boolean;
+  running:       boolean;
+  tunnelIp:      string | null;
+  raw:           Record<string, unknown> | null;
+  // Optional roll-up from the per-relay publish aggregator (PR 57).
+  // Caller passes the totals across all relays; we don't peek at
+  // individual URLs here so the helper stays pure.
+  publishErrors?:   { count: number; lastKind?: string | null } | null;
+  publishSuccesses?: number | null;
+}
+
+export interface NvpnHealthSummary {
+  state:           'ok' | 'degraded' | 'down' | 'unknown';
+  publicEndpoint:  string | null;
+  issues:          string[];
+}
+
+export function nvpnHealthSummary(in_: NvpnHealthSummaryInput): NvpnHealthSummary {
+  if (!in_.installed) {
+    return { state: 'down', publicEndpoint: null, issues: ['nvpn not installed'] };
+  }
+  if (!in_.running) {
+    return { state: 'down', publicEndpoint: null, issues: ['daemon not running'] };
+  }
+  const issues: string[] = [];
+  const r = in_.raw ?? {};
+
+  // STUN-discovered public endpoint. nvpn has shipped this under a few
+  // names across releases — try the obvious shapes; ignore failures
+  // (raw can be a deeply nested struct we don't fully model).
+  let publicEndpoint: string | null = null;
+  const candidates = [
+    (r as any).public_endpoint,
+    (r as any).external_endpoint,
+    (r as any).nat?.public_endpoint,
+    (r as any).nat?.discovered_endpoint,
+    (r as any).endpoint,
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.length > 0 && /:\d+/.test(c)) {
+      publicEndpoint = c;
+      break;
+    }
+  }
+  if (!publicEndpoint) {
+    issues.push('no public endpoint discovered (STUN may not have succeeded)');
+  }
+
+  // health[] is upstream nvpn's first-class reporting surface. Anything
+  // error-severity rolls into degraded; info entries we ignore (NAT
+  // info, "running" pings, etc).
+  const health = Array.isArray((r as any).health) ? (r as any).health as Array<{ code?: string; severity?: string; summary?: string }> : [];
+  for (const h of health) {
+    if (h && (h.severity === 'error' || h.severity === 'warn' || h.severity === 'warning')) {
+      issues.push(h.summary ? `${h.code || 'health'}: ${h.summary}` : (h.code || 'health entry'));
+    }
+  }
+
+  // Recent publish failures from the per-relay aggregator — surface when
+  // we have data. No data is not "ok" or "broken" — it's "we don't
+  // know" — and we keep silent rather than overclaim.
+  if (in_.publishErrors && in_.publishErrors.count > 0) {
+    const kind = in_.publishErrors.lastKind ? ` (${in_.publishErrors.lastKind})` : '';
+    issues.push(`${in_.publishErrors.count} recent publish error${in_.publishErrors.count === 1 ? '' : 's'}${kind}`);
+  }
+
+  // Daemon claims a tunnel IP but the publish channel is failing — this
+  // is the canonical "lying status" we're trying to surface.
+  if (in_.tunnelIp && in_.publishErrors && in_.publishErrors.count > 0 && (!in_.publishSuccesses || in_.publishSuccesses === 0)) {
+    issues.push('daemon reports running but no successful publishes recently');
+  }
+
+  return {
+    state:          issues.length === 0 ? 'ok' : 'degraded',
+    publicEndpoint,
+    issues,
+  };
+}
+
 // ── Banner running decision ─────────────────────────────────────────────
 //
 // The Logs panel banner needs a single boolean — "should we tell the user
