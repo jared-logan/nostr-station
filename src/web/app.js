@@ -10399,8 +10399,9 @@ const VpnPanel = (() => {
   let lastService    = null;  // GET /api/nvpn/service/status
   let lastRoster     = null;  // GET /api/nvpn/roster
   let lastRelays     = null;  // GET /api/nvpn/relays
+  let lastNetworks   = null;  // GET /api/nvpn/networks  (full [[networks]] list)
   let lastDeployment = null;  // GET /api/nvpn/deployment-context
-  let lastNetworks = null;    // GET /api/nvpn/networks  (full [[networks]] list)
+  let lastSplitBrain = null;  // GET /api/nvpn/split-brain
   // 60s TTL for the auto-fired netcheck — same idea as ConfigPanel's
   // cache. Manual "Check reachability" passes { force:true } to bypass.
   let relayHealthCache = null; // { fetchedAt: ms, raw: object|null }
@@ -10454,6 +10455,46 @@ const VpnPanel = (() => {
       </div>
       <div class="muted vpn-deployment-banner-detail">${escapeHtml(w.detail)}</div>
     `;
+  }
+
+  // Split-brain banner (#58). Renders above the status strip when the
+  // server reports two daemons (user-mode + systemd-managed) are both
+  // alive. Includes a "Consolidate" action that stops the user-mode
+  // daemon and lets the systemd one own the network. Self-creating
+  // slot so we don't need a static HTML hook.
+  function renderSplitBrainBanner() {
+    const slot = $('vpn-split-brain-banner') || (() => {
+      const el = document.createElement('div');
+      el.id = 'vpn-split-brain-banner';
+      el.className = 'vpn-split-brain-banner';
+      stripEl.parentNode.insertBefore(el, stripEl);
+      return el;
+    })();
+    const sb = lastSplitBrain;
+    if (!sb || !sb.splitBrain) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
+    slot.style.display = 'block';
+    slot.innerHTML = `
+      <div class="vpn-split-brain-row">
+        <div>
+          <strong>Two nvpn daemons running</strong>
+          <div class="muted vpn-split-brain-detail">${escapeHtml(sb.summary)}</div>
+          <div class="muted vpn-split-brain-detail">
+            User-mode pid ${sb.user?.pid ?? '?'} &middot; systemd pid ${sb.systemd?.pid ?? '?'}
+          </div>
+        </div>
+        <button id="vpn-split-brain-consolidate" class="primary">Consolidate</button>
+      </div>
+    `;
+    const btn = $('vpn-split-brain-consolidate');
+    if (btn) btn.addEventListener('click', async (e) => {
+      e.preventDefault(); btn.disabled = true;
+      try {
+        const r = await api('/api/nvpn/split-brain/consolidate', { method: 'POST' });
+        toast('Daemons consolidated', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+        await refresh();
+      } catch { /* api() already toasted */ }
+      btn.disabled = false;
+    });
   }
 
   // Top-of-panel status strip — pill + control buttons. Always rendered
@@ -10558,13 +10599,14 @@ const VpnPanel = (() => {
   // whole panel — each sub-tab handles missing data with its own
   // empty-state.
   async function refresh() {
-    const [s, svc, roster, relays, networks, deployment] = await Promise.all([
+    const [s, svc, roster, relays, networks, deployment, splitBrain] = await Promise.all([
       api('/api/nvpn/status').catch(() => null),
       api('/api/nvpn/service/status').catch(() => null),
       api('/api/nvpn/roster').catch(() => null),
       api('/api/nvpn/relays').catch(() => null),
       api('/api/nvpn/networks').catch(() => null),
       api('/api/nvpn/deployment-context', undefined, { silent: true }).catch(() => null),
+      api('/api/nvpn/split-brain', undefined, { silent: true }).catch(() => null),
     ]);
     lastStatus     = s;
     lastService    = svc;
@@ -10572,7 +10614,9 @@ const VpnPanel = (() => {
     lastRelays     = relays;
     lastNetworks   = networks;
     lastDeployment = deployment;
+    lastSplitBrain = splitBrain;
     renderDeploymentBanner();
+    renderSplitBrainBanner();
     renderStatusStrip();
     renderActiveTab();
   }

@@ -45,6 +45,7 @@ import {
 } from '../nvpn.js';
 import { nvpnRelayHealth } from '../nvpn-relay-health.js';
 import { detectContainer, natWarningFor } from '../container-detect.js';
+import { detectSplitBrain, stopUserModeDaemon } from '../nvpn-split-brain.js';
 import { readBody } from './_shared.js';
 
 async function writeJson(
@@ -147,6 +148,24 @@ export async function handleNvpn(
 
   if (url === '/api/nvpn/install-service' && method === 'POST') {
     const r = await installNvpnService();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // Split-brain detection (#58). Surfaces when both a user-mode and
+  // systemd-managed nvpn daemon are running — the install wizard's
+  // current behaviour leaves both processes alive, and CLI invocations
+  // from nostr-station hit the user-mode daemon (which lacks caps).
+  if (url === '/api/nvpn/split-brain' && method === 'GET') {
+    const r = await detectSplitBrain();
+    await writeJson(res, 200, r);
+    return true;
+  }
+  // Consolidate to the systemd-managed daemon by stopping the user-mode
+  // one. Idempotent — if no user daemon is running, returns ok with a
+  // "nothing to do" detail.
+  if (url === '/api/nvpn/split-brain/consolidate' && method === 'POST') {
+    const r = await stopUserModeDaemon();
     await writeJson(res, r.ok ? 200 : 500, r);
     return true;
   }
