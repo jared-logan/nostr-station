@@ -13,7 +13,7 @@ import path from 'path';
 
 export interface Identity {
   npub:       string;       // bech32 "npub1..." or 64-char hex
-  readRelays: string[];     // ws:// or wss:// URLs
+  readRelays: string[];     // ws:// or wss:// URLs — the user's "Your Relays" list
   // User's preferred GRASP servers (git+nostr storage hosts). Pre-populates
   // the per-project Initialize ngit form — same model shakespeare.diy uses
   // (Settings → Nostr → Nostr Git Servers configures globally; per-project
@@ -27,6 +27,12 @@ export interface Identity {
   // GRASP servers + git-remote-nostr, so the field became redundant.
   // readIdentity() migrates legacy values into this list on first read.
   graspServers?: string[];
+  // Whether to include nostr-station's curated App Relays (DEFAULT_READ_RELAYS
+  // — relay.damus.io / relay.nostr.band / nos.lol) in /client read paths
+  // alongside the user's "Your Relays" list. Default true so a brand-new
+  // user gets a working feed without configuring anything. Toggled from
+  // Config → Client Relays. Mirrors Ditto's "App Relays" enable switch.
+  appRelaysEnabled?: boolean;
   // Opt-out of dashboard auth for localhost requests (127.0.0.1, ::1). Default
   // true — manual override only, not surfaced in the UI yet.
   requireAuth?: boolean;
@@ -74,12 +80,23 @@ export function readIdentity(): Identity {
     const parsed = JSON.parse(raw);
     const ident: Identity = {
       npub:       typeof parsed.npub === 'string' ? parsed.npub : '',
-      readRelays: Array.isArray(parsed.readRelays) && parsed.readRelays.length > 0
+      // readRelays is now the user's "Your Relays" list — distinct from
+      // the curated App Relays (DEFAULT_READ_RELAYS). Before this field
+      // was split, an empty list silently fell back to defaults; now we
+      // preserve an empty list as "user explicitly cleared their list"
+      // and rely on App Relays (toggleable) to keep the feed working.
+      // Legacy reads where readRelays is missing still default to the
+      // curated set so existing installs don't suddenly lose their feed.
+      readRelays: Array.isArray(parsed.readRelays)
                     ? parsed.readRelays.filter((x: any) => typeof x === 'string')
                     : DEFAULT_READ_RELAYS.slice(),
       graspServers: Array.isArray(parsed.graspServers)
         ? parsed.graspServers.filter((x: any): x is string => typeof x === 'string' && x.length > 0)
         : undefined,
+      // App Relays default ON so new + upgrading users get the curated
+      // baseline. Explicit false (user toggled it off) is the only way
+      // to disable them. Anything truthy normalises to true.
+      appRelaysEnabled: parsed.appRelaysEnabled === false ? false : true,
       requireAuth: parsed.requireAuth === false ? false : undefined,
       setupComplete: typeof parsed.setupComplete === 'boolean' ? parsed.setupComplete : undefined,
     };
@@ -102,8 +119,46 @@ export function readIdentity(): Identity {
     }
     return ident;
   } catch {
-    return { npub: '', readRelays: DEFAULT_READ_RELAYS.slice() };
+    return { npub: '', readRelays: DEFAULT_READ_RELAYS.slice(), appRelaysEnabled: true };
   }
+}
+
+// Returns the union of (App Relays, Your Relays) that /client + other
+// public-relay consumers should query. Deduped, capped at 12 to keep
+// fan-out bounded. When App Relays are disabled and the user's list is
+// empty, returns an empty array — callers surface the empty state via
+// the existing `unavailable('no-read-relays')` branch.
+//
+// This is the single source of truth for "where do public-facing reads
+// go?" — every /client route uses it; the rest of the dashboard still
+// calls `readIdentity().readRelays` directly for backwards compatibility
+// with code paths that pre-date App Relays.
+export function getEffectiveReadRelays(): string[] {
+  const ident = readIdentity();
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const appOn = ident.appRelaysEnabled !== false;
+  if (appOn) {
+    for (const r of DEFAULT_READ_RELAYS) {
+      if (!seen.has(r)) { seen.add(r); out.push(r); }
+    }
+  }
+  for (const r of ident.readRelays || []) {
+    if (typeof r !== 'string') continue;
+    if (!isValidRelayUrl(r)) continue;
+    if (!seen.has(r)) { seen.add(r); out.push(r); }
+  }
+  return out.slice(0, 12);
+}
+
+// Flip the App Relays enable bit. Mirrors addReadRelay / removeReadRelay
+// in surface shape (returns the new state). Persisted to identity.json
+// so the choice survives a restart.
+export function setAppRelaysEnabled(enabled: boolean): { ok: true; appRelaysEnabled: boolean } {
+  const ident = readIdentity();
+  ident.appRelaysEnabled = !!enabled;
+  writeIdentity(ident);
+  return { ok: true, appRelaysEnabled: ident.appRelaysEnabled };
 }
 
 export function writeIdentity(ident: Identity): void {
