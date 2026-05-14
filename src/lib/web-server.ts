@@ -75,11 +75,14 @@ import {
   getActiveChatProjectId,
   setAutoSyncRef,
   setInprocRelayPort,
+  setInprocBlossomPort,
   type CmdSpec,
 } from './routes/_shared.js';
 import { readStationContext, stationContextPath } from './ai-context.js';
 import { seedStationContext, USER_REGION_BEGIN, USER_REGION_END } from './editor.js';
 import { handleProjects } from './routes/projects.js';
+import { handleBlossomConfig } from './routes/blossom-config.js';
+import type { BlossomServer } from '../blossom/index.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleDitto } from './routes/ditto.js';
 import { handleClient } from './routes/client.js';
@@ -148,6 +151,11 @@ function formatLogLine(line: LogLine): string {
 // module out of runtime load until maybeStartInprocRelay's dynamic import
 // actually fires (preserving the STATION_INPROC_RELAY=0 fast path).
 let inprocRelay: Relay | null = null;
+
+// In-process Blossom server (Phase C). Off by default — gated on
+// STATION_INPROC_BLOSSOM=1 OR the user clicking "Enable Blossom" in
+// the dashboard Status panel. Lifecycle mirrors inprocRelay above.
+let inprocBlossom: BlossomServer | null = null;
 
 // Per-channel log ring buffers for the Logs panel. The relay buffer is
 // fed by Relay.onLog hooks (see maybeStartInprocRelay below). The
@@ -283,6 +291,64 @@ async function maybeStartInprocRelay(): Promise<void> {
     // PATCH route can call reconcile(id) without a cyclic import.
     setAutoSyncRef(autoSync);
   }
+}
+
+// ── In-process Blossom (Phase C) ─────────────────────────────────────────
+//
+// Off by default. Two opt-in paths:
+//   - STATION_INPROC_BLOSSOM=1 at boot
+//   - POST /api/blossom/start from the dashboard
+// Either path constructs a BlossomServer pointed at the same data dir
+// (~/.nostr-station/data/blobs) and a port from STATION_INPROC_BLOSSOM_PORT
+// (default 8081). Auth predicates read live state at request time so a
+// freshly-added whitelist entry takes effect without a Blossom restart.
+
+function shouldStartInprocBlossom(): boolean {
+  return process.env.STATION_INPROC_BLOSSOM === '1';
+}
+
+async function startInprocBlossom(): Promise<void> {
+  if (inprocBlossom) return;
+  const { BlossomServer } = await import('../blossom/index.js');
+  const port = Number(process.env.STATION_INPROC_BLOSSOM_PORT || '8081');
+  const server = new BlossomServer({
+    port, host: '127.0.0.1',
+    predicates: {
+      isOwner: (hex) => {
+        try {
+          const ident = readIdentity();
+          if (!ident.npub) return false;
+          return npubToHex(ident.npub).toLowerCase() === hex.toLowerCase();
+        } catch { return false; }
+      },
+      isWhitelisted: (hex) => {
+        if (!inprocRelay) return false;
+        try { return inprocRelay.whitelist.has(hex.toLowerCase()); }
+        catch { return false; }
+      },
+      // Test-identity classification lands in Phase B; for now no test
+      // identities exist, so the predicate is a flat false. Wiring goes
+      // through here so adding the registry later is a one-line change.
+      isTestIdentity: (_hex) => false,
+    },
+    onLog: (level, text) => logBuffers.relay.push(level, `[blossom] ${text}`),
+  });
+  await server.start();
+  inprocBlossom = server;
+  setInprocBlossomPort(port);
+  process.stderr.write(`[blossom] in-process blossom listening on http://127.0.0.1:${port}\n`);
+}
+
+async function stopInprocBlossom(): Promise<void> {
+  if (!inprocBlossom) return;
+  await inprocBlossom.stop();
+  inprocBlossom = null;
+  setInprocBlossomPort(null);
+}
+
+async function maybeStartInprocBlossom(): Promise<void> {
+  if (!shouldStartInprocBlossom()) return;
+  await startInprocBlossom();
 }
 
 async function maybeStartWatchdog(): Promise<void> {
@@ -1410,6 +1476,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // ── Projects + Chat project context (extracted to routes/projects.ts) ──
       if (await handleProjects(req, res, fullUrl, method)) return;
 
+      // ── Blossom config + control (routes/blossom-config.ts) ───────────
+      if (await handleBlossomConfig(req, res, fullUrl, method, {
+        getServer: () => inprocBlossom,
+        start:     startInprocBlossom,
+        stop:      stopInprocBlossom,
+      })) return;
+
       // ── Identity (extracted to routes/identity.ts) ─────────────────────
       // Covers /api/identity/config, /api/identity/set, /api/identity/relays/{add,remove},
       // /api/identity/profile/preview, /api/identity/profile, /api/identity/profile/sync.
@@ -1684,6 +1757,8 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // worse than a dropped log line.
       void inprocRelay?.stop().catch(() => {});
       setInprocRelayPort(null);
+      void inprocBlossom?.stop().catch(() => {});
+      setInprocBlossomPort(null);
       inprocRelay = null;
       // nvpn log tailer is independent of the daemon — it just polls a
       // file. Stop it so the polling timer doesn't keep Node alive.
@@ -1747,6 +1822,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // poll; cached server-side so the dashboard never blocks on it
       // and the UI just reads from cache.
       startUpdatePoller();
+      // In-process Blossom (Phase C). Off by default — gated on
+      // STATION_INPROC_BLOSSOM=1 at boot. Fire-and-forget so its own
+      // EADDRINUSE on 8081 doesn't block the dashboard or the relay.
+      void maybeStartInprocBlossom().catch(e => {
+        process.stderr.write(`[blossom] startup failed: ${e?.message || e}\n`);
+      });
+
       // In-process relay (gated on STATION_INPROC_RELAY=1). Started after
       // the dashboard binds so a relay-port collision doesn't prevent
       // the dashboard from coming up — the relay will surface its own
