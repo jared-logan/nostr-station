@@ -398,15 +398,25 @@ function relayApplyToast(title, response, hostFallbackBody = 'Relay updated') {
 // clearSessionToken() wipes localStorage and the auth screen shows.
 const SESSION_KEY         = 'ns-session-token';
 const SESSION_EXPIRES_KEY = 'ns-session-expires';
+// Tracks WHICH signer the user authenticated with so subsequent
+// signing requests (publish, etc.) route to the matching signer:
+//   'nip07'  → window.nostr (Alby, nos2x, …) — sign in browser
+//   'bunker' → saved NIP-46 pairing (Amber)  — server signs
+// Set at sign-in time by completeSignIn(); read at publish time by
+// the Client-panel handlers. Cleared on sign-out.
+const SESSION_SOURCE_KEY  = 'ns-session-source';
 
 function getSessionToken() { return localStorage.getItem(SESSION_KEY); }
-function setSessionToken(token, expiresAt) {
+function getSessionSource() { return localStorage.getItem(SESSION_SOURCE_KEY); }
+function setSessionToken(token, expiresAt, source) {
   localStorage.setItem(SESSION_KEY, token);
   localStorage.setItem(SESSION_EXPIRES_KEY, String(expiresAt));
+  if (source) localStorage.setItem(SESSION_SOURCE_KEY, source);
 }
 function clearSessionToken() {
   localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(SESSION_EXPIRES_KEY);
+  localStorage.removeItem(SESSION_SOURCE_KEY);
 }
 
 // Drop-in fetch wrapper that surfaces non-2xx + network errors as toasts.
@@ -15046,7 +15056,9 @@ AuthScreen = (() => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `verify ${res.status}`);
-      completeSignIn(data);
+      // Browser-extension sign-in → record source so publish routes
+      // back to window.nostr.signEvent (no Amber pairing required).
+      completeSignIn(data, 'nip07');
     } catch (e) {
       setStatus(e.message || 'sign-in failed', 'err');
       btn.disabled = false;
@@ -15074,7 +15086,7 @@ AuthScreen = (() => {
     // spot and leave qrSession null so any subsequent renderQrTab would
     // re-POST and try silent again. mode: 'qr' is the traditional flow.
     if (data.mode === 'silent-ok' && data.token) {
-      completeSignIn(data);
+      completeSignIn(data, 'bunker');
       return { silent: true };
     }
     qrSession = data;
@@ -15144,7 +15156,7 @@ AuthScreen = (() => {
         const data = await r.json();
         if (data.status === 'ok') {
           qrSession = null;
-          completeSignIn(data);
+          completeSignIn(data, 'bunker');
           return;
         }
         if (data.status === 'waiting') {
@@ -15197,7 +15209,7 @@ AuthScreen = (() => {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `${res.status}`);
-        completeSignIn(data);
+        completeSignIn(data, 'bunker');
       } catch (e) {
         status.className = 'auth-status-line err';
         status.innerHTML = `<span class="pulse"></span>${escapeHtml(e.message || 'bunker failed')}`;
@@ -15209,9 +15221,14 @@ AuthScreen = (() => {
   }
 
   // ── Completion ───────────────────────────────────────────────────────
-  function completeSignIn(data) {
+  function completeSignIn(data, source) {
     if (!data?.token) { toast('Sign-in failed', 'no token', 'err'); return; }
-    setSessionToken(data.token, data.expiresAt);
+    // `source` is 'nip07' or 'bunker' — recorded so publish + future
+    // signing flows route to the matching signer. Falls back to
+    // 'bunker' for legacy call sites that don't pass it (silent paths
+    // / older cookies); the publish handler treats 'bunker' as the
+    // server-signs default.
+    setSessionToken(data.token, data.expiresAt, source || 'bunker');
     hide();
     bootDashboard(false);
     toast('Signed in', truncNpub(data.npub || ''), 'ok');
@@ -16762,6 +16779,35 @@ const ClientPanel = (() => {
   composeBtn.addEventListener('click', () => publish());
   composeCancelBtn.addEventListener('click', () => hideCompose());
 
+  // Routes a publish through whichever signer the user authenticated
+  // with. If they signed in via NIP-07 (Alby / nos2x / window.nostr),
+  // fetch the unsigned template from the server, sign in-browser, and
+  // POST the signed event back. If they signed in via bunker (Amber
+  // NIP-46), POST the body directly and the server signs via the saved
+  // pairing. Falls back to bunker for any unknown source.
+  async function signerAwarePublish(body) {
+    const source = getSessionSource();
+    if (source === 'nip07' && typeof window !== 'undefined' && window.nostr?.signEvent) {
+      const built = await api('/api/client/publish/build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!built?.template) throw new Error(built?.error || 'failed to build template');
+      const signed = await window.nostr.signEvent(built.template);
+      return api('/api/client/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event: signed }),
+      });
+    }
+    return api('/api/client/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
   async function publish() {
     const content = composeIn.value.trim();
     if (!content) { toast('Nothing to publish', 'Type something first', 'warn'); return; }
@@ -16771,11 +16817,7 @@ const ClientPanel = (() => {
     try {
       const body = { content };
       if (replyTarget) body.replyTo = replyTarget;
-      const r = await api('/api/client/publish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const r = await signerAwarePublish(body);
       if (!r.ok) {
         const acc = r.accepted ?? 0;
         toast('Publish failed', `${acc}/${r.targets || 0} relays accepted`, 'err');
@@ -17187,11 +17229,7 @@ const ClientPanel = (() => {
       const body = kind === 'react'
         ? { kind: 7, target, content: '+' }
         : { kind: 6, target };
-      const r = await api('/api/client/publish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const r = await signerAwarePublish(body);
       if (!r.ok) {
         toast(`${kind} failed`, `${r.accepted ?? 0}/${r.targets || 0} relays accepted`, 'err');
         return;

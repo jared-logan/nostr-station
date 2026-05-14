@@ -683,15 +683,45 @@ export async function handleClient(
     }
   }
 
+  // ── POST /api/client/publish/build ──────────────────────────────────────
+  //
+  // Returns the unsigned event template the publish endpoint would build
+  // for the same body. Used by the NIP-07 (browser-extension) flow:
+  // the dashboard fetches the template, hands it to window.nostr.signEvent,
+  // and POSTs the signed event back to /api/client/publish — the server
+  // never touches the user's secret. Body shape matches /publish exactly
+  // (see below). Returns { template } on success, { error } on validation
+  // failure.
+  if (path === '/api/client/publish/build' && method === 'POST') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+    const built = buildPublishTemplate(body);
+    if (!built.ok) return json(res, 400, { error: built.error });
+    return json(res, 200, { template: built.template });
+  }
+
   // ── POST /api/client/publish ─────────────────────────────────────────────
   //
-  // Body shape (one of):
-  //   { kind?: 1, content: string, replyTo?: { id, pubkey, relay? } }
-  //   { kind: 7, target: { id: hex, pubkey: hex }, content?: '+' | '-' | emoji }
-  //   { kind: 6, target: { id: hex, pubkey: hex, relay?: string } }
+  // Two body shapes:
   //
-  // Builds the event, signs it via the persisted bunker pairing, and
-  // broadcasts to the owner's read relays. The client tag is auto-stamped.
+  //   1. Template body (server signs via bunker — Amber NIP-46):
+  //        { kind?: 1, content: string, replyTo?: { id, pubkey, relay? } }
+  //        { kind: 7, target: { id, pubkey }, content?: '+' | '-' | emoji }
+  //        { kind: 6, target: { id, pubkey, relay? } }
+  //      Builds the event, signs via the persisted bunker pairing,
+  //      broadcasts to the owner's read relays. The client tag is
+  //      auto-stamped.
+  //
+  //   2. Pre-signed event (browser already signed via NIP-07):
+  //        { event: SignedEvent }
+  //      Server verifies signature + pubkey matches the station owner,
+  //      then broadcasts as-is. The browser was responsible for stamping
+  //      the client tag (publish/build does it for them).
+  //
+  // The two shapes coexist so a user signed in via Alby / nos2x doesn't
+  // need a separate Amber pairing just to publish — whichever signer
+  // they used to authenticate becomes the signer for posting.
   if (path === '/api/client/publish' && method === 'POST') {
     let body: any;
     try { body = JSON.parse(await readBody(req)); }
@@ -700,96 +730,54 @@ export async function handleClient(
     const me = ownerHex();
     if (!me) return json(res, 400, { error: 'no station owner configured — finish setup first' });
 
-    // Default kind = 1 to preserve the v0 contract for existing callers.
-    const kind = typeof body.kind === 'number' ? body.kind : 1;
-    if (![1, 6, 7].includes(kind)) {
-      return json(res, 400, { error: `unsupported kind ${kind} (allowed: 1, 6, 7)` });
-    }
+    let signedEvent: any;
 
-    const tags: string[][] = [];
-    let content = '';
-
-    if (kind === 1) {
-      content = typeof body.content === 'string' ? body.content : '';
-      if (!content.trim()) return json(res, 400, { error: 'content required' });
-      if (content.length > 32_000) return json(res, 400, { error: 'content too long (max 32000 chars)' });
-      // Reply threading per NIP-10 (marked tags). v1 only supports the
-      // immediate parent — full root/ancestor chain is the reader's job.
-      if (body.replyTo && typeof body.replyTo === 'object') {
-        const id     = typeof body.replyTo.id     === 'string' ? body.replyTo.id.toLowerCase()     : '';
-        const pubkey = typeof body.replyTo.pubkey === 'string' ? body.replyTo.pubkey.toLowerCase() : '';
-        const relay  = typeof body.replyTo.relay  === 'string' ? body.replyTo.relay                : '';
-        if (/^[0-9a-f]{64}$/.test(id)) {
-          tags.push(['e', id, relay, 'reply']);
-          if (/^[0-9a-f]{64}$/.test(pubkey)) tags.push(['p', pubkey]);
-        }
+    if (body && body.event && typeof body.event === 'object') {
+      // Mode 2 — pre-signed event from a NIP-07 signer.
+      const ev = body.event;
+      // Cheap structural sanity-check before reaching for the heavier
+      // verifyEvent — saves a syscall on bad input.
+      if (typeof ev.id !== 'string' || typeof ev.sig !== 'string' ||
+          typeof ev.pubkey !== 'string' || typeof ev.kind !== 'number' ||
+          typeof ev.created_at !== 'number' || !Array.isArray(ev.tags) ||
+          typeof ev.content !== 'string') {
+        return json(res, 400, { error: 'event missing required fields' });
       }
-    } else if (kind === 7) {
-      // NIP-25 reaction. content is "+" / "-" / an emoji. Target event id
-      // + author pubkey are required so the receiving client can resolve
-      // "who reacted to what".
-      const target = body.target;
-      if (!target || typeof target !== 'object') return json(res, 400, { error: 'target required for reaction' });
-      const id     = typeof target.id     === 'string' ? target.id.toLowerCase()     : '';
-      const pubkey = typeof target.pubkey === 'string' ? target.pubkey.toLowerCase() : '';
-      if (!/^[0-9a-f]{64}$/.test(id))     return json(res, 400, { error: 'target.id must be 64-char hex' });
-      if (!/^[0-9a-f]{64}$/.test(pubkey)) return json(res, 400, { error: 'target.pubkey must be 64-char hex' });
-      const rawContent = typeof body.content === 'string' ? body.content : REACTION_LIKE_CONTENT;
-      // Bound the reaction content: NIP-25 explicitly allows any string,
-      // but in practice it's "+", "-", or a single emoji. Cap at 32 chars
-      // so a misbehaving caller can't smuggle a kind-1's-worth of content
-      // into the reaction surface.
-      content = rawContent.slice(0, 32);
-      tags.push(['e', id]);
-      tags.push(['p', pubkey]);
-    } else if (kind === 6) {
-      // NIP-18 generic repost. The kind-6 event content SHOULD be the
-      // stringified original event so receivers can hydrate without a
-      // second round-trip; v1 keeps it empty and relies on the e + p
-      // tags + the receiving client's resolver. This is what Damus/Primal
-      // do for "Repost" while reserving "Quote" (kind-1 with q tag) for
-      // the richer flow — quote is a phase-2 feature for us.
-      const target = body.target;
-      if (!target || typeof target !== 'object') return json(res, 400, { error: 'target required for repost' });
-      const id     = typeof target.id     === 'string' ? target.id.toLowerCase()     : '';
-      const pubkey = typeof target.pubkey === 'string' ? target.pubkey.toLowerCase() : '';
-      const relay  = typeof target.relay  === 'string' ? target.relay                : '';
-      if (!/^[0-9a-f]{64}$/.test(id))     return json(res, 400, { error: 'target.id must be 64-char hex' });
-      if (!/^[0-9a-f]{64}$/.test(pubkey)) return json(res, 400, { error: 'target.pubkey must be 64-char hex' });
-      tags.push(['e', id, relay, 'mention']);
-      tags.push(['p', pubkey]);
-    }
-
-    // Stamp client identity. Bare two-element form (NIP-89 handler
-    // announcement is a phase-2 thing — for now the tag exists so other
-    // clients can credit "via nostr-station").
-    tags.push([...CLIENT_TAG]);
-
-    const template = {
-      kind,
-      created_at: Math.floor(Date.now() / 1000),
-      tags,
-      content,
-    };
-
-    const signed = await signEventWithSavedBunker(template, 60_000);
-    if (!signed.ok || !signed.signedEvent) {
-      return json(res, signed.tried ? 502 : 400, {
-        error: signed.error || 'sign failed',
-        tried: signed.tried,
-      });
+      if (ev.pubkey.toLowerCase() !== me) {
+        return json(res, 403, { error: 'event pubkey does not match station owner' });
+      }
+      // verifyEvent performs full signature + id-hash check. Reject any
+      // tampered event before broadcast — we'd rather error than send
+      // garbage to public relays.
+      const { verifyEvent } = await import('nostr-tools/pure');
+      let valid = false;
+      try { valid = verifyEvent(ev); } catch { valid = false; }
+      if (!valid) return json(res, 400, { error: 'event signature invalid' });
+      signedEvent = ev;
+    } else {
+      // Mode 1 — template body, server signs via bunker.
+      const built = buildPublishTemplate(body);
+      if (!built.ok) return json(res, 400, { error: built.error });
+      const signed = await signEventWithSavedBunker(built.template, 60_000);
+      if (!signed.ok || !signed.signedEvent) {
+        return json(res, signed.tried ? 502 : 400, {
+          error: signed.error || 'sign failed',
+          tried: signed.tried,
+        });
+      }
+      signedEvent = signed.signedEvent;
     }
 
     const relays = capRelays(readRelays());
     if (relays.length === 0) {
-      return json(res, 502, { error: 'no read relays configured — cannot broadcast', signedEvent: signed.signedEvent });
+      return json(res, 502, { error: 'no read relays configured — cannot broadcast', signedEvent });
     }
 
-    const results = await publishEventToRelays(signed.signedEvent, relays);
+    const results = await publishEventToRelays(signedEvent, relays);
     const accepted = results.filter(r => r.ok).length;
     return json(res, accepted > 0 ? 200 : 502, {
       ok:          accepted > 0,
-      signedEvent: signed.signedEvent,
+      signedEvent,
       publish:     results,
       accepted,
       targets:     relays.length,
@@ -797,4 +785,79 @@ export async function handleClient(
   }
 
   return false;
+}
+
+// ── Template builder (shared by /publish and /publish/build) ─────────────
+//
+// Validates the request body and returns the unsigned event template.
+// Lifted out of the publish handler so the NIP-07 build endpoint and the
+// bunker-signing branch share one source of truth for kind-specific
+// validation + tag construction (NIP-10 reply threading, NIP-25 reaction
+// shape, NIP-18 repost).
+type TemplateBuildResult =
+  | { ok: true;  template: { kind: number; created_at: number; tags: string[][]; content: string } }
+  | { ok: false; error: string };
+
+function buildPublishTemplate(body: any): TemplateBuildResult {
+  if (!body || typeof body !== 'object') {
+    return { ok: false, error: 'body required' };
+  }
+  const kind = typeof body.kind === 'number' ? body.kind : 1;
+  if (![1, 6, 7].includes(kind)) {
+    return { ok: false, error: `unsupported kind ${kind} (allowed: 1, 6, 7)` };
+  }
+
+  const tags: string[][] = [];
+  let content = '';
+
+  if (kind === 1) {
+    content = typeof body.content === 'string' ? body.content : '';
+    if (!content.trim()) return { ok: false, error: 'content required' };
+    if (content.length > 32_000) return { ok: false, error: 'content too long (max 32000 chars)' };
+    if (body.replyTo && typeof body.replyTo === 'object') {
+      const id     = typeof body.replyTo.id     === 'string' ? body.replyTo.id.toLowerCase()     : '';
+      const pubkey = typeof body.replyTo.pubkey === 'string' ? body.replyTo.pubkey.toLowerCase() : '';
+      const relay  = typeof body.replyTo.relay  === 'string' ? body.replyTo.relay                : '';
+      if (/^[0-9a-f]{64}$/.test(id)) {
+        tags.push(['e', id, relay, 'reply']);
+        if (/^[0-9a-f]{64}$/.test(pubkey)) tags.push(['p', pubkey]);
+      }
+    }
+  } else if (kind === 7) {
+    const target = body.target;
+    if (!target || typeof target !== 'object') return { ok: false, error: 'target required for reaction' };
+    const id     = typeof target.id     === 'string' ? target.id.toLowerCase()     : '';
+    const pubkey = typeof target.pubkey === 'string' ? target.pubkey.toLowerCase() : '';
+    if (!/^[0-9a-f]{64}$/.test(id))     return { ok: false, error: 'target.id must be 64-char hex' };
+    if (!/^[0-9a-f]{64}$/.test(pubkey)) return { ok: false, error: 'target.pubkey must be 64-char hex' };
+    const rawContent = typeof body.content === 'string' ? body.content : REACTION_LIKE_CONTENT;
+    content = rawContent.slice(0, 32);
+    tags.push(['e', id]);
+    tags.push(['p', pubkey]);
+  } else if (kind === 6) {
+    const target = body.target;
+    if (!target || typeof target !== 'object') return { ok: false, error: 'target required for repost' };
+    const id     = typeof target.id     === 'string' ? target.id.toLowerCase()     : '';
+    const pubkey = typeof target.pubkey === 'string' ? target.pubkey.toLowerCase() : '';
+    const relay  = typeof target.relay  === 'string' ? target.relay                : '';
+    if (!/^[0-9a-f]{64}$/.test(id))     return { ok: false, error: 'target.id must be 64-char hex' };
+    if (!/^[0-9a-f]{64}$/.test(pubkey)) return { ok: false, error: 'target.pubkey must be 64-char hex' };
+    tags.push(['e', id, relay, 'mention']);
+    tags.push(['p', pubkey]);
+  }
+
+  // Stamp client identity. Bare two-element form (NIP-89 handler
+  // announcement is a phase-2 thing — the tag exists so other
+  // clients can credit "via nostr-station").
+  tags.push([...CLIENT_TAG]);
+
+  return {
+    ok: true,
+    template: {
+      kind,
+      created_at: Math.floor(Date.now() / 1000),
+      tags,
+      content,
+    },
+  };
 }
