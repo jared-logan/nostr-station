@@ -43,6 +43,7 @@ import {
   readNvpnRelays, addNvpnRelay, removeNvpnRelay, setNvpnRelays,
   RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
+import { nvpnRelayHealth } from '../nvpn-relay-health.js';
 import { readBody } from './_shared.js';
 
 async function writeJson(
@@ -211,6 +212,15 @@ export async function handleNvpn(
   // server is the single source of truth — UI fetches and previews.
   if (url === '/api/nvpn/relays/recommended' && method === 'GET') {
     await writeJson(res, 200, { relays: [...RECOMMENDED_NVPN_RELAYS] });
+    return true;
+  }
+  // Per-relay health snapshot. Surfaces what the in-process health
+  // aggregator has seen from the vpn LogBuffer over its sliding window
+  // (~5min). The UI joins this against /api/nvpn/relays so URLs with no
+  // recent events render as "no data" rather than as broken.
+  if (url === '/api/nvpn/relays/health' && method === 'GET') {
+    const snapshot = nvpnRelayHealth().snapshot();
+    await writeJson(res, 200, { health: snapshot, windowMs: 5 * 60 * 1000 });
     return true;
   }
   if (url === '/api/nvpn/relays/add' && method === 'POST') {

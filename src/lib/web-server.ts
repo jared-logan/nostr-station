@@ -37,6 +37,7 @@ import { gatherStatus } from '../commands/Status.js';
 import { DEFAULT_DB_PATH } from '../relay/store.js';
 import type { Relay } from '../relay/index.js';
 import { LogBuffer, type LogLine } from './log-buffer.js';
+import { nvpnRelayHealth } from './nvpn-relay-health.js';
 import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
 import { AutoSyncManager } from './auto-sync.js';
@@ -156,6 +157,15 @@ const logBuffers = {
   watchdog: new LogBuffer(),
   vpn:      new LogBuffer(),
 } as const;
+
+// Per-relay health aggregator — listens on the vpn LogBuffer and tracks
+// publish-failure patterns (rate-limited, 5xx, WoT-reject, timeout). The
+// /api/nvpn/relays/health route reads its snapshot to surface relay-by-
+// relay status in the dashboard's Relays tab. Singleton lives in
+// nvpn-relay-health.ts so the route handler can reach it without
+// dependency injection; we just attach to the vpn buffer here so it
+// sees every line that flows through the tailer.
+nvpnRelayHealth().attach(logBuffers.vpn);
 
 // In-Node watchdog — heartbeats every 5 min through the local relay.
 // Started after maybeStartInprocRelay (it depends on the Relay handle
