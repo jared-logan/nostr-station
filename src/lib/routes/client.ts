@@ -35,6 +35,8 @@
  */
 import http from 'http';
 import { readIdentity, npubToHex, hexToNpub } from '../identity.js';
+import { getProject } from '../projects.js';
+import { getActiveChatProjectId } from './_shared.js';
 import { queryRelays, type NostrEvent } from '../nostr-query.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { publishEventToRelays } from './repo.js';
@@ -127,6 +129,26 @@ function ownerHex(): string | null {
 }
 
 function readRelays(): string[] {
+  // Active project's environment relays take precedence — when the user
+  // has a project selected (via /api/chat/context — same selection state
+  // backs the built-in Nostr client panel today), queries route through
+  // that project's *active* environment block. This is what makes
+  // local-mode development feel real: switch to a project with
+  // `active='dev'` and the built-in client suddenly sees only the local
+  // relay's data, not the user's public timeline. Falls back to
+  // `identity.readRelays` when no project is selected, when the selected
+  // project predates the environment field, or when its active block is
+  // empty (e.g. STATION_INPROC_RELAY=0 left dev.relays=[]).
+  const activePid = getActiveChatProjectId();
+  if (activePid) {
+    const proj = getProject(activePid);
+    const env  = proj?.environment;
+    if (env) {
+      const block  = env[env.active];
+      const live   = (block?.relays || []).filter(r => /^wss?:\/\//i.test(r));
+      if (live.length) return live;
+    }
+  }
   const ident = readIdentity();
   return (ident.readRelays || []).filter(r => /^wss?:\/\//i.test(r));
 }
