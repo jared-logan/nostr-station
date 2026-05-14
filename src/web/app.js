@@ -11469,9 +11469,70 @@ const VpnPanel = (() => {
         lastSeen:  typeof p.last_seen === 'string' ? p.last_seen
                  : typeof p.seen === 'string'      ? p.seen
                  : null,
+        // Extra fields for peer-state classification (#60). Captured
+        // permissively so we can fall back to the old behaviour when
+        // the upstream nvpn schema doesn't include them.
+        reachable:        typeof p.reachable === 'boolean' ? p.reachable : null,
+        lastSignalSeenAt: typeof p.last_signal_seen_at === 'string' ? p.last_signal_seen_at
+                        : typeof p.last_signal_at === 'string'      ? p.last_signal_at
+                        : null,
+        lastHandshakeAt:  typeof p.last_handshake_at === 'string' ? p.last_handshake_at
+                        : typeof p.last_handshake === 'string'    ? p.last_handshake
+                        : null,
+        error:            typeof p.error === 'string' ? p.error : null,
       });
     }
     return out;
+  }
+
+  // Peer-state classifier (#60). Differentiates "offline" into a small
+  // set of states with distinct meanings so the user can tell why a
+  // peer isn't connected. Returns one of:
+  //   online       — handshake complete, recent presence
+  //   reachable    — presence received recently, no active handshake yet
+  //   stale        — last presence > 5 min ago
+  //   unreachable  — daemon tried and failed (peers[i].reachable === false)
+  //   never_seen   — in roster but no presence ever observed
+  //   discovered   — live but not in roster (mid-publish race)
+  // Pure(-ish) — `now` is injected for tests; defaults to Date.now().
+  function classifyPeerState(p, now) {
+    const nowMs = typeof now === 'number' ? now : Date.now();
+    if (!p.roster) return 'discovered';
+    if (p.connected) return 'online';
+    const live = p.live;
+    if (!live) return 'never_seen';
+    if (live.reachable === false) return 'unreachable';
+    const lastSeenMs = live.lastSignalSeenAt
+      ? Date.parse(live.lastSignalSeenAt)
+      : (live.lastSeen ? Date.parse(live.lastSeen) : NaN);
+    if (Number.isFinite(lastSeenMs)) {
+      const age = nowMs - lastSeenMs;
+      if (age < 60_000)    return 'reachable';
+      if (age < 5 * 60_000) return 'reachable';
+      return 'stale';
+    }
+    if (live.error && /no signal yet/i.test(live.error)) return 'never_seen';
+    if (live.error) return 'reachable';
+    return 'never_seen';
+  }
+
+  function peerStateUi(state, p) {
+    switch (state) {
+      case 'online':      return { dot: 'ok',   label: '' };
+      case 'discovered':  return { dot: 'warn', label: 'discovered (not in roster)' };
+      case 'reachable':   return { dot: 'ok',   label: 'reachable, no handshake' };
+      case 'unreachable': return { dot: 'err',  label: 'unreachable' };
+      case 'stale': {
+        const lastSeenMs = p.live && (p.live.lastSignalSeenAt
+          ? Date.parse(p.live.lastSignalSeenAt)
+          : (p.live.lastSeen ? Date.parse(p.live.lastSeen) : NaN));
+        if (!Number.isFinite(lastSeenMs)) return { dot: 'warn', label: 'stale' };
+        const min = Math.round((Date.now() - lastSeenMs) / 60000);
+        return { dot: 'warn', label: `stale (${min}m)` };
+      }
+      case 'never_seen':  return { dot: 'warn', label: 'never seen' };
+      default:            return { dot: 'warn', label: 'offline' };
+    }
   }
 
   // Roster + live peers rarely match exactly (live peers may show
@@ -11529,14 +11590,19 @@ const VpnPanel = (() => {
   }
 
   function renderPeerRow(p) {
-    const dot = p.connected ? 'ok' : (p.roster ? 'warn' : 'err');
     const id  = p.id;
     const live = p.live;
+    // Classify the peer state so we can render distinct UI states
+    // (never_seen / reachable / stale / unreachable / online), each
+    // with its own dot color + label. See classifyPeerState above.
+    const state = classifyPeerState(p);
+    const ui    = peerStateUi(state, p);
+    const dot   = ui.dot;
     const sub = [
       live?.ip,
       live?.latencyMs != null ? `${live.latencyMs}ms` : null,
       live?.lastSeen,
-      !p.roster ? 'discovered (not in roster)' : (p.connected ? null : 'offline'),
+      ui.label || null,
     ].filter(Boolean).join(' · ');
     const adminBadge = p.admin ? '<span class="vpn-meta-peer-badge">admin</span>' : '';
     // Prefer the live tunnel IP for ping (works when online); fall back
