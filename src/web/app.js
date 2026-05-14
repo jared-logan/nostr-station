@@ -3455,6 +3455,16 @@ function projectCapBadges(caps) {
   return badges.join('');
 }
 
+// Per-project active-env chip — dev (green-ish) or prod (red-ish). Hidden
+// for projects that haven't opted into the environment block yet, so
+// legacy / cloned cards stay visually identical to their pre-feature
+// state until the user clicks "Isolate to local infra" in Settings.
+function projectEnvBadge(project) {
+  const active = project.environment?.active;
+  if (active !== 'dev' && active !== 'prod') return '';
+  return `<span class="env-chip env-chip-${active}" title="active environment: ${active}">${active}</span>`;
+}
+
 function projectIdentityLabel(project) {
   if (project.identity.useDefault) return 'station identity';
   const n = project.identity.npub;
@@ -4311,7 +4321,7 @@ const ProjectsPanel = (() => {
         <div class="pc-actions"></div>
       </div>
       <div class="pc-path">${p.path ? `<code>${escapeHtml(p.path)}</code>` : '<em class="muted">no local path</em>'}</div>
-      <div class="pc-badges">${projectCapBadges(p.capabilities)}<span class="pc-state" hidden></span></div>
+      <div class="pc-badges">${projectCapBadges(p.capabilities)}${projectEnvBadge(p)}<span class="pc-state" hidden></span></div>
       <div class="pc-meta">
         <div class="pc-meta-row"><span class="k">identity</span><span class="v">${escapeHtml(projectIdentityLabel(p))}</span></div>
         <div class="pc-meta-row"><span class="k">last activity</span><span class="v pc-last-activity">${lastAct}</span></div>
@@ -8741,14 +8751,9 @@ const ProjectsPanel = (() => {
         <div class="step-actions"><button class="primary save-ident">save identity</button></div>
       </div>
 
-      <div class="tab-section">
-        <h3>Read relays</h3>
-        <div class="muted">Override station read relays (optional). Empty means inherit station defaults.</div>
-        <div class="relay-list-editor"></div>
-        <div class="field-row">
-          <input type="text" class="relay-add-input" placeholder="wss://…">
-          <button class="add-relay">add</button>
-        </div>
+      <div class="tab-section" id="environment-section">
+        <h3>Environment</h3>
+        <div class="env-body"></div>
       </div>
 
       <div class="tab-section" id="pcfg-section">
@@ -8874,30 +8879,11 @@ const ProjectsPanel = (() => {
       });
     });
 
-    // Relay list editor
-    const listEl = container.querySelector('.relay-list-editor');
-    const relays = p.readRelays || [];
-    if (relays.length === 0) {
-      listEl.innerHTML = `<div class="muted">inheriting station defaults</div>`;
-    } else {
-      listEl.innerHTML = relays.map(r =>
-        `<div class="relay-row"><code>${escapeHtml(r)}</code><button class="relay-remove" data-url="${escapeHtml(r)}">remove</button></div>`
-      ).join('');
-      listEl.querySelectorAll('.relay-remove').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const next = (p.readRelays || []).filter(u => u !== btn.dataset.url);
-          await patchAndReload(p.id, { readRelays: next.length ? next : null });
-        });
-      });
-    }
-    container.querySelector('.add-relay').addEventListener('click', async () => {
-      const input = container.querySelector('.relay-add-input');
-      const v = input.value.trim();
-      if (!v) return;
-      if (!/^wss?:\/\//.test(v)) return toast('Relay URL must start with wss://', '', 'warn');
-      const next = [...(p.readRelays || []), v];
-      await patchAndReload(p.id, { readRelays: next });
-    });
+    // Environment editor — replaces the old per-project read-relays
+    // section. Routes through paintEnvironment so the same renderer can
+    // be re-used after every patch (active-env toggle, list edits) and
+    // by future Phase E flows that need to show the same widget.
+    paintEnvironment(container.querySelector('#environment-section .env-body'), p);
 
     container.querySelector('.remove-btn').addEventListener('click', async () => {
       const ok = await confirmDestructive({
@@ -8943,6 +8929,240 @@ const ProjectsPanel = (() => {
         }
       });
     }
+  }
+
+  // Renders the per-project Environment editor. Two modes:
+  //   - environment present: dev/prod tabs with relay+blossom list
+  //     editors, active-env toggle, and a Stacks divergence banner
+  //     when applicable.
+  //   - environment absent: a single "Isolate to local infra" CTA
+  //     that flips the project into dev mode against the running
+  //     local relay (and Blossom in Phase C). New-local-project
+  //     scaffolds already get the seed, so this CTA is the opt-in
+  //     path for legacy + imported + cloned projects.
+  function paintEnvironment(root, p) {
+    if (!root) return;
+    const env = p.environment;
+    if (!env) {
+      root.innerHTML = `
+        <div class="muted" style="margin-bottom:10px">
+          This project hasn't been isolated to local dev infrastructure yet.
+          Public read relays inherit from the station owner's identity.
+          Click below to flip it into dev mode against the running local
+          relay — your app will see <code>NOSTR_STATION_RELAY=ws://localhost:&lt;port&gt;</code>
+          when spawned via the dashboard.
+        </div>
+        <div class="step-actions">
+          <button class="primary isolate-btn">Isolate to local infra</button>
+        </div>
+      `;
+      root.querySelector('.isolate-btn').addEventListener('click', async () => {
+        // Server-side defaults are computed when we send an environment
+        // block with empty arrays and active='dev'; the user can then
+        // edit relays/blossoms via the editor that this paint will
+        // re-render. We seed prod.relays from p.readRelays (the
+        // legacy field, which still surfaces public defaults via the
+        // identity-derived read-through) so the user doesn't have to
+        // re-enter them. Local relay port is hardcoded to 7777 here
+        // since the client doesn't know which port the server bound;
+        // the server's scaffold seed pulls the live port for new
+        // projects, but for retrofits the user can edit it inline.
+        const seed = {
+          active: 'dev',
+          dev:  { relays: ['ws://localhost:7777'], blossoms: [] },
+          prod: {
+            relays: Array.isArray(p.readRelays) ? p.readRelays.slice() : [],
+            blossoms: [],
+          },
+        };
+        await patchAndReload(p.id, { environment: seed });
+      });
+      return;
+    }
+
+    const activeBlockKey = env.active === 'dev' ? 'dev' : 'prod';
+    const stacksHint = renderStacksDivergenceHint(p, env);
+    root.innerHTML = `
+      <div class="env-header">
+        <div class="env-active-row">
+          <span class="env-chip env-chip-${env.active}">${env.active}</span>
+          <span class="muted">active environment — spawned dev servers + the built-in client see this block</span>
+        </div>
+        <div class="step-actions" style="margin-top:6px">
+          <button class="${env.active === 'dev'  ? 'primary' : ''} env-flip-dev">use dev</button>
+          <button class="${env.active === 'prod' ? 'primary' : ''} env-flip-prod">use prod</button>
+        </div>
+      </div>
+      ${stacksHint}
+      <div class="env-tabs" role="tablist" style="margin-top:14px">
+        <button class="env-tab ${activeBlockKey === 'dev'  ? 'active' : ''}" data-which="dev"  role="tab">dev</button>
+        <button class="env-tab ${activeBlockKey === 'prod' ? 'active' : ''}" data-which="prod" role="tab">prod</button>
+      </div>
+      <div class="env-tab-body" data-which="dev"  ${activeBlockKey === 'dev'  ? '' : 'hidden'}></div>
+      <div class="env-tab-body" data-which="prod" ${activeBlockKey === 'prod' ? '' : 'hidden'}></div>
+      <div class="muted" style="margin-top:10px;font-size:11px">
+        Relays: <code>ws://</code> or <code>wss://</code>. Blossoms: <code>http://</code> (local) or
+        <code>https://</code> (public). The "Isolate" button + scaffold seed local URLs;
+        edit inline as needed.
+      </div>
+    `;
+    paintEnvBlock(root.querySelector('.env-tab-body[data-which="dev"]'),  p, 'dev',  env.dev);
+    paintEnvBlock(root.querySelector('.env-tab-body[data-which="prod"]'), p, 'prod', env.prod);
+
+    // Active-env flip buttons. We don't gate on a running dev server
+    // server-side (Phase A.6 deferred) — instead surface a soft warning
+    // when the user has any open project-bound terminal tab so they
+    // know the live PTY env is stale until they restart.
+    const flipDev  = root.querySelector('.env-flip-dev');
+    const flipProd = root.querySelector('.env-flip-prod');
+    flipDev?.addEventListener('click', () => flipActiveEnv(p, 'dev'));
+    flipProd?.addEventListener('click', () => flipActiveEnv(p, 'prod'));
+
+    // Tab switching. The two bodies stay in the DOM; we just toggle
+    // hidden so list edits in one don't lose draft input when the user
+    // peeks at the other.
+    root.querySelectorAll('.env-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const which = tab.dataset.which;
+        root.querySelectorAll('.env-tab').forEach(t =>
+          t.classList.toggle('active', t === tab));
+        root.querySelectorAll('.env-tab-body').forEach(b =>
+          b.hidden = (b.dataset.which !== which));
+      });
+    });
+  }
+
+  // Detect a divergence between the project's dev.relays and the local
+  // Stacks config's relay list (when the project is a Stacks project on
+  // macOS, where Stacks's config lives at
+  // ~/Library/Preferences/stacks/config.json). The dashboard already
+  // reads that config via GET /api/stacks/config for the AI provider
+  // section, but it doesn't surface relay info today; for v1 we only
+  // diff on the public flag (config exists vs. doesn't) and let the
+  // banner copy point users at `stacks configure` for the fix. Phase B+
+  // can extend this to a deep relay-list diff once we wire the config
+  // reader to return the relays field too.
+  function renderStacksDivergenceHint(p, env) {
+    if (!p.stacksProject) return '';
+    // Heuristic: a Stacks project whose dev block has only the local
+    // relay almost certainly has Dork pointing at a different relay
+    // list, since `stacks configure` defaults to public relays. We
+    // can't confirm without reading the Stacks config server-side, so
+    // the banner is a soft nudge rather than a hard claim.
+    const devOnlyLocal = env.dev.relays.length === 1 &&
+      /^ws:\/\/(localhost|127\.0\.0\.1)/.test(env.dev.relays[0]);
+    if (!devOnlyLocal) return '';
+    return `
+      <div class="pc-banner warn" style="margin-top:10px" hidden-not>
+        Stacks config may diverge — the Dork agent reads its own relay list from
+        <code>~/Library/Preferences/stacks/config.json</code>. If you want Dork
+        to see the same local relay, run <code>stacks configure</code> and point
+        it at <code>${escapeHtml(env.dev.relays[0])}</code>.
+      </div>
+    `;
+  }
+
+  // Paints one dev/prod block — the relay + blossom list editor pair.
+  // We render each as a list-with-remove + add-input shape that matches
+  // the legacy "Read relays" UX so muscle memory carries over.
+  function paintEnvBlock(root, p, which, block) {
+    if (!root) return;
+    root.innerHTML = `
+      <div class="env-list-section">
+        <h4 style="margin:8px 0 4px">relays</h4>
+        <div class="env-relay-list"></div>
+        <div class="field-row">
+          <input type="text" class="env-relay-add" placeholder="${which === 'dev' ? 'ws://localhost:7777' : 'wss://relay.example.com'}">
+          <button class="env-relay-add-btn">add</button>
+        </div>
+      </div>
+      <div class="env-list-section" style="margin-top:10px">
+        <h4 style="margin:8px 0 4px">blossoms</h4>
+        <div class="env-blossom-list"></div>
+        <div class="field-row">
+          <input type="text" class="env-blossom-add" placeholder="${which === 'dev' ? 'http://localhost:8081' : 'https://blossom.example.com'}">
+          <button class="env-blossom-add-btn">add</button>
+        </div>
+      </div>
+    `;
+    paintUrlList(root.querySelector('.env-relay-list'),   block.relays,   url => removeEnvUrl(p, which, 'relays', url));
+    paintUrlList(root.querySelector('.env-blossom-list'), block.blossoms, url => removeEnvUrl(p, which, 'blossoms', url));
+    root.querySelector('.env-relay-add-btn').addEventListener('click', () => {
+      const input = root.querySelector('.env-relay-add');
+      const v = (input.value || '').trim();
+      if (!v) return;
+      if (!/^wss?:\/\//.test(v)) return toast('Relay URL must start with ws:// or wss://', '', 'warn');
+      addEnvUrl(p, which, 'relays', v);
+    });
+    root.querySelector('.env-blossom-add-btn').addEventListener('click', () => {
+      const input = root.querySelector('.env-blossom-add');
+      const v = (input.value || '').trim();
+      if (!v) return;
+      if (!/^https?:\/\//.test(v)) return toast('Blossom URL must start with http:// or https://', '', 'warn');
+      addEnvUrl(p, which, 'blossoms', v);
+    });
+  }
+
+  function paintUrlList(root, urls, onRemove) {
+    if (!root) return;
+    if (!urls || urls.length === 0) {
+      root.innerHTML = `<div class="muted" style="font-size:11px">(none)</div>`;
+      return;
+    }
+    root.innerHTML = urls.map(u =>
+      `<div class="relay-row"><code>${escapeHtml(u)}</code><button class="relay-remove" data-url="${escapeHtml(u)}">remove</button></div>`,
+    ).join('');
+    root.querySelectorAll('.relay-remove').forEach(btn => {
+      btn.addEventListener('click', () => onRemove(btn.dataset.url));
+    });
+  }
+
+  // Mutators — each builds a fresh environment object and PATCHes the
+  // whole block in one go. This matches the server's validation
+  // contract (validate the full environment, no partial updates) and
+  // keeps the client logic shallow — every list edit is one round-trip.
+  async function addEnvUrl(p, which, key, url) {
+    const env = clonedEnv(p.environment);
+    if (!env) return;
+    const list = env[which][key];
+    if (!list.includes(url)) list.push(url);
+    await patchAndReload(p.id, { environment: env });
+  }
+  async function removeEnvUrl(p, which, key, url) {
+    const env = clonedEnv(p.environment);
+    if (!env) return;
+    env[which][key] = env[which][key].filter(u => u !== url);
+    await patchAndReload(p.id, { environment: env });
+  }
+  async function flipActiveEnv(p, next) {
+    if (!p.environment || p.environment.active === next) return;
+    // Soft warning when there's any open project-bound PTY for this
+    // project. Phase A.6 will add the server-side hard refusal; for
+    // now we trust the user to acknowledge that the live PTY env is
+    // stale until they restart.
+    const hasLivePty = !!window.NSTerminal?.hasProjectSession?.(p.id);
+    if (hasLivePty) {
+      const ok = await confirmDestructive({
+        title: 'Restart dev server to pick up new env',
+        description:
+          'A terminal tab is open for this project. The currently-running ' +
+          'process keeps its old env vars until you restart it — flip the ' +
+          'env, then stop and reopen the terminal.',
+        confirmLabel: 'Flip anyway',
+      });
+      if (!ok) return;
+    }
+    const env = clonedEnv(p.environment);
+    env.active = next;
+    await patchAndReload(p.id, { environment: env });
+  }
+  function clonedEnv(src) {
+    if (!src) return null;
+    return {
+      active: src.active,
+      dev:  { relays: (src.dev?.relays  || []).slice(), blossoms: (src.dev?.blossoms  || []).slice() },
+      prod: { relays: (src.prod?.relays || []).slice(), blossoms: (src.prod?.blossoms || []).slice() },
+    };
   }
 
   // Renders the per-project git-identity row in Settings: shows the

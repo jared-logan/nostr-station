@@ -5000,6 +5000,31 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .cap-chip.cap-ngit  { background: var(--accent-soft); color: var(--accent-bright); border: 1px solid var(--accent-dim); }
 .cap-chip.cap-nsite { background: rgba(30, 200, 190, 0.10); color: #47d6c8; border: 1px solid rgba(30, 200, 190, 0.3); }
 
+/* Active-environment chip — shape mirrors .cap-chip so the row stays
+   visually uniform. Dev = green-ish ("safe to break"), prod = amber
+   ("publishes to the real world, mind the gap"). */
+.env-chip {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  text-transform: lowercase;
+}
+.env-chip.env-chip-dev  { background: rgba(70, 200, 120, 0.12); color: #4cc97d; border: 1px solid rgba(70, 200, 120, 0.30); }
+.env-chip.env-chip-prod { background: rgba(240, 170, 70, 0.12); color: #e8a64a; border: 1px solid rgba(240, 170, 70, 0.30); }
+
+.env-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border, rgba(255,255,255,0.1)); }
+.env-tab {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  padding: 6px 14px; cursor: pointer; color: var(--text); font: inherit;
+  text-transform: lowercase;
+}
+.env-tab.active { border-bottom-color: var(--accent-bright, #6cf); color: var(--text-bright); }
+.env-active-row { display: flex; align-items: center; gap: 10px; }
+.env-list-section h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim, #999); }
+
 /* Per-card git-state badge — populated by ProjectsPanel's git-state
    poller. Lives alongside the capability chips on the .pc-badges row.
    `hidden` attribute is honored (display: none) so local-only cards
