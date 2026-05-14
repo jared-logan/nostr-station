@@ -70,6 +70,21 @@ const EVENT_STATS_MAX_IDS = 50;
 // "+" sentinel is the convention for an unspecified positive reaction.
 const REACTION_LIKE_CONTENT = '+';
 
+// NIP-65 outbox-discovery bootstrap set — relays that aggregate kind-10002
+// events across the network. The sync-relays endpoint queries these IN
+// ADDITION to the user's configured Client Relays so a fresh user whose
+// only Client Relays are different from where their kind-10002 actually
+// lives can still bootstrap. purplepag.es is the canonical profile +
+// relay-list indexer; the rest are wide general-purpose indexers known
+// to mirror replaceable events broadly.
+const NIP65_BOOTSTRAP_RELAYS: string[] = [
+  'wss://purplepag.es',
+  'wss://relay.nostr.band',
+  'wss://relay.damus.io',
+  'wss://relay.primal.net',
+  'wss://nos.lol',
+];
+
 // Cached "is nak installed?" check. findBin walks PATH on every call;
 // memoizing for the process lifetime is fine because the answer doesn't
 // change without a restart. `nakAvailable()` returns null when missing so
@@ -383,7 +398,14 @@ export async function handleClient(
     const me = ownerHex();
     if (!me) return json(res, 400, { error: 'no station owner configured' });
     if (nakBin() === null) return json(res, 200, { added: [], ...unavailable('nak-missing') });
-    const relays = capRelays(readRelays());
+    // Union of the user's configured relays + the NIP-65 bootstrap set.
+    // The bootstrap relays widen the search so a fresh user whose
+    // configured Client Relays don't happen to mirror their kind-10002
+    // can still discover their published relay list. Capped at 12 to
+    // bound fan-out (queryRelays opens one WebSocket per entry).
+    const configured = readRelays();
+    const merged = [...new Set([...configured, ...NIP65_BOOTSTRAP_RELAYS])];
+    const relays = merged.slice(0, 12);
     if (relays.length === 0) return json(res, 200, { added: [], ...unavailable('no-read-relays') });
     try {
       const r = await queryRelays({
@@ -401,7 +423,15 @@ export async function handleClient(
         if (!newest || ev.created_at > newest.created_at) newest = ev;
       }
       if (!newest) {
-        return json(res, 200, { added: [], empty: 'no NIP-65 relay list (kind 10002) found for your npub' });
+        // We queried both the user's configured relays AND the NIP-65
+        // bootstrap aggregators. If none of them have a kind-10002 for
+        // this npub, the user almost certainly hasn't published one.
+        // Surface the actionable hint rather than a vague "not found".
+        return json(res, 200, {
+          added: [],
+          empty: `No NIP-65 relay list (kind 10002) found for your npub on ${relays.length} relays (your configured ${configured.length} + ${NIP65_BOOTSTRAP_RELAYS.length} bootstrap aggregators). Some clients (Ditto, etc.) don't publish kind-10002 by default — try publishing one from Damus / Amethyst / nostr.guru first, then re-sync.`,
+          queriedRelays: relays,
+        });
       }
       const ident = readIdentity();
       const existing = new Set((ident.readRelays || []).map(s => s.toLowerCase()));
