@@ -249,13 +249,19 @@ export async function publishIdentityProfile(
   const port = getInprocRelayPort();
   if (!port) return { ok: false, reason: 'in-process relay not running' };
 
+  // Defaults are chosen so the kind-0 looks like a real user's profile
+  // in screenshots / demos: name + display_name only. `about`, `picture`,
+  // etc. are set ONLY when the user supplies them via input.profile —
+  // we never invent content that would look like leakage of "this is
+  // really a test user" in a UI screenshot.
   const profile = identity.profile || {};
-  const content = JSON.stringify({
+  const meta: Record<string, string> = {
     name:         identity.label,
     display_name: profile.displayName || humanize(identity.label),
-    about:        profile.about       || `Test user (${identity.role || 'no role'}) for ${project.name}.`,
-    ...(profile.picture ? { picture: profile.picture } : {}),
-  });
+  };
+  if (profile.about)   meta.about   = profile.about;
+  if (profile.picture) meta.picture = profile.picture;
+  const content = JSON.stringify(meta);
 
   let signed;
   try {
