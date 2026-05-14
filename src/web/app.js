@@ -12866,6 +12866,16 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
+      <details class="config-section cfg-collapsible" id="cfg-blossom-section">
+        <summary>
+          <h3>Blossom (local blob storage)</h3>
+          <span class="cfg-summary-meta" id="cfg-blossom-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-blossom-body">
+          <div class="muted">loading blossom status…</div>
+        </div>
+      </details>
+
       <details class="config-section cfg-collapsible" id="cfg-ai-section" open>
         <summary>
           <h3>AI</h3>
@@ -13363,6 +13373,98 @@ const ConfigPanel = (() => {
       });
     }
 
+    // ── Local Blossom (Phase C) ────────────────────────────────────────
+    // Paint into the slot reserved by #cfg-blossom-section. Async since
+    // it round-trips to /api/blossom-config — failures degrade to a
+    // muted "not running" line with an enable button.
+    paintBlossomConfigSection();
+  }
+
+  async function paintBlossomConfigSection() {
+    const body    = $('cfg-blossom-body');
+    const summary = $('cfg-blossom-summary');
+    if (!body) return;
+    let snapshot = null;
+    try { snapshot = await api('/api/blossom-config'); }
+    catch { /* surface as "unavailable" below */ }
+
+    if (!snapshot) {
+      if (summary) summary.textContent = 'unavailable';
+      body.innerHTML = `<div class="muted">Blossom config endpoint not reachable.</div>`;
+      return;
+    }
+
+    if (!snapshot.running) {
+      if (summary) summary.textContent = 'off';
+      body.innerHTML = `
+        <div class="muted" style="margin-bottom:10px">
+          Local Blossom is the blob-storage half of the dev stack — apps
+          spawned via the dashboard see <code>NOSTR_STATION_BLOSSOM=http://localhost:&lt;port&gt;</code>
+          when it's enabled. Off by default; turn on once you actually
+          need blob hosting locally (e.g. testing avatar uploads
+          without polluting public Blossom servers).
+        </div>
+        <div class="step-actions">
+          <button class="primary" id="cfg-blossom-enable">Enable Blossom</button>
+        </div>
+      `;
+      $('cfg-blossom-enable')?.addEventListener('click', async () => {
+        try {
+          await api('/api/blossom/start', { method: 'POST' });
+          paintBlossomConfigSection();
+          refreshHealth?.();
+        } catch (e) {
+          toast('Failed to start Blossom', e?.message || '', 'err');
+        }
+      });
+      return;
+    }
+
+    const stats = snapshot.stats || { blobCount: 0, totalBytes: 0, quotaBytes: 0, dataDir: '', uploadsByKind: {} };
+    const pct = stats.quotaBytes ? Math.min(100, Math.round((stats.totalBytes / stats.quotaBytes) * 100)) : 0;
+    if (summary) summary.textContent = `${stats.blobCount} blob${stats.blobCount === 1 ? '' : 's'} · ${fmtBytes(stats.totalBytes)}`;
+    body.innerHTML = `
+      <div class="config-row"><div class="k">URL</div><div class="v"><code>${escapeHtml(snapshot.url || '')}</code></div></div>
+      <div class="config-row"><div class="k">Stored</div><div class="v">
+        <b>${stats.blobCount}</b> blob${stats.blobCount === 1 ? '' : 's'} · <b>${fmtBytes(stats.totalBytes)}</b>
+        of <b>${fmtBytes(stats.quotaBytes)}</b> (${pct}%)
+      </div></div>
+      <div class="config-row"><div class="k">Uploaders</div><div class="v">
+        <span class="muted">owner ${stats.uploadsByKind.owner || 0} · whitelist ${stats.uploadsByKind.whitelist || 0} · test ${stats.uploadsByKind['test-identity'] || 0}</span>
+      </div></div>
+      <div class="config-row"><div class="k">Data dir</div><div class="v"><code>${escapeHtml(stats.dataDir || '')}</code></div></div>
+      <div class="step-actions" style="margin-top:10px">
+        <button id="cfg-blossom-stop">Stop</button>
+        <button id="cfg-blossom-restart">Restart</button>
+        <button class="danger" id="cfg-blossom-wipe">Wipe all blobs</button>
+      </div>
+    `;
+    $('cfg-blossom-stop')?.addEventListener('click', async () => {
+      try { await api('/api/blossom/stop', { method: 'POST' }); paintBlossomConfigSection(); refreshHealth?.(); }
+      catch (e) { toast('Stop failed', e?.message || '', 'err'); }
+    });
+    $('cfg-blossom-restart')?.addEventListener('click', async () => {
+      try { await api('/api/blossom/restart', { method: 'POST' }); paintBlossomConfigSection(); refreshHealth?.(); }
+      catch (e) { toast('Restart failed', e?.message || '', 'err'); }
+    });
+    $('cfg-blossom-wipe')?.addEventListener('click', async () => {
+      const ok = await confirmDestructive({
+        title: 'Wipe all local blobs?',
+        description: `Deletes ${stats.blobCount} blob(s) (${fmtBytes(stats.totalBytes)}) from the local store. Cannot be undone.`,
+        confirmLabel: 'Wipe',
+      });
+      if (!ok) return;
+      try { await api('/api/blossom/wipe', { method: 'POST' }); paintBlossomConfigSection(); }
+      catch (e) { toast('Wipe failed', e?.message || '', 'err'); }
+    });
+  }
+
+  function fmtBytes(n) {
+    if (!n || n < 0) return '0 B';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
   }
 
   // ── AI providers list ───────────────────────────────────────────────
