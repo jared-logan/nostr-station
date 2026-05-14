@@ -5000,9 +5000,21 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .cap-chip.cap-ngit  { background: var(--accent-soft); color: var(--accent-bright); border: 1px solid var(--accent-dim); }
 .cap-chip.cap-nsite { background: rgba(30, 200, 190, 0.10); color: #47d6c8; border: 1px solid rgba(30, 200, 190, 0.3); }
 
-/* Active-environment chip — shape mirrors .cap-chip so the row stays
-   visually uniform. Dev = green-ish ("safe to break"), prod = amber
-   ("publishes to the real world, mind the gap"). */
+/* ── Environment / surface chips ─────────────────────────────────────────
+   THEME-LOCKED palette. These three chips communicate which relay
+   "world" a surface is bound to:
+
+     dev    → purple (nostr-station brand)   — project's local dev relay
+     prod   → blue                            — project's public relays
+     public → green                           — Client panel; always
+                                                public, never project-
+                                                scoped, never dev
+
+   Hardcoded hex + `!important` deliberately: the meaning must NOT
+   change under Appearance themes or the Ditto theme-sync — a user who
+   recolors their accent to red shouldn't end up with a red `dev`
+   chip that looks like an error state. Color is reinforcement; the
+   text label inside each chip is the canonical signal. */
 .env-chip {
   display: inline-flex; align-items: center;
   padding: 2px 8px;
@@ -5012,12 +5024,22 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
   border-radius: 999px;
   text-transform: lowercase;
 }
-.env-chip.env-chip-dev    { background: rgba(70, 200, 120, 0.12); color: #4cc97d; border: 1px solid rgba(70, 200, 120, 0.30); }
-.env-chip.env-chip-prod   { background: rgba(240, 170, 70, 0.12); color: #e8a64a; border: 1px solid rgba(240, 170, 70, 0.30); }
-/* Public-Nostr label on the Client panel header — visually distinct
-   from dev/prod (which belong to project active-env) so users see at
-   a glance that the panel is a different scope entirely. */
-.env-chip.env-chip-public { background: rgba(120, 160, 240, 0.12); color: #8fb0ff; border: 1px solid rgba(120, 160, 240, 0.30); margin-left: 8px; vertical-align: middle; font-size: 9px; }
+.env-chip.env-chip-dev {
+  background:   rgba(123, 104, 238, 0.14) !important;  /* #7B68EE = nostr-station brand */
+  color:        #b8aaff                    !important;
+  border:       1px solid rgba(123, 104, 238, 0.40) !important;
+}
+.env-chip.env-chip-prod {
+  background:   rgba(90, 165, 245, 0.14)   !important;
+  color:        #88baf7                    !important;
+  border:       1px solid rgba(90, 165, 245, 0.40) !important;
+}
+.env-chip.env-chip-public {
+  background:   rgba(61, 220, 132, 0.14)   !important;
+  color:        #6ce6a1                    !important;
+  border:       1px solid rgba(61, 220, 132, 0.40) !important;
+  margin-left: 8px; vertical-align: middle; font-size: 9px;
+}
 
 .env-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border, rgba(255,255,255,0.1)); }
 .env-tab {

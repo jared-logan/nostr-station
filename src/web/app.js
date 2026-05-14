@@ -3455,14 +3455,21 @@ function projectCapBadges(caps) {
   return badges.join('');
 }
 
-// Per-project active-env chip — dev (green-ish) or prod (red-ish). Hidden
-// for projects that haven't opted into the environment block yet, so
-// legacy / cloned cards stay visually identical to their pre-feature
-// state until the user clicks "Isolate to local infra" in Settings.
+// Per-project active-env chip — dev (purple, brand) or prod (blue).
+// Hidden for projects that haven't opted into the environment block
+// yet, so legacy / cloned cards stay visually identical to their
+// pre-feature state until the user clicks "Isolate to local infra"
+// in Settings. Tooltip explicitly names the scope so the chip alone
+// answers "what does this affect?" on hover.
+const ENV_CHIP_TOOLTIPS = {
+  dev:    'dev — spawned dev servers, deploy, and exec see NOSTR_STATION_RELAY pointing at the local in-process relay. Safe to publish test events. Client panel is independent of this.',
+  prod:   'prod — spawned dev servers see public relays via NOSTR_STATION_RELAY. Promote publishes to real Nostr. Client panel is independent of this.',
+  public: 'Public Nostr — this panel always reads + posts via your App Relays ∪ Your Relays (Config → Client Relays). Never bound to any project\'s dev/prod active-env.',
+};
 function projectEnvBadge(project) {
   const active = project.environment?.active;
   if (active !== 'dev' && active !== 'prod') return '';
-  return `<span class="env-chip env-chip-${active}" title="active environment: ${active}">${active}</span>`;
+  return `<span class="env-chip env-chip-${active}" title="${escapeHtml(ENV_CHIP_TOOLTIPS[active])}">${active}</span>`;
 }
 
 function projectIdentityLabel(project) {
@@ -9000,7 +9007,7 @@ const ProjectsPanel = (() => {
     root.innerHTML = `
       <div class="env-header">
         <div class="env-active-row">
-          <span class="env-chip env-chip-${env.active}">${env.active}</span>
+          <span class="env-chip env-chip-${env.active}" title="${escapeHtml(ENV_CHIP_TOOLTIPS[env.active])}">${env.active}</span>
           <span class="muted">active environment for this project &mdash; spawned dev servers (<code>npm run dev</code>, deploy, exec) read this block via <code>NOSTR_STATION_RELAY</code> / <code>_BLOSSOM</code>. The Client panel is unaffected; it always queries public relays.</span>
         </div>
         <div class="step-actions" style="margin-top:6px">
