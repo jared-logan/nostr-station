@@ -189,6 +189,15 @@ export function gatherStatus(): ServiceStatus[] {
   const probePort = Number(process.env.RELAY_PORT || '7777');
   const relayUp   = cmd(`nc -z -w 1 ${probeHost} ${probePort}`, 1500) !== null;
 
+  // In-process Blossom — same shape as the relay probe. Port comes from
+  // STATION_INPROC_BLOSSOM_PORT (default 8081). Off by default: state is
+  // 'warn' when unbound (user hasn't enabled in Config → Blossom), 'ok'
+  // when bound. Never 'err' because the server is bundled in-process —
+  // there's no "not installed" state, only "not enabled yet."
+  const blossomHost = '127.0.0.1';
+  const blossomPort = Number(process.env.STATION_INPROC_BLOSSOM_PORT || '8081');
+  const blossomUp   = cmd(`nc -z -w 1 ${blossomHost} ${blossomPort}`, 1500) !== null;
+
   // nvpn probe — binary on PATH, then `nvpn status --json` to pull the
   // tunnel IP. The daemon socket can hang indefinitely when the mesh peer
   // is down, so we still cap; 4s matches the dashboard's banner probe and
@@ -260,6 +269,7 @@ export function gatherStatus(): ServiceStatus[] {
   //   warn — installed but not running/configured
   //   err  — not installed
   const relayState:    ServiceState = relayUp ? 'ok' : 'warn';
+  const blossomState:  ServiceState = blossomUp ? 'ok' : 'warn';
   const ngitState:     ServiceState = ngitBin ? 'ok' : 'err';
   const claudeState:   ServiceState = claudeBin ? 'ok' : 'err';
   const opencodeState: ServiceState = opencodeBin ? 'ok' : 'err';
@@ -269,6 +279,7 @@ export function gatherStatus(): ServiceStatus[] {
   return [
     // Services — daemons or scheduled jobs with a runtime state.
     { id: 'relay',     label: 'Relay',       value: relayUp ? `ws://${probeHost}:${probePort} ✓` : 'not running',                       ok: relayUp,      state: relayState,    kind: 'service' },
+    { id: 'blossom',   label: 'Blossom',     value: blossomUp ? `http://${blossomHost}:${blossomPort} ✓` : 'not enabled',                ok: blossomUp,    state: blossomState,  kind: 'service' },
     { id: 'vpn',       label: 'nostr-vpn',   value: vpnRow.value,                                                                        ok: vpnRow.ok,    state: vpnRow.state,  kind: 'service' },
     { id: 'watchdog',  label: 'watchdog',    value: wdRow.value,                                                                         ok: wdRow.ok,     state: wdRow.state,   kind: 'service' },
     // Binaries — CLI tools; installed or not.

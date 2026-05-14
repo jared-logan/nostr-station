@@ -1439,8 +1439,9 @@ const IdentityDrawer = (() => {
 function healthTooltip(s) {
   if (s.state === 'err') return `${s.label} not installed`;
   if (s.state === 'warn') {
-    if (s.id === 'relay') return 'Relay installed but not running — start it in the Relay panel';
-    if (s.id === 'vpn')   return 'nostr-vpn installed but not connected';
+    if (s.id === 'relay')   return 'Relay installed but not running — start it in the Relay panel';
+    if (s.id === 'blossom') return 'Blossom is bundled but not enabled — turn it on in Config → Blossom';
+    if (s.id === 'vpn')     return 'nostr-vpn installed but not connected';
     return `${s.label}: ${s.value}`;
   }
   // state === 'ok'
@@ -1874,6 +1875,15 @@ const StatusPanel = {
             <span class="muted">loading…</span>
           </div>
         </a>
+        <a class="dash-card" href="#config" data-card="blossom" title="Local Blossom — bundled in-process. Manage in Config → Blossom.">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Blossom</span>
+            <span class="dash-card-cta">Manage →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-blossom">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
         <a class="dash-card" href="#chat" data-card="ai">
           <div class="dash-card-head">
             <span class="dash-card-label">AI · Chat</span>
@@ -1890,6 +1900,7 @@ const StatusPanel = {
     this._fillIdentityCard();
     this._fillProjectsCard();
     this._fillRelayCard();
+    this._fillBlossomCard();
     this._fillAiCard();
   },
 
@@ -1997,6 +2008,33 @@ const StatusPanel = {
       `;
     } catch {
       el.innerHTML = `<span class="muted">relay unavailable</span>`;
+    }
+  },
+
+  // Blossom dashboard card — mirrors the Relay card. Three render
+  // states match the bundled-but-opt-in lifecycle:
+  //   - off       → "not enabled" + hint pointing at Config → Blossom
+  //   - running   → URL + blob count + total/quota bytes
+  //   - error     → unavailable banner (config endpoint unreachable)
+  async _fillBlossomCard() {
+    const el = $('dash-card-blossom');
+    if (!el) return;
+    try {
+      const cfg = await api('/api/blossom-config');
+      if (!cfg?.running) {
+        el.innerHTML = `
+          <div class="dash-sub warn">not enabled</div>
+          <div class="dash-sub muted">turn on in Config → Blossom</div>
+        `;
+        return;
+      }
+      const stats = cfg.stats || { blobCount: 0, totalBytes: 0, quotaBytes: 0 };
+      el.innerHTML = `
+        <div class="dash-relay-url" title="${escapeHtml(cfg.url || '')}">${escapeHtml(cfg.url || '')}</div>
+        <div class="dash-sub"><b>${stats.blobCount}</b> blob${stats.blobCount === 1 ? '' : 's'} · <b>${escapeHtml(formatBytesDashboard(stats.totalBytes))}</b>${stats.quotaBytes ? ` of ${escapeHtml(formatBytesDashboard(stats.quotaBytes))}` : ''}</div>
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">blossom config unavailable</span>`;
     }
   },
 
