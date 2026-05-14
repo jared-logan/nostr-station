@@ -1575,26 +1575,49 @@ const LOG_PATH_RECHECK_MS = 15_000;
 export function startNvpnLogTail(buffer: LogBuffer): TailerHandle {
   let stopped = false;
   let currentPath: string | null = null;
+  // When the resolved path isn't readable by the running user but `sudo -n`
+  // can reach it (typical for the systemd daemon's /root/.config/nvpn/
+  // daemon.log on Linux), switch reads to a sudo-spawned `tail`. Stat is
+  // still done via sudo when this flag is set.
+  let currentPathNeedsSudo = false;
   let offset = 0;
   let pollTimer: NodeJS.Timeout | null = null;
   let pathTimer: NodeJS.Timeout | null = null;
 
-  const resolveLogPath = async (): Promise<string | null> => {
+  // Best-effort: probe whether a path is readable directly, or via
+  // passwordless sudo. Returns 'direct' / 'sudo' / null.
+  const probeReadability = async (p: string): Promise<'direct' | 'sudo' | null> => {
+    try {
+      fs.accessSync(p, fs.constants.R_OK);
+      return 'direct';
+    } catch { /* fall through */ }
+    try {
+      await execa('sudo', ['-n', 'test', '-r', p], { timeout: 2000 });
+      return 'sudo';
+    } catch { /* sudo not available or file not readable as root */ }
+    return null;
+  };
+
+  const resolveLogPath = async (): Promise<{ path: string; needsSudo: boolean } | null> => {
     const s = await probeNvpnStatus();
-    if (!s.installed) return null;
-    const fromStatus = s.raw?.daemon?.log_file;
-    if (typeof fromStatus === 'string' && fromStatus.length > 0) return fromStatus;
-    // Common fallbacks if the daemon doesn't report a path. Read order
-    // matches what we see in practice across macOS / Linux installs.
+    const fromStatus = s.installed ? s.raw?.daemon?.log_file : null;
+    // Candidate paths in priority order. We probe each one (directly or
+    // via sudo) and return the first readable hit. The root-daemon path
+    // comes after the user-mode path because most installs run nvpn as
+    // the same user as nostr-station; the root path matters for systemd
+    // deployments where nostr-station can't directly stat /root.
     const home = os.homedir();
-    const candidates = [
-      path.join(home, '.config', 'nvpn', 'daemon.log'),
-      path.join(home, 'Library', 'Application Support', 'nvpn', 'daemon.log'),
-      '/var/log/nvpn.log',
-    ];
+    const candidates: string[] = [];
+    if (typeof fromStatus === 'string' && fromStatus.length > 0) candidates.push(fromStatus);
+    candidates.push(path.join(home, '.config', 'nvpn', 'daemon.log'));
+    candidates.push(path.join(home, 'Library', 'Application Support', 'nvpn', 'daemon.log'));
+    candidates.push('/root/.config/nvpn/daemon.log');
+    candidates.push('/var/log/nvpn.log');
+
     for (const c of candidates) {
-      try { fs.accessSync(c, fs.constants.R_OK); return c; }
-      catch { /* try next */ }
+      const r = await probeReadability(c);
+      if (r === 'direct') return { path: c, needsSudo: false };
+      if (r === 'sudo')   return { path: c, needsSudo: true  };
     }
     return null;
   };
@@ -1608,29 +1631,59 @@ export function startNvpnLogTail(buffer: LogBuffer): TailerHandle {
     }
   };
 
+  // Read the current size of the log file, transparently going through
+  // sudo if direct stat is denied. Returns null on any failure (file
+  // disappeared, sudo timed out, etc.) — caller treats that as "no
+  // change this tick."
+  const statSize = async (p: string, useSudo: boolean): Promise<number | null> => {
+    if (!useSudo) {
+      try { return fs.statSync(p).size; } catch { return null; }
+    }
+    try {
+      const r = await execa('sudo', ['-n', 'stat', '-c', '%s', p], { timeout: 2000 });
+      const n = parseInt(String(r.stdout).trim(), 10);
+      return Number.isFinite(n) ? n : null;
+    } catch { return null; }
+  };
+
+  const readRange = async (
+    p: string, useSudo: boolean, start: number, end: number,
+  ): Promise<string> => {
+    if (!useSudo) {
+      const stream = fs.createReadStream(p, { start, end: end - 1, encoding: 'utf8' });
+      let buf = '';
+      await new Promise<void>((resolve) => {
+        stream.on('data', (d: string | Buffer) => {
+          buf += typeof d === 'string' ? d : d.toString('utf8');
+        });
+        stream.on('end',   () => resolve());
+        stream.on('error', () => resolve());
+      });
+      return buf;
+    }
+    // sudo path: `dd` with byte offsets is the most portable way to slice
+    // a file without slurping the whole thing. `count=` is bytes to read.
+    try {
+      const r = await execa('sudo', [
+        '-n', 'dd', `if=${p}`, 'bs=1', `skip=${start}`, `count=${end - start}`, 'status=none',
+      ], { timeout: 5000 });
+      return String(r.stdout);
+    } catch { return ''; }
+  };
+
   const poll = async (): Promise<void> => {
     if (stopped) return;
     if (!currentPath) {
       schedulePoll();
       return;
     }
-    try {
-      const st = fs.statSync(currentPath);
+    const size = await statSize(currentPath, currentPathNeedsSudo);
+    if (size !== null) {
       // File rotated / truncated — start over from byte 0.
-      if (st.size < offset) offset = 0;
-      if (st.size > offset) {
-        const stream = fs.createReadStream(currentPath, {
-          start: offset, end: st.size - 1, encoding: 'utf8',
-        });
-        let buf = '';
-        await new Promise<void>((resolve) => {
-          stream.on('data', (d: string | Buffer) => {
-            buf += typeof d === 'string' ? d : d.toString('utf8');
-          });
-          stream.on('end',   () => resolve());
-          stream.on('error', () => resolve());
-        });
-        offset = st.size;
+      if (size < offset) offset = 0;
+      if (size > offset) {
+        const buf = await readRange(currentPath, currentPathNeedsSudo, offset, size);
+        offset = size;
         // Only emit complete lines — keep the trailing partial for the
         // next poll. (Most real log writes end in \n, so this is a
         // correctness-against-pathological-streams measure.)
@@ -1638,7 +1691,7 @@ export function startNvpnLogTail(buffer: LogBuffer): TailerHandle {
         const complete = idx >= 0 ? buf.slice(0, idx + 1) : '';
         if (complete) onLines(complete);
       }
-    } catch { /* file disappeared — try again next tick */ }
+    }
     schedulePoll();
   };
 
@@ -1649,13 +1702,15 @@ export function startNvpnLogTail(buffer: LogBuffer): TailerHandle {
 
   const refreshPath = async (): Promise<void> => {
     if (stopped) return;
-    const p = await resolveLogPath();
-    if (p && p !== currentPath) {
-      currentPath = p;
+    const r = await resolveLogPath();
+    if (r && r.path !== currentPath) {
+      currentPath = r.path;
+      currentPathNeedsSudo = r.needsSudo;
       // Seek to end so the user doesn't get a flood of historical lines
       // every time the daemon's log path changes.
-      try { offset = fs.statSync(p).size; } catch { offset = 0; }
-      buffer.info(`tailing ${p}`);
+      const sz = await statSize(r.path, r.needsSudo);
+      offset = sz ?? 0;
+      buffer.info(`tailing ${r.path}${r.needsSudo ? ' (via sudo)' : ''}`);
     }
     pathTimer = setTimeout(refreshPath, LOG_PATH_RECHECK_MS);
   };
