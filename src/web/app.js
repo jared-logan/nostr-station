@@ -11764,13 +11764,14 @@ const VpnPanel = (() => {
     }
     body.innerHTML = `
       <div class="vpn-invite-qr"></div>
+      <div class="vpn-invite-uri-label muted">Or paste this link into the nvpn app:</div>
       <div class="vpn-invite-uri">
         <code class="cmd-inline">${escapeHtml(r.invite)}</code>
         <span class="vpn-invite-copy"></span>
       </div>
       <div class="muted vpn-invite-hint">
         ${r.networkId ? `Network <code class="cmd-inline">${escapeHtml(r.networkId)}</code> · ` : ''}
-        Peers paste this into <strong>Import invite</strong> on their dashboard, or scan the QR with the nvpn mobile app.
+        Scan the QR with the nvpn mobile app, or copy the link above and paste into <strong>Import invite</strong>. If QR scanning doesn't seem to do anything, the paste path is the reliable fallback.
       </div>
     `;
     const qrSlot = body.querySelector('.vpn-invite-qr');

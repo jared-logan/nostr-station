@@ -1837,6 +1837,11 @@ details.dashboard-health .dashboard-health-sub {
   padding: 8px;
   box-shadow: 0 0 0 1px rgba(255,255,255,0.06);
 }
+.modal.vpn-invite-modal .vpn-invite-uri-label {
+  font-size: 11px;
+  margin-bottom: 4px;
+  margin-top: 4px;
+}
 .modal.vpn-invite-modal .vpn-invite-uri {
   display: flex;
   align-items: center;
