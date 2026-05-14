@@ -81,6 +81,7 @@ import { seedStationContext, USER_REGION_BEGIN, USER_REGION_END } from './editor
 import { handleProjects } from './routes/projects.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleDitto } from './routes/ditto.js';
+import { handleClient } from './routes/client.js';
 import { handleNgit } from './routes/ngit.js';
 import { handleRepo } from './routes/repo.js';
 import { handlePatches } from './routes/patches.js';
@@ -1410,6 +1411,12 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // ── Ditto theme sync (routes/ditto.ts) ─────────────────────────────
       // GET /api/ditto/theme — fetch latest kind 16767 from owner's relays.
       if (await handleDitto(req, res, fullUrl, method)) return;
+
+      // ── Nostr client (routes/client.ts) ────────────────────────────────
+      // Powers the /client (#client) panel — feed + notifications + profile
+      // lookup + kind-1 publish. Reads from identity.readRelays; signs via
+      // the persisted bunker pairing. Auto-stamps ["client","nostr-station"].
+      if (await handleClient(req, res, fullUrl, method)) return;
 
       // Setup wizard completion — called once from the Done stage. Flips
       // setupComplete=true (ending the localhost exemption on this box

@@ -8,7 +8,7 @@ import { renderMarkdown, renderCodeBlock } from './markdown.js';
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'config'];
+const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'client', 'config'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -15785,6 +15785,860 @@ const SetupWizard = (() => {
   return { show, hide };
 })();
 
+// ── Panel: client (Nostr social client) ──────────────────────────────────
+//
+// Slim built-in Nostr client: feed (kind-1 from owner's follows), notifications
+// (mentions/reactions/zaps tagging the owner), profile lookup, and compose +
+// publish. Reads from the station owner's identity.readRelays — NOT the
+// in-process relay, which has no inbound sync. Publishes through the persisted
+// bunker pairing and auto-stamps ["client","nostr-station"].
+//
+// Private DMs (NIP-17) are intentionally NOT in v1. The "DMs" tab is rendered
+// as a disabled placeholder so the IA is visible.
+
+const ClientPanel = (() => {
+  const subtitleEl  = $('client-subtitle');
+  const tabsEl      = $('client-tabs');
+  const listEl      = $('client-list');
+  const emptyEl     = $('client-empty');
+  const composeEl   = $('client-compose');
+  const composeIn   = $('client-compose-input');
+  const composeBtn  = $('client-compose-send');
+  const composeCount= $('client-compose-count');
+  const composeCancelBtn = $('client-compose-cancel');
+  const refreshBtn  = $('client-refresh');
+
+  // ── State ──────────────────────────────────────────────────────────────
+  let currentTab = 'feed';
+  // Per-tab cached payloads + load state. Re-rendering a tab without a
+  // refetch is the difference between snappy and "loading…" every nav.
+  //
+  // tabCache.profile.target = hex pubkey to view. null means "owner".
+  // Setting target then activating the Profile tab loads that user's
+  // kind-0 + their last N kind-1s.
+  const tabCache = {
+    feed:          { events: [], profiles: {}, stats: {}, loadedAt: 0, loading: false, empty: null },
+    notifications: { events: [], profiles: {}, stats: {}, loadedAt: 0, loading: false, empty: null },
+    profile:       { target: null, profile: null, events: [], profiles: {}, stats: {}, loadedAt: 0, loading: false, error: null, empty: null },
+  };
+  // Reply-target state for the compose box. null = top-level post.
+  let replyTarget = null;
+  let ownerHex = null;
+  let ownerNpub = null;
+
+  // ── Helpers ────────────────────────────────────────────────────────────
+  function timeAgo(unixSec) {
+    if (!unixSec) return '';
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - unixSec);
+    if (s < 60)    return `${s}s ago`;
+    if (s < 3600)  return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return new Date(unixSec * 1000).toLocaleDateString();
+  }
+
+  function profileDisplay(profile, fallbackHex) {
+    if (profile?.name)  return profile.name;
+    const hex = profile?.hex || fallbackHex || '';
+    const npub = profile?.npub || '';
+    return npub ? `${npub.slice(0, 12)}…${npub.slice(-4)}`
+                : `${hex.slice(0, 8)}…`;
+  }
+
+  function avatarOrInitials(profile, fallbackHex) {
+    const name = profileDisplay(profile, fallbackHex);
+    const initial = (name || '?').trim().charAt(0).toUpperCase() || '?';
+    const pic = profile?.picture ? escapeHtml(profile.picture) : '';
+    if (pic) {
+      return `<img class="client-avatar" src="${pic}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'client-avatar client-avatar-fallback',textContent:${JSON.stringify(initial)}}))">`;
+    }
+    return `<div class="client-avatar client-avatar-fallback">${escapeHtml(initial)}</div>`;
+  }
+
+  // Render kind-1 content with:
+  //   - linkified https URLs
+  //   - inline images for .jpg/.jpeg/.png/.gif/.webp links (https only —
+  //     http would mixed-content-warning the dashboard, and arbitrary
+  //     schemes are CSP-blocked)
+  //   - `nostr:npub1…` / `nostr:nprofile1…` resolved to @name when the
+  //     pubkey is in the profile map; falls back to a shortened npub link
+  //
+  // We escape the raw text first and only inject <a> / <img> tags via
+  // controlled paths, so attacker-controlled content can't smuggle markup.
+  function renderContent(text, profileMap) {
+    let safe = escapeHtml(String(text || ''));
+
+    // Inline image render — has to run before the generic linkify or the
+    // URL gets wrapped in <a> first and we'd then need to peel it back.
+    const IMG_RE = /(https:\/\/[^\s<]+?\.(?:jpe?g|png|gif|webp))(?=$|[\s<])/gi;
+    safe = safe.replace(IMG_RE, (m) => {
+      const url = m.endsWith(')') ? m.slice(0, -1) : m;
+      const trailing = m.endsWith(')') ? ')' : '';
+      // Defense in depth: validate the URL via the same safeHttpUrl shape
+      // the server uses. The host is attacker-controlled (a kind-1's
+      // content is whatever someone posted), so a same-origin loader
+      // would still leak via Referer. referrerpolicy=no-referrer drops it.
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer ugc" class="client-img-link"><img class="client-img" src="${url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.closest('.client-img-link')?.classList.add('client-img-broken')"></a>${trailing}`;
+    });
+
+    // Generic URL linkify for whatever's left.
+    safe = safe.replace(/(https?:\/\/[^\s<]+)/g, (m) => {
+      // Skip URLs already inside an href="..." (image render above).
+      // The simplest signal: if it's preceded by `href="` we'd already
+      // be inside an attribute, but RegExp can't easily peek back. The
+      // pragmatic fix: the IMG_RE replace already produced strings of
+      // the form `<a href="URL" ...><img ...src="URL"></a>` — those URLs
+      // sit inside attributes, not text. The replace runs on the post-
+      // escaped buffer, so " in attributes is preserved as ". A URL
+      // surrounded by " on both sides is inside an attribute — skip.
+      // Cheap heuristic with no false positives in our render path.
+      return m;
+    });
+    // Re-run, but only on text positions. The cheap way: walk the string
+    // and only linkify outside of `<...>` and `"..."` contexts. Hand-
+    // written rather than using a parser since the output structure is
+    // simple and known.
+    safe = linkifyTextOnly(safe);
+
+    // nostr: mention resolution. The bech32 decode is the same routine
+    // as npubToHexBrowser; if decode fails we leave the original raw
+    // text in place.
+    safe = safe.replace(/nostr:(n(?:pub|profile)1[02-9ac-hj-np-z]+)/gi, (_m, bech) => {
+      const hex = tryBech32ToHex(bech);
+      if (!hex) return _m;
+      const profile = profileMap?.[hex];
+      const display = profile?.name
+        ? `@${profile.name}`
+        : `@${bech.slice(0, 12)}…${bech.slice(-4)}`;
+      return `<a href="#" class="client-mention" data-mention-pubkey="${hex}">${escapeHtml(display)}</a>`;
+    });
+
+    return safe;
+  }
+
+  // Linkify URLs but only in text positions — skips matches inside
+  // attribute values (i.e. URLs we just injected via inline image render).
+  // Walks the string once, tracking whether we're inside a tag.
+  function linkifyTextOnly(html) {
+    const out = [];
+    let i = 0;
+    while (i < html.length) {
+      const open = html.indexOf('<', i);
+      if (open < 0) { out.push(linkifyUrls(html.slice(i))); break; }
+      out.push(linkifyUrls(html.slice(i, open)));
+      const close = html.indexOf('>', open);
+      if (close < 0) { out.push(html.slice(open)); break; }
+      out.push(html.slice(open, close + 1));
+      i = close + 1;
+    }
+    return out.join('');
+  }
+  function linkifyUrls(text) {
+    return text.replace(/(https?:\/\/[^\s<]+)/g, (m) => {
+      const url = m.endsWith(')') ? m.slice(0, -1) : m;
+      const trailing = m.endsWith(')') ? ')' : '';
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer ugc">${url}</a>${trailing}`;
+    });
+  }
+
+  function tryBech32ToHex(bech) {
+    try {
+      if (bech.startsWith('npub1')) return npubToHexBrowser(bech);
+      if (bech.startsWith('nprofile1')) {
+        // nprofile is TLV-encoded; pubkey is the first 32-byte type-0 entry.
+        const bytes = bech32ToBytes(bech);
+        let p = 0;
+        while (p < bytes.length) {
+          const t = bytes[p++];
+          const l = bytes[p++];
+          if (t === 0 && l === 32) {
+            return Array.from(bytes.slice(p, p + l))
+              .map(b => b.toString(16).padStart(2, '0'))
+              .join('');
+          }
+          p += l;
+        }
+      }
+    } catch { /* fall through to null */ }
+    return null;
+  }
+  // Internal — used by tryBech32ToHex for nprofile decoding. Returns the
+  // 5-bit-regrouped data byte array (no checksum).
+  function bech32ToBytes(bech) {
+    const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+    const dpos = bech.lastIndexOf('1');
+    const data = bech.slice(dpos + 1);
+    const five = [];
+    for (let i = 0; i < data.length - 6; i++) {
+      const v = CHARSET.indexOf(data.charAt(i));
+      if (v < 0) throw new Error('bad bech32 char');
+      five.push(v);
+    }
+    let acc = 0, bits = 0;
+    const out = [];
+    for (const v of five) {
+      acc = (acc << 5) | v;
+      bits += 5;
+      if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); }
+    }
+    return out;
+  }
+
+  function classifyNotification(ev, mePubkey) {
+    // Map kind+tags to a short label the UI can show.
+    if (ev.kind === 9735) return 'zapped you';
+    if (ev.kind === 7)    return `reacted ${ev.content && ev.content.trim().length <= 4 ? ev.content : '+'}`;
+    if (ev.kind === 6)    return 'reposted';
+    if (ev.kind === 1) {
+      const eTags = ev.tags?.filter(t => Array.isArray(t) && t[0] === 'e') || [];
+      const isReply = eTags.length > 0;
+      // Mentions = p-tagged but not a reply (no e tag pointing to one of
+      // your posts). The owner-side check (was the reply pointing at
+      // *our* event?) is more nuanced than v1 needs; "replied to you"
+      // when there's an e-tag is good enough.
+      return isReply ? 'replied' : 'mentioned you';
+    }
+    return 'engaged';
+  }
+
+  function setEmpty(msg) {
+    if (!msg) { emptyEl.hidden = true; emptyEl.textContent = ''; return; }
+    emptyEl.hidden = false;
+    emptyEl.textContent = msg;
+  }
+
+  // ── Compose box ────────────────────────────────────────────────────────
+  function showCompose(target /* null = top-level */) {
+    replyTarget = target;
+    composeEl.hidden = false;
+    composeCancelBtn.hidden = !target;
+    composeIn.placeholder = target
+      ? `Reply to ${profileDisplay(tabCache.feed.profiles[target.pubkey] || tabCache.notifications.profiles[target.pubkey], target.pubkey)}…  (⌘/Ctrl+⏎ to publish)`
+      : 'What\'s happening on Nostr? (⌘/Ctrl+⏎ to publish)';
+    composeCount.textContent = String(composeIn.value.length);
+    composeIn.focus();
+  }
+  function hideCompose() {
+    replyTarget = null;
+    composeIn.value = '';
+    composeCount.textContent = '0';
+    composeCancelBtn.hidden = true;
+    // The compose box stays visible on Feed (top-level posts) but hides
+    // on tabs where composing inline doesn't make sense.
+    composeEl.hidden = currentTab !== 'feed';
+  }
+
+  composeIn.addEventListener('input', () => {
+    composeCount.textContent = String(composeIn.value.length);
+  });
+  composeIn.addEventListener('keydown', (e) => {
+    // Cmd/Ctrl+Enter publishes — matches the chat panel's send shortcut.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      publish();
+    } else if (e.key === 'Escape' && replyTarget) {
+      hideCompose();
+    }
+  });
+  composeBtn.addEventListener('click', () => publish());
+  composeCancelBtn.addEventListener('click', () => hideCompose());
+
+  async function publish() {
+    const content = composeIn.value.trim();
+    if (!content) { toast('Nothing to publish', 'Type something first', 'warn'); return; }
+    composeBtn.disabled = true;
+    const origLabel = composeBtn.textContent;
+    composeBtn.textContent = 'publishing…';
+    try {
+      const body = { content };
+      if (replyTarget) body.replyTo = replyTarget;
+      const r = await api('/api/client/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const acc = r.accepted ?? 0;
+        toast('Publish failed', `${acc}/${r.targets || 0} relays accepted`, 'err');
+        return;
+      }
+      toast('Published', `Accepted by ${r.accepted}/${r.targets} relays`, 'ok');
+      hideCompose();
+      // Refresh feed so the new post lands at the top.
+      if (currentTab === 'feed') void loadFeed(true);
+    } catch (e) {
+      // api() already toasted; nothing more to do.
+    } finally {
+      composeBtn.disabled = false;
+      composeBtn.textContent = origLabel;
+    }
+  }
+
+  // ── Loaders ────────────────────────────────────────────────────────────
+  async function loadFeed(force = false) {
+    const cache = tabCache.feed;
+    if (cache.loading) return;
+    if (!force && cache.events.length > 0 && (Date.now() - cache.loadedAt) < 30_000) {
+      renderFeed();
+      return;
+    }
+    cache.loading = true;
+    renderLoading('Loading feed…');
+    try {
+      const r = await api('/api/client/feed?limit=50');
+      cache.events   = Array.isArray(r.events)   ? r.events   : [];
+      cache.profiles = r.profiles && typeof r.profiles === 'object' ? r.profiles : {};
+      cache.stats    = {};
+      cache.empty    = r.empty || (cache.events.length === 0 ? 'No posts yet — your follows haven\'t published recently.' : null);
+      cache.unavailable = !!r.unavailable;
+      cache.hint     = r.hint || null;
+      cache.loadedAt = Date.now();
+      renderFeed();
+      // Fire-and-forget: counters + parent-context render in async after
+      // the main list. Both tolerate failure silently.
+      void loadEventStats('feed', cache.events);
+      void loadParentContexts(cache.events);
+    } catch (e) {
+      renderError('Feed failed to load');
+    } finally {
+      cache.loading = false;
+    }
+  }
+
+  async function loadNotifications(force = false) {
+    const cache = tabCache.notifications;
+    if (cache.loading) return;
+    if (!force && cache.events.length > 0 && (Date.now() - cache.loadedAt) < 30_000) {
+      renderNotifications();
+      return;
+    }
+    cache.loading = true;
+    renderLoading('Loading notifications…');
+    try {
+      const r = await api('/api/client/notifications?limit=50');
+      cache.events   = Array.isArray(r.events)   ? r.events   : [];
+      cache.profiles = r.profiles && typeof r.profiles === 'object' ? r.profiles : {};
+      cache.stats    = {};
+      cache.empty    = r.empty || (cache.events.length === 0 ? 'No notifications yet.' : null);
+      cache.unavailable = !!r.unavailable;
+      cache.hint     = r.hint || null;
+      cache.loadedAt = Date.now();
+      renderNotifications();
+      void loadEventStats('notifications', cache.events);
+      void loadParentContexts(cache.events);
+    } catch (e) {
+      renderError('Notifications failed to load');
+    } finally {
+      cache.loading = false;
+    }
+  }
+
+  async function loadProfile(force = false) {
+    const cache = tabCache.profile;
+    if (cache.loading) return;
+    if (!force && cache.profile && (Date.now() - cache.loadedAt) < 60_000) {
+      renderProfile();
+      return;
+    }
+    cache.loading = true;
+    cache.error = null;
+    renderLoading('Loading profile…');
+    try {
+      // Resolve the owner's hex if we haven't yet — used as the default
+      // target when no specific user has been requested.
+      if (!ownerHex) {
+        const ident = await apiCached('/api/identity/config', 60_000).catch(() => null);
+        if (ident?.npub) {
+          ownerNpub = ident.npub;
+          try { ownerHex = npubToHexBrowser(ident.npub); }
+          catch { ownerHex = null; }
+        }
+      }
+      const target = cache.target || ownerHex;
+      if (!target) {
+        cache.error = 'No station owner configured. Finish setup in Config first.';
+        renderProfile();
+        return;
+      }
+      // Fetch the profile and the user's recent kind-1s in parallel.
+      // Profile is the critical-path render; feed is supplemental and
+      // failure-tolerant (a private user might have no kind-1s on the
+      // configured relays, in which case we render the card + an empty
+      // feed message).
+      const [profile, feed] = await Promise.all([
+        api(`/api/client/profile?pubkey=${target}`),
+        api(`/api/client/feed?limit=30&authors=${target}`).catch(() => ({ events: [], profiles: {} })),
+      ]);
+      cache.profile  = profile;
+      cache.events   = Array.isArray(feed.events) ? feed.events : [];
+      cache.profiles = feed.profiles && typeof feed.profiles === 'object' ? feed.profiles : { [target]: profile };
+      cache.stats    = {};
+      cache.empty    = feed.empty || (cache.events.length === 0 ? 'No posts from this user on your configured relays.' : null);
+      cache.loadedAt = Date.now();
+      renderProfile();
+      // Engagement stats + parent context for the user-feed half.
+      void loadEventStats('profile', cache.events);
+      void loadParentContexts(cache.events);
+    } catch (e) {
+      cache.error = 'Profile failed to load';
+      renderProfile();
+    } finally {
+      cache.loading = false;
+    }
+  }
+
+  // Minimal browser-side npub decoder. We avoid pulling in nostr-tools for
+  // a single bech32 decode by reusing the existing `npubToHex` helper if
+  // present, else fall back to a tiny inline bech32 → hex routine. The
+  // dashboard already needs this for several other features, so we expose
+  // a fallback path here without depending on a particular implementation
+  // being loaded first.
+  function npubToHexBrowser(npub) {
+    if (typeof window.__npubToHex === 'function') return window.__npubToHex(npub);
+    if (typeof npub !== 'string' || !npub.startsWith('npub1')) throw new Error('not an npub');
+    // Bech32 polyglot decode (BIP-173): copy of the spec's reference
+    // implementation, pared down to "decode the data part and convert
+    // 5-bit groups back to bytes". 32 bytes out for a valid npub.
+    const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+    const dpos = npub.lastIndexOf('1');
+    const data = npub.slice(dpos + 1);
+    const five = [];
+    for (let i = 0; i < data.length - 6; i++) {
+      const v = CHARSET.indexOf(data.charAt(i));
+      if (v < 0) throw new Error('bad bech32 char');
+      five.push(v);
+    }
+    // 5-bit → 8-bit regrouping.
+    let acc = 0, bits = 0;
+    const out = [];
+    for (const v of five) {
+      acc = (acc << 5) | v;
+      bits += 5;
+      if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); }
+    }
+    if (out.length !== 32) throw new Error('wrong-length npub');
+    return out.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // ── Renderers ──────────────────────────────────────────────────────────
+  function renderLoading(label) {
+    setEmpty(null);
+    listEl.innerHTML = `<div class="client-loading muted">${escapeHtml(label)}</div>`;
+  }
+  function renderError(label) {
+    setEmpty(null);
+    listEl.innerHTML = `<div class="client-loading">${escapeHtml(label)}</div>`;
+  }
+
+  function renderFeed() {
+    const { events, profiles, empty, unavailable, hint } = tabCache.feed;
+    if (events.length === 0) {
+      listEl.innerHTML = '';
+      const msg = empty ? (hint ? `${empty} · ${hint}` : empty) : 'No posts.';
+      setEmpty(msg);
+      emptyEl.classList.toggle('client-empty-unavailable', !!unavailable);
+      return;
+    }
+    setEmpty(null);
+    listEl.innerHTML = events.map(ev => renderNote(ev, profiles[ev.pubkey], profiles)).join('');
+    wireNoteActions();
+  }
+
+  function renderNotifications() {
+    const { events, profiles, empty, unavailable, hint } = tabCache.notifications;
+    if (events.length === 0) {
+      listEl.innerHTML = '';
+      const msg = empty ? (hint ? `${empty} · ${hint}` : empty) : 'No notifications.';
+      setEmpty(msg);
+      emptyEl.classList.toggle('client-empty-unavailable', !!unavailable);
+      return;
+    }
+    setEmpty(null);
+    listEl.innerHTML = events.map(ev => renderNotification(ev, profiles[ev.pubkey], profiles)).join('');
+    wireNoteActions();
+  }
+
+  function renderProfile() {
+    const cache = tabCache.profile;
+    if (cache.error) { listEl.innerHTML = ''; setEmpty(cache.error); return; }
+    if (!cache.profile) { renderLoading('Loading profile…'); return; }
+    const p = cache.profile;
+    const name = profileDisplay(p);
+    const about = p.about ? escapeHtml(p.about) : '';
+    const isOwner = !cache.target || cache.target === ownerHex;
+    const events = cache.events || [];
+    const profileMap = cache.profiles || { [p.hex]: p };
+    setEmpty(null);
+    listEl.innerHTML = `
+      <div class="client-profile-card">
+        ${avatarOrInitials(p)}
+        <div class="client-profile-meta">
+          <div class="client-profile-name">${escapeHtml(name)}</div>
+          ${p.nip05 ? `<div class="client-profile-nip05 muted">${escapeHtml(p.nip05)}</div>` : ''}
+          <div class="client-profile-npub muted">${escapeHtml(p.npub || '')}</div>
+          ${about ? `<div class="client-profile-about">${about}</div>` : ''}
+          ${!isOwner ? `<div class="client-profile-actions"><button class="client-note-action" id="client-profile-back">← back to feed</button></div>` : ''}
+        </div>
+      </div>
+      <div class="muted" style="margin:14px 0 8px;font-size:11px">
+        ${isOwner ? 'Your profile' : 'Recent posts from this user'} · served from your read relays
+      </div>
+      <div class="client-profile-feed">
+        ${events.length === 0
+          ? `<div class="client-empty">${escapeHtml(cache.empty || 'No posts.')}</div>`
+          : events.map(ev => renderNote(ev, profileMap[ev.pubkey] || p, profileMap)).join('')}
+      </div>
+    `;
+    wireNoteActions();
+    const backBtn = document.getElementById('client-profile-back');
+    if (backBtn) backBtn.addEventListener('click', () => {
+      tabCache.profile.target = null;
+      tabCache.profile.profile = null;
+      tabCache.profile.events  = [];
+      selectTab('feed');
+    });
+  }
+
+  // Find the immediate parent event id from a kind-1's tags per NIP-10.
+  // Prefer the explicit "reply" marker; fall back to the LAST e tag (deprecated
+  // positional shape: the last e is the immediate parent). Returns null
+  // when the event isn't a reply.
+  function replyParentId(ev) {
+    if (ev?.kind !== 1) return null;
+    const eTags = (ev.tags || []).filter(t => Array.isArray(t) && t[0] === 'e' && /^[0-9a-f]{64}$/i.test(String(t[1] || '')));
+    if (eTags.length === 0) return null;
+    const replyMarked = eTags.find(t => t[3] === 'reply');
+    if (replyMarked) return String(replyMarked[1]).toLowerCase();
+    const rootMarked = eTags.find(t => t[3] === 'root');
+    // If the reply marker isn't set but a root is, the only e is root —
+    // that IS the immediate parent.
+    if (rootMarked && eTags.length === 1) return String(rootMarked[1]).toLowerCase();
+    // Deprecated positional: last e tag is the immediate parent.
+    return String(eTags[eTags.length - 1][1]).toLowerCase();
+  }
+
+  function renderParentSlot(ev) {
+    const pid = replyParentId(ev);
+    if (!pid) return '';
+    // Reserved slot — `loadParentContexts` populates it asynchronously.
+    return `<div class="client-note-parent" data-parent-id="${escapeHtml(pid)}"><span class="muted">Replying to…</span></div>`;
+  }
+
+  function renderEngagementActions(ev, stats) {
+    const s = stats || { reactions: 0, reposts: 0, replies: 0, mine: null };
+    const liked = !!s.mine;
+    return `
+      <div class="client-note-actions">
+        <button class="client-note-action" data-action="reply" title="Reply">
+          <span class="cna-icon">↩</span><span class="cna-count" data-count="replies">${s.replies || ''}</span>
+        </button>
+        <button class="client-note-action" data-action="repost" title="Repost">
+          <span class="cna-icon">↻</span><span class="cna-count" data-count="reposts">${s.reposts || ''}</span>
+        </button>
+        <button class="client-note-action ${liked ? 'liked' : ''}" data-action="react" title="${liked ? 'You reacted' : 'React'}">
+          <span class="cna-icon">${liked ? '❤' : '♡'}</span><span class="cna-count" data-count="reactions">${s.reactions || ''}</span>
+        </button>
+      </div>
+    `;
+  }
+
+  function renderNote(ev, profile, profileMap) {
+    const name = profileDisplay(profile, ev.pubkey);
+    const stats = tabCache.feed.stats?.[ev.id] || tabCache.notifications.stats?.[ev.id] || null;
+    return `
+      <article class="client-note" data-event-id="${escapeHtml(ev.id)}" data-event-pubkey="${escapeHtml(ev.pubkey)}">
+        <a href="#" class="client-avatar-link" data-action="view-user" data-pubkey="${escapeHtml(ev.pubkey)}">${avatarOrInitials(profile, ev.pubkey)}</a>
+        <div class="client-note-body">
+          <div class="client-note-head">
+            <a href="#" class="client-note-name" data-action="view-user" data-pubkey="${escapeHtml(ev.pubkey)}">${escapeHtml(name)}</a>
+            <span class="muted">·</span>
+            <span class="muted" title="${new Date(ev.created_at * 1000).toLocaleString()}">${escapeHtml(timeAgo(ev.created_at))}</span>
+          </div>
+          ${renderParentSlot(ev)}
+          <div class="client-note-content">${renderContent(ev.content, profileMap)}</div>
+          ${renderEngagementActions(ev, stats)}
+        </div>
+      </article>
+    `;
+  }
+
+  function renderNotification(ev, profile, profileMap) {
+    const name  = profileDisplay(profile, ev.pubkey);
+    const label = classifyNotification(ev);
+    const showContent = ev.kind === 1 && typeof ev.content === 'string' && ev.content.length > 0;
+    const stats = ev.kind === 1 ? (tabCache.notifications.stats?.[ev.id] || null) : null;
+    return `
+      <article class="client-note client-notification" data-event-id="${escapeHtml(ev.id)}" data-event-pubkey="${escapeHtml(ev.pubkey)}">
+        <a href="#" class="client-avatar-link" data-action="view-user" data-pubkey="${escapeHtml(ev.pubkey)}">${avatarOrInitials(profile, ev.pubkey)}</a>
+        <div class="client-note-body">
+          <div class="client-note-head">
+            <a href="#" class="client-note-name" data-action="view-user" data-pubkey="${escapeHtml(ev.pubkey)}">${escapeHtml(name)}</a>
+            <span class="muted">${escapeHtml(label)}</span>
+            <span class="muted">·</span>
+            <span class="muted" title="${new Date(ev.created_at * 1000).toLocaleString()}">${escapeHtml(timeAgo(ev.created_at))}</span>
+          </div>
+          ${ev.kind === 1 ? renderParentSlot(ev) : ''}
+          ${showContent ? `<div class="client-note-content">${renderContent(ev.content, profileMap)}</div>` : ''}
+          ${ev.kind === 1 ? renderEngagementActions(ev, stats) : ''}
+        </div>
+      </article>
+    `;
+  }
+
+  // Renders the parent-event card inside a previously-emitted .client-note-parent
+  // slot. Called by loadParentContexts after async fetches resolve.
+  function renderParentCard(slotEl, event, profile) {
+    if (!event) {
+      slotEl.innerHTML = '<span class="muted">Replying to a post that\'s no longer available</span>';
+      return;
+    }
+    const name = profileDisplay(profile, event.pubkey);
+    slotEl.innerHTML = `
+      <div class="client-note-parent-card">
+        <div class="client-note-parent-head">
+          <span class="muted">Replying to</span>
+          <a href="#" class="client-note-name" data-action="view-user" data-pubkey="${escapeHtml(event.pubkey)}">${escapeHtml(name)}</a>
+        </div>
+        <div class="client-note-parent-content">${renderContent(event.content, { [event.pubkey]: profile })}</div>
+      </div>
+    `;
+  }
+
+  function wireNoteActions() {
+    listEl.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        // Use the closest button/link with data-action — `.client-note-name`
+        // elements are <a> tags; the avatar wrapper is also an <a>. Either
+        // way preventDefault to keep the page from navigating.
+        e.preventDefault();
+        const trigger = e.currentTarget;
+        const action = trigger.dataset.action;
+        const note = trigger.closest('.client-note');
+
+        if (action === 'view-user') {
+          const pubkey = trigger.dataset.pubkey;
+          if (pubkey) viewUser(pubkey);
+          return;
+        }
+        if (!note) return;
+        const id     = note.dataset.eventId;
+        const pubkey = note.dataset.eventPubkey;
+        if (!id || !pubkey) return;
+
+        if (action === 'reply') {
+          if (currentTab !== 'feed') selectTab('feed');
+          showCompose({ id, pubkey });
+        } else if (action === 'react') {
+          void publishEngagement('react', { id, pubkey }, trigger);
+        } else if (action === 'repost') {
+          void publishEngagement('repost', { id, pubkey }, trigger);
+        }
+      });
+    });
+    // Mentions inside content — same handler shape.
+    listEl.querySelectorAll('.client-mention[data-mention-pubkey]').forEach(a => {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        const pubkey = a.dataset.mentionPubkey;
+        if (pubkey) viewUser(pubkey);
+      });
+    });
+  }
+
+  // Switch to the Profile tab in "view user" mode for the given pubkey.
+  // The owner's own profile click also works through this — the loader
+  // handles "is this me?" branching at render time.
+  function viewUser(pubkey) {
+    tabCache.profile.target = pubkey;
+    tabCache.profile.profile = null;
+    tabCache.profile.events  = [];
+    tabCache.profile.loadedAt = 0;
+    tabCache.profile.error = null;
+    if (currentTab !== 'profile') selectTab('profile');
+    else loadProfile(true);
+  }
+
+  // Send a kind-7 or kind-6 engagement event. Optimistically bumps the
+  // local counter so the click feels responsive; refetches stats on
+  // success to reconcile with the actual broadcast count.
+  async function publishEngagement(kind, target, triggerEl) {
+    if (triggerEl?.dataset.busy === '1') return;
+    if (triggerEl) triggerEl.dataset.busy = '1';
+    try {
+      const body = kind === 'react'
+        ? { kind: 7, target, content: '+' }
+        : { kind: 6, target };
+      const r = await api('/api/client/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        toast(`${kind} failed`, `${r.accepted ?? 0}/${r.targets || 0} relays accepted`, 'err');
+        return;
+      }
+      // Update local cache optimistically.
+      const buckets = [tabCache.feed.stats, tabCache.notifications.stats];
+      for (const stats of buckets) {
+        if (!stats) continue;
+        const s = stats[target.id] ||= { reactions: 0, reposts: 0, replies: 0, mine: null };
+        if (kind === 'react') { s.reactions += 1; s.mine = '+'; }
+        else if (kind === 'repost') { s.reposts += 1; }
+      }
+      // Re-render just the affected article without refetching everything.
+      const article = listEl.querySelector(`[data-event-id="${CSS.escape(target.id)}"]`);
+      if (article) {
+        const actions = article.querySelector('.client-note-actions');
+        const stats = tabCache.feed.stats?.[target.id] || tabCache.notifications.stats?.[target.id];
+        if (actions && stats) {
+          const fake = { id: target.id, kind: 1 };
+          actions.outerHTML = renderEngagementActions(fake, stats);
+          // re-wire — outerHTML loses the listeners on the replaced subtree.
+          wireNoteActions();
+        }
+      }
+      toast(kind === 'react' ? 'Reacted' : 'Reposted', `Accepted by ${r.accepted}/${r.targets} relays`, 'ok');
+    } catch { /* api() already toasted */ }
+    finally { if (triggerEl) triggerEl.dataset.busy = '0'; }
+  }
+
+  // After feed / notifications render, fetch parent events for any reply
+  // and fill in the .client-note-parent slots. Bounded by the route's
+  // own timeout; failures leave the "Replying to…" placeholder in place.
+  async function loadParentContexts(events) {
+    const parentIds = new Set();
+    for (const ev of events) {
+      const pid = replyParentId(ev);
+      if (pid) parentIds.add(pid);
+    }
+    if (parentIds.size === 0) return;
+    // Cap to 12 — replies beyond that are rare in a 50-event window, and
+    // each fetch is one relay round-trip. Past the cap, the slots stay
+    // as plain "Replying to…" placeholders.
+    const ids = Array.from(parentIds).slice(0, 12);
+    await Promise.all(ids.map(async (id) => {
+      try {
+        const r = await api(`/api/client/thread?id=${id}`, undefined, { silent: true });
+        const slots = listEl.querySelectorAll(`.client-note-parent[data-parent-id="${CSS.escape(id)}"]`);
+        if (slots.length === 0) return;
+        const profile = r.event ? (r.profiles?.[r.event.pubkey] || null) : null;
+        for (const slot of slots) renderParentCard(slot, r.event, profile);
+      } catch { /* silent failure — placeholder remains */ }
+    }));
+  }
+
+  // Batch-fetch engagement stats for the currently rendered events and
+  // patch the count spans in place. Cheaper to update the existing DOM
+  // than to re-render the whole list.
+  async function loadEventStats(tabKey, events) {
+    const ids = events.filter(e => e.kind === 1).map(e => e.id);
+    if (ids.length === 0) return;
+    try {
+      const chunk = ids.slice(0, 50);
+      const r = await api(`/api/client/event-stats?ids=${chunk.join(',')}`, undefined, { silent: true });
+      if (r.unavailable) return;
+      const tab = tabCache[tabKey];
+      if (!tab) return;
+      tab.stats = r.stats || {};
+      for (const id of chunk) {
+        const s = tab.stats[id];
+        if (!s) continue;
+        const article = listEl.querySelector(`[data-event-id="${CSS.escape(id)}"]`);
+        if (!article) continue;
+        const replies   = article.querySelector('[data-count="replies"]');
+        const reposts   = article.querySelector('[data-count="reposts"]');
+        const reactions = article.querySelector('[data-count="reactions"]');
+        if (replies)   replies.textContent   = s.replies   || '';
+        if (reposts)   reposts.textContent   = s.reposts   || '';
+        if (reactions) reactions.textContent = s.reactions || '';
+        if (s.mine) {
+          const reactBtn = article.querySelector('[data-action="react"]');
+          if (reactBtn) {
+            reactBtn.classList.add('liked');
+            const icon = reactBtn.querySelector('.cna-icon');
+            if (icon) icon.textContent = '❤';
+            reactBtn.title = 'You reacted';
+          }
+        }
+      }
+    } catch { /* silent — counters just stay empty */ }
+  }
+
+  // ── Tab switching ──────────────────────────────────────────────────────
+  function selectTab(name) {
+    if (name === currentTab) return;
+    currentTab = name;
+    $$('#client-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.clientTab === name));
+    // Compose box only renders on feed; hide on others. Also clear any
+    // reply state so a switch doesn't carry a stale target across.
+    if (name === 'feed') {
+      composeEl.hidden = false;
+    } else {
+      composeEl.hidden = true;
+      replyTarget = null;
+      composeCancelBtn.hidden = true;
+    }
+    // Defer the load so the tab-class flip paints first (avoids a janky
+    // "old content visible while loading the new tab" frame).
+    requestAnimationFrame(() => {
+      if (name === 'feed')              loadFeed();
+      else if (name === 'notifications') loadNotifications();
+      else if (name === 'profile')       loadProfile();
+    });
+  }
+
+  tabsEl.addEventListener('click', (e) => {
+    const t = e.target.closest('.tab');
+    if (!t || t.disabled) return;
+    selectTab(t.dataset.clientTab);
+  });
+
+  refreshBtn.addEventListener('click', () => {
+    if (currentTab === 'feed')              return loadFeed(true);
+    if (currentTab === 'notifications')     return loadNotifications(true);
+    if (currentTab === 'profile')           return loadProfile(true);
+  });
+
+  // Quick boot probe — surfaces a top-of-panel banner when the client
+  // can't reach relays (missing nak, no read relays, no owner). The
+  // tab loaders all degrade gracefully into their own "unavailable"
+  // empty states, but the banner is the one place to fix it.
+  async function refreshHealthBanner() {
+    let banner = document.getElementById('client-health-banner');
+    try {
+      const h = await api('/api/client/health', undefined, { silent: true });
+      if (h.ok) {
+        if (banner) banner.remove();
+        return;
+      }
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'client-health-banner';
+        banner.className = 'client-health-banner';
+        composeEl.parentElement.insertBefore(banner, composeEl);
+      }
+      const msg = h.reason === 'nak-missing'
+        ? 'The client needs nak (Nostr relay CLI) installed to read your feed. Install it from Setup → Tools.'
+        : h.reason === 'no-read-relays'
+          ? 'No read relays configured. Add at least one in Config → Identity.'
+          : h.reason === 'no-owner'
+            ? 'Finish station setup before using the client.'
+            : 'Client is not fully configured.';
+      banner.textContent = msg;
+    } catch { /* silent — banner stays as-is */ }
+  }
+
+  return {
+    onEnter() {
+      // Always show compose box on feed (the default tab).
+      composeEl.hidden = currentTab !== 'feed';
+      void refreshHealthBanner();
+      if (currentTab === 'feed')              loadFeed();
+      else if (currentTab === 'notifications') loadNotifications();
+      else if (currentTab === 'profile')       loadProfile();
+    },
+  };
+})();
+
 // ── Registry + boot ──────────────────────────────────────────────────────
 
 const Panels = {
@@ -15794,6 +16648,7 @@ const Panels = {
   projects: ProjectsPanel,
   vpn:      VpnPanel,
   logs:     LogsPanel,
+  client:   ClientPanel,
   config:   ConfigPanel,
 };
 

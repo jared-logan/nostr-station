@@ -169,6 +169,10 @@
           Logs
           <span class="badge" id="logs-badge" style="display:none">0</span>
         </a>
+        <a href="#client" data-panel="client">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></span>
+          Client
+        </a>
         <a href="#config" data-panel="config">
           <span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg></span>
           Config
@@ -455,6 +459,40 @@
         <button class="tab" data-vpn-tab="diagnostics">Diagnostics</button>
       </div>
       <div class="panel-body" id="vpn-panel-body"></div>
+    </section>
+
+    <!-- CLIENT — nostr social client (feed + notifications + profile + compose).
+         v1 reads from identity.readRelays and signs via the persisted bunker
+         pairing; private DMs (NIP-17) are intentionally deferred. -->
+    <section class="panel" data-panel="client">
+      <div class="panel-head">
+        <div>
+          <div class="title">Client</div>
+          <div class="subtitle" id="client-subtitle">Nostr feed, notifications, and publishing — via your owner relays</div>
+        </div>
+        <div class="panel-head-actions">
+          <button id="client-refresh" title="Refresh the current tab">refresh</button>
+        </div>
+      </div>
+      <div class="tabs" id="client-tabs">
+        <button class="tab active" data-client-tab="feed">Feed</button>
+        <button class="tab" data-client-tab="notifications">Notifications</button>
+        <button class="tab" data-client-tab="profile">Profile</button>
+        <button class="tab" data-client-tab="dms" title="Private DMs — coming in phase 2" disabled>DMs <span class="muted" style="font-size:10px">soon</span></button>
+      </div>
+      <div class="panel-body">
+        <div class="client-compose" id="client-compose" hidden>
+          <textarea id="client-compose-input" placeholder="What's happening on Nostr? (⌘/Ctrl+⏎ to publish)"></textarea>
+          <div class="client-compose-actions">
+            <span class="client-compose-hint muted" id="client-compose-hint">stamped with <code>["client","nostr-station"]</code></span>
+            <span class="client-compose-count muted" id="client-compose-count">0</span>
+            <button class="primary" id="client-compose-send">publish</button>
+            <button id="client-compose-cancel" hidden>cancel</button>
+          </div>
+        </div>
+        <div class="client-empty" id="client-empty" hidden></div>
+        <div class="client-list" id="client-list"></div>
+      </div>
     </section>
 
     <!-- CONFIG -->
