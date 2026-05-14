@@ -1355,6 +1355,25 @@ details.dashboard-health .dashboard-health-sub {
   margin-top: 4px;
   font-size: 11px;
 }
+/* Split-brain banner (#58). Shown above the status strip when two
+   nvpn daemons are running. Single Consolidate button. */
+.vpn-split-brain-banner {
+  display: none;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border-radius: 4px;
+  background: rgba(220, 175, 75, 0.10);
+  border: 1px solid rgba(220, 175, 75, 0.45);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.vpn-split-brain-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.vpn-split-brain-detail { font-size: 11px; margin-top: 2px; }
 .vpn-strip-actions {
   display: flex;
   gap: 6px;
