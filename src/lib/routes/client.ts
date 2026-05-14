@@ -52,7 +52,19 @@ const FEED_DEFAULT_LIMIT     = 50;
 const FEED_MAX_LIMIT         = 200;
 const CONTACTS_CACHE_TTL_MS  = 60_000;
 const PROFILE_CACHE_TTL_MS   = 5 * 60_000;
-const CLIENT_TAG: string[]   = ['client', 'nostr-station'];
+// Client identity stamped on every event published through this surface.
+// 4-element NIP-89 form: ["client", <name>, <kind>:<pubkey>:<d-tag>, <relay-hint>].
+// The coordinate currently points at the kind-35128 nsite manifest for
+// nostr-station's public landing page — NIP-89-aware clients (Ditto et al.)
+// can resolve it and surface a clickable card / link to the nsite. When a
+// proper kind-31990 ("handler information") for nostr-station ships, swap
+// the kind + d-tag here; the rest of the publish path stays unchanged.
+const CLIENT_TAG: string[] = [
+  'client',
+  'nostr-station',
+  '35128:291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe:nostr-station',
+  'wss://relay.nsite.lol',
+];
 
 // Notification kinds we surface in the UI. Matches what Damus/Primal show:
 //   1     — kind-1 with a p tag (mentions + replies)
