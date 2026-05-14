@@ -11011,24 +11011,51 @@ const VpnPanel = (() => {
     for (const c of checks) {
       if (c && typeof c.relay === 'string') byUrl.set(normalizeRelayUrl(c.relay), c);
     }
+
+    // Publish-health from the in-process aggregator. Independent of
+    // netcheck — netcheck measures connect latency; the aggregator
+    // measures whether the daemon's recent publishes were accepted.
+    // Both surfaces useful, and the aggregator's `lastError.text`
+    // makes the "why is this relay broken" cause one hover away.
+    const publishHealthByUrl = new Map();
+    try {
+      const ph = await api('/api/nvpn/relays/health', undefined, { silent: true });
+      if (ph && Array.isArray(ph.health)) {
+        for (const e of ph.health) {
+          if (e && typeof e.url === 'string') publishHealthByUrl.set(normalizeRelayUrl(e.url), e);
+        }
+      }
+    } catch { /* silent */ }
+
     for (const item of list.querySelectorAll('.item')) {
       const slot = item.querySelector('.relay-health[data-slot="health"]');
       if (!slot) continue;
       const url = normalizeRelayUrl(item.dataset.url);
       const check = byUrl.get(url);
       slot.className = 'relay-health';
+      const pub = publishHealthByUrl.get(url);
+      let parts;
       if (!check) {
-        slot.innerHTML = '<span class="dot warn"></span><span>untested</span>';
-        continue;
+        parts = ['<span class="dot warn"></span><span>untested</span>'];
+      } else {
+        const latency = typeof check.latencyMs === 'number' ? check.latencyMs : null;
+        const cls = latency === null ? 'warn'
+                  : latency < 200    ? 'ok'
+                  :                    'warn';
+        const star = (preferred && url === preferred)
+          ? '<span class="preferred-star" title="nvpn-preferred relay">★</span>' : '';
+        const text = latency === null ? 'no latency' : `${latency}ms`;
+        parts = [`<span class="dot ${cls}"></span><span>${escapeHtml(text)}</span>${star}`];
       }
-      const latency = typeof check.latencyMs === 'number' ? check.latencyMs : null;
-      const cls = latency === null ? 'warn'
-                : latency < 200    ? 'ok'
-                :                    'warn';
-      const star = (preferred && url === preferred)
-        ? '<span class="preferred-star" title="nvpn-preferred relay">★</span>' : '';
-      const text = latency === null ? 'no latency' : `${latency}ms`;
-      slot.innerHTML = `<span class="dot ${cls}"></span><span>${escapeHtml(text)}</span>${star}`;
+      // Append publish-health badge when the aggregator has data. We
+      // only show errors — a healthy relay just stays quiet here, since
+      // the latency dot already conveys the positive signal.
+      if (pub && pub.errCount > 0) {
+        const kind = pub.lastError ? pub.lastError.kind : 'other';
+        const tip = pub.lastError ? pub.lastError.text : 'recent publish errors';
+        parts.push(`<span class="dot err" title="${escapeHtml(tip)}"></span><span title="${escapeHtml(tip)}">${pub.errCount} publish ${pub.errCount === 1 ? 'err' : 'errs'} (${escapeHtml(kind)})</span>`);
+      }
+      slot.innerHTML = parts.join(' ');
     }
   }
 
