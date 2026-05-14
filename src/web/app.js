@@ -9006,6 +9006,9 @@ const ProjectsPanel = (() => {
         </div>
       </div>
       ${stacksHint}
+      <div class="step-actions" style="margin-top:8px">
+        <button class="env-promote-dryrun" title="Show what would be published to prod">Promote to prod (dry-run)…</button>
+      </div>
       <div class="env-tabs" role="tablist" style="margin-top:14px">
         <button class="env-tab ${activeBlockKey === 'dev'  ? 'active' : ''}" data-which="dev"  role="tab">dev</button>
         <button class="env-tab ${activeBlockKey === 'prod' ? 'active' : ''}" data-which="prod" role="tab">prod</button>
@@ -9029,6 +9032,8 @@ const ProjectsPanel = (() => {
     const flipProd = root.querySelector('.env-flip-prod');
     flipDev?.addEventListener('click', () => flipActiveEnv(p, 'dev'));
     flipProd?.addEventListener('click', () => flipActiveEnv(p, 'prod'));
+
+    root.querySelector('.env-promote-dryrun')?.addEventListener('click', () => openPromoteDialog(p));
 
     // Tab switching. The two bodies stay in the DOM; we just toggle
     // hidden so list edits in one don't lose draft input when the user
@@ -9175,6 +9180,83 @@ const ProjectsPanel = (() => {
       dev:  { relays: (src.dev?.relays  || []).slice(), blossoms: (src.dev?.blossoms  || []).slice() },
       prod: { relays: (src.prod?.relays || []).slice(), blossoms: (src.prod?.blossoms || []).slice() },
     };
+  }
+
+  // Open the promote dialog: run a dry-run, show the plan + refused
+  // events + blob rewrites, then offer an Apply button. Apply re-runs
+  // promote with apply=true (which re-prompts Amber for each re-sign +
+  // each NIP-98 upload auth).
+  async function openPromoteDialog(p) {
+    const wait = toast('Running dry-run…', 'querying local relay', 'info');
+    let plan;
+    try {
+      plan = await api(`/api/projects/${p.id}/promote`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apply: false }),
+      });
+    } catch (e) {
+      toast('Dry-run failed', e?.message || '', 'err');
+      return;
+    } finally {
+      try { wait?.dismiss?.(); } catch {}
+    }
+
+    const summary = [
+      `${plan.promote.length} event${plan.promote.length === 1 ? '' : 's'} to publish`,
+      `${plan.refused.length} refused`,
+      `${plan.blobs.length} blob${plan.blobs.length === 1 ? '' : 's'} to re-upload`,
+    ].join(' · ');
+
+    const detailLines = [];
+    if (plan.errors.length) {
+      detailLines.push('Errors:');
+      for (const e of plan.errors) detailLines.push(`  • ${e}`);
+      detailLines.push('');
+    }
+    if (plan.refused.length) {
+      detailLines.push('Refused events:');
+      for (const r of plan.refused) {
+        detailLines.push(`  • kind ${r.kind} id ${r.id.slice(0, 8)}… (${r.reason})`);
+      }
+      detailLines.push('');
+    }
+    if (plan.promote.length) {
+      detailLines.push('Will publish:');
+      for (const c of plan.promote) {
+        const marker = c.rewrote ? ' [rewrites local blob URLs]' : '';
+        detailLines.push(`  • kind ${c.kind} id ${c.id.slice(0, 8)}…${marker}`);
+      }
+      detailLines.push('');
+    }
+    if (plan.blobs.length) {
+      detailLines.push('Blobs to re-upload to prod Blossom:');
+      for (const b of plan.blobs) detailLines.push(`  • ${b.sha256.slice(0, 12)}… ← ${b.localUrl}`);
+    }
+
+    const canApply = plan.errors.length === 0 && plan.promote.length > 0;
+    const ok = await confirmDestructive({
+      title: `Promote ${p.name} to prod`,
+      description: `${summary}\n\n${detailLines.join('\n')}`,
+      confirmLabel: canApply ? 'Apply' : 'Close',
+    });
+    if (!ok || !canApply) return;
+
+    const wait2 = toast('Promoting…', 'this prompts Amber to sign each event', 'info');
+    try {
+      const r = await api(`/api/projects/${p.id}/promote`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apply: true }),
+      });
+      const msg = `Published ${r.eventsPublished} event(s), uploaded ${r.blobsUploaded} blob(s)` +
+        (r.errors?.length ? ` (with ${r.errors.length} error${r.errors.length === 1 ? '' : 's'})` : '');
+      toast('Promote complete', msg, r.errors?.length ? 'warn' : 'ok');
+    } catch (e) {
+      toast('Promote failed', e?.message || '', 'err');
+    } finally {
+      try { wait2?.dismiss?.(); } catch {}
+    }
   }
 
   // Renders the per-project Test users section. Two states:

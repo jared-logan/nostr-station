@@ -62,6 +62,7 @@ import { handleProjectsGit }  from './projects-git.js';
 import { handleProjectsSync } from './projects-sync.js';
 import { handleProjectsExec } from './projects-exec.js';
 import { handleTestIdentities } from './test-identities.js';
+import { promote } from '../promote.js';
 import {
   readBody, setActiveChatProjectId, getAutoSyncRef,
 } from './_shared.js';
@@ -337,6 +338,19 @@ export async function handleProjects(
 
     if (tail.startsWith('test-identities')) {
       if (await handleTestIdentities(req, res, project, tail, method)) return true;
+    }
+
+    // ── Promote — local-to-prod deploy journey (Phase E) ──────────────
+    if (tail === 'promote' && method === 'POST') {
+      let parsed: any = {};
+      try { parsed = JSON.parse(await readBody(req)); } catch {}
+      const result = await promote(project, {
+        apply: !!parsed.apply,
+        since: typeof parsed.since === 'number' ? parsed.since : undefined,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+      return true;
     }
 
     // ── Sync surface (Item 2) ────────────────────────────────────────
