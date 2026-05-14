@@ -1071,6 +1071,82 @@ details.dashboard-health .dashboard-health-sub {
   }
 }
 
+/* ── chat-split: mobile bottom tabs ────────────────────────────────────
+   Shakespeare.diy-style: on phone-sized viewports the chat + iframe stop
+   sharing the screen; a Chat/Preview tab bar at the bottom of the split
+   flips between them full-screen. The existing data-preview state
+   machine (hidden/open/collapsed) is reused, so localStorage + the
+   PreviewPane sync()/setCollapsed() helpers keep working untouched:
+     • data-preview="open"      → preview visible, chat hidden
+     • data-preview="collapsed" → chat visible, preview hidden
+     • data-preview="hidden"    → no project / non-previewable; tab bar
+                                  hides too so the chat fills the panel
+   Above the breakpoint the tab strip is `display: none` and the existing
+   side-by-side / stacked layout takes over. */
+.chat-split-tabs {
+  display: none;
+}
+.chat-split-tab {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 10px 12px;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+  border-radius: 0;
+  cursor: pointer;
+}
+.chat-split-tab .cst-icon { display: inline-flex; }
+.chat-split-tab[aria-selected="true"] {
+  color: var(--accent-bright);
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+.chat-split-tab:hover { color: var(--text-bright); border-color: transparent; border-top-color: var(--border); }
+
+@media (max-width: 900px) {
+  /* Show the tab strip + collapse the split to a single visible pane
+     whenever a previewable project is active. */
+  .chat-split[data-preview="open"],
+  .chat-split[data-preview="collapsed"] {
+    display: grid;
+    grid-template-rows: 1fr auto;
+    gap: 0;
+  }
+  .chat-split[data-preview="open"] > .chat,
+  .chat-split[data-preview="open"] > .chat-preview,
+  .chat-split[data-preview="collapsed"] > .chat,
+  .chat-split[data-preview="collapsed"] > .chat-preview {
+    min-height: 0;
+    min-width: 0;
+    grid-row: 1;
+    grid-column: 1;
+  }
+  /* Hide whichever pane isn't selected. The floating ←/→ pull-tab also
+     disappears — the tab bar replaces it on mobile. */
+  .chat-split[data-preview="open"]      > .chat,
+  .chat-split[data-preview="collapsed"] > .chat-preview { display: none; }
+  .chat-split[data-preview="open"]      > .chat-preview { display: flex; }
+  .chat-split[data-preview="collapsed"] > .chat         { display: flex; }
+  .chat-split[data-preview="open"]      .chat-preview-show,
+  .chat-split[data-preview="collapsed"] .chat-preview-show { display: none; }
+
+  /* Tab strip lives in row 2. Only render it when a preview pane is
+     actually available — hidden state keeps chat full-bleed. */
+  .chat-split[data-preview="open"]      .chat-split-tabs,
+  .chat-split[data-preview="collapsed"] .chat-split-tabs {
+    display: flex;
+    grid-row: 2;
+    grid-column: 1;
+    background: var(--bg-elev);
+  }
+}
+
 /* ── relay: events + controls ─────────────────────────────────────────── */
 
 .relay-stats {

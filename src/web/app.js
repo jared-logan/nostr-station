@@ -2512,6 +2512,18 @@ const ChatPanel = (() => {
       collapseBtn.addEventListener('click', () => setCollapsed(true));
       showBtn.addEventListener('click',     () => setCollapsed(false));
 
+      // Mobile bottom tab strip — flips between chat and preview by
+      // delegating to the same setCollapsed() so localStorage + the
+      // data-preview state stay consistent with the desktop pull-tab.
+      const tabBar = document.getElementById('chat-split-tabs');
+      if (tabBar) {
+        tabBar.addEventListener('click', (e) => {
+          const btn = e.target.closest('[data-cs-tab]');
+          if (!btn) return;
+          setCollapsed(btn.dataset.csTab === 'chat');
+        });
+      }
+
       startBtn.addEventListener('click', () => {
         const p = activeProject;
         if (!p) return;
@@ -2537,7 +2549,20 @@ const ChatPanel = (() => {
       if (state === 'hidden') return;
       split.dataset.preview = collapsed ? 'collapsed' : 'open';
       showBtn.hidden = !collapsed;
+      syncTabState(collapsed);
       try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch {}
+    }
+
+    function syncTabState(collapsed) {
+      // Mirror the data-preview state onto the mobile tab strip so the
+      // active tab styling tracks PreviewPane.setCollapsed() — including
+      // when sync() flips state on project change.
+      const tabBar = document.getElementById('chat-split-tabs');
+      if (!tabBar) return;
+      for (const t of tabBar.querySelectorAll('[data-cs-tab]')) {
+        const active = (t.dataset.csTab === 'chat') === !!collapsed;
+        t.setAttribute('aria-selected', active ? 'true' : 'false');
+      }
     }
 
     function isCollapsedPref() {
@@ -2563,6 +2588,7 @@ const ChatPanel = (() => {
       const collapsed = isCollapsedPref();
       split.dataset.preview = collapsed ? 'collapsed' : 'open';
       showBtn.hidden = !collapsed;
+      syncTabState(collapsed);
       // Don't auto-load the iframe — the dev server probably isn't running
       // yet, and a failed iframe load doesn't auto-recover. Empty state +
       // explicit "Start dev server" button is clearer than a blank frame.
