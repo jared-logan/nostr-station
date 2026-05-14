@@ -1374,6 +1374,26 @@ details.dashboard-health .dashboard-health-sub {
   gap: 12px;
 }
 .vpn-split-brain-detail { font-size: 11px; margin-top: 2px; }
+/* Reachability test modal (#59). Each command row is a flex strip with
+   the cmd-inline code and a small copy button next to it. */
+.reach-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+.reach-row .cmd-inline.reach-cmd {
+  flex: 1;
+  word-break: break-all;
+  font-size: 11px;
+}
+.reach-steps {
+  margin-top: 14px;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.reach-steps li { margin-bottom: 4px; }
 .vpn-strip-actions {
   display: flex;
   gap: 6px;

@@ -11475,6 +11475,7 @@ const VpnPanel = (() => {
           <button id="vpn-diag-stats">Show stats</button>
           <button id="vpn-diag-reload">Reload config</button>
           <button id="vpn-diag-repair">Repair network</button>
+          <button id="vpn-diag-reachability" class="primary">Test reachability</button>
         </div>
         <div id="vpn-diag-out" class="vpn-meta-diag-out muted">click an action to run it</div>
       </div>`;
@@ -11554,7 +11555,65 @@ const VpnPanel = (() => {
       } catch { /* api() already toasted */ }
       repairBtn.disabled = false;
     });
+    const reachBtn = bodyEl.querySelector('#vpn-diag-reachability');
+    if (reachBtn) reachBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      reachBtn.disabled = true;
+      try {
+        const recipe = await api('/api/nvpn/reachability-recipe', undefined, { silent: true });
+        openReachabilityModal(recipe);
+      } catch { toast('reachability test', 'could not fetch endpoint info', 'err'); }
+      reachBtn.disabled = false;
+    });
   };
+
+  // Reachability test modal (issue #59, v0). No hosted probe service yet
+  // — the modal walks the user through running `nc -u` from an external
+  // network and `tcpdump` on the host, with both commands pre-filled
+  // and copy-button next to each. When the daemon's discovered endpoint
+  // is missing (STUN didn't land), we say so instead of showing broken
+  // commands.
+  function openReachabilityModal(recipe) {
+    const body = document.createElement('div');
+    if (!recipe || !recipe.endpoint) {
+      body.innerHTML = `
+        <p>No public endpoint discovered yet.</p>
+        <p class="muted">nvpn typically learns its public endpoint via STUN within the first 30 seconds of running. If the endpoint never appears, STUN probably can't reach a public server from your network. Check that the daemon is running and that outbound UDP isn't blocked.</p>
+      `;
+      openModal({ title: 'Test reachability', subtitle: 'No endpoint to test yet', body });
+      return;
+    }
+    const probe = recipe.probeCommand;
+    const verify = recipe.hostVerifyCommand;
+    const steps = (recipe.instructions || []).map((s, i) => `<li>${escapeHtml(s)}</li>`).join('');
+    body.innerHTML = `
+      <p>Discovered public endpoint:</p>
+      <div class="reach-row">
+        <code class="cmd-inline">${escapeHtml(recipe.endpoint)}</code>
+        <span class="reach-copy" data-copy="${escapeHtml(recipe.endpoint)}"></span>
+      </div>
+      <p style="margin-top:14px">Verify packets arrive at the host (run on this machine, leave running):</p>
+      <div class="reach-row">
+        <code class="cmd-inline reach-cmd">${escapeHtml(verify)}</code>
+        <span class="reach-copy" data-copy="${escapeHtml(verify)}"></span>
+      </div>
+      <p style="margin-top:14px">Probe from outside (run on a phone on cell data, a cloud shell, etc.):</p>
+      <div class="reach-row">
+        <code class="cmd-inline reach-cmd">${escapeHtml(probe)}</code>
+        <span class="reach-copy" data-copy="${escapeHtml(probe)}"></span>
+      </div>
+      <ol class="reach-steps">${steps}</ol>
+    `;
+    openModal({
+      title: 'Test reachability',
+      subtitle: 'Confirm peers can actually dial your endpoint',
+      body,
+    });
+    body.querySelectorAll('.reach-copy').forEach((slot) => {
+      const text = slot.getAttribute('data-copy') || '';
+      slot.appendChild(copyBtn(text));
+    });
+  }
 
   // ── Shared helpers used across sub-tab renderers ────────────────────
   //

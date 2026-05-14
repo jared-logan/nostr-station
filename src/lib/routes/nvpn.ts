@@ -170,6 +170,43 @@ export async function handleNvpn(
     return true;
   }
 
+  // Reachability test (v0). Returns the data the UI needs to walk the
+  // user through a manual external probe: published endpoint, suggested
+  // commands, host-side verification recipe. Server-side hairpin probe
+  // intentionally deferred — it confirms only that the daemon is locally
+  // reachable, not that the public path works.
+  if (url === '/api/nvpn/reachability-recipe' && method === 'GET') {
+    const status = await probeNvpnStatus();
+    const raw = status.raw as Record<string, any> | null;
+    const endpoint =
+      (raw && typeof raw.public_endpoint === 'string' && raw.public_endpoint) ||
+      (raw && typeof raw.external_endpoint === 'string' && raw.external_endpoint) ||
+      (raw && raw.nat && typeof raw.nat.public_endpoint === 'string' && raw.nat.public_endpoint) ||
+      (raw && typeof raw.endpoint === 'string' && raw.endpoint) ||
+      null;
+    const listenPort =
+      (raw && typeof raw.listen_port === 'number' && raw.listen_port) ||
+      (raw && typeof raw.port === 'number' && raw.port) ||
+      null;
+    await writeJson(res, 200, {
+      endpoint,
+      listenPort,
+      probeCommand: endpoint
+        ? `nc -u ${endpoint.split(':')[0]} ${endpoint.split(':')[1] || listenPort || 51820}`
+        : null,
+      hostVerifyCommand: listenPort
+        ? `sudo tcpdump -i any -n udp port ${listenPort}`
+        : `sudo tcpdump -i any -n udp port 51820`,
+      instructions: [
+        'On the nostr-station host, run the host-verify command in a terminal.',
+        'From any network outside your LAN (your phone on cell data, a cloud shell, a friend\'s machine), run the probe command. Type a few characters, press Enter, repeat.',
+        'Watch the host-verify output: if the probe packets land (you see lines mentioning your source IP), the data plane is reachable end-to-end.',
+        'If no packets land, the chain is broken at one of: home router (UDP port-forward), container runtime (host → container forward), or host firewall. See docs/nvpn-deployment.md for fixes.',
+      ],
+    });
+    return true;
+  }
+
   // ── Service lifecycle (Feature 2) ─────────────────────────────────
   // Status is unprivileged — supports the meta strip's pill display.
   // Enable / disable / uninstall need sudo for system-supervisor paths
