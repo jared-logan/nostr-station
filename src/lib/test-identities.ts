@@ -29,11 +29,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import WebSocket from 'ws';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { nip19 } from 'nostr-tools';
 import type { Project } from './projects.js';
 import { CONFIG_DIRNAME, ensureConfigDir } from './project-config.js';
-import { getWhitelistRef } from './routes/_shared.js';
+import { getWhitelistRef, getInprocRelayPort } from './routes/_shared.js';
+import { signEventWithLocalKey } from './local-signer.js';
 
 const FILE_NAME = 'test-identities.json';
 const STRICT_MODE = 0o600;
@@ -227,6 +229,79 @@ export function getNsec(project: Project, id: string): string | null {
   if (!existing.ok) return null;
   const rec = existing.data.identities.find(i => i.id === id);
   return rec ? rec.nsec : null;
+}
+
+// Best-effort: publish a kind-0 profile metadata event for a freshly-
+// created identity so apps (and the built-in client) render it with a
+// name + avatar instead of a bare npub. The event carries the
+// mandatory test-identity tag (via signEventWithLocalKey's opts), so
+// it can never leak to a public relay through the promote path.
+//
+// Fire-and-forget from the route handler — fails silently if the
+// in-process relay isn't running, on a connect timeout, or on relay
+// rejection. The identity itself is already persisted; the kind-0 is
+// a UX polish on top.
+export async function publishIdentityProfile(
+  project: Project,
+  identity: TestIdentity,
+  nsec: string,
+): Promise<{ ok: true; eventId: string } | { ok: false; reason: string }> {
+  const port = getInprocRelayPort();
+  if (!port) return { ok: false, reason: 'in-process relay not running' };
+
+  const profile = identity.profile || {};
+  const content = JSON.stringify({
+    name:         identity.label,
+    display_name: profile.displayName || humanize(identity.label),
+    about:        profile.about       || `Test user (${identity.role || 'no role'}) for ${project.name}.`,
+    ...(profile.picture ? { picture: profile.picture } : {}),
+  });
+
+  let signed;
+  try {
+    signed = signEventWithLocalKey(nsec, { kind: 0, content, tags: [] }, {
+      testIdentityTag: { projectId: project.id },
+    });
+  } catch (e: any) {
+    return { ok: false, reason: `sign failed: ${e?.message || e}` };
+  }
+
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const settled = { done: false };
+    const settle = (r: { ok: true; eventId: string } | { ok: false; reason: string }) => {
+      if (settled.done) return;
+      settled.done = true;
+      try { ws.close(); } catch {}
+      resolve(r);
+    };
+    const timer = setTimeout(() => settle({ ok: false, reason: 'publish timeout' }), 4000);
+    ws.once('open', () => {
+      try { ws.send(JSON.stringify(['EVENT', signed])); }
+      catch (e: any) { clearTimeout(timer); settle({ ok: false, reason: e?.message || 'send failed' }); }
+    });
+    ws.on('message', (data) => {
+      let msg: any;
+      try { msg = JSON.parse(data.toString()); } catch { return; }
+      if (Array.isArray(msg) && msg[0] === 'OK' && msg[1] === signed.id) {
+        clearTimeout(timer);
+        if (msg[2] === true) settle({ ok: true, eventId: signed.id });
+        else settle({ ok: false, reason: msg[3] || 'relay rejected' });
+      }
+    });
+    ws.once('error', (e) => { clearTimeout(timer); settle({ ok: false, reason: (e as Error).message }); });
+  });
+}
+
+// "teacher-alice" → "Teacher Alice". Best-effort capitalization for
+// the default display_name; users who want something different supply
+// it via input.profile.displayName at add time.
+function humanize(label: string): string {
+  return label
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
 }
 
 // Returns every (id → pubkey) pair across the provided projects. Used

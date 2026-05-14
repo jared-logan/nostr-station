@@ -16,6 +16,7 @@ import http from 'http';
 import type { Project } from '../projects.js';
 import {
   listIdentities, addIdentity, removeIdentity, regenerateAll, getNsec,
+  publishIdentityProfile,
 } from '../test-identities.js';
 import { signEventWithLocalKey, type EventTemplate } from '../local-signer.js';
 import { seedProject } from '../project-seed.js';
@@ -60,6 +61,15 @@ export async function handleTestIdentities(
       res.end(JSON.stringify({ error: r.error }));
       return true;
     }
+    // Fire-and-forget kind-0 publish so apps see the new identity with
+    // a name + avatar rather than a bare npub. Failures here don't fail
+    // the create — the identity is already on disk and whitelisted, the
+    // kind-0 is UX polish on top. Logged to stderr for diagnosis.
+    void publishIdentityProfile(project, r.result.identity, r.result.nsec)
+      .then(out => {
+        if (!out.ok) process.stderr.write(`[test-identity] kind-0 publish skipped: ${out.reason}\n`);
+      })
+      .catch(e => process.stderr.write(`[test-identity] kind-0 publish error: ${e?.message || e}\n`));
     res.writeHead(201, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       identity: r.result.identity,

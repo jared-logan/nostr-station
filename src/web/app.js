@@ -9225,7 +9225,13 @@ const ProjectsPanel = (() => {
       detailLines.push('Will publish:');
       for (const c of plan.promote) {
         const marker = c.rewrote ? ' [rewrites local blob URLs]' : '';
-        detailLines.push(`  • kind ${c.kind} id ${c.id.slice(0, 8)}…${marker}`);
+        // kindClass surfaces NIP-01 semantics: "replaceable" /
+        // "addressable" promote idempotently; "regular" creates a new
+        // public note with a fresh timestamp. "deletion" is the kind-5
+        // edge case with a clear advisory.
+        const cls = c.kindClass ? ` (${c.kindClass})` : '';
+        detailLines.push(`  • kind ${c.kind}${cls} id ${c.id.slice(0, 8)}…${marker}`);
+        if (c.kindNote) detailLines.push(`      ↪ ${c.kindNote}`);
       }
       detailLines.push('');
     }

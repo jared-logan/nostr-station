@@ -27,8 +27,7 @@ import { signEventWithSavedBunker } from './auth-bunker.js';
 import { isTestIdentityEvent } from './local-signer.js';
 import type { Project } from './projects.js';
 import { readIdentity, npubToHex } from './identity.js';
-
-const SUPPORTED_KINDS = new Set([1, 30023]);
+import { classifyKind } from './nostr-kinds.js';
 
 export interface PromoteOptions {
   apply?: boolean;
@@ -50,6 +49,12 @@ export interface PromotePlan {
 export interface PromoteCandidate {
   id:           string;
   kind:         number;
+  // NIP-01 class for the kind — promotable but the UI shows it so the
+  // user understands "this is replaceable, won't create a duplicate".
+  kindClass:    'regular' | 'replaceable' | 'addressable' | 'deletion';
+  // Per-kind advisory (e.g. "this is a deletion request — confirm
+  // e-tags reference public events"). Surfaced in dry-run output.
+  kindNote?:    string;
   authorNpub:   string;
   created_at:   number;
   contentBefore: string;
@@ -61,7 +66,7 @@ export interface PromoteCandidate {
 export interface RefusedEvent {
   id:     string;
   kind:   number;
-  reason: 'test-identity' | 'not-owner' | 'unsupported-kind' | 'unknown-url';
+  reason: 'test-identity' | 'not-owner' | 'ephemeral' | 'invalid-kind' | 'unknown-url';
   detail?: string;
 }
 
@@ -129,8 +134,13 @@ export async function promote(project: Project, opts: PromoteOptions = {}): Prom
       result.refused.push({ id: ev.id, kind: ev.kind, reason: 'not-owner' });
       continue;
     }
-    if (!SUPPORTED_KINDS.has(ev.kind)) {
-      result.refused.push({ id: ev.id, kind: ev.kind, reason: 'unsupported-kind' });
+    const kindInfo = classifyKind(ev.kind);
+    if (!kindInfo.promotable) {
+      result.refused.push({
+        id: ev.id, kind: ev.kind,
+        reason: kindInfo.class === 'ephemeral' ? 'ephemeral' : 'invalid-kind',
+        detail: kindInfo.note,
+      });
       continue;
     }
 
@@ -163,6 +173,8 @@ export async function promote(project: Project, opts: PromoteOptions = {}): Prom
     const contentAfter  = '';  // filled in post-upload
     result.promote.push({
       id: ev.id, kind: ev.kind,
+      kindClass: kindInfo.class as PromoteCandidate['kindClass'],
+      kindNote:  kindInfo.note,
       authorNpub: ident.npub,
       created_at: ev.created_at,
       contentBefore, contentAfter,
@@ -209,8 +221,14 @@ export async function promote(project: Project, opts: PromoteOptions = {}): Prom
     }
     cand.contentAfter = nextContent;
 
-    const isReplaceable = cand.kind >= 30000 && cand.kind < 40000;
-    const created_at = isReplaceable ? original.created_at : Math.floor(Date.now() / 1000);
+    // Preserve `created_at` for replaceable + addressable kinds so re-
+    // promote of the same logical event collapses on the destination
+    // relay (per NIP-01 replaceable semantics). Regular + deletion
+    // events get a fresh timestamp so dedupe-on-content-hash clients
+    // treat the prod copy as distinct from the local original.
+    const created_at = classifyKind(cand.kind).preserveTs
+      ? original.created_at
+      : Math.floor(Date.now() / 1000);
 
     const signed = await signEventWithSavedBunker({
       kind:       original.kind,
