@@ -39,6 +39,28 @@ export interface ProjectNsite {
   lastDeploy: string | null;
 }
 
+// Per-environment endpoints. relays are ws://localhost:7777 (local) or
+// wss://… (public); blossoms are http://localhost:8081 (local) or https://…
+// (public). Both arrays may be empty — a project that doesn't use blob
+// storage yet keeps blossoms=[] and any blossom-aware code falls back
+// gracefully.
+export interface ProjectEnvironmentBlock {
+  relays:   string[];
+  blossoms: string[];
+}
+
+// Per-project dev/prod separation introduced for the local-to-production
+// testing-infrastructure feature. `active` picks which block the env
+// injection (`NOSTR_STATION_RELAY`, `_BLOSSOM`, etc. in spawned PTYs and
+// streamExec calls) sees, and which the built-in Nostr client reads.
+// Legacy projects without this field continue to read through `readRelays`
+// — `normalize()` populates `environment.prod` from `readRelays` on load.
+export interface ProjectEnvironment {
+  active: 'dev' | 'prod';
+  dev:    ProjectEnvironmentBlock;
+  prod:   ProjectEnvironmentBlock;
+}
+
 export interface Project {
   id:           string;
   name:         string;
@@ -47,7 +69,14 @@ export interface Project {
   identity:     ProjectIdentity;
   remotes:      ProjectRemotes;
   nsite:        ProjectNsite;
+  // Legacy public-relays field. Kept on the in-memory Project for one
+  // release cycle so old dashboard clients and any external scripts that
+  // read /api/projects keep working; writes via PATCH are mirrored to
+  // `environment.prod.relays` and reads are derived from it whenever the
+  // environment block is present. Will be removed entirely after the
+  // promote (Phase E) flow ships.
   readRelays:   string[] | null;
+  environment?: ProjectEnvironment;
   // Per-project auto-sync (pull-only on a 5-minute interval). Stored on
   // the Project record so it survives dashboard restarts; the in-memory
   // AutoSyncManager (src/lib/auto-sync.ts) reads this on boot to arm
@@ -161,6 +190,46 @@ function projectsPath(): string {
 
 // ── Read / write ────────────────────────────────────────────────────────────
 
+// Loose http(s) URL validator for the `blossoms` arrays. Mirrors
+// `isValidRelayUrl` in identity.ts (which only accepts ws/wss) but for
+// HTTP — Blossom servers speak http(s), with http:// reserved for the
+// loopback dev case. Trailing-whitespace rejection matches the relay
+// validator so a copy-pasted URL with a stray newline gets caught before
+// it lands in the persisted JSON.
+function isValidBlossomUrl(s: string): boolean {
+  return typeof s === 'string' && /^https?:\/\/[^\s]+$/.test(s);
+}
+
+function normalizeEnvBlock(raw: any): ProjectEnvironmentBlock {
+  return {
+    relays: Array.isArray(raw?.relays)
+      ? raw.relays.filter((x: any) => typeof x === 'string' && x)
+      : [],
+    blossoms: Array.isArray(raw?.blossoms)
+      ? raw.blossoms.filter((x: any) => typeof x === 'string' && x)
+      : [],
+  };
+}
+
+// Migration: legacy projects (pre-environment) keep their public relay
+// list under `readRelays`. The first time they're loaded we DO NOT
+// auto-populate the environment block — opt-in only, per the plan.
+// Cloned / imported projects (where `environment` is missing) keep
+// `environment === undefined`; the "Isolate to local infra" dashboard
+// button is the user-driven path that flips them into dev/prod mode.
+// Only `readRelays` continues to flow through for backward-compat reads.
+function normalizeEnvironment(raw: any): ProjectEnvironment | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const active = raw.active === 'dev' ? 'dev'
+              : raw.active === 'prod' ? 'prod'
+              : 'prod';
+  return {
+    active,
+    dev:  normalizeEnvBlock(raw.dev),
+    prod: normalizeEnvBlock(raw.prod),
+  };
+}
+
 function normalize(raw: any): Project | null {
   if (!raw || typeof raw !== 'object') return null;
   if (typeof raw.id !== 'string' || !raw.id) return null;
@@ -168,6 +237,17 @@ function normalize(raw: any): Project | null {
   const ident = raw.identity || {};
   const remotes = raw.remotes || {};
   const nsite = raw.nsite || {};
+  const environment = normalizeEnvironment(raw.environment);
+  // When an environment block exists, derive readRelays from
+  // environment.prod.relays so old clients that GET /api/projects see
+  // the same list regardless of which field was written. When it
+  // doesn't, fall back to the legacy persisted readRelays.
+  const legacyReadRelays = Array.isArray(raw.readRelays)
+    ? raw.readRelays.filter((x: any) => typeof x === 'string')
+    : null;
+  const readRelays = environment
+    ? (environment.prod.relays.length ? environment.prod.relays.slice() : null)
+    : legacyReadRelays;
   const p: Project = {
     id:   raw.id,
     name: typeof raw.name === 'string' ? raw.name : '',
@@ -190,9 +270,8 @@ function normalize(raw: any): Project | null {
       url:        typeof nsite.url        === 'string' && nsite.url        ? nsite.url        : null,
       lastDeploy: typeof nsite.lastDeploy === 'string' && nsite.lastDeploy ? nsite.lastDeploy : null,
     },
-    readRelays: Array.isArray(raw.readRelays)
-      ? raw.readRelays.filter((x: any) => typeof x === 'string')
-      : null,
+    readRelays,
+    ...(environment ? { environment } : {}),
     // autoSync is optional — coerce truthy non-bool to true (defensive
     // against legacy entries written before strict coercion landed in
     // updateProject) and leave undefined as undefined so the field
@@ -297,6 +376,31 @@ function validateInput(input: Partial<Project>, existing?: Project): { ok: true 
     }
   }
 
+  if (input.environment) {
+    if (input.environment.active !== 'dev' && input.environment.active !== 'prod') {
+      return { ok: false, error: 'environment.active must be "dev" or "prod"' };
+    }
+    for (const which of ['dev', 'prod'] as const) {
+      const block = input.environment[which];
+      if (!block || typeof block !== 'object') {
+        return { ok: false, error: `environment.${which} must be an object` };
+      }
+      if (!Array.isArray(block.relays) || !Array.isArray(block.blossoms)) {
+        return { ok: false, error: `environment.${which}.relays and .blossoms must be arrays` };
+      }
+      for (const r of block.relays) {
+        if (!isValidRelayUrl(r)) {
+          return { ok: false, error: `invalid relay URL in environment.${which}: ${r}` };
+        }
+      }
+      for (const b of block.blossoms) {
+        if (!isValidBlossomUrl(b)) {
+          return { ok: false, error: `invalid blossom URL in environment.${which}: ${b}` };
+        }
+      }
+    }
+  }
+
   const name = input.name ?? existing?.name;
   if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
     return { ok: false, error: 'project name is required' };
@@ -325,6 +429,11 @@ export interface CreateInput {
   remotes:      ProjectRemotes;
   nsite?:       ProjectNsite;
   readRelays?:  string[] | null;
+  // Optional environment seed. New local-project scaffolds populate this
+  // with the running in-process relay URL in dev and public defaults in
+  // prod; imported / cloned projects leave it undefined and opt in later
+  // via the dashboard's "Isolate to local infra" action.
+  environment?: ProjectEnvironment;
 }
 
 export function createProject(input: CreateInput): { ok: true; project: Project } | { ok: false; error: string } {
@@ -379,7 +488,22 @@ export function createProject(input: CreateInput): { ok: true; project: Project 
       url:        input.nsite?.url        ?? null,
       lastDeploy: input.nsite?.lastDeploy ?? null,
     },
-    readRelays: input.readRelays && input.readRelays.length ? input.readRelays.slice() : null,
+    readRelays: input.environment
+      ? (input.environment.prod.relays.length ? input.environment.prod.relays.slice() : null)
+      : (input.readRelays && input.readRelays.length ? input.readRelays.slice() : null),
+    ...(input.environment ? {
+      environment: {
+        active: input.environment.active,
+        dev:    {
+          relays:   (input.environment.dev.relays   || []).slice(),
+          blossoms: (input.environment.dev.blossoms || []).slice(),
+        },
+        prod:   {
+          relays:   (input.environment.prod.relays   || []).slice(),
+          blossoms: (input.environment.prod.blossoms || []).slice(),
+        },
+      },
+    } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -389,7 +513,12 @@ export function createProject(input: CreateInput): { ok: true; project: Project 
   return { ok: true, project };
 }
 
-export type UpdateInput = Partial<Omit<Project, 'id' | 'createdAt' | 'updatedAt'>>;
+// Update shape mostly mirrors Project, but `environment: null` is a valid
+// patch (means "remove the environment block / revert to legacy mode")
+// even though Project's own type leaves the field as `?: ProjectEnvironment`.
+export type UpdateInput =
+  & Partial<Omit<Project, 'id' | 'createdAt' | 'updatedAt' | 'environment'>>
+  & { environment?: ProjectEnvironment | null };
 
 export function updateProject(id: string, patch: UpdateInput): { ok: true; project: Project } | { ok: false; error: string } {
   const projects = readProjects();
@@ -407,6 +536,26 @@ export function updateProject(id: string, patch: UpdateInput): { ok: true; proje
     catch (e) { return { ok: false, error: (e as Error).message }; }
   }
 
+  // Deprecation: `readRelays` writes are dropped. Old clients that PATCH
+  // it get a 200 but the field is not persisted — the canonical source
+  // of truth for public relays is now `environment.prod.relays`. The
+  // read-through in normalize() keeps GET responses populated so any
+  // consumer reading the field still works.
+  const nextEnvironment: ProjectEnvironment | undefined =
+    patch.environment !== undefined
+      ? (patch.environment ? {
+          active: patch.environment.active,
+          dev:    {
+            relays:   (patch.environment.dev?.relays   || []).slice(),
+            blossoms: (patch.environment.dev?.blossoms || []).slice(),
+          },
+          prod:   {
+            relays:   (patch.environment.prod?.relays   || []).slice(),
+            blossoms: (patch.environment.prod?.blossoms || []).slice(),
+          },
+        } : undefined)
+      : current.environment;
+
   const merged: Project = {
     ...current,
     name:         patch.name         !== undefined ? patch.name : current.name,
@@ -415,12 +564,26 @@ export function updateProject(id: string, patch: UpdateInput): { ok: true; proje
     identity:     patch.identity     !== undefined ? { ...patch.identity } : current.identity,
     remotes:      patch.remotes      !== undefined ? { ...patch.remotes } : current.remotes,
     nsite:        patch.nsite        !== undefined ? { ...patch.nsite } : current.nsite,
-    readRelays:   patch.readRelays   !== undefined
-      ? (patch.readRelays && patch.readRelays.length ? patch.readRelays.slice() : null)
-      : current.readRelays,
+    // readRelays is no longer writable through PATCH. The in-memory
+    // field stays populated via the read-through in normalize() when
+    // an environment block is present, OR carries over from `current`
+    // for projects that never adopted the environment block.
+    readRelays:   current.readRelays,
     autoSync:     patch.autoSync     !== undefined ? !!patch.autoSync : current.autoSync,
     updatedAt:    new Date().toISOString(),
   };
+  if (nextEnvironment) {
+    merged.environment = nextEnvironment;
+    // Keep readRelays in lockstep with environment.prod.relays so any
+    // legacy reader of the field sees the same list as the new one.
+    merged.readRelays = nextEnvironment.prod.relays.length
+      ? nextEnvironment.prod.relays.slice()
+      : null;
+  } else if (patch.environment === null) {
+    // Explicit unset — caller asked to remove the environment block
+    // (e.g. when reverting a project back to "no isolation").
+    delete (merged as any).environment;
+  }
 
   // Normalize identity: useDefault=true clears npub/bunker.
   if (merged.identity.useDefault) {

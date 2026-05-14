@@ -571,3 +571,242 @@ test('updateProject: a non-path patch does not retroactively reject a row', () =
   const updated = updateProject(created.project.id, { name: 'renamed' });
   assert.equal(updated.ok, true);
 });
+
+// ── Per-project environment (dev/prod relays + blossoms) ──────────────────
+//
+// The environment block is the foundation for project-scoped local infra
+// (Phase A of the local-to-production testing-infrastructure feature).
+// Legacy projects keep working through `readRelays`; new local projects
+// scaffold with `environment.active='dev'`; imported/cloned projects opt
+// in via the dashboard's "Isolate to local infra" action.
+
+const DEV_BLOCK = {
+  relays:   ['ws://localhost:7777'],
+  blossoms: ['http://localhost:8081'],
+};
+const PROD_BLOCK = {
+  relays:   ['wss://relay.damus.io', 'wss://nos.lol'],
+  blossoms: ['https://blossom.example.com'],
+};
+
+test('createProject: accepts an environment block', () => {
+  const r = createProject({
+    name: 'envd',
+    path: projInHome('envd'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    environment: { active: 'dev', dev: DEV_BLOCK, prod: PROD_BLOCK },
+  });
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.project.environment?.active, 'dev');
+    assert.deepEqual(r.project.environment?.dev,  DEV_BLOCK);
+    assert.deepEqual(r.project.environment?.prod, PROD_BLOCK);
+  }
+});
+
+test('createProject: derives readRelays from environment.prod.relays', () => {
+  // Old clients (and any external scripts) that GET /api/projects continue
+  // to read public relays from the legacy `readRelays` field. The
+  // environment block is the new source of truth — the legacy field is
+  // mirrored on every read so neither audience breaks.
+  const r = createProject({
+    name: 'mirror',
+    path: projInHome('mirror'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    environment: { active: 'dev', dev: DEV_BLOCK, prod: PROD_BLOCK },
+  });
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.deepEqual(r.project.readRelays, PROD_BLOCK.relays);
+  }
+});
+
+test('createProject: rejects invalid relay URL in environment', () => {
+  const r = createProject({
+    name: 'bad-relay',
+    path: projInHome('bad-relay'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    environment: {
+      active: 'dev',
+      dev:  { relays: ['http://not-a-relay'], blossoms: [] },
+      prod: PROD_BLOCK,
+    },
+  });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /invalid relay URL/i);
+});
+
+test('createProject: rejects invalid blossom URL in environment', () => {
+  const r = createProject({
+    name: 'bad-blossom',
+    path: projInHome('bad-blossom'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    environment: {
+      active: 'dev',
+      dev:  { relays: [], blossoms: ['wss://not-http'] },
+      prod: PROD_BLOCK,
+    },
+  });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /invalid blossom URL/i);
+});
+
+test('createProject: rejects environment.active outside {dev,prod}', () => {
+  const r = createProject({
+    name: 'bad-active',
+    path: projInHome('bad-active'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    // @ts-expect-error — testing runtime guard on bad input
+    environment: { active: 'staging', dev: DEV_BLOCK, prod: PROD_BLOCK },
+  });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /active must be/i);
+});
+
+test('updateProject: patching environment persists the new block', () => {
+  const created = createProject({
+    name: 'env-patch',
+    path: projInHome('env-patch'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+  });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const updated = updateProject(created.project.id, {
+    environment: { active: 'prod', dev: DEV_BLOCK, prod: PROD_BLOCK },
+  });
+  assert.equal(updated.ok, true);
+  if (updated.ok) {
+    assert.equal(updated.project.environment?.active, 'prod');
+    // readRelays mirrors environment.prod.relays after the patch.
+    assert.deepEqual(updated.project.readRelays, PROD_BLOCK.relays);
+  }
+});
+
+test('updateProject: patch.environment=null clears the block', () => {
+  const created = createProject({
+    name: 'env-clear',
+    path: projInHome('env-clear'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    environment: { active: 'dev', dev: DEV_BLOCK, prod: PROD_BLOCK },
+  });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const updated = updateProject(created.project.id, { environment: null });
+  assert.equal(updated.ok, true);
+  if (updated.ok) {
+    assert.equal(updated.project.environment, undefined);
+  }
+});
+
+test('updateProject: silently drops readRelays writes (deprecated)', () => {
+  // Writes to the legacy `readRelays` field are no-op'd — the canonical
+  // source is now `environment.prod.relays`. Old clients that PATCH
+  // readRelays get a 200 but the value is not persisted; the read-through
+  // ensures GET responses still surface a consistent list.
+  const created = createProject({
+    name: 'legacy-write',
+    path: projInHome('legacy-write'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    readRelays: ['wss://original.example'],
+  });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const updated = updateProject(created.project.id, {
+    readRelays: ['wss://new.example'],
+  });
+  assert.equal(updated.ok, true);
+  if (updated.ok) {
+    // Old value persists — write was dropped.
+    assert.deepEqual(updated.project.readRelays, ['wss://original.example']);
+  }
+});
+
+test('normalize: legacy readRelays preserved when environment is absent', () => {
+  // Pre-feature projects have only `readRelays`. They keep working until
+  // the user opts into the environment block via the dashboard.
+  const r = createProject({
+    name: 'legacy',
+    path: projInHome('legacy'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    readRelays: ['wss://legacy.example'],
+  });
+  assert.equal(r.ok, true);
+
+  // Re-read through readProjects() to exercise normalize() on the
+  // round-tripped JSON.
+  const all = readProjects();
+  assert.equal(all.length, 1);
+  assert.deepEqual(all[0].readRelays, ['wss://legacy.example']);
+  assert.equal(all[0].environment, undefined);
+});
+
+test('normalize: rolls a malformed environment block back into shape', () => {
+  // Synthesize a projects.json row with junk in the environment field
+  // (e.g. an old experimental schema, or a tampered file). normalize()
+  // should coerce: bad relays/blossoms → [], bad active → 'prod'.
+  const id = 'deadbeef-cafe-1111-2222-333344445555';
+  const projectsFile = path.join(HOME, '.config', 'nostr-station', 'projects.json');
+  fs.mkdirSync(path.dirname(projectsFile), { recursive: true });
+  fs.writeFileSync(projectsFile, JSON.stringify([{
+    id, name: 'junk-env',
+    path: projInHome('junk-env'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    nsite: { url: null, lastDeploy: null },
+    readRelays: null,
+    environment: {
+      active: 'staging-rc',     // invalid → falls back to 'prod'
+      dev:  { relays: 'oops', blossoms: null }, // bad shape → []
+      prod: { relays: ['wss://kept.example'], blossoms: ['nope', 42, 'http://ok.example'] },
+    },
+    createdAt: '2025-01-01T00:00:00.000Z',
+    updatedAt: '2025-01-01T00:00:00.000Z',
+  }]));
+  const got = getProject(id);
+  assert.ok(got);
+  assert.equal(got!.environment?.active, 'prod');
+  assert.deepEqual(got!.environment?.dev,  { relays: [], blossoms: [] });
+  // String filter drops non-strings but keeps both ok and not-yet-validated
+  // strings (validation is a write-time concern; normalize() is read-time).
+  assert.deepEqual(got!.environment?.prod.relays, ['wss://kept.example']);
+  assert.deepEqual(got!.environment?.prod.blossoms, ['nope', 'http://ok.example']);
+});
+
+test('environment round-trips through readProjects()', () => {
+  // End-to-end: create with environment, drop the in-memory cache, re-read.
+  const r = createProject({
+    name: 'roundtrip',
+    path: projInHome('roundtrip'),
+    capabilities: { git: false, ngit: false, nsite: false },
+    identity: { useDefault: true, npub: null, bunkerUrl: null },
+    remotes: { github: null, ngit: null },
+    environment: { active: 'dev', dev: DEV_BLOCK, prod: PROD_BLOCK },
+  });
+  assert.equal(r.ok, true);
+  const re = readProjects()[0];
+  assert.equal(re.environment?.active, 'dev');
+  assert.deepEqual(re.environment?.dev,  DEV_BLOCK);
+  assert.deepEqual(re.environment?.prod, PROD_BLOCK);
+});
