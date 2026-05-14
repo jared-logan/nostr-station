@@ -738,6 +738,42 @@ function activatePanel(name) {
 
 window.addEventListener('hashchange', () => activatePanel(currentPanel()));
 
+// ── Mobile sidebar toggle ────────────────────────────────────────────────
+// On screens ≤900px the sidebar collapses into an off-canvas drawer driven
+// by `body.sidebar-open`. The hamburger in the header flips the state; tapping
+// a nav link or the scrim — or hitting Escape — closes it. The CSS does all
+// the layout work; this just toggles the class and ARIA state.
+(function initSidebarToggle() {
+  const body   = document.body;
+  const btn    = document.getElementById('sidebar-toggle');
+  const scrim  = document.getElementById('sidebar-scrim');
+  const nav    = document.getElementById('nav');
+  if (!btn || !scrim || !nav) return;
+
+  const setOpen = (open) => {
+    body.classList.toggle('sidebar-open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    scrim.setAttribute('aria-hidden', open ? 'false' : 'true');
+  };
+
+  btn.addEventListener('click', () => setOpen(!body.classList.contains('sidebar-open')));
+  scrim.addEventListener('click', () => setOpen(false));
+  // Hash navigation already triggers activatePanel; we just need to close
+  // the drawer when the user picks a destination.
+  nav.addEventListener('click', (e) => {
+    if (e.target.closest('a')) setOpen(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && body.classList.contains('sidebar-open')) setOpen(false);
+  });
+  // If the viewport grows past the breakpoint (rotation, devtools resize),
+  // make sure we don't leave the body in sidebar-open state — the CSS hides
+  // the toggle there but the class would still apply transforms.
+  const mq = window.matchMedia('(min-width: 901px)');
+  const onChange = () => { if (mq.matches) setOpen(false); };
+  mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
+})();
+
 // ── Providers (mirrors src/lib/ai-providers.ts PROVIDERS) ────────────────
 // Display labels + per-provider default model lists for the chat/config
 // switcher. Curated list — Anthropic + Nostr-native paid relays + a
@@ -2476,6 +2512,18 @@ const ChatPanel = (() => {
       collapseBtn.addEventListener('click', () => setCollapsed(true));
       showBtn.addEventListener('click',     () => setCollapsed(false));
 
+      // Mobile bottom tab strip — flips between chat and preview by
+      // delegating to the same setCollapsed() so localStorage + the
+      // data-preview state stay consistent with the desktop pull-tab.
+      const tabBar = document.getElementById('chat-split-tabs');
+      if (tabBar) {
+        tabBar.addEventListener('click', (e) => {
+          const btn = e.target.closest('[data-cs-tab]');
+          if (!btn) return;
+          setCollapsed(btn.dataset.csTab === 'chat');
+        });
+      }
+
       startBtn.addEventListener('click', () => {
         const p = activeProject;
         if (!p) return;
@@ -2501,7 +2549,20 @@ const ChatPanel = (() => {
       if (state === 'hidden') return;
       split.dataset.preview = collapsed ? 'collapsed' : 'open';
       showBtn.hidden = !collapsed;
+      syncTabState(collapsed);
       try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch {}
+    }
+
+    function syncTabState(collapsed) {
+      // Mirror the data-preview state onto the mobile tab strip so the
+      // active tab styling tracks PreviewPane.setCollapsed() — including
+      // when sync() flips state on project change.
+      const tabBar = document.getElementById('chat-split-tabs');
+      if (!tabBar) return;
+      for (const t of tabBar.querySelectorAll('[data-cs-tab]')) {
+        const active = (t.dataset.csTab === 'chat') === !!collapsed;
+        t.setAttribute('aria-selected', active ? 'true' : 'false');
+      }
     }
 
     function isCollapsedPref() {
@@ -2527,6 +2588,7 @@ const ChatPanel = (() => {
       const collapsed = isCollapsedPref();
       split.dataset.preview = collapsed ? 'collapsed' : 'open';
       showBtn.hidden = !collapsed;
+      syncTabState(collapsed);
       // Don't auto-load the iframe — the dev server probably isn't running
       // yet, and a failed iframe load doesn't auto-recover. Empty state +
       // explicit "Start dev server" button is clearer than a blank frame.
