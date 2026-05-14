@@ -38,7 +38,12 @@ import {
   readIdentity, npubToHex, hexToNpub,
   DEFAULT_READ_RELAYS, getEffectiveReadRelays, addReadRelay, isValidRelayUrl,
 } from '../identity.js';
-import { queryRelays, type NostrEvent } from '../nostr-query.js';
+// Use the direct-WebSocket variant of queryRelays for the Client panel:
+// nak-based queries kept missing kind-0 / kind-3 / kind-1 events that the
+// direct-WS path (identity-config flow) reliably fetched against the same
+// relays, leaving Feed / Notifications / Profile blank for many users.
+// queryRelaysDirect has the same signature, so the swap is API-neutral.
+import { queryRelaysDirect as queryRelays, type NostrEvent } from '../nostr-query.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { publishEventToRelays } from './repo.js';
 import { safeHttpUrl } from '../url-safety.js';
@@ -362,14 +367,17 @@ export async function handleClient(
   if (path === '/api/client/health' && method === 'GET') {
     const me = ownerHex();
     const relays = readRelays();
+    // nak is no longer required for the Client panel — queries now use
+    // direct WebSockets (queryRelaysDirect). The field stays on the
+    // response for back-compat / diagnostic use; ok is independent of it.
     const nak = nakBin();
-    const ok = nak !== null && relays.length > 0 && me !== null;
+    const ok = relays.length > 0 && me !== null;
     return json(res, 200, {
       ok,
       ownerConfigured: me !== null,
       readRelayCount:  relays.length,
       nakInstalled:    nak !== null,
-      reason: !me ? 'no-owner' : !nak ? 'nak-missing' : relays.length === 0 ? 'no-read-relays' : null,
+      reason: !me ? 'no-owner' : relays.length === 0 ? 'no-read-relays' : null,
     });
   }
 
@@ -411,7 +419,6 @@ export async function handleClient(
   if (path === '/api/client/sync-relays' && method === 'POST') {
     const me = ownerHex();
     if (!me) return json(res, 400, { error: 'no station owner configured' });
-    if (nakBin() === null) return json(res, 200, { added: [], ...unavailable('nak-missing') });
     // Union of the user's configured relays + the NIP-65 bootstrap set.
     // The bootstrap relays widen the search so a fresh user whose
     // configured Client Relays don't happen to mirror their kind-10002
@@ -516,9 +523,6 @@ export async function handleClient(
       usingContacts = true;
     }
 
-    if (nakBin() === null) {
-      return json(res, 200, { events: [], profiles: {}, ...unavailable('nak-missing'), usingContacts });
-    }
     const relays = capRelays(readRelays());
     if (relays.length === 0) {
       return json(res, 200, { events: [], profiles: {}, ...unavailable('no-read-relays'), usingContacts });
@@ -572,7 +576,6 @@ export async function handleClient(
     if (!me) return json(res, 400, { error: 'no station owner configured' });
     const limit = clampInt(u.searchParams.get('limit'), FEED_DEFAULT_LIMIT, 1, FEED_MAX_LIMIT);
     const until = clampInt(u.searchParams.get('until'), 0, 0, 2_000_000_000);
-    if (nakBin() === null) return json(res, 200, { events: [], profiles: {}, ...unavailable('nak-missing') });
     const relays = capRelays(readRelays());
     if (relays.length === 0) return json(res, 200, { events: [], profiles: {}, ...unavailable('no-read-relays') });
 
@@ -633,7 +636,6 @@ export async function handleClient(
   if (path === '/api/client/thread' && method === 'GET') {
     const id = (u.searchParams.get('id') || '').trim().toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(id)) return json(res, 400, { error: 'invalid event id' });
-    if (nakBin() === null) return json(res, 200, { ...unavailable('nak-missing') });
     const relays = capRelays(readRelays());
     if (relays.length === 0) return json(res, 200, { ...unavailable('no-read-relays') });
     try {
@@ -663,7 +665,6 @@ export async function handleClient(
   // heart can render "filled" state without a second round-trip).
   if (path === '/api/client/event-stats' && method === 'GET') {
     const me = ownerHex();
-    if (nakBin() === null) return json(res, 200, { stats: {}, ...unavailable('nak-missing') });
     const relays = capRelays(readRelays());
     if (relays.length === 0) return json(res, 200, { stats: {}, ...unavailable('no-read-relays') });
 
