@@ -10447,14 +10447,30 @@ const VpnPanel = (() => {
       : '';
     const pid = (status.raw && status.raw.daemon && status.raw.daemon.pid != null)
       ? `<span class="muted">pid ${escapeHtml(String(status.raw.daemon.pid))}</span>` : '';
+    // Reality check (issue #56). status.health is the rolled-up surface
+    // from nvpnHealthSummary — when it disagrees with the daemon-claimed
+    // "running" pill (e.g., publish channel broken, STUN never landed),
+    // we want the user to see that *first*, not buried in raw JSON.
+    const health = status.health || null;
+    const endpointBadge = health && health.publicEndpoint
+      ? `<code class="cmd-inline vpn-strip-endpoint" title="STUN-discovered public endpoint — peers dial here">${escapeHtml(health.publicEndpoint)}</code>`
+      : '';
+    const degraded = (status.running && health && health.state === 'degraded')
+      ? `<span class="dot warn"></span><span class="vpn-strip-degraded" title="${escapeHtml(health.issues.join(' • '))}">degraded</span>`
+      : '';
     stripEl.innerHTML = `
       <div class="vpn-strip-state">
         <span class="dot ${stateClass}"></span>
         <span class="vpn-strip-label">nostr-vpn</span>
         <span class="vpn-strip-value">${escapeHtml(stateText)}</span>
+        ${degraded}
         ${tunnel}
+        ${endpointBadge}
         ${pid}
       </div>
+      ${health && Array.isArray(health.issues) && health.issues.length > 0 && status.running
+        ? `<div class="vpn-strip-issues muted">${health.issues.map(i => `<div>• ${escapeHtml(i)}</div>`).join('')}</div>`
+        : ''}
       <div class="vpn-strip-actions" id="vpn-strip-actions"></div>
     `;
     const actions = $('vpn-strip-actions');
