@@ -45,8 +45,9 @@ export const GITIGNORE_FILE       = '.gitignore';
 // Files that are machine-local and should not be committed to git. Keep
 // `system-prompt.md`, `project-context.md`, and `template.json` out of
 // the gitignore so they DO travel with the repo — they're shareable
-// per-project guidance and provenance.
-const GITIGNORE_CONTENTS = `${PERMISSIONS_FILE}\n${CHAT_FILE}\n`;
+// per-project guidance and provenance. `test-identities.json` contains
+// raw nsecs — never committable under any circumstance.
+const GITIGNORE_CONTENTS = `${PERMISSIONS_FILE}\n${CHAT_FILE}\ntest-identities.json\n`;
 
 export interface ProjectTemplateRecord {
   templateId:   string;
@@ -170,11 +171,24 @@ export function ensureConfigDir(project: Project): string | null {
   if (!project.path) return null;
   const dir = configDir(project.path);
   fs.mkdirSync(dir, { recursive: true });
-  // .gitignore is harmless to write every time; small file, never
-  // touched by the user, machine-local enough that overwriting is fine.
+  // .gitignore: write fresh when absent; otherwise append any
+  // newly-mandatory entries the file is missing. The append branch is
+  // load-bearing for upgrade — existing projects scaffolded before
+  // test-identities.json existed would otherwise leak the nsec file.
   const giPath = path.join(dir, GITIGNORE_FILE);
   if (!fs.existsSync(giPath)) {
     fs.writeFileSync(giPath, GITIGNORE_CONTENTS);
+  } else {
+    try {
+      const have = fs.readFileSync(giPath, 'utf8');
+      const lines = have.split(/\r?\n/);
+      const need = GITIGNORE_CONTENTS.split(/\r?\n/).filter(Boolean);
+      const missing = need.filter(n => !lines.includes(n));
+      if (missing.length) {
+        const sep = have.endsWith('\n') ? '' : '\n';
+        fs.appendFileSync(giPath, `${sep}${missing.join('\n')}\n`);
+      }
+    } catch { /* best-effort */ }
   }
   return dir;
 }

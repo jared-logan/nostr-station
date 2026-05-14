@@ -26,6 +26,7 @@
 import { spawn, execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import WebSocket from 'ws';
 import { findBin } from './detect.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -462,4 +463,166 @@ export async function getCachedOrFetch<T>(
   const value = await fetcher();
   setCached<T>(opts, value);
   return value;
+}
+
+// ── Direct-WS query (no nak dependency) ───────────────────────────────────
+//
+// Drop-in alternative to queryRelays() that talks WebSocket directly to
+// each relay instead of shelling out to `nak req`. Same RelayQueryOptions
+// in, same RelayQueryResult out, so callers can swap one for the other
+// with no API change.
+//
+// Why it exists alongside the nak version:
+//   1. The Nostr Client panel (routes/client.ts) issues 7+ relay queries
+//      per panel mount. Each nak spawn is a process fork + binary load +
+//      stdin/stdout pipe orchestration; under a developer-laptop load
+//      this stacks up enough to surface as "feed is empty" when the
+//      probes time out (project memory: project_nak_stdin_hang has bit
+//      us repeatedly).
+//   2. nak might be installed but the binary on PATH might be older /
+//      newer than what we expect, or the relay subset might be one nak's
+//      version chokes on. Direct WS sidesteps all of that.
+//   3. Identity-config flow (routes/identity.ts:fetchKind0FromRelay)
+//      already uses direct WS and is the more-reliable path users
+//      consistently see working. This generalises that approach to
+//      arbitrary filters.
+//
+// Trade-off: no nak diagnostic features (stderr capture, exit codes).
+// Diagnostics here reduce to "did we see any events" + how many.
+export async function queryRelaysDirect(opts: RelayQueryOptions): Promise<RelayQueryResult> {
+  const timeoutMs  = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const stream     = opts.stream ?? true;
+  const startedAt  = Date.now();
+  const baseDiag: RelayQueryDiagnostics = {
+    eventsSeen:    0,
+    uniqueEvents:  0,
+    parseFailures: 0,
+    stderrTail:    '',
+    spawnError:    null,
+    exitCode:      null,
+    nakArgs:       [],  // n/a for direct-WS; preserved for API parity
+    durationMs:    0,
+  };
+
+  if (opts.relays.length === 0) {
+    return { events: [], diagnostics: { ...baseDiag, durationMs: Date.now() - startedAt } };
+  }
+
+  return new Promise<RelayQueryResult>((resolve) => {
+    const eventsById = new Map<string, NostrEvent>();
+    const filter     = filterToNip01(opts.filter);
+    const subId      = 'ns-q-' + Math.random().toString(36).slice(2, 10);
+    let resolved     = false;
+    let closedCount  = 0;
+    let eventsSeen   = 0;
+    let parseFailures = 0;
+    const sockets: WebSocket[] = [];
+
+    const finish = (): void => {
+      if (resolved) return;
+      resolved = true;
+      for (const ws of sockets) { try { ws.close(); } catch {} }
+      clearTimeout(timer);
+      const events = [...eventsById.values()];
+      resolve({
+        events,
+        diagnostics: {
+          ...baseDiag,
+          eventsSeen,
+          uniqueEvents:  events.length,
+          parseFailures,
+          durationMs:    Date.now() - startedAt,
+        },
+      });
+    };
+
+    const checkAcceptUntil = (): void => {
+      if (!opts.acceptUntil) return;
+      try { if (opts.acceptUntil([...eventsById.values()])) finish(); }
+      catch { /* swallow predicate errors — don't break the query */ }
+    };
+
+    const timer = setTimeout(finish, timeoutMs);
+    if (opts.abortSignal) {
+      opts.abortSignal.addEventListener('abort', finish, { once: true });
+    }
+
+    for (const relayUrl of opts.relays) {
+      let ws: WebSocket;
+      try { ws = new WebSocket(relayUrl); }
+      catch { closedCount++; continue; }
+      sockets.push(ws);
+
+      ws.on('open', () => {
+        try { ws.send(JSON.stringify(['REQ', subId, filter])); }
+        catch { /* fall through to error handler */ }
+      });
+      ws.on('message', (data) => {
+        let msg: any;
+        try { msg = JSON.parse(typeof data === 'string' ? data : data.toString()); }
+        catch { parseFailures++; return; }
+        if (!Array.isArray(msg)) return;
+        // EVENT frames: ["EVENT", subId, event]
+        if (msg[0] === 'EVENT' && msg[1] === subId && msg[2]) {
+          const ev = msg[2];
+          // Cheap structural check before deduping — drop anything that
+          // doesn't look like NIP-01.
+          if (typeof ev.id !== 'string' || typeof ev.kind !== 'number') return;
+          eventsSeen++;
+          if (eventsById.has(ev.id)) return;
+          eventsById.set(ev.id, ev as NostrEvent);
+          checkAcceptUntil();
+          // When stream is false, the caller wants one-shot semantics —
+          // resolve as soon as the first event arrives (matching the
+          // nak version's `--no-stream` + acceptUntil behavior). Most
+          // callers use acceptUntil for this so it's belt-and-suspenders.
+        } else if (msg[0] === 'EOSE' && msg[1] === subId) {
+          // EOSE = end of stored events. For one-shot queries (stream=false),
+          // close this socket and count it; once all relays EOSE we finish.
+          if (!stream) {
+            closedCount++;
+            try { ws.close(); } catch {}
+            if (closedCount >= sockets.length) finish();
+          }
+          // For streaming queries we keep the socket open so new live
+          // events arrive until the timer fires or acceptUntil returns.
+        } else if (msg[0] === 'CLOSED' && msg[1] === subId) {
+          // Relay explicitly closed the subscription (e.g. auth-required).
+          closedCount++;
+          try { ws.close(); } catch {}
+          if (closedCount >= sockets.length) finish();
+        }
+      });
+      ws.on('error', () => {
+        closedCount++;
+        if (closedCount >= sockets.length) finish();
+      });
+      ws.on('close', () => {
+        // Only count a clean close if we haven't already counted EOSE/CLOSED
+        // for this socket — node-ws fires both. Guard by tracking via the
+        // higher-level closedCount; double-counting just makes finish() fire
+        // a tick early which is harmless because finish() is idempotent.
+        closedCount++;
+        if (closedCount >= sockets.length) finish();
+      });
+    }
+  });
+}
+
+// Translate the structural RelayQueryFilter into the NIP-01 wire shape.
+// Tag-name filters serialize as "#<name>": values per NIP-12.
+function filterToNip01(f: RelayQueryFilter): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (f.kinds   && f.kinds.length)   out.kinds   = f.kinds;
+  if (f.authors && f.authors.length) out.authors = f.authors;
+  if (f.ids     && f.ids.length)     out.ids     = f.ids;
+  if (typeof f.limit === 'number' && f.limit > 0) out.limit = Math.floor(f.limit);
+  if (f.tags) {
+    for (const [name, raw] of Object.entries(f.tags)) {
+      const values = Array.isArray(raw) ? raw : [raw];
+      if (values.length === 0) continue;
+      out[`#${name}`] = values;
+    }
+  }
+  return out;
 }

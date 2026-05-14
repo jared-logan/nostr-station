@@ -49,8 +49,10 @@ interface Profile {
   npub: string;
   hex:  string;
   name?: string;
+  displayName?: string;
   about?: string;
   picture?: string;
+  banner?: string;
   nip05?: string;
   nip05Verified?: boolean;
   cachedAt: number;
@@ -136,10 +138,12 @@ async function lookupProfile(npubOrHex: string, relays: string[]): Promise<Profi
   if (newest) {
     try {
       const meta = JSON.parse(newest.content);
-      if (typeof meta.name    === 'string') profile.name    = meta.name;
-      if (typeof meta.about   === 'string') profile.about   = meta.about;
-      if (typeof meta.picture === 'string') profile.picture = meta.picture;
-      if (typeof meta.nip05   === 'string') profile.nip05   = meta.nip05;
+      if (typeof meta.name         === 'string') profile.name        = meta.name;
+      if (typeof meta.display_name === 'string') profile.displayName = meta.display_name;
+      if (typeof meta.about        === 'string') profile.about       = meta.about;
+      if (typeof meta.picture      === 'string') profile.picture     = meta.picture;
+      if (typeof meta.banner       === 'string') profile.banner      = meta.banner;
+      if (typeof meta.nip05        === 'string') profile.nip05       = meta.nip05;
     } catch {}
   }
 
@@ -554,7 +558,7 @@ export async function handleIdentity(
       // Scheme-gate the attacker-controlled `picture` URL so a hostile
       // kind-0 can't land `javascript:` / `data:image/svg+xml` into an
       // <img src>. Defense-in-depth alongside the CSP img-src allowlist.
-      const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture) };
+      const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture), banner: safeHttpUrl((p as any)?.banner) };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(sanitized));
     } catch (e: any) {
@@ -573,7 +577,7 @@ export async function handleIdentity(
     }
     try {
       const p = await lookupProfile(ident.npub, ident.readRelays);
-      const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture) };
+      const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture), banner: safeHttpUrl((p as any)?.banner) };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(sanitized));
     } catch (e: any) {

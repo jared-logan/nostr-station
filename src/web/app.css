@@ -5000,6 +5000,57 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .cap-chip.cap-ngit  { background: var(--accent-soft); color: var(--accent-bright); border: 1px solid var(--accent-dim); }
 .cap-chip.cap-nsite { background: rgba(30, 200, 190, 0.10); color: #47d6c8; border: 1px solid rgba(30, 200, 190, 0.3); }
 
+/* ── Environment / surface chips ─────────────────────────────────────────
+   THEME-LOCKED palette. These three chips communicate which relay
+   "world" a surface is bound to:
+
+     dev    → purple (nostr-station brand)   — project's local dev relay
+     prod   → blue                            — project's public relays
+     public → green                           — Client panel; always
+                                                public, never project-
+                                                scoped, never dev
+
+   Hardcoded hex + `!important` deliberately: the meaning must NOT
+   change under Appearance themes or the Ditto theme-sync — a user who
+   recolors their accent to red shouldn't end up with a red `dev`
+   chip that looks like an error state. Color is reinforcement; the
+   text label inside each chip is the canonical signal. */
+.env-chip {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  text-transform: lowercase;
+}
+.env-chip.env-chip-dev {
+  background:   rgba(123, 104, 238, 0.14) !important;  /* #7B68EE = nostr-station brand */
+  color:        #b8aaff                    !important;
+  border:       1px solid rgba(123, 104, 238, 0.40) !important;
+}
+.env-chip.env-chip-prod {
+  background:   rgba(90, 165, 245, 0.14)   !important;
+  color:        #88baf7                    !important;
+  border:       1px solid rgba(90, 165, 245, 0.40) !important;
+}
+.env-chip.env-chip-public {
+  background:   rgba(61, 220, 132, 0.14)   !important;
+  color:        #6ce6a1                    !important;
+  border:       1px solid rgba(61, 220, 132, 0.40) !important;
+  margin-left: 8px; vertical-align: middle; font-size: 9px;
+}
+
+.env-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border, rgba(255,255,255,0.1)); }
+.env-tab {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  padding: 6px 14px; cursor: pointer; color: var(--text); font: inherit;
+  text-transform: lowercase;
+}
+.env-tab.active { border-bottom-color: var(--accent-bright, #6cf); color: var(--text-bright); }
+.env-active-row { display: flex; align-items: center; gap: 10px; }
+.env-list-section h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim, #999); }
+
 /* Per-card git-state badge — populated by ProjectsPanel's git-state
    poller. Lives alongside the capability chips on the .pc-badges row.
    `hidden` attribute is honored (display: none) so local-only cards
@@ -8148,6 +8199,25 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
      the distinction. Reserved for future styling. */
 }
 
+/* Banner (NIP-24 kind-0 `banner` field) sits above the profile card.
+   Wide aspect-ratio cover image. When present, the card below uses
+   `.has-banner` so the avatar can negatively offset and overlap the
+   banner's bottom edge — the social-client convention. */
+.client-profile-banner {
+  width: 100%;
+  height: 180px;
+  border-radius: 8px 8px 0 0;
+  overflow: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  margin-bottom: 0;
+}
+.client-profile-banner img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .client-profile-card {
   display: flex;
   gap: 16px;
@@ -8156,6 +8226,19 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
   border-radius: 8px;
   padding: 16px;
   align-items: flex-start;
+}
+.client-profile-card.has-banner {
+  border-radius: 0 0 8px 8px;
+  border-top: none;
+  /* Negative top-margin so the avatar overlaps the banner's bottom
+     edge — same trick Twitter / Damus / Primal use. */
+  padding-top: 28px;
+}
+.client-profile-card.has-banner .client-avatar,
+.client-profile-card.has-banner .client-avatar-fallback {
+  margin-top: -52px;
+  border: 3px solid var(--bg-card);
+  background-clip: padding-box;
 }
 .client-profile-card .client-avatar {
   width: 64px;

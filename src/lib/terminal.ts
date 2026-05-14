@@ -36,6 +36,7 @@ import { createRequire } from 'module';
 import { execa } from 'execa';
 import type { WebSocket } from 'ws';
 import { findBin } from './detect.js';
+import { projectEnvContract, type Project } from './projects.js';
 
 // Bridge to require() from within an ESM module — needed to call
 // require.resolve('node-pty/package.json') without triggering the native
@@ -180,6 +181,11 @@ export interface CmdSpec {
 export interface CreateOpts {
   key:  string;
   cwd?: string;
+  // When set, the PTY's environment is augmented with the project's
+  // NOSTR_STATION_* contract (see `projectEnvContract` in projects.ts).
+  // Set for project-bound terminals (the dashboard's "open terminal in
+  // project X" path) and unset for the bare shell tab.
+  project?: Project;
 }
 
 // How to invoke our own CLI (node dist/cli.js / tsx src/cli.tsx).
@@ -426,8 +432,12 @@ export async function createSession(
   // Splice login shell PATH in front of process.env.PATH so anything the
   // server had (node, npm) still wins over shell rc overrides when there's
   // a duplicate, but user-installed bins in ~/.cargo/bin etc. are findable.
+  // When the PTY is bound to a project, splice the NOSTR_STATION_* env
+  // contract in too so spawned dev servers (vite, npm run dev, dork) see
+  // the right relay/blossom URLs for the project's active environment.
   const env: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined)) as Record<string, string>,
+    ...(opts.project ? projectEnvContract(opts.project) : {}),
     ...(spec.env || {}),
     PATH: `${loginPath}:${process.env.PATH || ''}`,
     TERM: 'xterm-256color',

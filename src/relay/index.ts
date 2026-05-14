@@ -114,7 +114,7 @@ export class Relay {
     this.http = http.createServer((req, res) => this.handleHttp(req, res));
     this.wss  = new WebSocketServer({ server: this.http });
 
-    this.wss.on('connection', ws => this.handleConnection(ws));
+    this.wss.on('connection', (ws, req) => this.handleConnection(ws, req));
 
     await new Promise<void>((resolve, reject) => {
       this.http!.once('error', reject);
@@ -180,8 +180,20 @@ export class Relay {
     res.writeHead(405); res.end();
   }
 
-  private handleConnection(ws: WebSocket): void {
+  private handleConnection(ws: WebSocket, req?: http.IncomingMessage): void {
     const connSubs = new Set<string>();
+
+    // Stash whether the originating socket is loopback so the
+    // test-identity gate in handleEvent can refuse to accept
+    // `nostr-station-test` client-tagged events from external clients.
+    // For the local-only relay (bind 127.0.0.1) every connection is
+    // loopback by definition; this guards a future deployment that
+    // exposes the relay externally.
+    const remote = req?.socket?.remoteAddress || '';
+    const isLoopback =
+      remote === '127.0.0.1' || remote === '::1' ||
+      remote.startsWith('::ffff:127.');
+    (ws as any).__nsLoopback = isLoopback;
 
     // Per-connection AUTH state. Initialized eagerly with a fresh challenge
     // even though we don't send the challenge upfront — `sendAuthChallenge`
@@ -324,6 +336,20 @@ export class Relay {
     const ownerHex = (this.getOwnerHex?.() ?? '').toLowerCase();
     const isOwner       = !!ownerHex && ownerHex === evPubkey;
     const isWhitelisted = this.whitelist.has(evPubkey);
+    // Test-identity defense layer 1: refuse to accept events carrying
+    // the ["client", "nostr-station-test", …] tag from a non-loopback
+    // connection. Defends a future deployment that binds the relay
+    // externally — the local-bind case is already loopback-only. Layer
+    // 2 is in the Phase E promote pipeline.
+    const isTestTagged =
+      Array.isArray(raw.tags) &&
+      raw.tags.some(t => Array.isArray(t) && t[0] === 'client' && t[1] === 'nostr-station-test');
+    const isLoopback = !!(ws as any).__nsLoopback;
+    if (isTestTagged && !isLoopback) {
+      this.log('warn', `EVENT rejected — test-identity tag from non-loopback (id ${raw.id.slice(0, 8)}…)`);
+      return ok(ws, raw.id, false, 'blocked: nostr-station test-identity events stay local');
+    }
+
     if (!isOwner && !isWhitelisted) {
       this.log('warn', `EVENT rejected — pubkey ${evPubkey.slice(0, 8)}… not authorized (kind ${raw.kind})`);
       ok(ws, raw.id, false, 'auth-required: pubkey not authorized to publish to this relay');

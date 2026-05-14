@@ -398,15 +398,25 @@ function relayApplyToast(title, response, hostFallbackBody = 'Relay updated') {
 // clearSessionToken() wipes localStorage and the auth screen shows.
 const SESSION_KEY         = 'ns-session-token';
 const SESSION_EXPIRES_KEY = 'ns-session-expires';
+// Tracks WHICH signer the user authenticated with so subsequent
+// signing requests (publish, etc.) route to the matching signer:
+//   'nip07'  → window.nostr (Alby, nos2x, …) — sign in browser
+//   'bunker' → saved NIP-46 pairing (Amber)  — server signs
+// Set at sign-in time by completeSignIn(); read at publish time by
+// the Client-panel handlers. Cleared on sign-out.
+const SESSION_SOURCE_KEY  = 'ns-session-source';
 
 function getSessionToken() { return localStorage.getItem(SESSION_KEY); }
-function setSessionToken(token, expiresAt) {
+function getSessionSource() { return localStorage.getItem(SESSION_SOURCE_KEY); }
+function setSessionToken(token, expiresAt, source) {
   localStorage.setItem(SESSION_KEY, token);
   localStorage.setItem(SESSION_EXPIRES_KEY, String(expiresAt));
+  if (source) localStorage.setItem(SESSION_SOURCE_KEY, source);
 }
 function clearSessionToken() {
   localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(SESSION_EXPIRES_KEY);
+  localStorage.removeItem(SESSION_SOURCE_KEY);
 }
 
 // Drop-in fetch wrapper that surfaces non-2xx + network errors as toasts.
@@ -1439,8 +1449,9 @@ const IdentityDrawer = (() => {
 function healthTooltip(s) {
   if (s.state === 'err') return `${s.label} not installed`;
   if (s.state === 'warn') {
-    if (s.id === 'relay') return 'Relay installed but not running — start it in the Relay panel';
-    if (s.id === 'vpn')   return 'nostr-vpn installed but not connected';
+    if (s.id === 'relay')   return 'Relay installed but not running — start it in the Relay panel';
+    if (s.id === 'blossom') return 'Blossom is bundled but not enabled — turn it on in Config → Blossom';
+    if (s.id === 'vpn')     return 'nostr-vpn installed but not connected';
     return `${s.label}: ${s.value}`;
   }
   // state === 'ok'
@@ -1874,6 +1885,15 @@ const StatusPanel = {
             <span class="muted">loading…</span>
           </div>
         </a>
+        <a class="dash-card" href="#config" data-card="blossom" title="Local Blossom — bundled in-process. Manage in Config → Blossom.">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Blossom</span>
+            <span class="dash-card-cta">Manage →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-blossom">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
         <a class="dash-card" href="#chat" data-card="ai">
           <div class="dash-card-head">
             <span class="dash-card-label">AI · Chat</span>
@@ -1890,6 +1910,7 @@ const StatusPanel = {
     this._fillIdentityCard();
     this._fillProjectsCard();
     this._fillRelayCard();
+    this._fillBlossomCard();
     this._fillAiCard();
   },
 
@@ -1997,6 +2018,33 @@ const StatusPanel = {
       `;
     } catch {
       el.innerHTML = `<span class="muted">relay unavailable</span>`;
+    }
+  },
+
+  // Blossom dashboard card — mirrors the Relay card. Three render
+  // states match the bundled-but-opt-in lifecycle:
+  //   - off       → "not enabled" + hint pointing at Config → Blossom
+  //   - running   → URL + blob count + total/quota bytes
+  //   - error     → unavailable banner (config endpoint unreachable)
+  async _fillBlossomCard() {
+    const el = $('dash-card-blossom');
+    if (!el) return;
+    try {
+      const cfg = await api('/api/blossom-config');
+      if (!cfg?.running) {
+        el.innerHTML = `
+          <div class="dash-sub warn">not enabled</div>
+          <div class="dash-sub muted">turn on in Config → Blossom</div>
+        `;
+        return;
+      }
+      const stats = cfg.stats || { blobCount: 0, totalBytes: 0, quotaBytes: 0 };
+      el.innerHTML = `
+        <div class="dash-relay-url" title="${escapeHtml(cfg.url || '')}">${escapeHtml(cfg.url || '')}</div>
+        <div class="dash-sub"><b>${stats.blobCount}</b> blob${stats.blobCount === 1 ? '' : 's'} · <b>${escapeHtml(formatBytesDashboard(stats.totalBytes))}</b>${stats.quotaBytes ? ` of ${escapeHtml(formatBytesDashboard(stats.quotaBytes))}` : ''}</div>
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">blossom config unavailable</span>`;
     }
   },
 
@@ -3455,6 +3503,23 @@ function projectCapBadges(caps) {
   return badges.join('');
 }
 
+// Per-project active-env chip — dev (purple, brand) or prod (blue).
+// Hidden for projects that haven't opted into the environment block
+// yet, so legacy / cloned cards stay visually identical to their
+// pre-feature state until the user clicks "Isolate to local infra"
+// in Settings. Tooltip explicitly names the scope so the chip alone
+// answers "what does this affect?" on hover.
+const ENV_CHIP_TOOLTIPS = {
+  dev:    'dev — spawned dev servers, deploy, and exec see NOSTR_STATION_RELAY pointing at the local in-process relay. Safe to publish test events. Client panel is independent of this.',
+  prod:   'prod — spawned dev servers see public relays via NOSTR_STATION_RELAY. Promote publishes to real Nostr. Client panel is independent of this.',
+  public: 'Public Nostr — this panel always reads + posts via your App Relays ∪ Your Relays (Config → Client Relays). Never bound to any project\'s dev/prod active-env.',
+};
+function projectEnvBadge(project) {
+  const active = project.environment?.active;
+  if (active !== 'dev' && active !== 'prod') return '';
+  return `<span class="env-chip env-chip-${active}" title="${escapeHtml(ENV_CHIP_TOOLTIPS[active])}">${active}</span>`;
+}
+
 function projectIdentityLabel(project) {
   if (project.identity.useDefault) return 'station identity';
   const n = project.identity.npub;
@@ -4311,7 +4376,7 @@ const ProjectsPanel = (() => {
         <div class="pc-actions"></div>
       </div>
       <div class="pc-path">${p.path ? `<code>${escapeHtml(p.path)}</code>` : '<em class="muted">no local path</em>'}</div>
-      <div class="pc-badges">${projectCapBadges(p.capabilities)}<span class="pc-state" hidden></span></div>
+      <div class="pc-badges">${projectCapBadges(p.capabilities)}${projectEnvBadge(p)}<span class="pc-state" hidden></span></div>
       <div class="pc-meta">
         <div class="pc-meta-row"><span class="k">identity</span><span class="v">${escapeHtml(projectIdentityLabel(p))}</span></div>
         <div class="pc-meta-row"><span class="k">last activity</span><span class="v pc-last-activity">${lastAct}</span></div>
@@ -8741,14 +8806,20 @@ const ProjectsPanel = (() => {
         <div class="step-actions"><button class="primary save-ident">save identity</button></div>
       </div>
 
-      <div class="tab-section">
-        <h3>Read relays</h3>
-        <div class="muted">Override station read relays (optional). Empty means inherit station defaults.</div>
-        <div class="relay-list-editor"></div>
-        <div class="field-row">
-          <input type="text" class="relay-add-input" placeholder="wss://…">
-          <button class="add-relay">add</button>
+      <div class="tab-section" id="environment-section">
+        <h3>Environment</h3>
+        <div class="env-body"></div>
+      </div>
+
+      <div class="tab-section" id="test-users-section">
+        <h3>Test users</h3>
+        <div class="muted" style="margin-bottom:8px">
+          Per-project throwaway keys for local development. Each test
+          user is auto-whitelisted on the local relay; events they sign
+          carry a <code>["client","nostr-station-test"]</code> tag so
+          they never leak to public infrastructure.
         </div>
+        <div class="test-users-body">loading…</div>
       </div>
 
       <div class="tab-section" id="pcfg-section">
@@ -8874,30 +8945,12 @@ const ProjectsPanel = (() => {
       });
     });
 
-    // Relay list editor
-    const listEl = container.querySelector('.relay-list-editor');
-    const relays = p.readRelays || [];
-    if (relays.length === 0) {
-      listEl.innerHTML = `<div class="muted">inheriting station defaults</div>`;
-    } else {
-      listEl.innerHTML = relays.map(r =>
-        `<div class="relay-row"><code>${escapeHtml(r)}</code><button class="relay-remove" data-url="${escapeHtml(r)}">remove</button></div>`
-      ).join('');
-      listEl.querySelectorAll('.relay-remove').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const next = (p.readRelays || []).filter(u => u !== btn.dataset.url);
-          await patchAndReload(p.id, { readRelays: next.length ? next : null });
-        });
-      });
-    }
-    container.querySelector('.add-relay').addEventListener('click', async () => {
-      const input = container.querySelector('.relay-add-input');
-      const v = input.value.trim();
-      if (!v) return;
-      if (!/^wss?:\/\//.test(v)) return toast('Relay URL must start with wss://', '', 'warn');
-      const next = [...(p.readRelays || []), v];
-      await patchAndReload(p.id, { readRelays: next });
-    });
+    // Environment editor — replaces the old per-project read-relays
+    // section. Routes through paintEnvironment so the same renderer can
+    // be re-used after every patch (active-env toggle, list edits) and
+    // by future Phase E flows that need to show the same widget.
+    paintEnvironment(container.querySelector('#environment-section .env-body'), p);
+    paintTestUsers(container.querySelector('#test-users-section .test-users-body'), p);
 
     container.querySelector('.remove-btn').addEventListener('click', async () => {
       const ok = await confirmDestructive({
@@ -8943,6 +8996,463 @@ const ProjectsPanel = (() => {
         }
       });
     }
+  }
+
+  // Renders the per-project Environment editor. Two modes:
+  //   - environment present: dev/prod tabs with relay+blossom list
+  //     editors, active-env toggle, and a Stacks divergence banner
+  //     when applicable.
+  //   - environment absent: a single "Isolate to local infra" CTA
+  //     that flips the project into dev mode against the running
+  //     local relay (and Blossom in Phase C). New-local-project
+  //     scaffolds already get the seed, so this CTA is the opt-in
+  //     path for legacy + imported + cloned projects.
+  function paintEnvironment(root, p) {
+    if (!root) return;
+    const env = p.environment;
+    if (!env) {
+      root.innerHTML = `
+        <div class="muted" style="margin-bottom:10px">
+          This project hasn't been isolated to local dev infrastructure yet.
+          Click below to flip it into dev mode against the running local
+          relay &mdash; spawned dev servers (<code>npm run dev</code>,
+          deploy, exec) will then see
+          <code>NOSTR_STATION_RELAY=ws://localhost:&lt;port&gt;</code> via
+          environment variables. This setting affects only this project's
+          spawned subprocesses; the Client panel (public Nostr) stays on
+          your public relays regardless.
+        </div>
+        <div class="step-actions">
+          <button class="primary isolate-btn">Isolate to local infra</button>
+        </div>
+      `;
+      root.querySelector('.isolate-btn').addEventListener('click', async () => {
+        // Server-side defaults are computed when we send an environment
+        // block with empty arrays and active='dev'; the user can then
+        // edit relays/blossoms via the editor that this paint will
+        // re-render. We seed prod.relays from p.readRelays (the
+        // legacy field, which still surfaces public defaults via the
+        // identity-derived read-through) so the user doesn't have to
+        // re-enter them. Local relay port is hardcoded to 7777 here
+        // since the client doesn't know which port the server bound;
+        // the server's scaffold seed pulls the live port for new
+        // projects, but for retrofits the user can edit it inline.
+        const seed = {
+          active: 'dev',
+          dev:  { relays: ['ws://localhost:7777'], blossoms: [] },
+          prod: {
+            relays: Array.isArray(p.readRelays) ? p.readRelays.slice() : [],
+            blossoms: [],
+          },
+        };
+        await patchAndReload(p.id, { environment: seed });
+      });
+      return;
+    }
+
+    const activeBlockKey = env.active === 'dev' ? 'dev' : 'prod';
+    const stacksHint = renderStacksDivergenceHint(p, env);
+    root.innerHTML = `
+      <div class="env-header">
+        <div class="env-active-row">
+          <span class="env-chip env-chip-${env.active}" title="${escapeHtml(ENV_CHIP_TOOLTIPS[env.active])}">${env.active}</span>
+          <span class="muted">active environment for this project &mdash; spawned dev servers (<code>npm run dev</code>, deploy, exec) read this block via <code>NOSTR_STATION_RELAY</code> / <code>_BLOSSOM</code>. The Client panel is unaffected; it always queries public relays.</span>
+        </div>
+        <div class="step-actions" style="margin-top:6px">
+          <button class="${env.active === 'dev'  ? 'primary' : ''} env-flip-dev">use dev</button>
+          <button class="${env.active === 'prod' ? 'primary' : ''} env-flip-prod">use prod</button>
+        </div>
+      </div>
+      ${stacksHint}
+      <div class="step-actions" style="margin-top:8px">
+        <button class="env-promote-dryrun" title="Show what would be published to prod">Promote to prod (dry-run)…</button>
+      </div>
+      <div class="env-tabs" role="tablist" style="margin-top:14px">
+        <button class="env-tab ${activeBlockKey === 'dev'  ? 'active' : ''}" data-which="dev"  role="tab">dev</button>
+        <button class="env-tab ${activeBlockKey === 'prod' ? 'active' : ''}" data-which="prod" role="tab">prod</button>
+      </div>
+      <div class="env-tab-body" data-which="dev"  ${activeBlockKey === 'dev'  ? '' : 'hidden'}></div>
+      <div class="env-tab-body" data-which="prod" ${activeBlockKey === 'prod' ? '' : 'hidden'}></div>
+      <div class="muted" style="margin-top:10px;font-size:11px">
+        Relays: <code>ws://</code> or <code>wss://</code>. Blossoms: <code>http://</code> (local) or
+        <code>https://</code> (public). The "Isolate" button + scaffold seed local URLs;
+        edit inline as needed.
+      </div>
+    `;
+    paintEnvBlock(root.querySelector('.env-tab-body[data-which="dev"]'),  p, 'dev',  env.dev);
+    paintEnvBlock(root.querySelector('.env-tab-body[data-which="prod"]'), p, 'prod', env.prod);
+
+    // Active-env flip buttons. We don't gate on a running dev server
+    // server-side (Phase A.6 deferred) — instead surface a soft warning
+    // when the user has any open project-bound terminal tab so they
+    // know the live PTY env is stale until they restart.
+    const flipDev  = root.querySelector('.env-flip-dev');
+    const flipProd = root.querySelector('.env-flip-prod');
+    flipDev?.addEventListener('click', () => flipActiveEnv(p, 'dev'));
+    flipProd?.addEventListener('click', () => flipActiveEnv(p, 'prod'));
+
+    root.querySelector('.env-promote-dryrun')?.addEventListener('click', () => openPromoteDialog(p));
+
+    // Tab switching. The two bodies stay in the DOM; we just toggle
+    // hidden so list edits in one don't lose draft input when the user
+    // peeks at the other.
+    root.querySelectorAll('.env-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const which = tab.dataset.which;
+        root.querySelectorAll('.env-tab').forEach(t =>
+          t.classList.toggle('active', t === tab));
+        root.querySelectorAll('.env-tab-body').forEach(b =>
+          b.hidden = (b.dataset.which !== which));
+      });
+    });
+  }
+
+  // Detect a divergence between the project's dev.relays and the local
+  // Stacks config's relay list (when the project is a Stacks project on
+  // macOS, where Stacks's config lives at
+  // ~/Library/Preferences/stacks/config.json). The dashboard already
+  // reads that config via GET /api/stacks/config for the AI provider
+  // section, but it doesn't surface relay info today; for v1 we only
+  // diff on the public flag (config exists vs. doesn't) and let the
+  // banner copy point users at `stacks configure` for the fix. Phase B+
+  // can extend this to a deep relay-list diff once we wire the config
+  // reader to return the relays field too.
+  function renderStacksDivergenceHint(p, env) {
+    if (!p.stacksProject) return '';
+    // Heuristic: a Stacks project whose dev block has only the local
+    // relay almost certainly has Dork pointing at a different relay
+    // list, since `stacks configure` defaults to public relays. We
+    // can't confirm without reading the Stacks config server-side, so
+    // the banner is a soft nudge rather than a hard claim.
+    const devOnlyLocal = env.dev.relays.length === 1 &&
+      /^ws:\/\/(localhost|127\.0\.0\.1)/.test(env.dev.relays[0]);
+    if (!devOnlyLocal) return '';
+    return `
+      <div class="pc-banner warn" style="margin-top:10px" hidden-not>
+        Stacks config may diverge — the Dork agent reads its own relay list from
+        <code>~/Library/Preferences/stacks/config.json</code>. If you want Dork
+        to see the same local relay, run <code>stacks configure</code> and point
+        it at <code>${escapeHtml(env.dev.relays[0])}</code>.
+      </div>
+    `;
+  }
+
+  // Paints one dev/prod block — the relay + blossom list editor pair.
+  // We render each as a list-with-remove + add-input shape that matches
+  // the legacy "Read relays" UX so muscle memory carries over.
+  function paintEnvBlock(root, p, which, block) {
+    if (!root) return;
+    root.innerHTML = `
+      <div class="env-list-section">
+        <h4 style="margin:8px 0 4px">relays</h4>
+        <div class="env-relay-list"></div>
+        <div class="field-row">
+          <input type="text" class="env-relay-add" placeholder="${which === 'dev' ? 'ws://localhost:7777' : 'wss://relay.example.com'}">
+          <button class="env-relay-add-btn">add</button>
+        </div>
+      </div>
+      <div class="env-list-section" style="margin-top:10px">
+        <h4 style="margin:8px 0 4px">blossoms</h4>
+        <div class="env-blossom-list"></div>
+        <div class="field-row">
+          <input type="text" class="env-blossom-add" placeholder="${which === 'dev' ? 'http://localhost:8081' : 'https://blossom.example.com'}">
+          <button class="env-blossom-add-btn">add</button>
+        </div>
+      </div>
+    `;
+    paintUrlList(root.querySelector('.env-relay-list'),   block.relays,   url => removeEnvUrl(p, which, 'relays', url));
+    paintUrlList(root.querySelector('.env-blossom-list'), block.blossoms, url => removeEnvUrl(p, which, 'blossoms', url));
+    root.querySelector('.env-relay-add-btn').addEventListener('click', () => {
+      const input = root.querySelector('.env-relay-add');
+      const v = (input.value || '').trim();
+      if (!v) return;
+      if (!/^wss?:\/\//.test(v)) return toast('Relay URL must start with ws:// or wss://', '', 'warn');
+      addEnvUrl(p, which, 'relays', v);
+    });
+    root.querySelector('.env-blossom-add-btn').addEventListener('click', () => {
+      const input = root.querySelector('.env-blossom-add');
+      const v = (input.value || '').trim();
+      if (!v) return;
+      if (!/^https?:\/\//.test(v)) return toast('Blossom URL must start with http:// or https://', '', 'warn');
+      addEnvUrl(p, which, 'blossoms', v);
+    });
+  }
+
+  function paintUrlList(root, urls, onRemove) {
+    if (!root) return;
+    if (!urls || urls.length === 0) {
+      root.innerHTML = `<div class="muted" style="font-size:11px">(none)</div>`;
+      return;
+    }
+    root.innerHTML = urls.map(u =>
+      `<div class="relay-row"><code>${escapeHtml(u)}</code><button class="relay-remove" data-url="${escapeHtml(u)}">remove</button></div>`,
+    ).join('');
+    root.querySelectorAll('.relay-remove').forEach(btn => {
+      btn.addEventListener('click', () => onRemove(btn.dataset.url));
+    });
+  }
+
+  // Mutators — each builds a fresh environment object and PATCHes the
+  // whole block in one go. This matches the server's validation
+  // contract (validate the full environment, no partial updates) and
+  // keeps the client logic shallow — every list edit is one round-trip.
+  async function addEnvUrl(p, which, key, url) {
+    const env = clonedEnv(p.environment);
+    if (!env) return;
+    const list = env[which][key];
+    if (!list.includes(url)) list.push(url);
+    await patchAndReload(p.id, { environment: env });
+  }
+  async function removeEnvUrl(p, which, key, url) {
+    const env = clonedEnv(p.environment);
+    if (!env) return;
+    env[which][key] = env[which][key].filter(u => u !== url);
+    await patchAndReload(p.id, { environment: env });
+  }
+  async function flipActiveEnv(p, next) {
+    if (!p.environment || p.environment.active === next) return;
+    // Soft warning when there's any open project-bound PTY for this
+    // project. Phase A.6 will add the server-side hard refusal; for
+    // now we trust the user to acknowledge that the live PTY env is
+    // stale until they restart.
+    const hasLivePty = !!window.NSTerminal?.hasProjectSession?.(p.id);
+    if (hasLivePty) {
+      const ok = await confirmDestructive({
+        title: 'Restart dev server to pick up new env',
+        description:
+          'A terminal tab is open for this project. The currently-running ' +
+          'process keeps its old env vars until you restart it — flip the ' +
+          'env, then stop and reopen the terminal.',
+        confirmLabel: 'Flip anyway',
+      });
+      if (!ok) return;
+    }
+    const env = clonedEnv(p.environment);
+    env.active = next;
+    await patchAndReload(p.id, { environment: env });
+  }
+  function clonedEnv(src) {
+    if (!src) return null;
+    return {
+      active: src.active,
+      dev:  { relays: (src.dev?.relays  || []).slice(), blossoms: (src.dev?.blossoms  || []).slice() },
+      prod: { relays: (src.prod?.relays || []).slice(), blossoms: (src.prod?.blossoms || []).slice() },
+    };
+  }
+
+  // Open the promote dialog: run a dry-run, show the plan + refused
+  // events + blob rewrites, then offer an Apply button. Apply re-runs
+  // promote with apply=true (which re-prompts Amber for each re-sign +
+  // each NIP-98 upload auth).
+  async function openPromoteDialog(p) {
+    const wait = toast('Running dry-run…', 'querying local relay', 'info');
+    let plan;
+    try {
+      plan = await api(`/api/projects/${p.id}/promote`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apply: false }),
+      });
+    } catch (e) {
+      toast('Dry-run failed', e?.message || '', 'err');
+      return;
+    } finally {
+      try { wait?.dismiss?.(); } catch {}
+    }
+
+    const summary = [
+      `${plan.promote.length} event${plan.promote.length === 1 ? '' : 's'} to publish`,
+      `${plan.refused.length} refused`,
+      `${plan.blobs.length} blob${plan.blobs.length === 1 ? '' : 's'} to re-upload`,
+    ].join(' · ');
+
+    const detailLines = [];
+    if (plan.errors.length) {
+      detailLines.push('Errors:');
+      for (const e of plan.errors) detailLines.push(`  • ${e}`);
+      detailLines.push('');
+    }
+    if (plan.refused.length) {
+      detailLines.push('Refused events:');
+      for (const r of plan.refused) {
+        detailLines.push(`  • kind ${r.kind} id ${r.id.slice(0, 8)}… (${r.reason})`);
+      }
+      detailLines.push('');
+    }
+    if (plan.promote.length) {
+      detailLines.push('Will publish:');
+      for (const c of plan.promote) {
+        const marker = c.rewrote ? ' [rewrites local blob URLs]' : '';
+        // kindClass surfaces NIP-01 semantics: "replaceable" /
+        // "addressable" promote idempotently; "regular" creates a new
+        // public note with a fresh timestamp. "deletion" is the kind-5
+        // edge case with a clear advisory.
+        const cls = c.kindClass ? ` (${c.kindClass})` : '';
+        detailLines.push(`  • kind ${c.kind}${cls} id ${c.id.slice(0, 8)}…${marker}`);
+        if (c.kindNote) detailLines.push(`      ↪ ${c.kindNote}`);
+      }
+      detailLines.push('');
+    }
+    if (plan.blobs.length) {
+      detailLines.push('Blobs to re-upload to prod Blossom:');
+      for (const b of plan.blobs) detailLines.push(`  • ${b.sha256.slice(0, 12)}… ← ${b.localUrl}`);
+    }
+
+    const canApply = plan.errors.length === 0 && plan.promote.length > 0;
+    const ok = await confirmDestructive({
+      title: `Promote ${p.name} to prod`,
+      description: `${summary}\n\n${detailLines.join('\n')}`,
+      confirmLabel: canApply ? 'Apply' : 'Close',
+    });
+    if (!ok || !canApply) return;
+
+    const wait2 = toast('Promoting…', 'this prompts Amber to sign each event', 'info');
+    try {
+      const r = await api(`/api/projects/${p.id}/promote`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apply: true }),
+      });
+      const msg = `Published ${r.eventsPublished} event(s), uploaded ${r.blobsUploaded} blob(s)` +
+        (r.errors?.length ? ` (with ${r.errors.length} error${r.errors.length === 1 ? '' : 's'})` : '');
+      toast('Promote complete', msg, r.errors?.length ? 'warn' : 'ok');
+    } catch (e) {
+      toast('Promote failed', e?.message || '', 'err');
+    } finally {
+      try { wait2?.dismiss?.(); } catch {}
+    }
+  }
+
+  // Renders the per-project Test users section. Two states:
+  //   - file mode 0600 + parseable → list + add + reset controls
+  //   - file mode wrong / parse failure → big red banner with a
+  //     "Fix permissions" button that chmods the file back to 0600
+  async function paintTestUsers(root, p) {
+    if (!root) return;
+    if (!p.path) {
+      root.innerHTML = `<div class="muted">Project has no local path — test users require a path.</div>`;
+      return;
+    }
+    let resp = null;
+    try { resp = await api(`/api/projects/${p.id}/test-identities`); }
+    catch (e) {
+      // Server returned 4xx (e.g. bad-mode) — body is JSON with { error, mode? }.
+      const message = e?.body?.error || e?.message || 'unknown error';
+      const isBadMode = message === 'bad-mode';
+      root.innerHTML = `
+        <div class="pc-banner err">
+          <div><b>Cannot load test identities</b></div>
+          <div class="muted" style="margin-top:4px">${escapeHtml(message)}</div>
+          ${isBadMode ? `
+            <div class="step-actions" style="margin-top:8px">
+              <button class="primary tu-fix-perms">Fix permissions (chmod 600)</button>
+            </div>
+          ` : ''}
+        </div>
+      `;
+      // No server-side "fix permissions" endpoint yet — point user at the path.
+      root.querySelector('.tu-fix-perms')?.addEventListener('click', () => {
+        const fp = `${p.path}/.nostr-station/test-identities.json`;
+        toast('Run in your terminal',
+          `chmod 600 "${fp}"`, 'warn');
+      });
+      return;
+    }
+
+    const identities = resp?.identities || [];
+    const rows = identities.length === 0
+      ? `<div class="muted">No test users yet.</div>`
+      : identities.map(id => `
+        <div class="test-user-row" data-tid="${escapeHtml(id.id)}">
+          <div class="test-user-meta">
+            <div><b>${escapeHtml(id.label)}</b> <span class="muted" style="font-size:11px">· ${escapeHtml(id.role || 'no role')}</span></div>
+            <div class="muted" style="font-size:11px"><code>${escapeHtml(id.npub.slice(0, 14))}…${escapeHtml(id.npub.slice(-6))}</code></div>
+          </div>
+          <button class="tu-delete" data-tid="${escapeHtml(id.id)}">remove</button>
+        </div>
+      `).join('');
+
+    root.innerHTML = `
+      <div class="test-user-list">${rows}</div>
+      <div class="field-row" style="margin-top:10px">
+        <input type="text" class="tu-label" placeholder="label (e.g. teacher-alice)" style="flex:2">
+        <input type="text" class="tu-role"  placeholder="role (optional)" style="flex:1">
+        <button class="tu-add">add test user</button>
+      </div>
+      ${identities.length ? `
+        <div class="step-actions" style="margin-top:10px">
+          <button class="tu-seed">Seed fixture events (3 per user)</button>
+          <button class="danger tu-reset">Reset all (regenerate)</button>
+        </div>
+      ` : ''}
+    `;
+
+    root.querySelectorAll('.tu-delete').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const tid = btn.dataset.tid;
+        const ok = await confirmDestructive({
+          title: 'Remove test user?',
+          description: 'Deletes the keypair and removes the pubkey from the local relay\'s whitelist. Any events they\'ve published stay in the relay store.',
+          confirmLabel: 'Remove',
+        });
+        if (!ok) return;
+        try {
+          await api(`/api/projects/${p.id}/test-identities/${tid}`, { method: 'DELETE' });
+          paintTestUsers(root, p);
+        } catch (e) { toast('Remove failed', e?.message || '', 'err'); }
+      });
+    });
+
+    root.querySelector('.tu-add')?.addEventListener('click', async () => {
+      const label = root.querySelector('.tu-label').value.trim();
+      const role  = root.querySelector('.tu-role').value.trim();
+      if (!label) return toast('Label required', 'pick something like teacher-alice', 'warn');
+      try {
+        await api(`/api/projects/${p.id}/test-identities`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body:    JSON.stringify({ label, role }),
+        });
+        paintTestUsers(root, p);
+      } catch (e) {
+        toast('Add failed', e?.message || '', 'err');
+      }
+    });
+
+    root.querySelector('.tu-seed')?.addEventListener('click', async () => {
+      const btn = root.querySelector('.tu-seed');
+      btn.disabled = true;
+      btn.textContent = 'Seeding…';
+      try {
+        const r = await api(`/api/projects/${p.id}/test-identities/seed`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ countPerIdentity: 3 }),
+        });
+        const msg = r.errors?.length
+          ? `Published ${r.eventsPublished} events (with ${r.errors.length} errors)`
+          : `Published ${r.eventsPublished} events from ${r.identitiesUsed} test user${r.identitiesUsed === 1 ? '' : 's'}`;
+        toast('Seed complete', msg, r.errors?.length ? 'warn' : 'ok');
+      } catch (e) {
+        toast('Seed failed', e?.message || '', 'err');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Seed fixture events (3 per user)';
+      }
+    });
+
+    root.querySelector('.tu-reset')?.addEventListener('click', async () => {
+      const ok = await confirmDestructive({
+        title: 'Reset all test users?',
+        description: `Removes all ${identities.length} test user(s) from this project and the relay whitelist. Cannot be undone.`,
+        confirmLabel: 'Reset',
+      });
+      if (!ok) return;
+      try {
+        await api(`/api/projects/${p.id}/test-identities/reset`, { method: 'POST' });
+        paintTestUsers(root, p);
+      } catch (e) { toast('Reset failed', e?.message || '', 'err'); }
+    });
   }
 
   // Renders the per-project git-identity row in Settings: shows the
@@ -12694,6 +13204,16 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
+      <details class="config-section cfg-collapsible" id="cfg-blossom-section">
+        <summary>
+          <h3>Blossom (local blob storage)</h3>
+          <span class="cfg-summary-meta" id="cfg-blossom-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-blossom-body">
+          <div class="muted">loading blossom status…</div>
+        </div>
+      </details>
+
       <details class="config-section cfg-collapsible" id="cfg-ai-section" open>
         <summary>
           <h3>AI</h3>
@@ -13261,6 +13781,98 @@ const ConfigPanel = (() => {
       });
     }
 
+    // ── Local Blossom (Phase C) ────────────────────────────────────────
+    // Paint into the slot reserved by #cfg-blossom-section. Async since
+    // it round-trips to /api/blossom-config — failures degrade to a
+    // muted "not running" line with an enable button.
+    paintBlossomConfigSection();
+  }
+
+  async function paintBlossomConfigSection() {
+    const body    = $('cfg-blossom-body');
+    const summary = $('cfg-blossom-summary');
+    if (!body) return;
+    let snapshot = null;
+    try { snapshot = await api('/api/blossom-config'); }
+    catch { /* surface as "unavailable" below */ }
+
+    if (!snapshot) {
+      if (summary) summary.textContent = 'unavailable';
+      body.innerHTML = `<div class="muted">Blossom config endpoint not reachable.</div>`;
+      return;
+    }
+
+    if (!snapshot.running) {
+      if (summary) summary.textContent = 'off';
+      body.innerHTML = `
+        <div class="muted" style="margin-bottom:10px">
+          Local Blossom is the blob-storage half of the dev stack — apps
+          spawned via the dashboard see <code>NOSTR_STATION_BLOSSOM=http://localhost:&lt;port&gt;</code>
+          when it's enabled. Off by default; turn on once you actually
+          need blob hosting locally (e.g. testing avatar uploads
+          without polluting public Blossom servers).
+        </div>
+        <div class="step-actions">
+          <button class="primary" id="cfg-blossom-enable">Enable Blossom</button>
+        </div>
+      `;
+      $('cfg-blossom-enable')?.addEventListener('click', async () => {
+        try {
+          await api('/api/blossom/start', { method: 'POST' });
+          paintBlossomConfigSection();
+          refreshHealth?.();
+        } catch (e) {
+          toast('Failed to start Blossom', e?.message || '', 'err');
+        }
+      });
+      return;
+    }
+
+    const stats = snapshot.stats || { blobCount: 0, totalBytes: 0, quotaBytes: 0, dataDir: '', uploadsByKind: {} };
+    const pct = stats.quotaBytes ? Math.min(100, Math.round((stats.totalBytes / stats.quotaBytes) * 100)) : 0;
+    if (summary) summary.textContent = `${stats.blobCount} blob${stats.blobCount === 1 ? '' : 's'} · ${fmtBytes(stats.totalBytes)}`;
+    body.innerHTML = `
+      <div class="config-row"><div class="k">URL</div><div class="v"><code>${escapeHtml(snapshot.url || '')}</code></div></div>
+      <div class="config-row"><div class="k">Stored</div><div class="v">
+        <b>${stats.blobCount}</b> blob${stats.blobCount === 1 ? '' : 's'} · <b>${fmtBytes(stats.totalBytes)}</b>
+        of <b>${fmtBytes(stats.quotaBytes)}</b> (${pct}%)
+      </div></div>
+      <div class="config-row"><div class="k">Uploaders</div><div class="v">
+        <span class="muted">owner ${stats.uploadsByKind.owner || 0} · whitelist ${stats.uploadsByKind.whitelist || 0} · test ${stats.uploadsByKind['test-identity'] || 0}</span>
+      </div></div>
+      <div class="config-row"><div class="k">Data dir</div><div class="v"><code>${escapeHtml(stats.dataDir || '')}</code></div></div>
+      <div class="step-actions" style="margin-top:10px">
+        <button id="cfg-blossom-stop">Stop</button>
+        <button id="cfg-blossom-restart">Restart</button>
+        <button class="danger" id="cfg-blossom-wipe">Wipe all blobs</button>
+      </div>
+    `;
+    $('cfg-blossom-stop')?.addEventListener('click', async () => {
+      try { await api('/api/blossom/stop', { method: 'POST' }); paintBlossomConfigSection(); refreshHealth?.(); }
+      catch (e) { toast('Stop failed', e?.message || '', 'err'); }
+    });
+    $('cfg-blossom-restart')?.addEventListener('click', async () => {
+      try { await api('/api/blossom/restart', { method: 'POST' }); paintBlossomConfigSection(); refreshHealth?.(); }
+      catch (e) { toast('Restart failed', e?.message || '', 'err'); }
+    });
+    $('cfg-blossom-wipe')?.addEventListener('click', async () => {
+      const ok = await confirmDestructive({
+        title: 'Wipe all local blobs?',
+        description: `Deletes ${stats.blobCount} blob(s) (${fmtBytes(stats.totalBytes)}) from the local store. Cannot be undone.`,
+        confirmLabel: 'Wipe',
+      });
+      if (!ok) return;
+      try { await api('/api/blossom/wipe', { method: 'POST' }); paintBlossomConfigSection(); }
+      catch (e) { toast('Wipe failed', e?.message || '', 'err'); }
+    });
+  }
+
+  function fmtBytes(n) {
+    if (!n || n < 0) return '0 B';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
   }
 
   // ── AI providers list ───────────────────────────────────────────────
@@ -14444,7 +15056,9 @@ AuthScreen = (() => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `verify ${res.status}`);
-      completeSignIn(data);
+      // Browser-extension sign-in → record source so publish routes
+      // back to window.nostr.signEvent (no Amber pairing required).
+      completeSignIn(data, 'nip07');
     } catch (e) {
       setStatus(e.message || 'sign-in failed', 'err');
       btn.disabled = false;
@@ -14472,7 +15086,7 @@ AuthScreen = (() => {
     // spot and leave qrSession null so any subsequent renderQrTab would
     // re-POST and try silent again. mode: 'qr' is the traditional flow.
     if (data.mode === 'silent-ok' && data.token) {
-      completeSignIn(data);
+      completeSignIn(data, 'bunker');
       return { silent: true };
     }
     qrSession = data;
@@ -14542,7 +15156,7 @@ AuthScreen = (() => {
         const data = await r.json();
         if (data.status === 'ok') {
           qrSession = null;
-          completeSignIn(data);
+          completeSignIn(data, 'bunker');
           return;
         }
         if (data.status === 'waiting') {
@@ -14595,7 +15209,7 @@ AuthScreen = (() => {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `${res.status}`);
-        completeSignIn(data);
+        completeSignIn(data, 'bunker');
       } catch (e) {
         status.className = 'auth-status-line err';
         status.innerHTML = `<span class="pulse"></span>${escapeHtml(e.message || 'bunker failed')}`;
@@ -14607,9 +15221,14 @@ AuthScreen = (() => {
   }
 
   // ── Completion ───────────────────────────────────────────────────────
-  function completeSignIn(data) {
+  function completeSignIn(data, source) {
     if (!data?.token) { toast('Sign-in failed', 'no token', 'err'); return; }
-    setSessionToken(data.token, data.expiresAt);
+    // `source` is 'nip07' or 'bunker' — recorded so publish + future
+    // signing flows route to the matching signer. Falls back to
+    // 'bunker' for legacy call sites that don't pass it (silent paths
+    // / older cookies); the publish handler treats 'bunker' as the
+    // server-signs default.
+    setSessionToken(data.token, data.expiresAt, source || 'bunker');
     hide();
     bootDashboard(false);
     toast('Signed in', truncNpub(data.npub || ''), 'ok');
@@ -16160,6 +16779,35 @@ const ClientPanel = (() => {
   composeBtn.addEventListener('click', () => publish());
   composeCancelBtn.addEventListener('click', () => hideCompose());
 
+  // Routes a publish through whichever signer the user authenticated
+  // with. If they signed in via NIP-07 (Alby / nos2x / window.nostr),
+  // fetch the unsigned template from the server, sign in-browser, and
+  // POST the signed event back. If they signed in via bunker (Amber
+  // NIP-46), POST the body directly and the server signs via the saved
+  // pairing. Falls back to bunker for any unknown source.
+  async function signerAwarePublish(body) {
+    const source = getSessionSource();
+    if (source === 'nip07' && typeof window !== 'undefined' && window.nostr?.signEvent) {
+      const built = await api('/api/client/publish/build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!built?.template) throw new Error(built?.error || 'failed to build template');
+      const signed = await window.nostr.signEvent(built.template);
+      return api('/api/client/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event: signed }),
+      });
+    }
+    return api('/api/client/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
   async function publish() {
     const content = composeIn.value.trim();
     if (!content) { toast('Nothing to publish', 'Type something first', 'warn'); return; }
@@ -16169,11 +16817,7 @@ const ClientPanel = (() => {
     try {
       const body = { content };
       if (replyTarget) body.replyTo = replyTarget;
-      const r = await api('/api/client/publish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const r = await signerAwarePublish(body);
       if (!r.ok) {
         const acc = r.accepted ?? 0;
         toast('Publish failed', `${acc}/${r.targets || 0} relays accepted`, 'err');
@@ -16386,8 +17030,16 @@ const ClientPanel = (() => {
     const events = cache.events || [];
     const profileMap = cache.profiles || { [p.hex]: p };
     setEmpty(null);
+    // Banner (NIP-24 `banner` field on kind-0). Renders only when set —
+    // we don't paint a placeholder so the layout doesn't get bigger for
+    // users without one. URL is already safeHttpUrl-gated server-side
+    // so direct embed is safe.
+    const bannerHtml = p.banner
+      ? `<div class="client-profile-banner"><img src="${escapeHtml(p.banner)}" alt=""></div>`
+      : '';
     listEl.innerHTML = `
-      <div class="client-profile-card">
+      ${bannerHtml}
+      <div class="client-profile-card${p.banner ? ' has-banner' : ''}">
         ${avatarOrInitials(p)}
         <div class="client-profile-meta">
           <div class="client-profile-name">${escapeHtml(name)}</div>
@@ -16585,11 +17237,7 @@ const ClientPanel = (() => {
       const body = kind === 'react'
         ? { kind: 7, target, content: '+' }
         : { kind: 6, target };
-      const r = await api('/api/client/publish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const r = await signerAwarePublish(body);
       if (!r.ok) {
         toast(`${kind} failed`, `${r.accepted ?? 0}/${r.targets || 0} relays accepted`, 'err');
         return;

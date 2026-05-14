@@ -62,7 +62,7 @@ test('ensureConfigDir: creates the dir and gitignore', () => {
   assert.match(gi, /chat\.json/);
 });
 
-test('ensureConfigDir: idempotent — preserves existing gitignore', () => {
+test('ensureConfigDir: preserves user customizations + appends required entries', () => {
   const dir = makeProjectDir();
   const project = makeProject({ path: dir });
   ensureConfigDir(project);
@@ -70,7 +70,15 @@ test('ensureConfigDir: idempotent — preserves existing gitignore', () => {
   const giPath = path.join(dir, CONFIG_DIRNAME, '.gitignore');
   fs.writeFileSync(giPath, 'custom\n');
   ensureConfigDir(project);
-  assert.equal(fs.readFileSync(giPath, 'utf8'), 'custom\n');
+  const after = fs.readFileSync(giPath, 'utf8');
+  // The user's custom line stays. Required entries (permissions.json,
+  // chat.json, test-identities.json) are appended when absent — load-
+  // bearing for upgrades: a project scaffolded before test-identities
+  // existed would otherwise leak that file to git.
+  assert.match(after, /^custom$/m);
+  assert.match(after, /^permissions\.json$/m);
+  assert.match(after, /^chat\.json$/m);
+  assert.match(after, /^test-identities\.json$/m);
 });
 
 test('ensureConfigDir: returns null for path-less project', () => {
