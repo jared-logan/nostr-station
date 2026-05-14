@@ -50,6 +50,8 @@ export const DEFAULT_READ_RELAYS = [
   'wss://relay.damus.io',
   'wss://relay.nostr.band',
   'wss://nos.lol',
+  'wss://relay.primal.net',
+  'wss://relay.ditto.pub',
 ];
 
 // Default GRASP server picks for a brand-new install. NIP-34 mentions

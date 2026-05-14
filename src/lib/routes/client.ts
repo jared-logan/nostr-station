@@ -75,14 +75,16 @@ const REACTION_LIKE_CONTENT = '+';
 // ADDITION to the user's configured Client Relays so a fresh user whose
 // only Client Relays are different from where their kind-10002 actually
 // lives can still bootstrap. purplepag.es is the canonical profile +
-// relay-list indexer; the rest are wide general-purpose indexers known
-// to mirror replaceable events broadly.
+// relay-list indexer; the rest are wide general-purpose indexers + Ditto's
+// own relay (where many @user@happytavern.co / Ditto-instance users
+// actually have their kind-10002 published).
 const NIP65_BOOTSTRAP_RELAYS: string[] = [
   'wss://purplepag.es',
   'wss://relay.nostr.band',
   'wss://relay.damus.io',
   'wss://relay.primal.net',
   'wss://nos.lol',
+  'wss://relay.ditto.pub',
 ];
 
 // Cached "is nak installed?" check. findBin walks PATH on every call;
