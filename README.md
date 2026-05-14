@@ -269,6 +269,10 @@ The wizard explicitly asks if you want this with a *Skip for now* button
 right next to *Install*. Default answer is Skip. You can always install
 later from the Status panel or this panel.
 
+For deployment topologies (cloud VM vs home server vs container), how to
+verify each layer of the stack, and the common failure modes, see
+[docs/nvpn-deployment.md](docs/nvpn-deployment.md).
+
 ### Logs
 
 ![Logs panel — relay tab, INFO-tagged lines with ISO timestamps](https://i.nostr.build/f4Caw9ClVL2eLPCu.png)
