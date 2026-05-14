@@ -244,13 +244,15 @@ async function fetchContacts(force = false): Promise<ContactsCacheEntry> {
 // ── Profile cache (kind-0, hex → ProfileLite) ──────────────────────────────
 
 interface ProfileLite {
-  hex:      string;
-  npub:     string;
-  name?:    string;
-  about?:   string;
-  picture?: string;
-  nip05?:   string;
-  cachedAt: number;
+  hex:           string;
+  npub:          string;
+  name?:         string;
+  displayName?:  string;
+  about?:        string;
+  picture?:      string;
+  banner?:       string;
+  nip05?:        string;
+  cachedAt:      number;
 }
 
 const profileCache = new Map<string, ProfileLite>();
@@ -259,11 +261,16 @@ function parseKind0(ev: NostrEvent): Partial<ProfileLite> {
   const out: Partial<ProfileLite> = {};
   try {
     const meta = JSON.parse(ev.content);
-    if (typeof meta.name         === 'string') out.name    = meta.name;
-    else if (typeof meta.display_name === 'string') out.name = meta.display_name;
-    if (typeof meta.about        === 'string') out.about   = meta.about;
-    if (typeof meta.picture      === 'string') out.picture = meta.picture;
-    if (typeof meta.nip05        === 'string') out.nip05   = meta.nip05;
+    // `name` is the handle/username; `display_name` (NIP-24) is the
+    // longer "Display Name" most clients prefer for the prominent label.
+    // Surface both so the renderer can pick — fallback to whichever
+    // exists if only one is set.
+    if (typeof meta.name         === 'string') out.name        = meta.name;
+    if (typeof meta.display_name === 'string') out.displayName = meta.display_name;
+    if (typeof meta.about        === 'string') out.about       = meta.about;
+    if (typeof meta.picture      === 'string') out.picture     = meta.picture;
+    if (typeof meta.banner       === 'string') out.banner      = meta.banner;
+    if (typeof meta.nip05        === 'string') out.nip05       = meta.nip05;
   } catch { /* malformed kind-0 — leave fields undefined */ }
   return out;
 }
@@ -314,9 +321,11 @@ async function fetchProfiles(pubkeys: string[]): Promise<Map<string, ProfileLite
     const ev = freshest.get(hex);
     const profile: ProfileLite = { hex, npub: hexToNpub(hex), cachedAt: now };
     if (ev) Object.assign(profile, parseKind0(ev));
-    // Sanitize picture at cache time so callers can render <img src>
-    // without re-checking schemes.
+    // Sanitize picture + banner at cache time so callers can render
+    // <img src> without re-checking schemes. Same defense-in-depth
+    // against javascript: / data: smuggling in user-controlled URLs.
     if (profile.picture) profile.picture = safeHttpUrl(profile.picture) || undefined;
+    if (profile.banner)  profile.banner  = safeHttpUrl(profile.banner)  || undefined;
     profileCache.set(hex, profile);
     out.set(hex, profile);
   }

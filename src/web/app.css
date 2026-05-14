@@ -8199,6 +8199,25 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
      the distinction. Reserved for future styling. */
 }
 
+/* Banner (NIP-24 kind-0 `banner` field) sits above the profile card.
+   Wide aspect-ratio cover image. When present, the card below uses
+   `.has-banner` so the avatar can negatively offset and overlap the
+   banner's bottom edge — the social-client convention. */
+.client-profile-banner {
+  width: 100%;
+  height: 180px;
+  border-radius: 8px 8px 0 0;
+  overflow: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  margin-bottom: 0;
+}
+.client-profile-banner img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .client-profile-card {
   display: flex;
   gap: 16px;
@@ -8207,6 +8226,19 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
   border-radius: 8px;
   padding: 16px;
   align-items: flex-start;
+}
+.client-profile-card.has-banner {
+  border-radius: 0 0 8px 8px;
+  border-top: none;
+  /* Negative top-margin so the avatar overlaps the banner's bottom
+     edge — same trick Twitter / Damus / Primal use. */
+  padding-top: 28px;
+}
+.client-profile-card.has-banner .client-avatar,
+.client-profile-card.has-banner .client-avatar-fallback {
+  margin-top: -52px;
+  border: 3px solid var(--bg-card);
+  background-clip: padding-box;
 }
 .client-profile-card .client-avatar {
   width: 64px;

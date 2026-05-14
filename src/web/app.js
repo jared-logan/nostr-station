@@ -17030,8 +17030,16 @@ const ClientPanel = (() => {
     const events = cache.events || [];
     const profileMap = cache.profiles || { [p.hex]: p };
     setEmpty(null);
+    // Banner (NIP-24 `banner` field on kind-0). Renders only when set —
+    // we don't paint a placeholder so the layout doesn't get bigger for
+    // users without one. URL is already safeHttpUrl-gated server-side
+    // so direct embed is safe.
+    const bannerHtml = p.banner
+      ? `<div class="client-profile-banner"><img src="${escapeHtml(p.banner)}" alt=""></div>`
+      : '';
     listEl.innerHTML = `
-      <div class="client-profile-card">
+      ${bannerHtml}
+      <div class="client-profile-card${p.banner ? ' has-banner' : ''}">
         ${avatarOrInitials(p)}
         <div class="client-profile-meta">
           <div class="client-profile-name">${escapeHtml(name)}</div>
