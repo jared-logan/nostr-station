@@ -1,9 +1,9 @@
 /**
  * Nostr client routes — the read-and-post surface that powers the
- * /client (#client) panel in the dashboard. v1 ships feed + notifications
- * + profile lookup + kind-1 publish; private DMs (NIP-17) are intentionally
- * deferred to a follow-up so the inbox-relay + gift-wrap UX gets its own
- * design pass.
+ * /client (#client) panel in the dashboard. Ships feed + notifications
+ * + profile lookup + reactions + reposts + replies; private DMs (NIP-17)
+ * and zap sending (NIP-57 LN wallet integration) are intentionally
+ * deferred to a follow-up.
  *
  * Read paths consult the station owner's read relays — `identity.readRelays`
  * in identity.json, which the user manages via Config → Identity. The
@@ -13,6 +13,7 @@
  * `identity.readRelays`.
  *
  * Surface:
+ *   GET  /api/client/health               — nak presence + relay count
  *   GET  /api/client/contacts             — owner's kind-3 follows (cached 60s)
  *   GET  /api/client/feed?limit=&until=&authors=
  *                                         — kind-1 from owner's follows
@@ -21,7 +22,12 @@
  *                                         — mentions/replies/reposts/reactions/zaps
  *                                           tagging the owner's pubkey
  *   GET  /api/client/profile?pubkey=hex   — single kind-0 lookup
- *   POST /api/client/publish              — sign + broadcast kind-1
+ *   GET  /api/client/thread?id=hex        — fetch a single kind-1 event
+ *                                           (used to render reply parents)
+ *   GET  /api/client/event-stats?ids=hex,…
+ *                                         — reaction / repost / reply counts
+ *                                           plus the owner's own reaction
+ *   POST /api/client/publish              — sign + broadcast a kind-1/6/7
  *                                           (auto-stamps ["client","nostr-station"])
  *
  * Returns `true` when matched and a response was written; `false` lets
@@ -34,6 +40,7 @@ import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { publishEventToRelays } from './repo.js';
 import { safeHttpUrl } from '../url-safety.js';
 import { readBody } from './_shared.js';
+import { findBin } from '../detect.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -50,6 +57,59 @@ const CLIENT_TAG: string[]   = ['client', 'nostr-station'];
 //   7     — reaction
 //   9735  — zap receipt
 const NOTIFICATION_KINDS = [1, 6, 7, 9735];
+
+// Event-stats fan-out limit. Asking 50+ event ids in one query is fine for
+// nak but the response can be large; cap the request side so a runaway
+// caller can't trigger an unbounded query.
+const EVENT_STATS_MAX_IDS = 50;
+// Default reaction content for a like — matches what Damus + most clients
+// publish when the user hits the heart. Anything non-empty is allowed; the
+// "+" sentinel is the convention for an unspecified positive reaction.
+const REACTION_LIKE_CONTENT = '+';
+
+// Cached "is nak installed?" check. findBin walks PATH on every call;
+// memoizing for the process lifetime is fine because the answer doesn't
+// change without a restart. `nakAvailable()` returns null when missing so
+// callers can branch on it explicitly.
+let _nakBinCache: string | null | undefined;
+function nakBin(): string | null {
+  if (_nakBinCache === undefined) _nakBinCache = findBin('nak');
+  return _nakBinCache;
+}
+
+// Build the standard "client unavailable" payload — shared by every read
+// endpoint so the dashboard always gets the same shape and can render a
+// single install-nak banner instead of N differently-shaped errors.
+interface ClientUnavailable {
+  empty:        string;
+  unavailable:  true;
+  reason:       'nak-missing' | 'no-read-relays' | 'no-owner';
+  hint?:        string;
+}
+function unavailable(reason: ClientUnavailable['reason']): ClientUnavailable {
+  if (reason === 'nak-missing') {
+    return {
+      unavailable: true,
+      reason,
+      empty: 'nak is not installed — the client can\'t reach your relays',
+      hint:  'install nak (Setup → Tools) and refresh',
+    };
+  }
+  if (reason === 'no-read-relays') {
+    return {
+      unavailable: true,
+      reason,
+      empty: 'no read relays configured',
+      hint:  'add at least one read relay in Config → Identity',
+    };
+  }
+  return {
+    unavailable: true,
+    reason,
+    empty: 'no station owner configured',
+    hint:  'finish setup before opening the client',
+  };
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -248,6 +308,27 @@ export async function handleClient(
   const u = new URL(url, 'http://localhost');
   const path = u.pathname;
 
+  // ── GET /api/client/health ───────────────────────────────────────────────
+  //
+  // Fast-path the dashboard hits on panel-enter to decide whether to render
+  // a "client is broken" banner before any feed/notifications query fires.
+  // Reports nak presence, read-relay count, and owner-configured state in
+  // one round-trip — three things that would otherwise need three separate
+  // /api/client/* probes.
+  if (path === '/api/client/health' && method === 'GET') {
+    const me = ownerHex();
+    const relays = readRelays();
+    const nak = nakBin();
+    const ok = nak !== null && relays.length > 0 && me !== null;
+    return json(res, 200, {
+      ok,
+      ownerConfigured: me !== null,
+      readRelayCount:  relays.length,
+      nakInstalled:    nak !== null,
+      reason: !me ? 'no-owner' : !nak ? 'nak-missing' : relays.length === 0 ? 'no-read-relays' : null,
+    });
+  }
+
   // ── GET /api/client/contacts ─────────────────────────────────────────────
   if (path === '/api/client/contacts' && method === 'GET') {
     const force = u.searchParams.get('refresh') === '1';
@@ -287,9 +368,12 @@ export async function handleClient(
       usingContacts = true;
     }
 
+    if (nakBin() === null) {
+      return json(res, 200, { events: [], profiles: {}, ...unavailable('nak-missing'), usingContacts });
+    }
     const relays = capRelays(readRelays());
     if (relays.length === 0) {
-      return json(res, 200, { events: [], profiles: {}, empty: 'no read relays configured', usingContacts });
+      return json(res, 200, { events: [], profiles: {}, ...unavailable('no-read-relays'), usingContacts });
     }
     if (authors.length === 0) {
       return json(res, 200, {
@@ -340,8 +424,9 @@ export async function handleClient(
     if (!me) return json(res, 400, { error: 'no station owner configured' });
     const limit = clampInt(u.searchParams.get('limit'), FEED_DEFAULT_LIMIT, 1, FEED_MAX_LIMIT);
     const until = clampInt(u.searchParams.get('until'), 0, 0, 2_000_000_000);
+    if (nakBin() === null) return json(res, 200, { events: [], profiles: {}, ...unavailable('nak-missing') });
     const relays = capRelays(readRelays());
-    if (relays.length === 0) return json(res, 200, { events: [], profiles: {}, empty: 'no read relays configured' });
+    if (relays.length === 0) return json(res, 200, { events: [], profiles: {}, ...unavailable('no-read-relays') });
 
     try {
       const filter: any = { kinds: NOTIFICATION_KINDS, tags: { p: me }, limit };
@@ -390,13 +475,119 @@ export async function handleClient(
     }
   }
 
+  // ── GET /api/client/thread?id=hex ────────────────────────────────────────
+  //
+  // Single-event fetch used by the dashboard to render reply context — the
+  // "parent note above the reply" affordance every major client has. Returns
+  // the event + the author's profile (or { empty: '...' } if the event
+  // can't be resolved on the configured relays). Bounded to one event so
+  // an attacker-controlled id query can't fan out to a thread-flood.
+  if (path === '/api/client/thread' && method === 'GET') {
+    const id = (u.searchParams.get('id') || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(id)) return json(res, 400, { error: 'invalid event id' });
+    if (nakBin() === null) return json(res, 200, { ...unavailable('nak-missing') });
+    const relays = capRelays(readRelays());
+    if (relays.length === 0) return json(res, 200, { ...unavailable('no-read-relays') });
+    try {
+      const r = await queryRelays({
+        filter: { ids: [id], limit: 1 },
+        relays,
+        timeoutMs: RELAY_QUERY_TIMEOUT_MS,
+        stream: false,
+        acceptUntil: (evs) => evs.length >= 1,
+      });
+      const event = r.events.find(e => e.id.toLowerCase() === id) || null;
+      if (!event) return json(res, 200, { event: null, empty: 'event not found on configured relays' });
+      const profiles = await fetchProfiles([event.pubkey]).catch(() => new Map<string, ProfileLite>());
+      const profileObj: Record<string, ProfileLite> = {};
+      for (const [k, v] of profiles) profileObj[k] = v;
+      return json(res, 200, { event, profiles: profileObj });
+    } catch (e: any) {
+      return json(res, 500, { error: String(e?.message || e) });
+    }
+  }
+
+  // ── GET /api/client/event-stats?ids=hex,hex,… ────────────────────────────
+  //
+  // Aggregate reactions / reposts / reply counts for a batch of event ids.
+  // Powers the per-post counters in the feed and notifications views.
+  // Also reports whether the station owner has already reacted (so the
+  // heart can render "filled" state without a second round-trip).
+  if (path === '/api/client/event-stats' && method === 'GET') {
+    const me = ownerHex();
+    if (nakBin() === null) return json(res, 200, { stats: {}, ...unavailable('nak-missing') });
+    const relays = capRelays(readRelays());
+    if (relays.length === 0) return json(res, 200, { stats: {}, ...unavailable('no-read-relays') });
+
+    const idsParam = (u.searchParams.get('ids') || '').trim();
+    const ids = idsParam
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(s => /^[0-9a-f]{64}$/.test(s))
+      .slice(0, EVENT_STATS_MAX_IDS);
+    if (ids.length === 0) return json(res, 200, { stats: {} });
+
+    try {
+      const r = await queryRelays({
+        // One filter covering all three engagement kinds tagged at any of
+        // the requested event ids. The relay returns the union; we bucket
+        // per-id locally.
+        filter: { kinds: [1, 6, 7], tags: { e: ids } },
+        relays,
+        timeoutMs: RELAY_QUERY_TIMEOUT_MS,
+        stream: true,
+        // Don't acceptUntil — the relay's EOSE is what we want. Bounded
+        // by the wall-clock timeout. Reactions on a popular post can be
+        // thousands of events, but we only need counts; a 8s ceiling is
+        // a reasonable trade for "show stale counts on busy posts".
+      });
+      type Bucket = { reactions: number; reposts: number; replies: number; mine: string | null };
+      const stats: Record<string, Bucket> = {};
+      for (const id of ids) stats[id] = { reactions: 0, reposts: 0, replies: 0, mine: null };
+      const seen = new Set<string>(); // de-dupe by event id (the same engagement event can come from multiple relays)
+      for (const ev of r.events) {
+        if (seen.has(ev.id)) continue;
+        seen.add(ev.id);
+        const eTag = ev.tags.find(t => Array.isArray(t) && t[0] === 'e' && /^[0-9a-f]{64}$/.test(String(t[1] || '').toLowerCase()));
+        if (!eTag) continue;
+        const target = String(eTag[1]).toLowerCase();
+        const b = stats[target];
+        if (!b) continue;
+        if (ev.kind === 1) b.replies++;
+        else if (ev.kind === 6) b.reposts++;
+        else if (ev.kind === 7) {
+          b.reactions++;
+          // Track the owner's own reaction so the UI can render filled
+          // state. Only record once (the freshest); ignore "-" downvotes
+          // for the toggle since we only render the like button in v1.
+          if (me && ev.pubkey.toLowerCase() === me && ev.content !== '-') {
+            b.mine = ev.content || '+';
+          }
+        }
+      }
+      return json(res, 200, {
+        stats,
+        diagnostics: {
+          relays,
+          ids:         ids.length,
+          eventsSeen:  r.diagnostics.eventsSeen,
+          durationMs:  r.diagnostics.durationMs,
+        },
+      });
+    } catch (e: any) {
+      return json(res, 500, { error: String(e?.message || e) });
+    }
+  }
+
   // ── POST /api/client/publish ─────────────────────────────────────────────
   //
-  // Body: { content: string, replyTo?: { id: hex, pubkey: hex, relay?: string } }
+  // Body shape (one of):
+  //   { kind?: 1, content: string, replyTo?: { id, pubkey, relay? } }
+  //   { kind: 7, target: { id: hex, pubkey: hex }, content?: '+' | '-' | emoji }
+  //   { kind: 6, target: { id: hex, pubkey: hex, relay?: string } }
   //
-  // Builds a kind-1, signs it via the persisted Amber/bunker pairing, and
-  // broadcasts to the owner's read relays. The client tag is auto-stamped
-  // — that's the whole point of doing this through the station.
+  // Builds the event, signs it via the persisted bunker pairing, and
+  // broadcasts to the owner's read relays. The client tag is auto-stamped.
   if (path === '/api/client/publish' && method === 'POST') {
     let body: any;
     try { body = JSON.parse(await readBody(req)); }
@@ -405,28 +596,64 @@ export async function handleClient(
     const me = ownerHex();
     if (!me) return json(res, 400, { error: 'no station owner configured — finish setup first' });
 
-    const content = typeof body.content === 'string' ? body.content : '';
-    if (!content.trim()) return json(res, 400, { error: 'content required' });
-    // Soft cap. Nothing in NIP-01 requires it, but past 32k the post is
-    // almost certainly a mistake (pasted log file, runaway editor) and
-    // most relays will reject it anyway. Surface the limit as a 400 so
-    // the UI can show a clean error rather than parsing a relay's NOTICE.
-    if (content.length > 32_000) return json(res, 400, { error: 'content too long (max 32000 chars)' });
+    // Default kind = 1 to preserve the v0 contract for existing callers.
+    const kind = typeof body.kind === 'number' ? body.kind : 1;
+    if (![1, 6, 7].includes(kind)) {
+      return json(res, 400, { error: `unsupported kind ${kind} (allowed: 1, 6, 7)` });
+    }
 
     const tags: string[][] = [];
+    let content = '';
 
-    // Reply threading per NIP-10 (marked tags). We only support the simple
-    // "reply to one post" case in v1 — replying to a reply still works
-    // because the second-level reply just tags the immediate parent; the
-    // full ancestor chain reconstruction is the reader's job.
-    if (body.replyTo && typeof body.replyTo === 'object') {
-      const id     = typeof body.replyTo.id     === 'string' ? body.replyTo.id.toLowerCase()     : '';
-      const pubkey = typeof body.replyTo.pubkey === 'string' ? body.replyTo.pubkey.toLowerCase() : '';
-      const relay  = typeof body.replyTo.relay  === 'string' ? body.replyTo.relay                : '';
-      if (/^[0-9a-f]{64}$/.test(id)) {
-        tags.push(['e', id, relay, 'reply']);
-        if (/^[0-9a-f]{64}$/.test(pubkey)) tags.push(['p', pubkey]);
+    if (kind === 1) {
+      content = typeof body.content === 'string' ? body.content : '';
+      if (!content.trim()) return json(res, 400, { error: 'content required' });
+      if (content.length > 32_000) return json(res, 400, { error: 'content too long (max 32000 chars)' });
+      // Reply threading per NIP-10 (marked tags). v1 only supports the
+      // immediate parent — full root/ancestor chain is the reader's job.
+      if (body.replyTo && typeof body.replyTo === 'object') {
+        const id     = typeof body.replyTo.id     === 'string' ? body.replyTo.id.toLowerCase()     : '';
+        const pubkey = typeof body.replyTo.pubkey === 'string' ? body.replyTo.pubkey.toLowerCase() : '';
+        const relay  = typeof body.replyTo.relay  === 'string' ? body.replyTo.relay                : '';
+        if (/^[0-9a-f]{64}$/.test(id)) {
+          tags.push(['e', id, relay, 'reply']);
+          if (/^[0-9a-f]{64}$/.test(pubkey)) tags.push(['p', pubkey]);
+        }
       }
+    } else if (kind === 7) {
+      // NIP-25 reaction. content is "+" / "-" / an emoji. Target event id
+      // + author pubkey are required so the receiving client can resolve
+      // "who reacted to what".
+      const target = body.target;
+      if (!target || typeof target !== 'object') return json(res, 400, { error: 'target required for reaction' });
+      const id     = typeof target.id     === 'string' ? target.id.toLowerCase()     : '';
+      const pubkey = typeof target.pubkey === 'string' ? target.pubkey.toLowerCase() : '';
+      if (!/^[0-9a-f]{64}$/.test(id))     return json(res, 400, { error: 'target.id must be 64-char hex' });
+      if (!/^[0-9a-f]{64}$/.test(pubkey)) return json(res, 400, { error: 'target.pubkey must be 64-char hex' });
+      const rawContent = typeof body.content === 'string' ? body.content : REACTION_LIKE_CONTENT;
+      // Bound the reaction content: NIP-25 explicitly allows any string,
+      // but in practice it's "+", "-", or a single emoji. Cap at 32 chars
+      // so a misbehaving caller can't smuggle a kind-1's-worth of content
+      // into the reaction surface.
+      content = rawContent.slice(0, 32);
+      tags.push(['e', id]);
+      tags.push(['p', pubkey]);
+    } else if (kind === 6) {
+      // NIP-18 generic repost. The kind-6 event content SHOULD be the
+      // stringified original event so receivers can hydrate without a
+      // second round-trip; v1 keeps it empty and relies on the e + p
+      // tags + the receiving client's resolver. This is what Damus/Primal
+      // do for "Repost" while reserving "Quote" (kind-1 with q tag) for
+      // the richer flow — quote is a phase-2 feature for us.
+      const target = body.target;
+      if (!target || typeof target !== 'object') return json(res, 400, { error: 'target required for repost' });
+      const id     = typeof target.id     === 'string' ? target.id.toLowerCase()     : '';
+      const pubkey = typeof target.pubkey === 'string' ? target.pubkey.toLowerCase() : '';
+      const relay  = typeof target.relay  === 'string' ? target.relay                : '';
+      if (!/^[0-9a-f]{64}$/.test(id))     return json(res, 400, { error: 'target.id must be 64-char hex' });
+      if (!/^[0-9a-f]{64}$/.test(pubkey)) return json(res, 400, { error: 'target.pubkey must be 64-char hex' });
+      tags.push(['e', id, relay, 'mention']);
+      tags.push(['p', pubkey]);
     }
 
     // Stamp client identity. Bare two-element form (NIP-89 handler
@@ -435,7 +662,7 @@ export async function handleClient(
     tags.push([...CLIENT_TAG]);
 
     const template = {
-      kind:       1,
+      kind,
       created_at: Math.floor(Date.now() / 1000),
       tags,
       content,
