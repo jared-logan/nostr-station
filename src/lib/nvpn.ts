@@ -821,13 +821,20 @@ export interface NvpnRelays {
 // Curated "good defaults" the dashboard offers via the Config panel's
 // "Use recommended" button. Deliberately separate from whatever nvpn
 // itself ships as init defaults — those have flaked in the field
-// (snort.social / temp.iris.to returning 504s). We keep this list
-// short and only include relays we've measured as healthy. Update
-// here when relay quality changes; the UI button surfaces the new
-// list on the next dashboard load.
+// (snort.social / temp.iris.to returning 504s, damus.io rate-limiting
+// presence publishers with "you are noting too much"). We keep this
+// list short and only include relays measured as healthy for nvpn
+// publish traffic. Update here when relay quality changes; the UI
+// button surfaces the new list on the next dashboard load.
+//
+// Excluded after field measurement: relay.damus.io (publish rate-limit),
+// relay.snort.social (504), relay.nostr.band (connect timeouts),
+// nostr.wine (paid / 403), offchain.pub (WoT publish rejection).
 export const RECOMMENDED_NVPN_RELAYS: readonly string[] = Object.freeze([
-  'wss://relay.damus.io',
+  'wss://nos.lol',
   'wss://relay.primal.net',
+  'wss://purplerelay.com',
+  'wss://nostr.mom',
 ]);
 
 // Pure helper — extract the relay list from the parsed sections of a
