@@ -46,6 +46,7 @@ import {
 import { nvpnRelayHealth } from '../nvpn-relay-health.js';
 import { detectContainer, natWarningFor } from '../container-detect.js';
 import { detectSplitBrain, stopUserModeDaemon } from '../nvpn-split-brain.js';
+import { listJoinRequests, approveJoinRequest, denyJoinRequest } from '../nvpn-join-requests.js';
 import { readBody } from './_shared.js';
 
 async function writeJson(
@@ -257,6 +258,34 @@ export async function handleNvpn(
   if (url === '/api/nvpn/networks' && method === 'GET') {
     const networks = readNvpnNetworks();
     await writeJson(res, 200, { networks });
+    return true;
+  }
+
+  // ── Join requests (#62) ───────────────────────────────────────────
+  // nvpn protocol supports peer-initiated join-requests: a device that
+  // imports an admin's invite can submit a request, and the admin
+  // approves to add to the roster. CLI surface varies across nvpn
+  // versions; the bridge tries a few naming variants and reports
+  // `supported: false` when none match.
+  if (url === '/api/nvpn/join-requests' && method === 'GET') {
+    const r = await listJoinRequests();
+    await writeJson(res, 200, r);
+    return true;
+  }
+  if (url === '/api/nvpn/join-requests/approve' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const p = typeof body.participant === 'string' ? body.participant : '';
+    const r = await approveJoinRequest(p);
+    await writeJson(res, r.ok ? 200 : 400, r);
+    return true;
+  }
+  if (url === '/api/nvpn/join-requests/deny' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const p = typeof body.participant === 'string' ? body.participant : '';
+    const r = await denyJoinRequest(p);
+    await writeJson(res, r.ok ? 200 : 400, r);
     return true;
   }
 

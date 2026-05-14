@@ -1394,6 +1394,33 @@ details.dashboard-health .dashboard-health-sub {
   line-height: 1.6;
 }
 .reach-steps li { margin-bottom: 4px; }
+/* Pending join-request rows (#62). Sits inside the Network sub-tab
+   above the peers list, only when at least one request is pending. */
+.vpn-join-req-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.vpn-join-req-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a2c33);
+  border-radius: 4px;
+  background: rgba(120, 160, 220, 0.05);
+}
+.vpn-join-req-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+.vpn-join-req-ts { font-size: 11px; }
+.vpn-join-req-actions { display: flex; gap: 6px; }
+.vpn-join-req-actions button { font-size: 11px; padding: 4px 10px; }
 .vpn-strip-actions {
   display: flex;
   gap: 6px;

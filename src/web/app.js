@@ -10395,13 +10395,14 @@ const VpnPanel = (() => {
   let currentTab = 'status';
   // Cached payloads — shared across sub-tab renders so flipping tabs
   // doesn't refetch what we already have. Each onEnter() refreshes.
-  let lastStatus     = null;  // GET /api/nvpn/status
-  let lastService    = null;  // GET /api/nvpn/service/status
-  let lastRoster     = null;  // GET /api/nvpn/roster
-  let lastRelays     = null;  // GET /api/nvpn/relays
-  let lastNetworks   = null;  // GET /api/nvpn/networks  (full [[networks]] list)
-  let lastDeployment = null;  // GET /api/nvpn/deployment-context
-  let lastSplitBrain = null;  // GET /api/nvpn/split-brain
+  let lastStatus       = null;  // GET /api/nvpn/status
+  let lastService      = null;  // GET /api/nvpn/service/status
+  let lastRoster       = null;  // GET /api/nvpn/roster
+  let lastRelays       = null;  // GET /api/nvpn/relays
+  let lastNetworks     = null;  // GET /api/nvpn/networks  (full [[networks]] list)
+  let lastDeployment   = null;  // GET /api/nvpn/deployment-context
+  let lastSplitBrain   = null;  // GET /api/nvpn/split-brain
+  let lastJoinRequests = null;  // GET /api/nvpn/join-requests
   // 60s TTL for the auto-fired netcheck — same idea as ConfigPanel's
   // cache. Manual "Check reachability" passes { force:true } to bypass.
   let relayHealthCache = null; // { fetchedAt: ms, raw: object|null }
@@ -10599,7 +10600,7 @@ const VpnPanel = (() => {
   // whole panel — each sub-tab handles missing data with its own
   // empty-state.
   async function refresh() {
-    const [s, svc, roster, relays, networks, deployment, splitBrain] = await Promise.all([
+    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs] = await Promise.all([
       api('/api/nvpn/status').catch(() => null),
       api('/api/nvpn/service/status').catch(() => null),
       api('/api/nvpn/roster').catch(() => null),
@@ -10607,14 +10608,16 @@ const VpnPanel = (() => {
       api('/api/nvpn/networks').catch(() => null),
       api('/api/nvpn/deployment-context', undefined, { silent: true }).catch(() => null),
       api('/api/nvpn/split-brain', undefined, { silent: true }).catch(() => null),
+      api('/api/nvpn/join-requests', undefined, { silent: true }).catch(() => null),
     ]);
-    lastStatus     = s;
-    lastService    = svc;
-    lastRoster     = roster;
-    lastRelays     = relays;
-    lastNetworks   = networks;
-    lastDeployment = deployment;
-    lastSplitBrain = splitBrain;
+    lastStatus       = s;
+    lastService      = svc;
+    lastRoster       = roster;
+    lastRelays       = relays;
+    lastNetworks     = networks;
+    lastDeployment   = deployment;
+    lastSplitBrain   = splitBrain;
+    lastJoinRequests = joinReqs;
     renderDeploymentBanner();
     renderSplitBrainBanner();
     renderStatusStrip();
@@ -10694,6 +10697,41 @@ const VpnPanel = (() => {
   // invite / Publish roster live here, along with the add-peer form
   // and per-peer actions (ping / whois / alias / promote / demote /
   // remove).
+  // Join-requests section (#62). Renders inside the Network tab when
+  // any pending requests exist; hidden entirely on nvpn versions that
+  // don't expose the join-request CLI surface (supported === false)
+  // or when there are no pending requests.
+  function renderJoinRequestsSection() {
+    const jr = lastJoinRequests;
+    if (!jr || !jr.supported) return '';
+    const reqs = Array.isArray(jr.requests) ? jr.requests : [];
+    if (reqs.length === 0) return '';
+    const rows = reqs.map(r => {
+      const id = r.npub || r.pubkey || '';
+      const label = r.alias || r.device_name || (id ? (id.length > 24 ? `${id.slice(0, 12)}…${id.slice(-6)}` : id) : 'unknown');
+      const ts = r.ts ? String(r.ts) : '';
+      return `
+        <div class="vpn-join-req-row" data-id="${escapeHtml(id)}">
+          <div class="vpn-join-req-meta">
+            <strong>${escapeHtml(label)}</strong>
+            <code class="cmd-inline muted">${escapeHtml(id)}</code>
+            ${ts ? `<span class="muted vpn-join-req-ts">${escapeHtml(ts)}</span>` : ''}
+          </div>
+          <div class="vpn-join-req-actions">
+            <button data-action="approve" class="primary">Approve</button>
+            <button data-action="deny" class="danger">Deny</button>
+          </div>
+        </div>`;
+    }).join('');
+    return `
+      <div class="vpn-join-requests" style="margin-top:14px">
+        <div class="vpn-meta-peers-head">
+          <span class="vpn-meta-label">pending join requests (${reqs.length})</span>
+        </div>
+        <div class="vpn-join-req-list">${rows}</div>
+      </div>`;
+  }
+
   function renderNetworkBody() {
     const r = lastStatus && lastStatus.raw ? lastStatus.raw : null;
     const roster = lastRoster;
@@ -10761,6 +10799,7 @@ const VpnPanel = (() => {
           <button id="vpn-import-invite">Import invite</button>
           <button id="vpn-publish-roster">Publish roster</button>
         </div>
+        ${renderJoinRequestsSection()}
         <div class="vpn-meta-peers" style="margin-top:18px">
           <div class="vpn-meta-peers-head">
             <span class="vpn-meta-label">peers (${merged.length})</span>
@@ -10808,6 +10847,31 @@ const VpnPanel = (() => {
         pubBtn.disabled = false;
       });
     }
+
+    // Join-request Approve / Deny buttons (#62). Dispatch on data-action
+    // so the rendering code can drop / reorder rows without rewiring.
+    bodyEl.querySelectorAll('.vpn-join-req-row button[data-action]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const row = btn.closest('.vpn-join-req-row');
+        const id = row?.dataset.id || '';
+        if (!id) return;
+        const action = btn.dataset.action;
+        const endpoint = action === 'approve'
+          ? '/api/nvpn/join-requests/approve'
+          : '/api/nvpn/join-requests/deny';
+        btn.disabled = true;
+        try {
+          const r = await api(endpoint, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ participant: id }),
+          });
+          toast(`request ${action}d`, r?.detail || '', r?.ok === false ? 'err' : 'ok');
+          await refresh();
+        } catch { /* api() already toasted */ }
+        btn.disabled = false;
+      });
+    });
 
     const addForm = bodyEl.querySelector('.vpn-add-peer');
     if (addForm) {
