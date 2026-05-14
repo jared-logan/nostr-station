@@ -28,6 +28,7 @@ import { readIdentity, addReadRelay, removeReadRelay,
   setSetupComplete, isNpubOrHex, isNsec,
   DEFAULT_READ_RELAYS, hexToNpub, npubToHex,
   getGraspServers, addGraspServer, removeGraspServer,
+  setAppRelaysEnabled,
 } from '../identity.js';
 import {
   readGlobalGitIdentity, writeGlobalGitIdentity,
@@ -383,8 +384,38 @@ export async function handleIdentity(
       // touched the list, so the dashboard can render the section
       // without an empty-state branch.
       graspServers: getGraspServers(),
-      hasProfile:   !!ident.npub,
+      // App Relays (Ditto-style "default relays that ship with the app")
+      // and the toggle controlling whether they participate in /client
+      // reads. New users default to enabled so the feed works out of the
+      // box. The list itself is fixed in code (DEFAULT_READ_RELAYS) so we
+      // expose it here rather than as a separate /api/client/relay-config
+      // GET — both flows want the same data.
+      appRelays:        DEFAULT_READ_RELAYS.slice(),
+      appRelaysEnabled: ident.appRelaysEnabled !== false,
+      hasProfile:       !!ident.npub,
     }));
+    return true;
+  }
+
+  // ── App Relays toggle ─────────────────────────────────────────────────
+  //
+  // Flips identity.appRelaysEnabled. Used by the Config → Client Relays
+  // toggle. Returns the new state so the client doesn't have to round-trip
+  // through /api/identity/config to re-render. No need to bust the profile
+  // cache — App Relays affect /client reads but not the profile-lookup
+  // path (that always uses the union via the existing readRelays field).
+  if (url === '/api/identity/app-relays/toggle' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+    if (typeof parsed.enabled !== 'boolean') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'enabled (boolean) required' }));
+      return true;
+    }
+    const r = setAppRelaysEnabled(parsed.enabled);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(r));
     return true;
   }
 

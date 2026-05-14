@@ -34,7 +34,10 @@
  * the orchestrator continue trying its remaining route groups.
  */
 import http from 'http';
-import { readIdentity, npubToHex, hexToNpub } from '../identity.js';
+import {
+  readIdentity, npubToHex, hexToNpub,
+  DEFAULT_READ_RELAYS, getEffectiveReadRelays, addReadRelay, isValidRelayUrl,
+} from '../identity.js';
 import { getProject } from '../projects.js';
 import { getActiveChatProjectId } from './_shared.js';
 import { queryRelays, type NostrEvent } from '../nostr-query.js';
@@ -128,6 +131,10 @@ function ownerHex(): string | null {
   catch { return null; }
 }
 
+// Effective read relays — union of (App Relays, Your Relays) per the
+// identity helper. The local helper here exists so a single call site
+// can swap to a different policy (e.g. outbox model per author) later
+// without every route knowing.
 function readRelays(): string[] {
   // Active project's environment relays take precedence — when the user
   // has a project selected (via /api/chat/context — same selection state
@@ -135,10 +142,11 @@ function readRelays(): string[] {
   // that project's *active* environment block. This is what makes
   // local-mode development feel real: switch to a project with
   // `active='dev'` and the built-in client suddenly sees only the local
-  // relay's data, not the user's public timeline. Falls back to
-  // `identity.readRelays` when no project is selected, when the selected
-  // project predates the environment field, or when its active block is
-  // empty (e.g. STATION_INPROC_RELAY=0 left dev.relays=[]).
+  // relay's data, not the user's public timeline. Falls back to the
+  // station's effective read-relay list (App Relays ∪ Your Relays per
+  // NIP-65) when no project is selected, when the selected project
+  // predates the environment field, or when its active block is empty
+  // (e.g. STATION_INPROC_RELAY=0 leaves dev.relays=[]).
   const activePid = getActiveChatProjectId();
   if (activePid) {
     const proj = getProject(activePid);
@@ -149,8 +157,7 @@ function readRelays(): string[] {
       if (live.length) return live;
     }
   }
-  const ident = readIdentity();
-  return (ident.readRelays || []).filter(r => /^wss?:\/\//i.test(r));
+  return getEffectiveReadRelays().filter(r => /^wss?:\/\//i.test(r));
 }
 
 // Cap relay fan-out so a misconfigured 30-entry read list doesn't open 30
@@ -349,6 +356,95 @@ export async function handleClient(
       nakInstalled:    nak !== null,
       reason: !me ? 'no-owner' : !nak ? 'nak-missing' : relays.length === 0 ? 'no-read-relays' : null,
     });
+  }
+
+  // ── GET /api/client/relay-config ─────────────────────────────────────────
+  //
+  // Composite view of the relays the /client panel uses. Single endpoint
+  // for the dashboard's status indicator + the Config → Client Relays
+  // section. Includes:
+  //   appRelays         — DEFAULT_READ_RELAYS (fixed, ships with nostr-station)
+  //   appRelaysEnabled  — toggle state (true = App Relays merged into effective)
+  //   yourRelays        — identity.readRelays (user's editable list)
+  //   effective         — deduped union actually used for /client reads
+  //
+  // The same data is partly exposed via /api/identity/config — kept here
+  // so /client doesn't have to peek across into the identity surface and
+  // so a future consumer can swap effective for a per-author outbox-model
+  // resolution without rippling through /api/identity/config callers.
+  if (path === '/api/client/relay-config' && method === 'GET') {
+    const ident = readIdentity();
+    return json(res, 200, {
+      appRelays:        DEFAULT_READ_RELAYS.slice(),
+      appRelaysEnabled: ident.appRelaysEnabled !== false,
+      yourRelays:       (ident.readRelays || []).slice(),
+      effective:        getEffectiveReadRelays(),
+    });
+  }
+
+  // ── POST /api/client/sync-relays ─────────────────────────────────────────
+  //
+  // NIP-65 outbox sync: fetches the owner's kind 10002 relay list event
+  // from the currently-effective relays, parses every `r` tag, and merges
+  // the URLs into identity.readRelays (deduped). Returns the additions so
+  // the UI can render a "added N relays" toast.
+  //
+  // This is a one-shot import, not a continuous binding — once relays
+  // land in identity.readRelays they're user-managed from there. Per-
+  // author outbox routing (read THEIR posts from THEIR write relays)
+  // is the bigger architectural follow-up and intentionally deferred.
+  if (path === '/api/client/sync-relays' && method === 'POST') {
+    const me = ownerHex();
+    if (!me) return json(res, 400, { error: 'no station owner configured' });
+    if (nakBin() === null) return json(res, 200, { added: [], ...unavailable('nak-missing') });
+    const relays = capRelays(readRelays());
+    if (relays.length === 0) return json(res, 200, { added: [], ...unavailable('no-read-relays') });
+    try {
+      const r = await queryRelays({
+        filter: { kinds: [10002], authors: [me], limit: 1 },
+        relays,
+        timeoutMs: RELAY_QUERY_TIMEOUT_MS,
+        stream: false,
+        acceptUntil: (evs) => evs.length >= 1,
+      });
+      // Pick the freshest kind 10002 (replaceable — relays should already
+      // return one, but de-dup defensively).
+      let newest: NostrEvent | null = null;
+      for (const ev of r.events) {
+        if (ev.kind !== 10002) continue;
+        if (!newest || ev.created_at > newest.created_at) newest = ev;
+      }
+      if (!newest) {
+        return json(res, 200, { added: [], empty: 'no NIP-65 relay list (kind 10002) found for your npub' });
+      }
+      const ident = readIdentity();
+      const existing = new Set((ident.readRelays || []).map(s => s.toLowerCase()));
+      const added: string[] = [];
+      // NIP-65 r-tag shapes:
+      //   ["r", "wss://relay.example.com"]            — read+write
+      //   ["r", "wss://relay.example.com", "read"]    — read only
+      //   ["r", "wss://relay.example.com", "write"]   — write only
+      // We import all of them — the read/write distinction is a per-author
+      // routing hint, not a "should this be in my own list" filter.
+      for (const t of newest.tags) {
+        if (!Array.isArray(t) || t[0] !== 'r') continue;
+        const url = typeof t[1] === 'string' ? t[1].trim() : '';
+        if (!url || !isValidRelayUrl(url)) continue;
+        if (existing.has(url.toLowerCase())) continue;
+        const r2 = addReadRelay(url);
+        if (r2.ok) {
+          existing.add(url.toLowerCase());
+          added.push(url);
+        }
+      }
+      return json(res, 200, {
+        added,
+        sourceCreatedAt: newest.created_at,
+        yourRelays:      (readIdentity().readRelays || []).slice(),
+      });
+    } catch (e: any) {
+      return json(res, 500, { error: String(e?.message || e) });
+    }
   }
 
   // ── GET /api/client/contacts ─────────────────────────────────────────────

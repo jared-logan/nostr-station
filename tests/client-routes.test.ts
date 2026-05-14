@@ -186,3 +186,28 @@ test('handleClient: /api/client/publish rejects unsupported kind', async () => {
   // once we have an owner. Confirm the route matched + responded.
   assert.equal(res.getStatus(), 400);
 });
+
+test('handleClient: /api/client/relay-config returns app + your + effective lists', async () => {
+  const res = fakeRes();
+  const matched = await client.handleClient(fakeReq('GET', '/api/client/relay-config'), res, '/api/client/relay-config', 'GET');
+  assert.equal(matched, true);
+  assert.equal(res.getStatus(), 200);
+  const body = res.getBody();
+  assert.ok(Array.isArray(body.appRelays));
+  assert.equal(typeof body.appRelaysEnabled, 'boolean');
+  assert.ok(Array.isArray(body.yourRelays));
+  assert.ok(Array.isArray(body.effective));
+  // App Relays default ON, so effective should include them.
+  assert.ok(body.effective.length >= body.appRelays.length);
+});
+
+test('handleClient: /api/client/sync-relays 400s without owner', async () => {
+  const res = fakeRes();
+  const matched = await client.handleClient(
+    fakeReq('POST', '/api/client/sync-relays', {}),
+    res, '/api/client/sync-relays', 'POST',
+  );
+  assert.equal(matched, true);
+  assert.equal(res.getStatus(), 400);
+  assert.match(res.getBody().error, /no station owner/);
+});

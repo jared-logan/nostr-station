@@ -13080,14 +13080,62 @@ const ConfigPanel = (() => {
           <div class="config-row"><div class="k">Whitelist</div><div class="v">${whitelistHtml}</div></div>
           ${row('Data dir',    rc.dataDir || '—')}
           ${row('Config file', rc.configPath || '—')}
+          <div class="callout" style="margin-top:10px">
+            This section configures the <b>private, local Nostr relay</b> running inside nostr-station.
+            For the public relays the /client panel reads from, see <b>Client Relays</b> below.
+          </div>
+        </div>
+      </details>
 
-          <div class="cfg-subsection">
-            <h4>Read relays</h4>
+      <details class="config-section cfg-collapsible" id="cfg-client-relays-section" open>
+        <summary>
+          <h3>Client Relays</h3>
+          <span class="cfg-summary-meta">
+            ${(ident.appRelaysEnabled !== false ? (ident.appRelays?.length || 3) : 0) + (ident.readRelays?.length || 0)} effective
+          </span>
+        </summary>
+        <div class="cfg-section-body">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
+            These relays power the <a href="#client" style="color:var(--accent-bright)">/client panel</a>
+            (feed, notifications, profile lookups, publishing) and the dashboard's behind-the-scenes
+            profile / maintainer lookups. Reads + writes go here — <b>not</b> to the private local relay.
+          </div>
+
+          <div class="cfg-subsection" id="cfg-app-relays">
+            <div class="cfg-subsection-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
+              <h4 style="margin:0">App Relays</h4>
+              <label class="toggle" title="Include nostr-station's default relays in client reads">
+                <input type="checkbox" id="cfg-app-relays-toggle" ${(ident.appRelaysEnabled !== false) ? 'checked' : ''}>
+                <span class="slider"></span>
+              </label>
+            </div>
             <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-              Used to look up profile data (kind 0). <b>nostr-station never writes to these relays.</b>
+              Curated defaults that ship with nostr-station — picked for reliable public-Nostr connectivity.
+              Fixed list (analogous to nostr-station's <a href="#" class="cfg-link-grasp" style="color:var(--accent-bright)">GRASP server defaults</a> for git).
+              Toggle off to use <b>only</b> your relays below.
+            </div>
+            <div class="relay-list relay-list-readonly" id="app-relays">
+              ${(ident.appRelays || []).map(url => `
+                <div class="item">
+                  <span class="url">${escapeHtml(url)}</span>
+                  <span class="muted" style="font-size:10px">read · write · default</span>
+                </div>`).join('')}
+            </div>
+          </div>
+
+          <div class="cfg-subsection" id="cfg-your-relays" style="margin-top:18px">
+            <div class="cfg-subsection-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
+              <h4 style="margin:0">Your Relays</h4>
+              <button id="cfg-sync-relays" type="button" title="Fetch your NIP-65 outbox list (kind 10002) and merge into this list">
+                ↻ sync from Nostr
+              </button>
+            </div>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
+              Your personal relays. Merged with App Relays (above) when the toggle is on, otherwise used alone.
+              Use <b>sync from Nostr</b> to import your existing NIP-65 outbox list.
             </div>
             <div class="relay-list" id="read-relays">
-              ${relayItems || '<div style="color:var(--muted);font-size:11px">defaults will be used</div>'}
+              ${relayItems || '<div style="color:var(--muted);font-size:11px">no personal relays — App Relays will be used alone</div>'}
               <div class="add">
                 <input id="read-relay-input" placeholder="wss://relay.example.com" autocomplete="off">
                 <button id="read-relay-paste">paste</button>
@@ -13415,7 +13463,7 @@ const ConfigPanel = (() => {
       }
     }
 
-    // Read-relays list
+    // Read-relays list ("Your Relays" — under the Client Relays section)
     $$('#read-relays .rm').forEach(btn => {
       btn.addEventListener('click', (e) => {
         const url = e.target.closest('.item').dataset.url;
@@ -13427,6 +13475,76 @@ const ConfigPanel = (() => {
     $('read-relay-paste').addEventListener('click', async () => {
       try { $('read-relay-input').value = (await navigator.clipboard.readText()).trim(); }
       catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+    });
+
+    // App Relays toggle — flips identity.appRelaysEnabled. The /client panel
+    // (and other public-relay consumers via getEffectiveReadRelays) pick up
+    // the change on their next call; nothing else on this page needs to
+    // re-render, so we just update the summary count + toast.
+    const appRelaysToggle = $('cfg-app-relays-toggle');
+    if (appRelaysToggle) {
+      appRelaysToggle.addEventListener('change', async (e) => {
+        const enabled = !!e.target.checked;
+        try {
+          await api('/api/identity/app-relays/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+          });
+          apiInvalidate('/api/identity/config');
+          document.dispatchEvent(new CustomEvent('api-config-changed'));
+          toast('App Relays', enabled ? 'Enabled' : 'Disabled', 'ok');
+          // Reload Config so the effective count + the relay-list-readonly
+          // visual state stays consistent with the persisted toggle.
+          load();
+        } catch { /* api() already toasted; revert checkbox to match server */
+          e.target.checked = !enabled;
+        }
+      });
+    }
+
+    // Sync from Nostr — pulls the owner's kind 10002 NIP-65 outbox list and
+    // merges new entries into Your Relays. Defensive against the "no kind
+    // 10002 found" empty case + the nak-missing / no-relays unavailable
+    // shape from the server.
+    const syncBtn = $('cfg-sync-relays');
+    if (syncBtn) {
+      syncBtn.addEventListener('click', async () => {
+        const orig = syncBtn.textContent;
+        syncBtn.disabled = true;
+        syncBtn.textContent = 'syncing…';
+        try {
+          const r = await api('/api/client/sync-relays', { method: 'POST' });
+          if (r.unavailable) {
+            toast('Sync skipped', r.hint || r.empty || r.reason, 'warn');
+            return;
+          }
+          if (r.empty) {
+            toast('Nothing to sync', r.empty, 'warn');
+            return;
+          }
+          const n = Array.isArray(r.added) ? r.added.length : 0;
+          toast('Synced from Nostr', n === 0 ? 'No new relays — your list is up to date' : `Added ${n} relay${n === 1 ? '' : 's'}`, 'ok');
+          apiInvalidate('/api/identity/config');
+          document.dispatchEvent(new CustomEvent('api-config-changed'));
+          load();
+        } catch { /* api() toasted */ }
+        finally {
+          syncBtn.disabled = false;
+          syncBtn.textContent = orig;
+        }
+      });
+    }
+
+    // The "GRASP server defaults" inline link in App Relays explainer text —
+    // scrolls to the existing GRASP servers UI in the Git section so users
+    // see the parallel structure without leaving the page.
+    document.querySelectorAll('.cfg-link-grasp').forEach(a => {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        const git = document.getElementById('cfg-git-section');
+        if (git) { git.open = true; git.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      });
     });
 
     // Grasp servers list — same wire shape as the read-relay list above
@@ -17173,7 +17291,7 @@ const ClientPanel = (() => {
       const msg = h.reason === 'nak-missing'
         ? 'The client needs nak (Nostr relay CLI) installed to read your feed. Install it from Setup → Tools.'
         : h.reason === 'no-read-relays'
-          ? 'No read relays configured. Add at least one in Config → Identity.'
+          ? 'No read relays configured. Add one in Config → Client Relays.'
           : h.reason === 'no-owner'
             ? 'Finish station setup before using the client.'
             : 'Client is not fully configured.';
@@ -17181,11 +17299,35 @@ const ClientPanel = (() => {
     } catch { /* silent — banner stays as-is */ }
   }
 
+  // Footer status line under the tabs: "Reading from N relays · manage →".
+  // Calls /api/client/relay-config (the same endpoint Config's Client Relays
+  // section would use) so the user always knows what pool /client is actually
+  // querying. Updates on panel-enter and after a sync-from-Nostr toast.
+  async function refreshRelayStatus() {
+    const statusEl = document.getElementById('client-relay-status');
+    const countEl  = document.getElementById('client-relay-count');
+    const nounEl   = document.getElementById('client-relay-noun');
+    if (!statusEl || !countEl) return;
+    try {
+      const rc = await api('/api/client/relay-config', undefined, { silent: true });
+      const n = Array.isArray(rc.effective) ? rc.effective.length : 0;
+      countEl.textContent = String(n);
+      if (nounEl) nounEl.textContent = n === 1 ? 'relay' : 'relays';
+      statusEl.hidden = false;
+    } catch {
+      statusEl.hidden = true;
+    }
+  }
+  // Refresh the footer whenever Config emits an api-config-changed event —
+  // covers the toggle flip + the sync-from-Nostr button.
+  document.addEventListener('api-config-changed', () => { void refreshRelayStatus(); });
+
   return {
     onEnter() {
       // Always show compose box on feed (the default tab).
       composeEl.hidden = currentTab !== 'feed';
       void refreshHealthBanner();
+      void refreshRelayStatus();
       if (currentTab === 'feed')              loadFeed();
       else if (currentTab === 'notifications') loadNotifications();
       else if (currentTab === 'profile')       loadProfile();
