@@ -1329,6 +1329,32 @@ details.dashboard-health .dashboard-health-sub {
   font-size: 11px;
   line-height: 1.6;
 }
+.vpn-deployment-banner {
+  display: none;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--border, #2a2c33);
+}
+.vpn-deployment-banner.info  { background: rgba(120, 160, 220, 0.07); border-color: rgba(120, 160, 220, 0.35); }
+.vpn-deployment-banner.warn  { background: rgba(220, 175, 75,  0.07); border-color: rgba(220, 175, 75,  0.35); }
+.vpn-deployment-banner.error { background: rgba(220, 90,  90,  0.07); border-color: rgba(220, 90,  90,  0.45); }
+.vpn-deployment-banner-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.vpn-deployment-banner-row a {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.vpn-deployment-banner-detail {
+  margin-top: 4px;
+  font-size: 11px;
+}
 .vpn-strip-actions {
   display: flex;
   gap: 6px;

@@ -44,6 +44,7 @@ import {
   RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
 import { nvpnRelayHealth } from '../nvpn-relay-health.js';
+import { detectContainer, natWarningFor } from '../container-detect.js';
 import { readBody } from './_shared.js';
 
 async function writeJson(
@@ -101,6 +102,28 @@ export async function handleNvpn(
       raw:       status.raw,
     });
     await writeJson(res, 200, { ...status, row, health });
+    return true;
+  }
+
+  // Container / NAT detection — surfaces a "this deployment may need
+  // port-forwarding" callout for users running nostr-station inside
+  // Docker, OrbStack, LXC, etc. Pure read (no daemon spawn beyond the
+  // single status probe), and the data rarely changes — UI can call
+  // this once on dashboard load and again on refresh.
+  if (url === '/api/nvpn/deployment-context' && method === 'GET') {
+    const status = await probeNvpnStatus();
+    const raw = status.raw as Record<string, any> | null;
+    // Same endpoint-extraction logic as nvpnHealthSummary — nvpn has
+    // shipped this field under a few names. Stay schema-flexible.
+    const publicEndpoint =
+      (raw && typeof raw.public_endpoint === 'string' && raw.public_endpoint) ||
+      (raw && typeof raw.external_endpoint === 'string' && raw.external_endpoint) ||
+      (raw && raw.nat && typeof raw.nat.public_endpoint === 'string' && raw.nat.public_endpoint) ||
+      (raw && typeof raw.endpoint === 'string' && raw.endpoint) ||
+      null;
+    const container = detectContainer();
+    const warning = natWarningFor({ container, publicEndpoint });
+    await writeJson(res, 200, { container, publicEndpoint, warning });
     return true;
   }
 

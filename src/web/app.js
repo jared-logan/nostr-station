@@ -10395,10 +10395,11 @@ const VpnPanel = (() => {
   let currentTab = 'status';
   // Cached payloads — shared across sub-tab renders so flipping tabs
   // doesn't refetch what we already have. Each onEnter() refreshes.
-  let lastStatus   = null;    // GET /api/nvpn/status
-  let lastService  = null;    // GET /api/nvpn/service/status
-  let lastRoster   = null;    // GET /api/nvpn/roster
-  let lastRelays   = null;    // GET /api/nvpn/relays
+  let lastStatus     = null;  // GET /api/nvpn/status
+  let lastService    = null;  // GET /api/nvpn/service/status
+  let lastRoster     = null;  // GET /api/nvpn/roster
+  let lastRelays     = null;  // GET /api/nvpn/relays
+  let lastDeployment = null;  // GET /api/nvpn/deployment-context
   let lastNetworks = null;    // GET /api/nvpn/networks  (full [[networks]] list)
   // 60s TTL for the auto-fired netcheck — same idea as ConfigPanel's
   // cache. Manual "Check reachability" passes { force:true } to bypass.
@@ -10425,6 +10426,34 @@ const VpnPanel = (() => {
     // expose on the function itself. Keeps the render-then-bind split
     // close together and lets us re-render without re-wiring globals.
     if (typeof renderer.wire === 'function') renderer.wire();
+  }
+
+  // Deployment-context banner — shown above the status strip when the
+  // host is detected as being inside a container/VM or the daemon's
+  // published endpoint is RFC1918. Tells the user "you may need to set
+  // up port-forwarding" with a link to the deployment doc, instead of
+  // letting them discover that through several hours of debugging.
+  function renderDeploymentBanner() {
+    const slot = $('vpn-deployment-banner') || (() => {
+      // Lazy-create the slot above the status strip if the static HTML
+      // doesn't already define it.
+      const el = document.createElement('div');
+      el.id = 'vpn-deployment-banner';
+      el.className = 'vpn-deployment-banner';
+      stripEl.parentNode.insertBefore(el, stripEl);
+      return el;
+    })();
+    const w = lastDeployment && lastDeployment.warning ? lastDeployment.warning : null;
+    if (!w) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
+    slot.style.display = 'block';
+    slot.className = `vpn-deployment-banner ${w.level}`;
+    slot.innerHTML = `
+      <div class="vpn-deployment-banner-row">
+        <strong>${escapeHtml(w.summary)}</strong>
+        <a href="docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a>
+      </div>
+      <div class="muted vpn-deployment-banner-detail">${escapeHtml(w.detail)}</div>
+    `;
   }
 
   // Top-of-panel status strip — pill + control buttons. Always rendered
@@ -10529,18 +10558,21 @@ const VpnPanel = (() => {
   // whole panel — each sub-tab handles missing data with its own
   // empty-state.
   async function refresh() {
-    const [s, svc, roster, relays, networks] = await Promise.all([
+    const [s, svc, roster, relays, networks, deployment] = await Promise.all([
       api('/api/nvpn/status').catch(() => null),
       api('/api/nvpn/service/status').catch(() => null),
       api('/api/nvpn/roster').catch(() => null),
       api('/api/nvpn/relays').catch(() => null),
       api('/api/nvpn/networks').catch(() => null),
+      api('/api/nvpn/deployment-context', undefined, { silent: true }).catch(() => null),
     ]);
-    lastStatus   = s;
-    lastService  = svc;
-    lastRoster   = roster;
-    lastRelays   = relays;
-    lastNetworks = networks;
+    lastStatus     = s;
+    lastService    = svc;
+    lastRoster     = roster;
+    lastRelays     = relays;
+    lastNetworks   = networks;
+    lastDeployment = deployment;
+    renderDeploymentBanner();
     renderStatusStrip();
     renderActiveTab();
   }
