@@ -18,6 +18,7 @@ import {
   listIdentities, addIdentity, removeIdentity, regenerateAll, getNsec,
 } from '../test-identities.js';
 import { signEventWithLocalKey, type EventTemplate } from '../local-signer.js';
+import { seedProject } from '../project-seed.js';
 import { readBody } from './_shared.js';
 
 export async function handleTestIdentities(
@@ -67,6 +68,20 @@ export async function handleTestIdentities(
       // server-side. App code that wants to sign as a test identity
       // also goes through /sign rather than holding the key in JS.
     }));
+    return true;
+  }
+
+  // Seed — publish fixture kind-1s from each test identity (Phase D).
+  // Lives under the test-identities prefix because the operation is
+  // "publish as every test identity"; placing it here keeps the route
+  // group cohesive.
+  if (tail === 'test-identities/seed' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); } catch {}
+    const count = Number(parsed?.countPerIdentity || 3);
+    const result = await seedProject(project, { countPerIdentity: count });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
     return true;
   }
 

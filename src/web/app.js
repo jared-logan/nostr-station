@@ -9235,6 +9235,7 @@ const ProjectsPanel = (() => {
       </div>
       ${identities.length ? `
         <div class="step-actions" style="margin-top:10px">
+          <button class="tu-seed">Seed fixture events (3 per user)</button>
           <button class="danger tu-reset">Reset all (regenerate)</button>
         </div>
       ` : ''}
@@ -9269,6 +9270,28 @@ const ProjectsPanel = (() => {
         paintTestUsers(root, p);
       } catch (e) {
         toast('Add failed', e?.message || '', 'err');
+      }
+    });
+
+    root.querySelector('.tu-seed')?.addEventListener('click', async () => {
+      const btn = root.querySelector('.tu-seed');
+      btn.disabled = true;
+      btn.textContent = 'Seeding…';
+      try {
+        const r = await api(`/api/projects/${p.id}/test-identities/seed`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ countPerIdentity: 3 }),
+        });
+        const msg = r.errors?.length
+          ? `Published ${r.eventsPublished} events (with ${r.errors.length} errors)`
+          : `Published ${r.eventsPublished} events from ${r.identitiesUsed} test user${r.identitiesUsed === 1 ? '' : 's'}`;
+        toast('Seed complete', msg, r.errors?.length ? 'warn' : 'ok');
+      } catch (e) {
+        toast('Seed failed', e?.message || '', 'err');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Seed fixture events (3 per user)';
       }
     });
 
