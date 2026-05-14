@@ -8202,3 +8202,28 @@ a.client-mention {
   border-color: color-mix(in srgb, var(--warn, #d99a3a) 35%, var(--border));
   color: var(--text);
 }
+
+/* Footer status line under the /client tabs: "Reading from N relays · manage →" */
+.client-relay-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  padding: 6px 2px 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.client-relay-status b { color: var(--text); font-weight: 600; }
+.client-relay-config-link { text-decoration: none; }
+.client-relay-config-link:hover { color: var(--accent-bright); }
+
+/* Read-only variant of the existing .relay-list editor — used for the
+   App Relays display in Config → Client Relays. No remove button, no
+   add row, slightly dimmed defaults marker on each entry. */
+.relay-list-readonly .item {
+  cursor: default;
+  opacity: 0.95;
+}
+.relay-list-readonly .item .url {
+  color: var(--text);
+}

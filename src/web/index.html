@@ -480,6 +480,10 @@
         <button class="tab" data-client-tab="profile">Profile</button>
         <button class="tab" data-client-tab="dms" title="Private DMs — coming in phase 2" disabled>DMs <span class="muted" style="font-size:10px">soon</span></button>
       </div>
+      <div class="client-relay-status" id="client-relay-status" hidden>
+        <span class="muted">Reading from <b id="client-relay-count">…</b> <span id="client-relay-noun">relays</span></span>
+        <a href="#config" class="muted client-relay-config-link" title="Manage in Config → Client Relays">manage →</a>
+      </div>
       <div class="panel-body">
         <div class="client-compose" id="client-compose" hidden>
           <textarea id="client-compose-input" placeholder="What's happening on Nostr? (⌘/Ctrl+⏎ to publish)"></textarea>
