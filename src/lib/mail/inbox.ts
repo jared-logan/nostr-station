@@ -26,19 +26,33 @@ import { unwrapGift } from './wrap.js';
 import { getMailStore } from './store.js';
 import { readInboxRelays } from './inbox-relays.js';
 import { isContact } from './contacts.js';
-import { KIND_GIFT_WRAP, KIND_EMAIL, type NostrEvent } from './types.js';
+import {
+  KIND_GIFT_WRAP, KIND_EMAIL, KIND_LABEL, KIND_APP_DATA,
+  APP_DATA_D_SETTINGS,
+  type NostrEvent,
+} from './types.js';
+import { parseLabel } from './labels.js';
+import { applyIncomingSettingsEvent } from './settings-sync.js';
 
 interface RelayState {
   url:        string;
   ws:         WebSocket | null;
-  subId:      string;
+  // Multiple subscriptions per socket: gift wraps, kind 1985 labels
+  // authored by us, kind 30078 settings authored by us. Each REQ has
+  // its own client-side id; the relay dispatches inbound events back
+  // through the matching id so we can fan-out by sub.
+  subWrap:    string;
+  subLabels:  string;
+  subSettings:string;
   retryAt:    number;
   retryDelay: number;
   isOpen:     boolean;
   events:     number;
 }
 
-const SUB_PREFIX  = 'mail-inbox-';
+const SUB_PREFIX_WRAP     = 'mail-inbox-';
+const SUB_PREFIX_LABELS   = 'mail-labels-';
+const SUB_PREFIX_SETTINGS = 'mail-settings-';
 const BACKOFF_MIN = 5_000;
 const BACKOFF_MAX = 5 * 60_000;
 
@@ -124,9 +138,12 @@ export class InboxWorker extends EventEmitter {
 
   private connectRelay(url: string): void {
     if (this.stopping) return;
-    const subId = SUB_PREFIX + Math.random().toString(36).slice(2, 10);
+    const r = () => Math.random().toString(36).slice(2, 10);
     const state: RelayState = {
-      url, ws: null, subId,
+      url, ws: null,
+      subWrap:     SUB_PREFIX_WRAP     + r(),
+      subLabels:   SUB_PREFIX_LABELS   + r(),
+      subSettings: SUB_PREFIX_SETTINGS + r(),
       retryAt: 0, retryDelay: BACKOFF_MIN, isOpen: false, events: 0,
     };
     this.relays.set(url, state);
@@ -148,12 +165,22 @@ export class InboxWorker extends EventEmitter {
       state.isOpen = true;
       state.retryDelay = BACKOFF_MIN;
       this.recountConnected();
-      // Subscribe to kind 1059 #p=self. since=0 means "all-time backfill";
-      // for users with very large inboxes that's expensive — a future
-      // patch can move to a windowed since= once we track high-water
-      // marks per relay.
-      const req = ['REQ', state.subId, { kinds: [KIND_GIFT_WRAP], '#p': [this.ownerPubkey!] }];
-      try { ws.send(JSON.stringify(req)); } catch {}
+      // Three subs per relay:
+      //   1. gift wraps addressed to us (kind 1059 #p=self).
+      //   2. NIP-32 labels we authored (kind 1985 authors=self) —
+      //      cross-device folder + read-state sync (PR 10).
+      //   3. NIP-78 app data we authored (kind 30078 authors=self
+      //      #d=nostr-mail:settings) — settings sync (PR 10).
+      // since=0 on each = all-time backfill. Fine for low volumes.
+      const me = this.ownerPubkey!;
+      try {
+        ws.send(JSON.stringify(['REQ', state.subWrap,
+          { kinds: [KIND_GIFT_WRAP], '#p': [me] }]));
+        ws.send(JSON.stringify(['REQ', state.subLabels,
+          { kinds: [KIND_LABEL], authors: [me] }]));
+        ws.send(JSON.stringify(['REQ', state.subSettings,
+          { kinds: [KIND_APP_DATA], authors: [me], '#d': [APP_DATA_D_SETTINGS] }]));
+      } catch {}
     });
 
     ws.on('message', (raw) => {
@@ -162,18 +189,24 @@ export class InboxWorker extends EventEmitter {
       catch { return; }
       if (!Array.isArray(msg)) return;
 
-      if (msg[0] === 'EVENT' && msg[1] === state.subId && msg[2]) {
-        const ev = msg[2] as NostrEvent;
-        if (ev.kind !== KIND_GIFT_WRAP) return;
-        state.events++;
-        this.stats.eventsSeen++;
-        this.stats.lastEventAt = Date.now();
-        this.enqueueDecrypt(ev);
+      if (msg[0] === 'EVENT' && msg[2]) {
+        const subId = msg[1];
+        const ev    = msg[2] as NostrEvent;
+        if (subId === state.subWrap && ev.kind === KIND_GIFT_WRAP) {
+          state.events++;
+          this.stats.eventsSeen++;
+          this.stats.lastEventAt = Date.now();
+          this.enqueueDecrypt(ev);
+        } else if (subId === state.subLabels && ev.kind === KIND_LABEL) {
+          this.handleLabel(ev);
+        } else if (subId === state.subSettings && ev.kind === KIND_APP_DATA) {
+          this.handleSettings(ev);
+        }
       }
       // EOSE is informational; we keep the subscription open to tail
       // new events. CLOSED means the relay dropped our REQ — usually
       // a NIP-42 AUTH gate. Log it and don't retry until reconnect.
-      if (msg[0] === 'CLOSED' && msg[1] === state.subId) {
+      if (msg[0] === 'CLOSED' && [state.subWrap, state.subLabels, state.subSettings].includes(msg[1])) {
         this.stats.lastError = `${state.url}: ${msg[2] || 'CLOSED'}`;
         this.emit('relay-closed', { url: state.url, reason: msg[2] });
       }
@@ -228,6 +261,39 @@ export class InboxWorker extends EventEmitter {
       }
     } finally {
       this.decrypting = false;
+    }
+  }
+
+  // ── Label sync (kind 1985, PR 10) ───────────────────────────────────────
+
+  private handleLabel(ev: NostrEvent): void {
+    // The sub filter authors=[me] already constrains this server-side,
+    // but a misbehaving relay could send anything; re-verify here.
+    if (ev.pubkey.toLowerCase() !== this.ownerPubkey) return;
+    const parsed = parseLabel(ev);
+    if (!parsed) return;
+    const store = getMailStore();
+    const applied = store.applyLabel(
+      parsed.rumorId, parsed.namespace, parsed.value, parsed.created_at,
+    );
+    if (applied) {
+      // SSE consumers (Mail panel) re-fetch on this event so the
+      // folder bucket reflects the cross-device move/read.
+      this.emit('mail-received', { rumorId: parsed.rumorId, bucket: 'inbox' });
+    }
+  }
+
+  // ── Settings sync (kind 30078, PR 10) ───────────────────────────────────
+
+  private handleSettings(ev: NostrEvent): void {
+    if (ev.pubkey.toLowerCase() !== this.ownerPubkey) return;
+    const changed = applyIncomingSettingsEvent(ev);
+    if (changed) {
+      // Settings changes may include a new inbox-relay list — pick
+      // them up live without a process restart. applySettings already
+      // wrote inbox-relays.json, so we just re-read and reset.
+      try { this.resetRelays(readInboxRelays()); } catch {}
+      this.emit('settings-changed', {});
     }
   }
 

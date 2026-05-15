@@ -9016,3 +9016,68 @@ a.client-mention {
 .mail-msg-attachments .mail-msg-fileChip {
   flex: 0 0 auto;
 }
+
+/* ── Mail · folder sidebar (PR 10) ───────────────────────────────────── */
+.mail-split { grid-template-columns: 200px 280px minmax(0, 1fr); }
+@media (max-width: 900px) {
+  .mail-split { grid-template-columns: 1fr; }
+  .mail-folders { display: none; }
+  .mail-folders:not([hidden]) {
+    display: flex; flex-direction: row; overflow-x: auto;
+  }
+}
+
+.mail-folders {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  padding: 6px;
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 80vh; overflow: auto;
+}
+.mail-folder-section {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 4px 0;
+}
+.mail-folder-section + .mail-folder-section {
+  border-top: 1px solid var(--border);
+  margin-top: 4px; padding-top: 6px;
+}
+.mail-folder-section-title {
+  font-size: 10px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.5px; padding: 4px 8px;
+}
+.mail-folder-row {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; text-align: left;
+  background: transparent; border: none;
+  color: var(--text); padding: 6px 8px;
+  border-radius: 6px; font: inherit; font-size: 13px;
+  cursor: pointer;
+}
+.mail-folder-row:hover  { background: var(--card-hover, rgba(255,255,255,0.04)); }
+.mail-folder-row.active { background: var(--accent-soft); color: var(--text-bright); }
+.mail-folder-icon  { font-size: 14px; }
+.mail-folder-label { flex: 1; }
+.mail-folder-unread {
+  background: var(--accent); color: var(--bg);
+  font-size: 10px; font-weight: 600;
+  padding: 1px 6px; border-radius: 999px;
+}
+.mail-folder-total { font-size: 11px; color: var(--muted); }
+.mail-folder-add {
+  background: transparent; border: 1px dashed var(--border);
+  color: var(--text-dim); padding: 6px 8px;
+  border-radius: 6px; font: inherit; font-size: 12px;
+  cursor: pointer; margin-top: 4px;
+}
+.mail-folder-add:hover { color: var(--text-bright); border-color: var(--accent); }
+
+/* Thread head: move-to-folder dropdown */
+.mail-thread-head-actions { display: flex; gap: 8px; align-items: center; }
+.mail-thread-head-actions select {
+  background: var(--input-bg, rgba(0,0,0,0.25));
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 5px 8px; border-radius: 6px; font: inherit; font-size: 12px;
+}

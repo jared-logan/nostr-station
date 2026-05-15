@@ -17213,7 +17213,9 @@ const MailPanel = (() => {
   let threads        = [];
   let requests       = [];        // PR 7: quarantine bucket
   let blocked        = [];        // PR 7: blocklist entries
+  let folders        = { defaults: [], custom: [] };  // PR 10: folder counts
   let activeTab      = 'inbox';   // 'inbox' | 'requests' | 'blocked'
+  let activeFolder   = 'inbox';   // PR 10: active folder when activeTab === 'inbox'
   let activeCounter  = null;      // hex pubkey of the open thread, or null
   let activeMessages = [];
   let lastStatus     = null;
@@ -17236,19 +17238,27 @@ const MailPanel = (() => {
 
   async function load() {
     try {
-      // Fetch inbox + requests + status in parallel. Blocked list is
-      // smaller / less frequently checked — fetched lazily when the
-      // Blocked tab opens.
-      const [inbox, reqs, status] = await Promise.all([
-        api('/api/mail/inbox?bucket=inbox',    undefined, { silent: true }),
-        api('/api/mail/requests',              undefined, { silent: true }).catch(() => ({ threads: [] })),
-        api('/api/mail/status',                undefined, { silent: true }).catch(() => null),
+      // Fetch inbox (filtered by active folder) + requests + folder
+      // counts + status in parallel. Blocked list is fetched lazily.
+      const inboxPath = activeTab === 'inbox' && activeFolder !== 'inbox'
+        ? `/api/mail/inbox?bucket=inbox&folder=${encodeURIComponent(activeFolder)}`
+        : '/api/mail/inbox?bucket=inbox';
+      const [inbox, reqs, foldersResp, status] = await Promise.all([
+        api(inboxPath,                            undefined, { silent: true }),
+        api('/api/mail/requests',                 undefined, { silent: true }).catch(() => ({ threads: [] })),
+        api('/api/mail/folders',                  undefined, { silent: true }).catch(() => null),
+        api('/api/mail/status',                   undefined, { silent: true }).catch(() => null),
       ]);
       threads    = Array.isArray(inbox?.threads) ? inbox.threads : [];
       requests   = Array.isArray(reqs?.threads)  ? reqs.threads  : [];
+      if (foldersResp) folders = {
+        defaults: Array.isArray(foldersResp.defaults) ? foldersResp.defaults : [],
+        custom:   Array.isArray(foldersResp.custom)   ? foldersResp.custom   : [],
+      };
       lastStatus = status?.stats || null;
       renderStatus();
       renderTabBadges();
+      renderFolders();
       renderThreads();
       updateBadge();
       // If a thread is open, reload its messages too — new arrivals are
@@ -17258,6 +17268,87 @@ const MailPanel = (() => {
       const el = $('mail-threads');
       if (el) el.innerHTML = `<div class="mail-empty">Failed to load: ${escapeHtml(e?.message || e)}</div>`;
     }
+  }
+
+  // ── Folder sidebar (PR 10) ─────────────────────────────────────────────
+  const FOLDER_LABELS = {
+    inbox:   'Inbox',
+    sent:    'Sent',
+    archive: 'Archive',
+    trash:   'Trash',
+  };
+  const FOLDER_ICONS = {
+    inbox:   '📥',
+    sent:    '📤',
+    archive: '🗄️',
+    trash:   '🗑️',
+  };
+  function renderFolders() {
+    const el = $('mail-folders');
+    if (!el) return;
+    // Folder sidebar is only visible in the Inbox tab; Requests and
+    // Blocked are flat lists by design.
+    if (activeTab !== 'inbox') { el.hidden = true; return; }
+    el.hidden = false;
+    const renderRow = (f, isCustom) => {
+      const label = FOLDER_LABELS[f.id] ?? f.id;
+      const icon  = FOLDER_ICONS[f.id]  ?? '📁';
+      const active = f.id === activeFolder ? ' active' : '';
+      const unread = f.unread > 0
+        ? `<span class="mail-folder-unread">${f.unread > 99 ? '99+' : f.unread}</span>`
+        : '';
+      return `<button class="mail-folder-row${active}" data-folder="${escapeHtml(f.id)}">
+        <span class="mail-folder-icon">${icon}</span>
+        <span class="mail-folder-label">${escapeHtml(label)}</span>
+        ${unread}
+        <span class="mail-folder-total" title="${f.total} total">${f.total || ''}</span>
+      </button>`;
+    };
+    el.innerHTML = `
+      <div class="mail-folder-section">
+        ${(folders.defaults || []).map(f => renderRow(f, false)).join('')}
+      </div>
+      ${(folders.custom || []).length > 0 ? `
+        <div class="mail-folder-section">
+          <div class="mail-folder-section-title">Folders</div>
+          ${folders.custom.map(f => renderRow(f, true)).join('')}
+        </div>` : ''}
+      <button class="mail-folder-add" id="mail-folder-add">+ new folder</button>
+    `;
+    for (const btn of $$('.mail-folder-row', el)) {
+      btn.addEventListener('click', () => {
+        const f = btn.getAttribute('data-folder');
+        if (!f || f === activeFolder) return;
+        activeFolder = f;
+        activeCounter  = null;
+        activeMessages = [];
+        renderFolders();
+        void load();
+        renderThread();
+      });
+    }
+    $('mail-folder-add')?.addEventListener('click', async () => {
+      const name = prompt('New folder name (a-z, 0-9, dash, underscore; max 32 chars):');
+      if (!name) return;
+      if (!/^[a-z0-9_-]{1,32}$/i.test(name)) {
+        toast('Bad folder name', 'Use only letters, numbers, dash, underscore (max 32).', 'warn');
+        return;
+      }
+      if (folders.defaults.find(f => f.id === name) || folders.custom.find(f => f.id === name)) {
+        toast('Folder exists', `"${name}" is already in your list.`, 'warn');
+        return;
+      }
+      try {
+        const next = [...folders.custom.map(f => f.id), name];
+        await api('/api/mail/settings', {
+          method:  'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ customFolders: next }),
+        });
+        toast('Folder created', `"${name}" added.`, 'ok');
+        await load();
+      } catch { /* api() already toasted */ }
+    });
   }
 
   async function loadBlocked() {
@@ -17291,9 +17382,12 @@ const MailPanel = (() => {
       btn.classList.toggle('active', on);
       btn.setAttribute('aria-selected', on ? 'true' : 'false');
     }
+    renderFolders();
     renderThreads();
     renderThread();
     if (tab === 'blocked') void loadBlocked();
+    // Switching back to Inbox re-fetches with the current folder filter.
+    if (tab === 'inbox') void load();
   }
 
   async function loadThread(counterparty) {
@@ -17467,7 +17561,15 @@ const MailPanel = (() => {
         <div class="mail-thread-counter">${escapeHtml(npubShort(activeCounter))}</div>
         <div class="mail-thread-headsubj">${escapeHtml(lastSubj || '(no subject)')}</div>
       </div>
-      <div><button class="primary mail-thread-reply" id="mail-thread-reply">reply</button></div>
+      <div class="mail-thread-head-actions">
+        <select id="mail-thread-move" title="Move thread to folder">
+          <option value="">Move to…</option>
+          ${[...(folders.defaults || []), ...(folders.custom || [])]
+            .map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(FOLDER_LABELS[f.id] ?? f.id)}</option>`)
+            .join('')}
+        </select>
+        <button class="primary mail-thread-reply" id="mail-thread-reply">reply</button>
+      </div>
     </div>`;
     function fmtSize(size) {
       return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MiB`
@@ -17521,6 +17623,27 @@ const MailPanel = (() => {
       </div>`;
     }).join('');
     el.innerHTML = `${head}<div class="mail-msgs">${msgs}</div>`;
+    const moveSel = $('mail-thread-move');
+    if (moveSel) {
+      moveSel.addEventListener('change', async () => {
+        const target = moveSel.value;
+        if (!target) return;
+        const ids = activeMessages.map(m => m.id);
+        try {
+          await api('/api/mail/folder', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ ids, folder: target }),
+          });
+          toast('Moved', `Thread moved to ${FOLDER_LABELS[target] ?? target}.`, 'ok');
+          activeCounter  = null;
+          activeMessages = [];
+          await load();
+          renderThread();
+        } catch { /* api() already toasted */ }
+        moveSel.value = '';
+      });
+    }
     const replyBtn = $('mail-thread-reply');
     if (replyBtn) {
       replyBtn.addEventListener('click', () => {

@@ -31,6 +31,16 @@ import {
 import { readIdentity, npubToHex, isValidRelayUrl } from '../identity.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { encryptBlob, decryptBlob } from '../mail/file-crypto.js';
+import {
+  publishLabel,
+} from '../mail/labels.js';
+import {
+  readLocalSettings, publishSettings,
+  type MailSettings,
+} from '../mail/settings-sync.js';
+import {
+  LABEL_NS_FOLDER, LABEL_NS_READ, DEFAULT_FOLDERS,
+} from '../mail/types.js';
 import type { BlossomServer } from '../../blossom/index.js';
 
 // Optional dependency accessor — web-server.ts wires this. When the
@@ -121,13 +131,79 @@ export async function handleMail(
   // ?bucket=quarantine returns the Requests bucket; passing ?bucket=all
   // returns every thread regardless of bucket (used by callers that
   // pre-date PR 7's spam protection).
+  //
+  // PR 10: optional &folder=<id> filter (inbox|sent|archive|trash|custom)
+  // narrows the inbox bucket to one folder. The Requests bucket ignores
+  // folders entirely — quarantined mail isn't user-foldered.
   if (pathname === '/api/mail/inbox' && method === 'GET') {
     const store     = getMailStore();
     const bucketIn  = (parsed.searchParams.get('bucket') || 'inbox').toLowerCase();
-    const threads   = bucketIn === 'all'
-      ? store.threadSummaries()
-      : store.threadSummaries(bucketIn === 'quarantine' ? 'quarantine' : 'inbox');
-    return json(res, 200, { threads, bucket: bucketIn });
+    const folder    = parsed.searchParams.get('folder');
+    let threads;
+    if (bucketIn === 'all') {
+      threads = store.threadSummaries();
+    } else if (bucketIn === 'quarantine') {
+      threads = store.threadSummaries('quarantine');
+    } else if (folder && folder.length > 0) {
+      threads = store.threadSummariesInFolder('inbox', folder);
+    } else {
+      threads = store.threadSummaries('inbox');
+    }
+    return json(res, 200, { threads, bucket: bucketIn, folder: folder || null });
+  }
+
+  // ── GET /api/mail/folders ──────────────────────────────────────────────
+  // Returns the canonical folder list (4 defaults + any custom folders
+  // the user added) along with per-folder total + unread counts. Drives
+  // the folder sidebar in the Mail panel.
+  if (pathname === '/api/mail/folders' && method === 'GET') {
+    const settings = readLocalSettings();
+    const counts   = getMailStore().folderCounts();
+    const countMap = new Map(counts.map(c => [c.folder, c]));
+    const fmt = (id: string) => ({
+      id,
+      total:  countMap.get(id)?.total  ?? 0,
+      unread: countMap.get(id)?.unread ?? 0,
+    });
+    return json(res, 200, {
+      defaults: DEFAULT_FOLDERS.map(fmt),
+      custom:   settings.customFolders.map(fmt),
+    });
+  }
+
+  // ── POST /api/mail/folder ──────────────────────────────────────────────
+  // Move one or more messages to a folder. Publishes a kind-1985 label
+  // per message so the change syncs across the user's devices. Local
+  // mutation is unconditional; publish is best-effort and surfaced in
+  // the response so the UI can show "saved, syncing…" / "saved (sync
+  // failed)".
+  if (pathname === '/api/mail/folder' && method === 'POST') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+    const ids = Array.isArray(body?.ids)
+      ? body.ids.filter((s: any): s is string => typeof s === 'string' && /^[0-9a-f]{64}$/i.test(s))
+      : [];
+    const folder = typeof body?.folder === 'string' ? body.folder : '';
+    if (ids.length === 0) return json(res, 400, { error: 'ids must be a non-empty array of rumor ids' });
+    if (!/^[a-z0-9_-]{1,32}$/i.test(folder)) {
+      return json(res, 400, { error: 'folder must be 1-32 chars (alnum, -, _)' });
+    }
+
+    const store = getMailStore();
+    let synced = 0;
+    let failed = 0;
+    for (const id of ids) {
+      store.setFolder(id, folder);
+      const existing = store.getLabel(id, LABEL_NS_FOLDER);
+      // Fire and forget per-id; await sequentially so we don't slam
+      // Amber with N parallel signature requests.
+      try {
+        const r = await publishLabel(id, LABEL_NS_FOLDER, folder, existing?.created_at);
+        if (r.ok) synced++; else failed++;
+      } catch { failed++; }
+    }
+    return json(res, 200, { ok: true, moved: ids.length, synced, failed });
   }
 
   // ── GET /api/mail/requests ─────────────────────────────────────────────
@@ -204,16 +280,69 @@ export async function handleMail(
   }
 
   // ── POST /api/mail/mark-read ───────────────────────────────────────────
+  // Flip the local read flag for one or more rumor ids AND publish a
+  // kind-1985 "read" label per id so the read state syncs to the
+  // user's other devices. Sync is best-effort — if Amber is unreachable
+  // the local flip stands and the call returns ok:true with failed > 0
+  // so the UI can decide whether to surface a "couldn't sync" hint.
   if (pathname === '/api/mail/mark-read' && method === 'POST') {
     let body: any;
     try { body = JSON.parse(await readBody(req)); }
     catch { return json(res, 400, { error: 'bad json' }); }
     const ids = Array.isArray(body?.ids)
-      ? body.ids.filter((s: any): s is string => typeof s === 'string' && s.length > 0)
+      ? body.ids.filter((s: any): s is string => typeof s === 'string' && /^[0-9a-f]{64}$/i.test(s))
       : [];
     if (ids.length === 0) return json(res, 200, { ok: true, updated: 0 });
-    getMailStore().markRead(ids);
-    return json(res, 200, { ok: true, updated: ids.length });
+    const store = getMailStore();
+    store.markRead(ids);
+    // ?sync=0 lets the bulk-on-open-thread call skip the kind-1985 publish
+    // — that flow fires once per panel switch and the Amber prompts
+    // would be intrusive. Explicit user toggles (single-message read,
+    // mass mark-read) should keep sync on.
+    const sync = parsed.searchParams.get('sync') !== '0';
+    let synced = 0, failed = 0;
+    if (sync) {
+      for (const id of ids) {
+        const existing = store.getLabel(id, LABEL_NS_READ);
+        try {
+          const r = await publishLabel(id, LABEL_NS_READ, 'read', existing?.created_at);
+          if (r.ok) synced++; else failed++;
+        } catch { failed++; }
+      }
+    }
+    return json(res, 200, { ok: true, updated: ids.length, synced, failed });
+  }
+
+  // ── GET /api/mail/settings ─────────────────────────────────────────────
+  // Returns the current settings document (NIP-78 kind 30078 mirrored
+  // to disk). Used by the Settings UI to show custom folders + inbox
+  // relays + the schema version.
+  if (pathname === '/api/mail/settings' && method === 'GET') {
+    return json(res, 200, { settings: readLocalSettings() });
+  }
+
+  // ── PUT /api/mail/settings ─────────────────────────────────────────────
+  // Merge a partial settings patch (customFolders, inboxRelays — others
+  // are reserved for future fields), bump updated_at, sign + publish a
+  // fresh kind 30078, and apply locally. The full settings object goes
+  // back in the response. Returns 200 even when Amber is unreachable —
+  // the local cache always updates so the UI feels responsive — and the
+  // response includes `synced: false + error: <reason>` in that case.
+  if (pathname === '/api/mail/settings' && method === 'PUT') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+    const patch: Partial<MailSettings> = {};
+    if (Array.isArray(body?.customFolders)) patch.customFolders = body.customFolders;
+    if (Array.isArray(body?.inboxRelays))   patch.inboxRelays   = body.inboxRelays;
+
+    const r = await publishSettings(patch);
+    return json(res, 200, {
+      ok:       true,
+      settings: r.settings,
+      synced:   r.ok,
+      error:    r.error,
+    });
   }
 
   // ── GET /api/mail/status ───────────────────────────────────────────────
