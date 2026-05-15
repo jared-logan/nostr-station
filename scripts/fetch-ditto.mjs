@@ -25,8 +25,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
-import { execFileSync } from 'node:child_process';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const DITTO_URL = 'https://gitlab.com/api/v4/projects/79646323/jobs/artifacts/main/download?job=build-web';
@@ -78,23 +77,18 @@ async function fetchAndExtract() {
     return;
   }
 
-  // Write to a tmp file, extract via unzip, clean up. unzip is available
-  // on every supported platform (macOS preinstalled, linux default-y,
-  // Windows via git-bash / WSL). Falling back to a JS zip lib would
-  // pull in a dep just for one file extraction — not worth it.
-  const tmpZip = path.join(os.tmpdir(), `nostr-station-ditto-${Date.now()}.zip`);
-  fs.writeFileSync(tmpZip, buf);
+  // Extract using a pure-Node ZIP reader. We previously shelled out to
+  // `unzip`, but it isn't reliably on PATH (minimal docker images, some
+  // managed/cloud envs, fresh Windows installs without git-bash) and the
+  // "Fetch Ditto" dashboard button surfaced the failure as ENOENT. zlib
+  // is built into Node, so this avoids both the spawn and a new dep.
   fs.mkdirSync(TARGET_DIR, { recursive: true });
-
   try {
-    execFileSync('unzip', ['-q', '-o', tmpZip, '-d', TARGET_DIR], { stdio: 'inherit' });
+    extractZip(buf, TARGET_DIR);
   } catch (e) {
-    console.warn(`[ditto] WARN: unzip failed — ${e.message}`);
-    console.warn(`[ditto] is the \`unzip\` binary on PATH?`);
-    try { fs.unlinkSync(tmpZip); } catch {}
+    console.warn(`[ditto] WARN: extraction failed — ${e.message}`);
     return;
   }
-  try { fs.unlinkSync(tmpZip); } catch {}
 
   // GitLab CI artifact zips occasionally wrap the build output in a
   // top-level subdirectory (e.g. dist/, build/). Flatten: if there's no
@@ -125,6 +119,90 @@ async function fetchAndExtract() {
   }
 
   console.log(`[ditto] extracted to ${path.relative(process.cwd(), TARGET_DIR)}`);
+}
+
+// Pure-Node ZIP extractor. Supports the only two compression methods
+// GitLab CI artifact zips use in practice: stored (0) and deflate (8).
+// Walks the Central Directory from the End-of-Central-Directory record
+// rather than scanning sequentially, which is the standard ZIP read path
+// and tolerates trailing junk / signed archives gracefully.
+function extractZip(buf, destDir) {
+  const EOCD_SIG = 0x06054b50;
+  const CD_SIG   = 0x02014b50;
+  const LFH_SIG  = 0x04034b50;
+
+  // EOCD lives within the last 22 + 65535 bytes (the trailing comment
+  // field is capped at 64 KiB by the spec). Scan backwards.
+  let eocdOff = -1;
+  const minOff = Math.max(0, buf.length - (22 + 0xffff));
+  for (let i = buf.length - 22; i >= minOff; i--) {
+    if (buf.readUInt32LE(i) === EOCD_SIG) { eocdOff = i; break; }
+  }
+  if (eocdOff < 0) throw new Error('not a ZIP (no EOCD record)');
+
+  const totalEntries = buf.readUInt16LE(eocdOff + 10);
+  const cdOffset     = buf.readUInt32LE(eocdOff + 16);
+  // ZIP64 signal: 0xffffffff in the 32-bit fields. The 6 MiB GitLab
+  // artifact won't hit this, but bail loudly if it ever does rather
+  // than silently corrupt.
+  if (cdOffset === 0xffffffff) throw new Error('ZIP64 archive not supported');
+
+  const destResolved = path.resolve(destDir);
+  let off = cdOffset;
+  for (let i = 0; i < totalEntries; i++) {
+    if (buf.readUInt32LE(off) !== CD_SIG) {
+      throw new Error(`malformed central directory at entry ${i}`);
+    }
+    const method     = buf.readUInt16LE(off + 10);
+    const compSize   = buf.readUInt32LE(off + 20);
+    const nameLen    = buf.readUInt16LE(off + 28);
+    const extraLen   = buf.readUInt16LE(off + 30);
+    const commentLen = buf.readUInt16LE(off + 32);
+    const extAttr    = buf.readUInt32LE(off + 38);
+    const localOff   = buf.readUInt32LE(off + 42);
+    const name       = buf.subarray(off + 46, off + 46 + nameLen).toString('utf8');
+    off += 46 + nameLen + extraLen + commentLen;
+
+    if (buf.readUInt32LE(localOff) !== LFH_SIG) {
+      throw new Error(`malformed local file header for ${name}`);
+    }
+    const lfhNameLen  = buf.readUInt16LE(localOff + 26);
+    const lfhExtraLen = buf.readUInt16LE(localOff + 28);
+    const dataOff = localOff + 30 + lfhNameLen + lfhExtraLen;
+
+    // Path-traversal guard — refuse any entry that escapes destDir.
+    const outPath = path.resolve(destResolved, name);
+    if (outPath !== destResolved && !outPath.startsWith(destResolved + path.sep)) {
+      throw new Error(`refusing to extract outside dest: ${name}`);
+    }
+
+    // Directory entries: name ends with '/', no data.
+    if (name.endsWith('/')) {
+      fs.mkdirSync(outPath, { recursive: true });
+      continue;
+    }
+
+    const compData = buf.subarray(dataOff, dataOff + compSize);
+    let data;
+    if (method === 0) {
+      data = compData;
+    } else if (method === 8) {
+      data = zlib.inflateRawSync(compData);
+    } else {
+      throw new Error(`unsupported compression method ${method} for ${name}`);
+    }
+
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, data);
+
+    // Preserve Unix mode bits if present (upper 16 bits of external
+    // attrs when "version made by" is Unix). Bundled JS/CSS/HTML don't
+    // need exec bits, but matches what `unzip` did before.
+    const unixMode = (extAttr >>> 16) & 0o777;
+    if (unixMode) {
+      try { fs.chmodSync(outPath, unixMode); } catch {}
+    }
+  }
 }
 
 // Overlay nostr-station branding on top of the extracted Ditto bundle.
