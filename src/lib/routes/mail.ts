@@ -15,6 +15,13 @@ import http from 'http';
 import { readBody } from './_shared.js';
 import { getMailStore } from '../mail/store.js';
 import { getInboxWorker } from '../mail/inbox.js';
+import { resolveRecipient, RecipientError } from '../mail/resolve.js';
+import { buildGiftWrapPair } from '../mail/wrap.js';
+import { AmberSigner } from '../mail/signer.js';
+import { readInboxRelays } from '../mail/inbox-relays.js';
+import { publishEventToRelays } from './repo.js';
+import { KIND_DM_RUMOR } from '../mail/types.js';
+import { readIdentity, npubToHex } from '../identity.js';
 
 function json(res: http.ServerResponse, status: number, body: any): true {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -78,6 +85,112 @@ export async function handleMail(
   if (pathname === '/api/mail/status' && method === 'GET') {
     const worker = getInboxWorker();
     return json(res, 200, { stats: worker.stats });
+  }
+
+  // ── POST /api/mail/resolve ─────────────────────────────────────────────
+  // Pre-flight lookup that the compose form calls as the user types a
+  // recipient. Returns the resolved pubkey + the recipient's inbox
+  // relays so the UI can warn if delivery is unlikely.
+  if (pathname === '/api/mail/resolve' && method === 'POST') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+    const input = typeof body?.to === 'string' ? body.to : '';
+    try {
+      const r = await resolveRecipient(input);
+      return json(res, 200, {
+        ok:           true,
+        pubkey:       r.pubkey,
+        inboxRelays:  r.inboxRelays,
+        hasInbox:     r.inboxRelays.length > 0,
+        nip05:        r.nip05 ?? null,
+      });
+    } catch (e: any) {
+      if (e instanceof RecipientError) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+      return json(res, 500, { ok: false, error: e?.message || 'resolve failed' });
+    }
+  }
+
+  // ── POST /api/mail/send ────────────────────────────────────────────────
+  // Full NIP-17 send pipeline:
+  //   1. Resolve the recipient (npub | hex | NIP-05).
+  //   2. Build the rumor (kind 14, with subject tag if present).
+  //   3. Seal + wrap for the recipient, AND seal + wrap a self-copy so
+  //      the sender's own inbox view shows their sent mail.
+  //   4. Publish the recipient wrap to the recipient's inbox relays
+  //      (with a fallback to the user's own inbox-relay list when the
+  //      recipient hasn't advertised any). Publish the self-wrap to
+  //      the user's own inbox relays only.
+  //   5. Persist the rumor in mail.db so the sender's UI updates
+  //      immediately, without waiting for the inbox worker to round-
+  //      trip the self-wrap back from a relay.
+  if (pathname === '/api/mail/send' && method === 'POST') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+
+    const toInput  = typeof body?.to      === 'string' ? body.to      : '';
+    const subject  = typeof body?.subject === 'string' ? body.subject : '';
+    const content  = typeof body?.body    === 'string' ? body.body    : '';
+    if (!content.trim()) return json(res, 400, { error: 'body is required' });
+
+    // Resolve recipient. Failures here are user-actionable so we surface
+    // them as 400s with the original message.
+    let resolved;
+    try { resolved = await resolveRecipient(toInput); }
+    catch (e: any) {
+      if (e instanceof RecipientError) return json(res, 400, { error: e.message });
+      return json(res, 500, { error: e?.message || 'resolve failed' });
+    }
+
+    // Build the rumor + wrap pair via Amber.
+    const tags: string[][] = [['p', resolved.pubkey]];
+    if (subject.trim()) tags.push(['subject', subject.trim()]);
+
+    const signer = new AmberSigner();
+    let pair;
+    try {
+      pair = await buildGiftWrapPair(
+        { kind: KIND_DM_RUMOR, content, tags },
+        resolved.pubkey,
+        signer,
+      );
+    } catch (e: any) {
+      return json(res, 500, { error: `sign/wrap failed: ${e?.message || e}` });
+    }
+
+    // Publish.
+    const ownInbox = readInboxRelays();
+    // Fall back to the user's own inbox list if recipient has no kind 10050.
+    const recipientTargets = resolved.inboxRelays.length > 0
+      ? resolved.inboxRelays
+      : ownInbox;
+    const [recipientResults, selfResults] = await Promise.all([
+      publishEventToRelays(pair.recipientWrap, recipientTargets),
+      publishEventToRelays(pair.selfWrap,      ownInbox),
+    ]);
+
+    // Persist the sender's view immediately. ownPubkey is read from
+    // identity.json; if it's missing, the rumor still goes onto the
+    // wire but won't show in the local inbox until the worker picks
+    // up the self-wrap on next connect.
+    try {
+      const ident = readIdentity();
+      if (ident.npub) {
+        const ownHex = npubToHex(ident.npub).toLowerCase();
+        getMailStore().insertMessage(pair.rumor, pair.selfWrap.id, ownHex);
+      }
+    } catch { /* non-fatal; the worker will catch up */ }
+
+    return json(res, 200, {
+      ok:          true,
+      rumorId:     pair.rumor.id,
+      recipient:   { results: recipientResults, targets: recipientTargets },
+      self:        { results: selfResults,      targets: ownInbox },
+      usedFallback: resolved.inboxRelays.length === 0,
+    });
   }
 
   return false;
