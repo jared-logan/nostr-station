@@ -104,6 +104,7 @@ import { handleNvpn } from './routes/nvpn.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
 import { getInboxWorker } from './mail/inbox.js';
+import { handleNsite } from './routes/nsite.js';
 
 // Static-asset + vendor + security-headers wiring lives in
 // ./web-server-static.ts. We re-import the four names the orchestrator
@@ -1580,6 +1581,14 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // lookup + kind-1 publish. Reads from identity.readRelays; signs via
       // the persisted bunker pairing. Auto-stamps ["client","nostr-station"].
       if (await handleClient(req, res, fullUrl, method)) return;
+
+      // ── nsite browser (routes/nsite.ts) ────────────────────────────────
+      // Read side of NIP-5A v1: resolves npub/NIP-05/NSIT addresses, fetches
+      // kind:34128 file events from owner relays, serves SHA256-verified
+      // blobs from the author's Blossom servers into the #nsite panel's
+      // sandboxed iframe. Snapshot cache + LRU blob cache; no disk
+      // persistence in v1.
+      if (await handleNsite(req, res, fullUrl, method)) return;
 
       // Setup wizard completion — called once from the Done stage. Flips
       // setupComplete=true (ending the localhost exemption on this box

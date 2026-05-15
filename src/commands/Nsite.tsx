@@ -429,7 +429,19 @@ const NsitePublish: React.FC<NsitePublishProps> = ({ yes = false }) => {
               {success ? '✓ Published' : '⚠ Publish completed with errors — check output above'}
             </Text>
             {success && cfg && (
-              <Text color={P.muted}>  https://{cfg.npub || '<npub>'}.nsite.lol</Text>
+              <>
+                <Text color={P.muted}>  https://{cfg.npub || '<npub>'}.nsite.lol</Text>
+                {/* Deep-link into the dashboard's #nsite panel for an
+                    in-station preview that doesn't depend on the
+                    gateway. Reads NS_DASHBOARD_PORT if set (when the
+                    publish is triggered from the dashboard itself);
+                    otherwise prints the default 3000. The hash-suffix
+                    is consumed by NsitePanel.maybeConsumeDeepLink. */}
+                <Text color={P.muted}>
+                  {'  Preview in station: '}
+                  http://127.0.0.1:{process.env.NS_DASHBOARD_PORT || '3000'}/#nsite/{cfg.npub || '<npub>'}
+                </Text>
+              </>
             )}
           </Box>
         )}

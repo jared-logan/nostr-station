@@ -8,7 +8,7 @@ import { renderMarkdown, renderCodeBlock } from './markdown.js';
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'client', 'mail', 'config'];
+const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'client', 'nsite', 'mail', 'config'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -18269,6 +18269,196 @@ const MailPanel = (() => {
   };
 })();
 
+// ── nsite browser ────────────────────────────────────────────────────────
+// Sandboxed iframe that renders NIP-5A v1 nsites. Address bar accepts
+// `npub1…`, NIP-05 (`name@host`), `nsite://<x>`, or a bare NSIT name (the
+// latter only when a name indexer is configured server-side).
+//
+// The iframe sandbox attribute is deliberately set WITHOUT
+// `allow-same-origin`, so the rendered nsite runs in an opaque origin and
+// cannot read this dashboard's cookies, localStorage, or fetch our /api/*
+// endpoints with credentials. Subresources still load from
+// /nsite-content/<siteId>/* on this server because that's an HTTP-fetch
+// rule, not an origin check.
+//
+// Address bar history is panel-local (back/forward via in-memory stack).
+// Persisting recent addresses is a future polish — sessionStorage-friendly
+// once the panel proves out.
+const NsitePanel = (() => {
+  const els = {};
+  // History stack: each entry is { siteId, display, path }. The current
+  // index is `cursor`; back/forward move it without truncating, until a
+  // fresh Go() pushes onto cursor+1 and trims the tail.
+  const history = [];
+  let cursor = -1;
+  // Track whether the next iframe `load` is from our own navigation (we
+  // already updated the address bar) or from a link click inside the
+  // iframe (we need to sync the address bar from iframe.contentWindow's
+  // URL). The flag is set when WE drive iframe.src.
+  let drivenLoad = false;
+
+  function setStatus(msg, isError = false) {
+    if (!els.status) return;
+    els.status.textContent = msg || '';
+    els.status.classList.toggle('err', !!isError);
+  }
+  function setMeta(text) {
+    if (!els.meta) return;
+    if (text) { els.meta.hidden = false; els.meta.textContent = text; }
+    else      { els.meta.hidden = true;  els.meta.textContent = ''; }
+  }
+  function setEmpty(visible) {
+    if (els.empty) els.empty.style.display = visible ? '' : 'none';
+    if (els.frame) els.frame.style.display = visible ? 'none' : '';
+  }
+  function updateNavButtons() {
+    if (els.back)    els.back.disabled    = !(cursor > 0);
+    if (els.forward) els.forward.disabled = !(cursor >= 0 && cursor < history.length - 1);
+  }
+
+  // Resolve an address through the backend and, on success, load the
+  // returned siteId's entry path in the iframe.
+  async function go(rawAddr) {
+    const addr = String(rawAddr || '').trim();
+    if (!addr) return;
+    setStatus('Resolving…');
+    setMeta('');
+    try {
+      const url = `/api/nsite/resolve?addr=${encodeURIComponent(addr)}`;
+      const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = body?.message || body?.error || `HTTP ${res.status}`;
+        setStatus(msg, true);
+        return;
+      }
+      const { siteId, display, fileCount, latestAt, source, entry, blossomServers } = body;
+      const entryPath = entry || 'index.html';
+      // Push new history entry (trim forward tail on fresh nav).
+      if (cursor < history.length - 1) history.splice(cursor + 1);
+      history.push({ siteId, display, path: entryPath });
+      cursor = history.length - 1;
+      setStatus(`✓ ${fileCount} file${fileCount === 1 ? '' : 's'} — ${source}`);
+      const ts = latestAt ? new Date(latestAt * 1000).toLocaleString() : '';
+      const servers = (blossomServers || []).map(s => s.replace(/^https?:\/\//, '')).join(', ');
+      setMeta(`Latest event: ${ts || 'unknown'} · Blossom: ${servers || 'defaults'}`);
+      loadIframe(siteId, entryPath, display);
+      updateNavButtons();
+    } catch (e) {
+      setStatus(`Error: ${e?.message || e}`, true);
+    }
+  }
+
+  function loadIframe(siteId, path, display) {
+    if (!els.frame) return;
+    setEmpty(false);
+    const safePath = String(path || 'index.html').replace(/^\/+/, '');
+    drivenLoad = true;
+    els.frame.src = `/nsite-content/${siteId}/${safePath}`;
+    if (els.addr) els.addr.value = display || els.addr.value;
+  }
+
+  function navigate(delta) {
+    const target = cursor + delta;
+    if (target < 0 || target >= history.length) return;
+    cursor = target;
+    const h = history[cursor];
+    loadIframe(h.siteId, h.path, h.display);
+    updateNavButtons();
+  }
+
+  function reload() {
+    if (cursor < 0 || cursor >= history.length) {
+      // Nothing in history yet — re-run the typed address.
+      if (els.addr?.value) void go(els.addr.value);
+      return;
+    }
+    const h = history[cursor];
+    loadIframe(h.siteId, h.path, h.display);
+  }
+
+  function onIframeLoad() {
+    // When the iframe navigates internally (link click → same-origin
+    // /nsite-content/<siteId>/<path>), update the current history entry's
+    // path so reload/back behave correctly. The frame's location is
+    // readable here because the parent is same-origin with the wrapping
+    // URL even though the sandbox attribute makes the *document* itself
+    // opaque-origin.
+    try {
+      const href = els.frame?.contentWindow?.location?.href || '';
+      const m = href.match(/\/nsite-content\/([a-f0-9]{16})\/(.*)$/);
+      if (m && !drivenLoad) {
+        const [, sid, p] = m;
+        // Only treat as a navigation if it's the same site as the current
+        // entry — cross-site iframe nav would be more invasive and is
+        // out of scope for v1.
+        if (cursor >= 0 && history[cursor].siteId === sid) {
+          history[cursor] = { ...history[cursor], path: p };
+        }
+      }
+    } catch { /* sandboxed cross-origin read — ignore */ }
+    drivenLoad = false;
+  }
+
+  function init() {
+    if (els._wired) return;
+    els._wired   = true;
+    els.addr     = $('nsite-addr');
+    els.go       = $('nsite-go');
+    els.back     = $('nsite-back');
+    els.forward  = $('nsite-forward');
+    els.reload   = $('nsite-reload');
+    els.frame    = $('nsite-frame');
+    els.status   = $('nsite-status');
+    els.meta     = $('nsite-meta');
+    els.empty    = $('nsite-empty');
+    els.pubLink  = $('nsite-publish-link');
+    if (!els.addr) return;
+
+    setEmpty(true);
+    els.go?.addEventListener('click', () => void go(els.addr.value));
+    els.addr.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); void go(els.addr.value); }
+    });
+    els.back?.addEventListener('click',    () => navigate(-1));
+    els.forward?.addEventListener('click', () => navigate(+1));
+    els.reload?.addEventListener('click',  () => reload());
+    els.frame?.addEventListener('load', onIframeLoad);
+    els.pubLink?.addEventListener('click', () => {
+      // Light-weight hint — link to the publish-flow docs in the CLI help.
+      // The publish surface itself is the CLI (`nostr-station nsite init/publish`),
+      // so the dashboard's job here is just to point users at it.
+      toast('Publish from a terminal', '`nostr-station nsite init` → build → `nsite publish`.');
+    });
+
+    // Hash deep-link support: `#nsite/<addr>` auto-loads on panel enter.
+    // Used by `nostr-station nsite publish` to print a one-click preview
+    // link after a successful publish.
+    maybeConsumeDeepLink();
+  }
+
+  function maybeConsumeDeepLink() {
+    const hash = String(location.hash || '');
+    const m = hash.match(/^#nsite\/(.+)$/);
+    if (!m || !els.addr) return;
+    const addr = decodeURIComponent(m[1]);
+    els.addr.value = addr;
+    // Strip the suffix from the URL so a reload doesn't keep re-loading.
+    history.length = 0; cursor = -1;
+    try { location.hash = '#nsite'; } catch {}
+    void go(addr);
+  }
+
+  return {
+    onEnter() {
+      init();
+      maybeConsumeDeepLink();
+    },
+    // For tests / dev tools.
+    _state: () => ({ history: history.slice(), cursor }),
+  };
+})();
+
 // ── Registry + boot ──────────────────────────────────────────────────────
 
 const Panels = {
@@ -18280,6 +18470,7 @@ const Panels = {
   vpn:      VpnPanel,
   logs:     LogsPanel,
   client:   ClientPanel,
+  nsite:    NsitePanel,
   mail:     MailPanel,
   config:   ConfigPanel,
 };

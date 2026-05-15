@@ -9096,3 +9096,85 @@ a.client-mention {
   accent-color: var(--accent);
   cursor: pointer;
 }
+
+/* ── nsite browser panel ───────────────────────────────────────────── */
+.panel[data-panel="nsite"] .panel-body.nsite-body {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.nsite-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.nsite-bar button {
+  min-width: 32px;
+}
+.nsite-addr-input {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 10px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono, monospace);
+  font-size: 13px;
+}
+.nsite-addr-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.nsite-status {
+  font-size: 12px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+.nsite-status.err {
+  color: var(--danger, #ff6e6e);
+}
+.nsite-meta {
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  background: var(--bg-elev);
+}
+.nsite-viewport {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  display: flex;
+}
+.nsite-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+  display: block;
+}
+.nsite-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  pointer-events: none;
+  background: var(--bg);
+}
+.nsite-empty-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
