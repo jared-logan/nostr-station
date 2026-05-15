@@ -17340,8 +17340,11 @@ const MailPanel = (() => {
     // Subject of the most recent message is shown at the top.
     const lastSubj = activeMessages[activeMessages.length - 1].subject;
     const head = `<div class="mail-thread-head">
-      <div class="mail-thread-counter">${escapeHtml(npubShort(activeCounter))}</div>
-      <div class="mail-thread-headsubj">${escapeHtml(lastSubj || '(no subject)')}</div>
+      <div>
+        <div class="mail-thread-counter">${escapeHtml(npubShort(activeCounter))}</div>
+        <div class="mail-thread-headsubj">${escapeHtml(lastSubj || '(no subject)')}</div>
+      </div>
+      <div><button class="primary mail-thread-reply" id="mail-thread-reply">reply</button></div>
     </div>`;
     const msgs = activeMessages.map(m => {
       const side  = m.direction === 'out' ? ' mail-msg-out' : ' mail-msg-in';
@@ -17360,6 +17363,13 @@ const MailPanel = (() => {
       </div>`;
     }).join('');
     el.innerHTML = `${head}<div class="mail-msgs">${msgs}</div>`;
+    const replyBtn = $('mail-thread-reply');
+    if (replyBtn) {
+      replyBtn.addEventListener('click', () => {
+        const subj = lastSubj && !/^re:\s/i.test(lastSubj) ? `Re: ${lastSubj}` : lastSubj;
+        onCompose({ to: activeCounter, subject: subj });
+      });
+    }
   }
 
   function updateBadge() {
@@ -17386,12 +17396,127 @@ const MailPanel = (() => {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 
-  // Compose button is wired here so the badge / status pieces stay
-  // co-located with the panel. The send flow itself is added in the
-  // follow-up PR — for now we surface a "coming soon" notice so the
-  // button isn't dead in the navigation.
-  function onCompose() {
-    toast('Compose coming soon', 'Send/reply lands in the next patch — receive works today.', 'warn');
+  // ── Compose modal ─────────────────────────────────────────────────────
+  //
+  // Resolves the recipient on `to` blur so the user gets immediate
+  // feedback about delivery viability ("recipient has no inbox relay
+  // advertised — delivery may fail"), then runs the full send pipeline
+  // on submit via POST /api/mail/send.
+  function onCompose(prefill) {
+    const body = document.createElement('div');
+    body.className = 'mail-compose';
+    body.innerHTML = `
+      <div class="mail-compose-field">
+        <label for="mail-compose-to">to</label>
+        <input id="mail-compose-to" type="text" autocomplete="off" spellcheck="false"
+               placeholder="npub1… · hex pubkey · alice@example.com">
+        <div class="mail-compose-tohint" id="mail-compose-tohint"></div>
+      </div>
+      <div class="mail-compose-field">
+        <label for="mail-compose-subject">subject</label>
+        <input id="mail-compose-subject" type="text" autocomplete="off">
+      </div>
+      <div class="mail-compose-field mail-compose-body-field">
+        <label for="mail-compose-body">message</label>
+        <textarea id="mail-compose-body" rows="10"
+                  placeholder="Plain text. Markdown renders on receipt."></textarea>
+      </div>
+    `;
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px'; foot.style.width = '100%';
+    foot.style.justifyContent = 'flex-end';
+    const cancel = document.createElement('button'); cancel.textContent = 'cancel';
+    const send   = document.createElement('button'); send.textContent   = 'send'; send.className = 'primary';
+    foot.appendChild(cancel); foot.appendChild(send);
+
+    const modal = openModal({
+      title:    'Compose mail',
+      subtitle: 'NIP-17 · end-to-end encrypted',
+      body, footer: foot,
+    });
+    modal.root.classList.add('mail-compose-modal');
+
+    const toEl   = body.querySelector('#mail-compose-to');
+    const subjEl = body.querySelector('#mail-compose-subject');
+    const bodyEl = body.querySelector('#mail-compose-body');
+    const hintEl = body.querySelector('#mail-compose-tohint');
+
+    if (prefill) {
+      // When replying we pre-fill `to` with the counterparty's npub-ish
+      // hex; clicking "compose" from a thread keeps the user in flow.
+      if (prefill.to)      toEl.value   = prefill.to;
+      if (prefill.subject) subjEl.value = prefill.subject;
+      if (prefill.body)    bodyEl.value = prefill.body;
+    }
+    setTimeout(() => toEl.focus(), 50);
+
+    let resolvedRecipient = null;
+    let resolving         = false;
+    async function resolveNow() {
+      const v = toEl.value.trim();
+      if (!v) { hintEl.textContent = ''; resolvedRecipient = null; return; }
+      if (resolving) return;
+      resolving = true;
+      hintEl.textContent = 'resolving…';
+      hintEl.className = 'mail-compose-tohint';
+      try {
+        const r = await api('/api/mail/resolve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: v }),
+        }, { silent: true });
+        resolvedRecipient = r;
+        const short = `${r.pubkey.slice(0, 8)}…${r.pubkey.slice(-4)}`;
+        const inboxN = Array.isArray(r.inboxRelays) ? r.inboxRelays.length : 0;
+        if (r.hasInbox) {
+          hintEl.textContent = `✓ ${short} · ${inboxN} inbox relay${inboxN === 1 ? '' : 's'}`;
+          hintEl.className = 'mail-compose-tohint ok';
+        } else {
+          hintEl.textContent = `⚠ ${short} · no inbox relays advertised; delivery may fail`;
+          hintEl.className = 'mail-compose-tohint warn';
+        }
+      } catch (e) {
+        const msg = (e?.message || String(e)).replace(/^.* 400.*?: /, '');
+        hintEl.textContent = `✗ ${msg.slice(0, 120)}`;
+        hintEl.className = 'mail-compose-tohint err';
+        resolvedRecipient = null;
+      } finally {
+        resolving = false;
+      }
+    }
+    toEl.addEventListener('blur', () => { void resolveNow(); });
+
+    cancel.addEventListener('click', () => modal.close());
+    send.addEventListener('click', async () => {
+      const to   = toEl.value.trim();
+      const subj = subjEl.value.trim();
+      const msg  = bodyEl.value;
+      if (!to)         { toast('Missing recipient', 'Enter an npub, hex pubkey, or NIP-05 address.', 'warn'); return; }
+      if (!msg.trim()) { toast('Empty message', 'Write something to send.', 'warn'); return; }
+
+      send.disabled = true; send.textContent = 'sending…';
+      try {
+        const r = await api('/api/mail/send', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ to, subject: subj, body: msg }),
+        });
+        const okRecipients = (r.recipient?.results || []).filter(x => x.ok).length;
+        const totalRecipients = (r.recipient?.results || []).length;
+        if (okRecipients > 0) {
+          toast('Mail sent', `${okRecipients}/${totalRecipients} recipient inbox relays accepted.`, 'ok');
+          modal.close();
+          await load();
+        } else {
+          const reasons = (r.recipient?.results || []).map(x => x.reason).filter(Boolean).slice(0, 2);
+          toast('Send failed', reasons.join(' · ') || 'all recipient relays rejected the wrap', 'err');
+        }
+      } catch (e) {
+        // api() already toasts non-2xx — nothing more to do here.
+      } finally {
+        send.disabled = false; send.textContent = 'send';
+      }
+    });
   }
 
   function wireButtons() {

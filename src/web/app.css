@@ -8801,3 +8801,41 @@ a.client-mention {
   font-size: 13px; color: var(--text);
   white-space: pre-wrap; word-break: break-word;
 }
+
+/* ── Mail compose modal ──────────────────────────────────────────────── */
+.mail-compose-modal { width: min(640px, 92vw); }
+.mail-compose       { display: flex; flex-direction: column; gap: 12px; }
+.mail-compose-field { display: flex; flex-direction: column; gap: 4px; }
+.mail-compose-field label {
+  font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;
+}
+.mail-compose-field input,
+.mail-compose-field textarea {
+  background: var(--input-bg, rgba(0,0,0,0.25));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+}
+.mail-compose-body-field textarea {
+  font-family: inherit;
+  resize: vertical;
+  min-height: 140px;
+}
+.mail-compose-tohint {
+  font-size: 11px;
+  min-height: 14px;
+  color: var(--text-dim);
+}
+.mail-compose-tohint.ok   { color: var(--accent-bright); }
+.mail-compose-tohint.warn { color: #e0b341; }
+.mail-compose-tohint.err  { color: var(--error, #e85555); }
+
+/* Thread head: align reply button to the right */
+.mail-thread-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.mail-thread-reply { white-space: nowrap; }
