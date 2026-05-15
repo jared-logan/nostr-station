@@ -9227,3 +9227,76 @@ a.client-mention {
   border-top: 1px solid var(--border);
   font-size: 11px;
 }
+
+/* ── Config → nsite section ───────────────────────────────────────── */
+.cfg-nsite-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cfg-nsite-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cfg-nsite-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}
+.cfg-nsite-label .muted {
+  font-weight: 400;
+  font-size: 11px;
+}
+.cfg-nsite-field textarea,
+.cfg-nsite-field input[type="text"] {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  line-height: 1.4;
+  resize: vertical;
+}
+.cfg-nsite-field textarea:focus,
+.cfg-nsite-field input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.cfg-nsite-field textarea[disabled],
+.cfg-nsite-field input[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.cfg-nsite-hint {
+  font-size: 10px;
+}
+.cfg-env-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.cfg-nsite-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.cfg-nsite-path {
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+}
