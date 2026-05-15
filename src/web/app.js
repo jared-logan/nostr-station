@@ -17528,7 +17528,135 @@ const MailPanel = (() => {
     const compose = $('mail-compose');
     if (compose && !compose.__wired) {
       compose.__wired = true;
-      compose.addEventListener('click', onCompose);
+      compose.addEventListener('click', () => onCompose());
+    }
+    const settings = $('mail-settings');
+    if (settings && !settings.__wired) {
+      settings.__wired = true;
+      settings.addEventListener('toggle', () => {
+        if (settings.open) void loadInboxRelays();
+      });
+    }
+  }
+
+  // ── Inbox-relay management ─────────────────────────────────────────────
+  //
+  // Renders an editable list of wss:// URLs plus "publish kind 10050 now"
+  // and "reset to defaults" buttons. The PUT call persists locally and
+  // tries to publish a fresh kind 10050 in one shot; the publish button
+  // is a manual retry hook for when the signed-publish step failed.
+
+  async function loadInboxRelays() {
+    const el = $('mail-settings-body');
+    const sub = $('mail-settings-sub');
+    if (!el) return;
+    el.innerHTML = '<div class="mail-empty">loading…</div>';
+    try {
+      const r = await api('/api/mail/inbox-relays', undefined, { silent: true });
+      const relays   = Array.isArray(r?.relays)   ? r.relays   : [];
+      const defaults = Array.isArray(r?.defaults) ? r.defaults : [];
+      if (sub) sub.textContent = `${relays.length} relay${relays.length === 1 ? '' : 's'}`;
+
+      const rows = relays.map((u, i) => `
+        <div class="mail-relay-row" data-i="${i}">
+          <input type="text" class="mail-relay-url" value="${escapeHtml(u)}" spellcheck="false">
+          <button class="danger mail-relay-remove" data-i="${i}">remove</button>
+        </div>`).join('');
+
+      el.innerHTML = `
+        <div class="mail-relay-list" id="mail-relay-list">${rows}</div>
+        <div class="mail-relay-add">
+          <input type="text" id="mail-relay-new" placeholder="wss://…" spellcheck="false">
+          <button id="mail-relay-add-btn">add</button>
+        </div>
+        <div class="mail-relay-actions">
+          <button id="mail-relay-save" class="primary">save + publish</button>
+          <button id="mail-relay-publish">publish only</button>
+          <button id="mail-relay-reset">reset to defaults</button>
+        </div>
+        <div class="mail-relay-defaults">
+          Defaults: <code>${escapeHtml(defaults.join('  '))}</code>
+        </div>`;
+
+      const readLocal = () => $$('.mail-relay-url', $('mail-relay-list'))
+        .map(i => i.value.trim()).filter(Boolean);
+
+      for (const btn of $$('.mail-relay-remove', el)) {
+        btn.addEventListener('click', () => {
+          btn.closest('.mail-relay-row')?.remove();
+          if (sub) sub.textContent = `${readLocal().length} relay${readLocal().length === 1 ? '' : 's'}`;
+        });
+      }
+      $('mail-relay-add-btn')?.addEventListener('click', () => {
+        const input = $('mail-relay-new');
+        const v = (input.value || '').trim();
+        if (!/^wss?:\/\//.test(v)) {
+          toast('Bad relay URL', 'must start with wss:// or ws://', 'warn');
+          return;
+        }
+        const list = $('mail-relay-list');
+        const i = $$('.mail-relay-row', list).length;
+        const row = document.createElement('div');
+        row.className = 'mail-relay-row';
+        row.dataset.i = String(i);
+        row.innerHTML = `<input type="text" class="mail-relay-url" value="${escapeHtml(v)}" spellcheck="false">
+                         <button class="danger mail-relay-remove" data-i="${i}">remove</button>`;
+        row.querySelector('.mail-relay-remove').addEventListener('click', () => row.remove());
+        list.appendChild(row);
+        input.value = '';
+        if (sub) sub.textContent = `${readLocal().length} relay${readLocal().length === 1 ? '' : 's'}`;
+      });
+
+      async function save(publish) {
+        const next = readLocal();
+        if (next.length === 0) {
+          toast('Need at least one inbox relay', 'Add a wss:// URL before saving.', 'warn');
+          return;
+        }
+        try {
+          const r = await api('/api/mail/inbox-relays', {
+            method:  'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ relays: next, publish }),
+          });
+          if (publish && r?.publish?.attempted) {
+            if (r.publish.ok) toast('Saved + published', 'kind 10050 accepted.', 'ok');
+            else              toast('Saved (publish failed)', r.publish.error || 'no relays accepted the event', 'warn');
+          } else {
+            toast('Saved', 'Inbox relays updated locally.', 'ok');
+          }
+          // Refresh the worker stats so "N inbox relays connected" reflects
+          // the new set on the very next render tick.
+          await load();
+          await loadInboxRelays();
+        } catch { /* api() already toasted */ }
+      }
+
+      $('mail-relay-save')?.addEventListener('click', () => save(true));
+      $('mail-relay-publish')?.addEventListener('click', async () => {
+        try {
+          const r = await api('/api/mail/inbox-relays/publish', { method: 'POST' });
+          if (r.ok) toast('Published', 'kind 10050 broadcast to inbox + discovery relays.', 'ok');
+          else      toast('Publish failed', r.error || 'no relays accepted', 'err');
+        } catch { /* api() already toasted */ }
+      });
+      $('mail-relay-reset')?.addEventListener('click', () => {
+        const list = $('mail-relay-list');
+        list.innerHTML = defaults.map((u, i) => `
+          <div class="mail-relay-row" data-i="${i}">
+            <input type="text" class="mail-relay-url" value="${escapeHtml(u)}" spellcheck="false">
+            <button class="danger mail-relay-remove" data-i="${i}">remove</button>
+          </div>`).join('');
+        for (const btn of $$('.mail-relay-remove', list)) {
+          btn.addEventListener('click', () => {
+            btn.closest('.mail-relay-row')?.remove();
+            if (sub) sub.textContent = `${readLocal().length} relay${readLocal().length === 1 ? '' : 's'}`;
+          });
+        }
+        if (sub) sub.textContent = `${defaults.length} relay${defaults.length === 1 ? '' : 's'} (defaults)`;
+      });
+    } catch (e) {
+      el.innerHTML = `<div class="mail-empty">Failed to load relays: ${escapeHtml(e?.message || e)}</div>`;
     }
   }
 

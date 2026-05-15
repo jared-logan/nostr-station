@@ -53,6 +53,35 @@ function get(port: number, path: string): Promise<{ status: number; body: string
   });
 }
 
+// Same wrapper but issues a request body + sets Origin so the CSRF guard
+// lets the mutation through to the handler.
+function send(port: number, method: string, path: string, body: any): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const payload = body == null ? '' : JSON.stringify(body);
+    const req = http.request(
+      { host: '127.0.0.1', port, path, method,
+        headers: {
+          host: `127.0.0.1:${port}`,
+          'content-type': 'application/json',
+          'origin': `http://127.0.0.1:${port}`,
+          'content-length': Buffer.byteLength(payload).toString(),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end',  () => resolve({
+          status: res.statusCode ?? 0,
+          body:   Buffer.concat(chunks).toString('utf8'),
+        }));
+      },
+    );
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
 test('mail-routes: /api/mail/inbox returns an empty thread list initially', async (t) => {
   const { server, port } = await bootOnRandomPort();
   t.after(() => new Promise<void>((r) => server.close(() => r())));
@@ -96,4 +125,48 @@ test('mail-routes: /api/mail/status returns inbox worker stats', async (t) => {
   assert.equal(typeof parsed.stats, 'object');
   assert.equal(typeof parsed.stats.relaysConnected, 'number');
   assert.equal(typeof parsed.stats.eventsSeen,      'number');
+});
+
+test('mail-routes: GET /api/mail/inbox-relays returns defaults', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/inbox-relays');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.ok(Array.isArray(parsed.relays));
+  assert.ok(parsed.relays.length > 0, 'fresh install ships with default inbox relays');
+  assert.ok(Array.isArray(parsed.defaults));
+});
+
+test('mail-routes: PUT /api/mail/inbox-relays validates entries', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const bad = await send(port, 'PUT', '/api/mail/inbox-relays',
+    { relays: ['http://insecure.example'], publish: false });
+  assert.equal(bad.status, 400);
+  assert.match(bad.body, /invalid relay url/);
+
+  const empty = await send(port, 'PUT', '/api/mail/inbox-relays',
+    { relays: [], publish: false });
+  assert.equal(empty.status, 400);
+  assert.match(empty.body, /at least one/);
+});
+
+test('mail-routes: PUT /api/mail/inbox-relays saves a valid list', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const want = ['wss://relay.example.test', 'wss://another.example.test'];
+  // publish:false to avoid the kind 10050 broadcast attempt (no bunker is paired in tests).
+  const r = await send(port, 'PUT', '/api/mail/inbox-relays', { relays: want, publish: false });
+  assert.equal(r.status, 200);
+  const saved = JSON.parse(r.body);
+  assert.deepEqual(saved.relays, want);
+
+  // Re-read to confirm persistence.
+  const after = await get(port, '/api/mail/inbox-relays');
+  const afterParsed = JSON.parse(after.body);
+  assert.deepEqual(afterParsed.relays, want);
 });

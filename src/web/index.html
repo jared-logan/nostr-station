@@ -557,6 +557,17 @@
         <!-- Two-column layout: thread list on the left, current thread on the right.
              Populated by MailPanel in app.js. -->
         <div class="mail-status" id="mail-status"></div>
+
+        <!-- Inbox-relay management. Collapsed by default; the user opens
+             it to add/remove relays or re-publish their kind 10050. -->
+        <details class="mail-settings" id="mail-settings">
+          <summary>
+            <span class="mail-settings-title">Inbox relays (kind 10050)</span>
+            <span class="mail-settings-sub" id="mail-settings-sub"></span>
+          </summary>
+          <div class="mail-settings-body" id="mail-settings-body">loading…</div>
+        </details>
+
         <div class="mail-split" id="mail-split">
           <aside class="mail-threads" id="mail-threads">
             <div class="mail-empty">loading…</div>
