@@ -8839,3 +8839,55 @@ a.client-mention {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
 .mail-thread-reply { white-space: nowrap; }
+
+/* ── Mail · inbox-relay management ───────────────────────────────────── */
+.mail-settings {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  padding: 0;
+}
+.mail-settings > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 14px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 13px;
+}
+.mail-settings > summary::-webkit-details-marker { display: none; }
+.mail-settings-title { color: var(--text-bright); }
+.mail-settings-sub   { color: var(--muted); font-size: 11px; }
+.mail-settings-body {
+  border-top: 1px solid var(--border);
+  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.mail-relay-list  { display: flex; flex-direction: column; gap: 6px; }
+.mail-relay-row   { display: flex; gap: 6px; }
+.mail-relay-url   {
+  flex: 1;
+  background: var(--input-bg, rgba(0,0,0,0.25));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+  font: inherit;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.mail-relay-add { display: flex; gap: 6px; }
+.mail-relay-add input {
+  flex: 1;
+  background: var(--input-bg, rgba(0,0,0,0.25));
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 6px 8px;
+  font: inherit; font-family: var(--font-mono, monospace); font-size: 12px;
+}
+.mail-relay-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.mail-relay-defaults {
+  font-size: 11px; color: var(--muted);
+  word-break: break-all;
+}
+.mail-relay-defaults code {
+  font-size: 11px; color: var(--text-dim); background: transparent;
+}

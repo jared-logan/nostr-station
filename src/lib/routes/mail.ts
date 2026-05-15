@@ -18,10 +18,13 @@ import { getInboxWorker } from '../mail/inbox.js';
 import { resolveRecipient, RecipientError } from '../mail/resolve.js';
 import { buildGiftWrapPair } from '../mail/wrap.js';
 import { AmberSigner } from '../mail/signer.js';
-import { readInboxRelays } from '../mail/inbox-relays.js';
+import {
+  readInboxRelays, writeInboxRelays, DEFAULT_INBOX_RELAYS,
+} from '../mail/inbox-relays.js';
 import { publishEventToRelays } from './repo.js';
-import { KIND_DM_RUMOR } from '../mail/types.js';
-import { readIdentity, npubToHex } from '../identity.js';
+import { KIND_DM_RUMOR, KIND_INBOX_RELAYS } from '../mail/types.js';
+import { readIdentity, npubToHex, isValidRelayUrl } from '../identity.js';
+import { signEventWithSavedBunker } from '../auth-bunker.js';
 
 function json(res: http.ServerResponse, status: number, body: any): true {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -193,5 +196,108 @@ export async function handleMail(
     });
   }
 
+  // ── GET /api/mail/inbox-relays ─────────────────────────────────────────
+  // Returns the user's currently configured inbox-relay list (mirrors
+  // what we'd publish as kind 10050) plus the curated default set the
+  // UI can offer as "reset to defaults".
+  if (pathname === '/api/mail/inbox-relays' && method === 'GET') {
+    return json(res, 200, {
+      relays:   readInboxRelays(),
+      defaults: DEFAULT_INBOX_RELAYS,
+    });
+  }
+
+  // ── PUT /api/mail/inbox-relays ─────────────────────────────────────────
+  // Replace the inbox-relay list. We persist the new list to disk,
+  // restart the inbox worker's subscriptions so it tails the new
+  // relays immediately, and (if a bunker is paired) publish a fresh
+  // kind 10050 so other NIP-17 clients know where to deliver to us.
+  if (pathname === '/api/mail/inbox-relays' && method === 'PUT') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+    const incoming = Array.isArray(body?.relays) ? body.relays : null;
+    if (!incoming) return json(res, 400, { error: 'relays must be an array of wss:// URLs' });
+
+    const cleaned: string[] = [];
+    for (const r of incoming) {
+      if (typeof r !== 'string') continue;
+      const trimmed = r.trim();
+      if (!isValidRelayUrl(trimmed)) {
+        return json(res, 400, { error: `invalid relay url: ${trimmed.slice(0, 80)}` });
+      }
+      if (!cleaned.includes(trimmed)) cleaned.push(trimmed);
+    }
+    if (cleaned.length === 0) {
+      return json(res, 400, { error: 'at least one inbox relay is required' });
+    }
+    const saved = writeInboxRelays(cleaned);
+
+    // Live-update the running worker so new mail arrives without a
+    // restart. The worker no-ops when not started, so this is safe to
+    // call unconditionally.
+    try { getInboxWorker().resetRelays(saved); } catch {}
+
+    // Try to publish the kind 10050. Best-effort — failure here doesn't
+    // unsave the list, just leaves it un-broadcast (the user can hit
+    // "publish kind 10050" again from the UI).
+    let publish: any = { attempted: false };
+    if (body.publish !== false) {
+      publish = await publishInboxRelayList(saved);
+    }
+
+    return json(res, 200, { ok: true, relays: saved, publish });
+  }
+
+  // ── POST /api/mail/inbox-relays/publish ────────────────────────────────
+  // Explicit "republish kind 10050 now" — useful when the user fixes
+  // a paired Amber session after the silent publish at save time
+  // failed, or wants to re-broadcast to a new relay they just added
+  // outside the UI.
+  if (pathname === '/api/mail/inbox-relays/publish' && method === 'POST') {
+    const result = await publishInboxRelayList(readInboxRelays());
+    return json(res, result.ok ? 200 : 500, result);
+  }
+
   return false;
+}
+
+// Sign + broadcast a kind 10050 event listing the user's inbox relays.
+// Falls back gracefully if no bunker is paired — the local list is still
+// usable for receiving (the inbox worker subscribes regardless of whether
+// we ever publish), it just means other NIP-17 clients won't discover
+// where to send mail for this pubkey.
+async function publishInboxRelayList(
+  relays: string[],
+): Promise<{ ok: boolean; attempted: boolean; results?: any[]; error?: string }> {
+  const ident = readIdentity();
+  if (!ident.npub) {
+    return { ok: false, attempted: false, error: 'no station npub configured' };
+  }
+  const template = {
+    kind:       KIND_INBOX_RELAYS,
+    created_at: Math.floor(Date.now() / 1000),
+    tags:       relays.map(r => ['relay', r]),
+    content:    '',
+  };
+  const signed = await signEventWithSavedBunker(template);
+  if (!signed.ok || !signed.signedEvent) {
+    return {
+      ok:        false,
+      attempted: true,
+      error:     signed.error || 'bunker signature unavailable',
+    };
+  }
+  // Publish to the user's own inbox relays + a small fan-out to common
+  // discovery relays so other clients can find this kind 10050 even if
+  // they don't already know about the user's chosen inbox set.
+  const fanout = new Set<string>(relays);
+  for (const r of ['wss://purplepag.es', 'wss://relay.damus.io', 'wss://nos.lol']) fanout.add(r);
+  const results = await publishEventToRelays(signed.signedEvent, [...fanout]);
+  const okCount = results.filter(r => r.ok).length;
+  return {
+    ok:        okCount > 0,
+    attempted: true,
+    results,
+  };
 }
