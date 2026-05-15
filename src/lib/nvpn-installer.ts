@@ -33,7 +33,10 @@ import {
 
 export type { InstallResult, ProgressCallback };
 
-export async function installNostrVpn(onProgress: ProgressCallback = () => {}): Promise<InstallResult> {
+export async function installNostrVpn(
+  onProgress: ProgressCallback = () => {},
+  opts: { force?: boolean } = {},
+): Promise<InstallResult> {
   const cargoBin = getCargoBin();
   const target   = getNvpnTarget();
   if (!target) {
@@ -46,18 +49,21 @@ export async function installNostrVpn(onProgress: ProgressCallback = () => {}): 
 
   const log = createInstallLogger('nvpn', onProgress);
   const nvpnBin = path.join(cargoBin, 'nvpn');
-  log.append(`target=${target} cargoBin=${cargoBin}`);
+  log.append(`target=${target} cargoBin=${cargoBin}${opts.force ? ' force=true' : ''}`);
 
   // Short-circuit when already installed. `nvpn status --json` would be
   // wrong here — it talks to the daemon and exits non-zero when
   // disconnected, forcing a reinstall every time the user re-ran the
-  // wizard on a working install.
-  log.step('checking for existing install');
-  try {
-    await execa(nvpnBin, ['--help'], { stdio: 'pipe', timeout: 5000 });
-    log.append('already installed — skipping');
-    return { ok: true, detail: 'already installed' };
-  } catch { /* fall through to install */ }
+  // wizard on a working install. `force` (per-tool update flow) bypasses
+  // this — the caller already version-compared and wants the binary swapped.
+  if (!opts.force) {
+    log.step('checking for existing install');
+    try {
+      await execa(nvpnBin, ['--help'], { stdio: 'pipe', timeout: 5000 });
+      log.append('already installed — skipping');
+      return { ok: true, detail: 'already installed' };
+    } catch { /* fall through to install */ }
+  }
 
   const pinnedVersion = COMPONENT_VERSIONS['nvpn'];
   if (!pinnedVersion) {

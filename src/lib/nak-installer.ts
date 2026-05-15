@@ -41,7 +41,10 @@ function resolveTarget(): { os: string; arch: string; key: string } | null {
   return { os: osName, arch, key: `${osName}-${arch}` };
 }
 
-export async function installNak(onProgress: ProgressCallback = () => {}): Promise<InstallResult> {
+export async function installNak(
+  onProgress: ProgressCallback = () => {},
+  opts: { force?: boolean } = {},
+): Promise<InstallResult> {
   const target = resolveTarget();
   if (!target) {
     return {
@@ -52,15 +55,19 @@ export async function installNak(onProgress: ProgressCallback = () => {}): Promi
   }
 
   const log = createInstallLogger('nak', onProgress);
-  log.append(`target=${target.key}`);
+  log.append(`target=${target.key}${opts.force ? ' force=true' : ''}`);
 
-  // Short-circuit when already installed and responding.
-  log.step('checking for existing install');
-  try {
-    await execa('nak', ['--version'], { stdio: 'pipe', timeout: 5000 });
-    log.append('already installed — skipping');
-    return { ok: true, detail: 'already installed' };
-  } catch { /* fall through to install */ }
+  // Short-circuit when already installed and responding — unless the caller
+  // asked for `force` (the per-tool update flow does: it has already
+  // version-compared and decided we need to overwrite the on-disk binary).
+  if (!opts.force) {
+    log.step('checking for existing install');
+    try {
+      await execa('nak', ['--version'], { stdio: 'pipe', timeout: 5000 });
+      log.append('already installed — skipping');
+      return { ok: true, detail: 'already installed' };
+    } catch { /* fall through to install */ }
+  }
 
   const pinnedVersion = COMPONENT_VERSIONS['nak'];
   if (!pinnedVersion) {
