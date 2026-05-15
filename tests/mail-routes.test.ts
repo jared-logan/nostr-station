@@ -154,6 +154,46 @@ test('mail-routes: PUT /api/mail/inbox-relays validates entries', async (t) => {
   assert.match(empty.body, /at least one/);
 });
 
+test('mail-routes: /api/mail/requests returns an empty quarantine bucket initially', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/requests');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.equal(parsed.bucket, 'quarantine');
+  assert.ok(Array.isArray(parsed.threads));
+  assert.equal(parsed.threads.length, 0);
+});
+
+test('mail-routes: /api/mail/accept and /api/mail/block validate pubkey shape', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const badAccept = await send(port, 'POST', '/api/mail/accept', { pubkey: 'not-hex' });
+  assert.equal(badAccept.status, 400);
+  assert.match(badAccept.body, /64-char hex/);
+
+  const badBlock = await send(port, 'POST', '/api/mail/block', { pubkey: 'not-hex' });
+  assert.equal(badBlock.status, 400);
+  assert.match(badBlock.body, /64-char hex/);
+});
+
+test('mail-routes: /api/mail/accept allowlists a pubkey, /api/mail/lists reads it back', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const pk = 'a'.repeat(64);
+  const ok = await send(port, 'POST', '/api/mail/accept', { pubkey: pk });
+  assert.equal(ok.status, 200);
+
+  const lists = await get(port, '/api/mail/lists');
+  assert.equal(lists.status, 200);
+  const parsed = JSON.parse(lists.body);
+  assert.ok(Array.isArray(parsed.allowlist));
+  assert.ok(parsed.allowlist.some((e: any) => e.pubkey === pk));
+});
+
 test('mail-routes: /api/mail/stream sends a hello frame on connect', async (t) => {
   const { server, port } = await bootOnRandomPort();
   t.after(() => new Promise<void>((r) => server.close(() => r())));

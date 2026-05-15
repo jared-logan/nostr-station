@@ -17211,7 +17211,10 @@ const ClientPanel = (() => {
 
 const MailPanel = (() => {
   let threads        = [];
-  let activeCounter  = null;     // hex pubkey of the open thread, or null
+  let requests       = [];        // PR 7: quarantine bucket
+  let blocked        = [];        // PR 7: blocklist entries
+  let activeTab      = 'inbox';   // 'inbox' | 'requests' | 'blocked'
+  let activeCounter  = null;      // hex pubkey of the open thread, or null
   let activeMessages = [];
   let lastStatus     = null;
 
@@ -17233,13 +17236,19 @@ const MailPanel = (() => {
 
   async function load() {
     try {
-      const [inbox, status] = await Promise.all([
-        api('/api/mail/inbox',  undefined, { silent: true }),
-        api('/api/mail/status', undefined, { silent: true }).catch(() => null),
+      // Fetch inbox + requests + status in parallel. Blocked list is
+      // smaller / less frequently checked — fetched lazily when the
+      // Blocked tab opens.
+      const [inbox, reqs, status] = await Promise.all([
+        api('/api/mail/inbox?bucket=inbox',    undefined, { silent: true }),
+        api('/api/mail/requests',              undefined, { silent: true }).catch(() => ({ threads: [] })),
+        api('/api/mail/status',                undefined, { silent: true }).catch(() => null),
       ]);
       threads    = Array.isArray(inbox?.threads) ? inbox.threads : [];
+      requests   = Array.isArray(reqs?.threads)  ? reqs.threads  : [];
       lastStatus = status?.stats || null;
       renderStatus();
+      renderTabBadges();
       renderThreads();
       updateBadge();
       // If a thread is open, reload its messages too — new arrivals are
@@ -17249,6 +17258,42 @@ const MailPanel = (() => {
       const el = $('mail-threads');
       if (el) el.innerHTML = `<div class="mail-empty">Failed to load: ${escapeHtml(e?.message || e)}</div>`;
     }
+  }
+
+  async function loadBlocked() {
+    try {
+      const r = await api('/api/mail/lists', undefined, { silent: true });
+      blocked = Array.isArray(r?.blocklist) ? r.blocklist : [];
+      if (activeTab === 'blocked') renderThreads();
+    } catch {
+      blocked = [];
+    }
+  }
+
+  function renderTabBadges() {
+    const b = $('mail-tab-badge-requests');
+    if (!b) return;
+    if (requests.length > 0) {
+      b.hidden = false;
+      b.textContent = String(requests.length > 99 ? '99+' : requests.length);
+    } else {
+      b.hidden = true;
+    }
+  }
+
+  function setTab(tab) {
+    if (tab !== 'inbox' && tab !== 'requests' && tab !== 'blocked') return;
+    activeTab = tab;
+    activeCounter  = null;
+    activeMessages = [];
+    for (const btn of $$('.mail-tab')) {
+      const on = btn.getAttribute('data-tab') === tab;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
+    renderThreads();
+    renderThread();
+    if (tab === 'blocked') void loadBlocked();
   }
 
   async function loadThread(counterparty) {
@@ -17294,15 +17339,56 @@ const MailPanel = (() => {
   function renderThreads() {
     const el = $('mail-threads');
     if (!el) return;
-    if (!threads.length) {
-      el.innerHTML = `<div class="mail-empty">
-        No mail yet. Encrypted messages addressed to your npub will appear here.
-      </div>`;
+
+    // Blocked tab: pubkey list with Unblock buttons. No threads view.
+    if (activeTab === 'blocked') {
+      if (!blocked.length) {
+        el.innerHTML = `<div class="mail-empty">No blocked senders.</div>`;
+        return;
+      }
+      el.innerHTML = blocked.map(b => `
+        <div class="mail-thread-item mail-block-row">
+          <div class="mail-thread-row1">
+            <span class="mail-thread-who">${escapeHtml(npubShort(b.pubkey))}</span>
+            <span class="mail-thread-age">${escapeHtml(fmtAge(Math.floor(b.added_at / 1000)))}</span>
+          </div>
+          <div class="mail-thread-actions">
+            <button class="mail-thread-unblock" data-pubkey="${escapeHtml(b.pubkey)}">unblock</button>
+          </div>
+        </div>`).join('');
+      for (const btn of $$('.mail-thread-unblock', el)) {
+        btn.addEventListener('click', async () => {
+          const pk = btn.getAttribute('data-pubkey');
+          try {
+            await api('/api/mail/unblock', {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify({ pubkey: pk }),
+            });
+            toast('Unblocked', `${npubShort(pk)} can send mail again.`, 'ok');
+            await loadBlocked();
+          } catch { /* api() already toasted */ }
+        });
+      }
       return;
     }
-    const items = threads.map(t => {
+
+    const list = activeTab === 'requests' ? requests : threads;
+    if (!list.length) {
+      const msg = activeTab === 'requests'
+        ? 'No requests yet. Mail from senders you don\'t follow lands here.'
+        : 'No mail yet. Encrypted messages addressed to your npub will appear here.';
+      el.innerHTML = `<div class="mail-empty">${escapeHtml(msg)}</div>`;
+      return;
+    }
+    const items = list.map(t => {
       const active = activeCounter === t.counterparty ? ' active' : '';
       const unreadDot = t.unread > 0 ? '<span class="mail-unread-dot" aria-label="unread"></span>' : '';
+      const requestActions = activeTab === 'requests' ? `
+        <div class="mail-thread-actions">
+          <button class="mail-thread-accept" data-pubkey="${escapeHtml(t.counterparty)}">accept</button>
+          <button class="mail-thread-block danger" data-pubkey="${escapeHtml(t.counterparty)}">block</button>
+        </div>` : '';
       return `<button class="mail-thread-item${active}" data-counter="${escapeHtml(t.counterparty)}">
         ${unreadDot}
         <div class="mail-thread-row1">
@@ -17311,16 +17397,54 @@ const MailPanel = (() => {
         </div>
         <div class="mail-thread-subj">${escapeHtml(t.last_subject || '(no subject)')}</div>
         <div class="mail-thread-prev">${escapeHtml(preview(t.last_preview))}</div>
+        ${requestActions}
       </button>`;
     }).join('');
     el.innerHTML = items;
     for (const btn of $$('.mail-thread-item', el)) {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', (e) => {
+        // The inner accept/block buttons stop propagation themselves;
+        // this fires for clicks on the body of the chip.
         const c = btn.getAttribute('data-counter');
         if (!c) return;
         activeCounter = c;
         renderThreads();
         void loadThread(c);
+      });
+    }
+    for (const btn of $$('.mail-thread-accept', el)) {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const pk = btn.getAttribute('data-pubkey');
+        try {
+          await api('/api/mail/accept', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ pubkey: pk }),
+          });
+          toast('Accepted', `${npubShort(pk)} moved to inbox.`, 'ok');
+          await load();
+        } catch { /* api() already toasted */ }
+      });
+    }
+    for (const btn of $$('.mail-thread-block', el)) {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const pk = btn.getAttribute('data-pubkey');
+        try {
+          await api('/api/mail/block', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ pubkey: pk }),
+          });
+          toast('Blocked', `${npubShort(pk)} is blocked and their history was deleted.`, 'ok');
+          if (activeCounter === pk) {
+            activeCounter  = null;
+            activeMessages = [];
+            renderThread();
+          }
+          await load();
+        } catch { /* api() already toasted */ }
       });
     }
   }
@@ -17678,6 +17802,16 @@ const MailPanel = (() => {
       settings.__wired = true;
       settings.addEventListener('toggle', () => {
         if (settings.open) void loadInboxRelays();
+      });
+    }
+    const tabs = $('mail-tabs');
+    if (tabs && !tabs.__wired) {
+      tabs.__wired = true;
+      tabs.addEventListener('click', (e) => {
+        const btn = e.target?.closest?.('.mail-tab');
+        if (!btn) return;
+        const tab = btn.getAttribute('data-tab');
+        if (tab) setTab(tab);
       });
     }
   }

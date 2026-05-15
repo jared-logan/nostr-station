@@ -61,6 +61,12 @@ export interface ThreadSummary {
   total:           number;
 }
 
+// 'inbox'      — messages from trusted senders (contacts, allowlisted,
+//                or our own outgoing mail).
+// 'quarantine' — incoming wraps from senders we don't know yet. Shown
+//                in the Requests tab so the user can accept / block.
+export type MessageBucket = 'inbox' | 'quarantine';
+
 const DEFAULT_DB_PATH = path.join(os.homedir(), '.nostr-station', 'data', 'mail.db');
 
 export class MailStore {
@@ -76,6 +82,18 @@ export class MailStore {
   private stMessagesByCounterparty!: Database.Statement;
   private stCountUnreadByCounterparty!: Database.Statement;
   private stThreadSummary!: Database.Statement;
+  // Spam-protection statements (PR 7).
+  private stThreadSummaryByStatus!:   Database.Statement;
+  private stUpdateStatusByCounter!:   Database.Statement;
+  private stDeleteByCounterparty!:    Database.Statement;
+  private stIsAllowlisted!:           Database.Statement;
+  private stIsBlocklisted!:           Database.Statement;
+  private stAddAllow!:                Database.Statement;
+  private stRemoveAllow!:             Database.Statement;
+  private stAddBlock!:                Database.Statement;
+  private stRemoveBlock!:             Database.Statement;
+  private stListAllow!:               Database.Statement;
+  private stListBlock!:               Database.Statement;
 
   constructor(dbPath: string = DEFAULT_DB_PATH) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -106,7 +124,31 @@ export class MailStore {
         wrap_id     TEXT PRIMARY KEY,
         received_at INTEGER NOT NULL
       );
+
+      -- Spam protection (PR 7).
+      -- Allowlist + blocklist of pubkeys. Allowlist routes incoming
+      -- mail straight to the inbox bucket; blocklist drops it before
+      -- it ever hits the store.
+      CREATE TABLE IF NOT EXISTS mail_allowlist (
+        pubkey   TEXT PRIMARY KEY,
+        added_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS mail_blocklist (
+        pubkey   TEXT PRIMARY KEY,
+        added_at INTEGER NOT NULL
+      );
     `);
+
+    // Spam protection (PR 7): backfill a `status` column on messages so
+    // every row maps to either 'inbox' or 'quarantine'. Rows that
+    // pre-date this column are treated as 'inbox' — pre-spam-bucket
+    // mail keeps showing where the user already saw it.
+    const cols = this.db.prepare(`PRAGMA table_info(messages)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'status')) {
+      this.db.exec(`ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'inbox'`);
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_status_thread
+                  ON messages(status, counterparty, created_at DESC)`);
 
     this.prepare();
   }
@@ -115,9 +157,9 @@ export class MailStore {
     this.stInsertMessage = this.db.prepare(
       `INSERT OR IGNORE INTO messages
          (id, counterparty, direction, kind, subject, body, tags_json,
-          created_at, read, wrap_id, received_at)
+          created_at, read, wrap_id, received_at, status)
        VALUES
-         (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+         (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
     );
     this.stHasMessage  = this.db.prepare(`SELECT 1 FROM messages WHERE id = ? LIMIT 1`);
     this.stHasSeenWrap = this.db.prepare(`SELECT 1 FROM seen_wraps WHERE wrap_id = ? LIMIT 1`);
@@ -136,6 +178,29 @@ export class MailStore {
       `SELECT COUNT(*) AS n FROM messages
         WHERE counterparty = ? AND direction = 'in' AND read = 0`,
     );
+    // Thread summary filtered by bucket. The Inbox tab passes
+    // 'inbox'; the Requests tab passes 'quarantine'. We always show
+    // the LAST message (subject + preview) from the same bucket so
+    // moving a thread to quarantine doesn't leak the inbox preview
+    // (and vice versa).
+    this.stThreadSummaryByStatus = this.db.prepare(
+      `SELECT counterparty,
+              (SELECT subject FROM messages m2
+                WHERE m2.counterparty = m.counterparty AND m2.status = m.status
+                ORDER BY m2.created_at DESC LIMIT 1) AS last_subject,
+              (SELECT body    FROM messages m2
+                WHERE m2.counterparty = m.counterparty AND m2.status = m.status
+                ORDER BY m2.created_at DESC LIMIT 1) AS last_preview,
+              MAX(created_at) AS last_created_at,
+              SUM(CASE WHEN direction = 'in' AND read = 0 THEN 1 ELSE 0 END) AS unread,
+              COUNT(*) AS total
+         FROM messages m
+        WHERE status = ?
+        GROUP BY counterparty
+        ORDER BY last_created_at DESC`,
+    );
+    // Back-compat alias for callers that haven't been updated yet.
+    // Returns all buckets combined (legacy behaviour pre-PR-7).
     this.stThreadSummary = this.db.prepare(
       `SELECT counterparty,
               (SELECT subject FROM messages m2
@@ -151,6 +216,30 @@ export class MailStore {
         GROUP BY counterparty
         ORDER BY last_created_at DESC`,
     );
+
+    // PR 7: spam-protection statements.
+    this.stUpdateStatusByCounter = this.db.prepare(
+      `UPDATE messages SET status = ? WHERE counterparty = ?`,
+    );
+    this.stDeleteByCounterparty = this.db.prepare(
+      `DELETE FROM messages WHERE counterparty = ?`,
+    );
+    this.stIsAllowlisted = this.db.prepare(
+      `SELECT 1 FROM mail_allowlist WHERE pubkey = ? LIMIT 1`,
+    );
+    this.stIsBlocklisted = this.db.prepare(
+      `SELECT 1 FROM mail_blocklist WHERE pubkey = ? LIMIT 1`,
+    );
+    this.stAddAllow = this.db.prepare(
+      `INSERT OR IGNORE INTO mail_allowlist (pubkey, added_at) VALUES (?, ?)`,
+    );
+    this.stRemoveAllow = this.db.prepare(`DELETE FROM mail_allowlist WHERE pubkey = ?`);
+    this.stAddBlock = this.db.prepare(
+      `INSERT OR IGNORE INTO mail_blocklist (pubkey, added_at) VALUES (?, ?)`,
+    );
+    this.stRemoveBlock = this.db.prepare(`DELETE FROM mail_blocklist WHERE pubkey = ?`);
+    this.stListAllow = this.db.prepare(`SELECT pubkey, added_at FROM mail_allowlist ORDER BY added_at DESC`);
+    this.stListBlock = this.db.prepare(`SELECT pubkey, added_at FROM mail_blocklist ORDER BY added_at DESC`);
   }
 
   // ── Wrap dedup ──────────────────────────────────────────────────────────
@@ -174,8 +263,18 @@ export class MailStore {
    * inference. counterparty is read from the rumor's first `p` tag
    * (recipient) for outgoing messages, and from the rumor's own pubkey
    * for incoming.
+   *
+   * `bucket` selects which list the message lands in — defaults to
+   * 'inbox' (back-compat for callers that pre-date PR 7). The inbox
+   * worker decides the bucket based on contacts + allowlist; outgoing
+   * mail always goes to 'inbox'.
    */
-  insertMessage(rumor: Rumor, wrapId: string, ownPubkey: string): StoredMessage | null {
+  insertMessage(
+    rumor:     Rumor,
+    wrapId:    string,
+    ownPubkey: string,
+    bucket:    MessageBucket = 'inbox',
+  ): StoredMessage | null {
     if (rumor.kind !== KIND_DM_RUMOR && rumor.kind !== KIND_FILE_RUMOR) {
       // Out of scope for the mail panel — silently drop. (NIP-17 also
       // allows kind 7 reactions on threads; we'll surface those in a
@@ -208,10 +307,14 @@ export class MailStore {
 
     const subject = (rumor.tags.find(t => t[0] === 'subject')?.[1] ?? '').toString();
     const body    = typeof rumor.content === 'string' ? rumor.content : '';
+    // Outgoing mail always lands in inbox — the user pressed Send, so
+    // their own thread should never be marked as a Request even when
+    // the recipient is a stranger.
+    const finalBucket: MessageBucket = direction === 'out' ? 'inbox' : bucket;
 
     this.stInsertMessage.run(
       rumor.id, counterparty, direction, rumor.kind, subject, body,
-      JSON.stringify(rumor.tags), rumor.created_at, wrapId, Date.now(),
+      JSON.stringify(rumor.tags), rumor.created_at, wrapId, Date.now(), finalBucket,
     );
 
     return {
@@ -230,8 +333,10 @@ export class MailStore {
 
   // ── Read APIs ──────────────────────────────────────────────────────────
 
-  threadSummaries(): ThreadSummary[] {
-    const rows = this.stThreadSummary.all() as Array<{
+  threadSummaries(bucket?: MessageBucket): ThreadSummary[] {
+    const rows = (bucket
+      ? this.stThreadSummaryByStatus.all(bucket)
+      : this.stThreadSummary.all()) as Array<{
       counterparty: string; last_subject: string | null; last_preview: string | null;
       last_created_at: number; unread: number | null; total: number;
     }>;
@@ -243,6 +348,52 @@ export class MailStore {
       unread:          Number(r.unread ?? 0),
       total:           Number(r.total),
     }));
+  }
+
+  // ── Spam protection: allowlist / blocklist / bucket moves ──────────────
+
+  isAllowlisted(hex: string): boolean {
+    return !!this.stIsAllowlisted.get(hex.toLowerCase());
+  }
+  isBlocklisted(hex: string): boolean {
+    return !!this.stIsBlocklisted.get(hex.toLowerCase());
+  }
+  allowlist(): Array<{ pubkey: string; added_at: number }> {
+    return this.stListAllow.all() as Array<{ pubkey: string; added_at: number }>;
+  }
+  blocklist(): Array<{ pubkey: string; added_at: number }> {
+    return this.stListBlock.all() as Array<{ pubkey: string; added_at: number }>;
+  }
+  /**
+   * Promote a counterparty's quarantined thread into the inbox AND add
+   * the pubkey to the allowlist so future mail from them lands directly
+   * in inbox. Idempotent; safe to call on an already-allowlisted
+   * counterparty.
+   */
+  acceptCounterparty(hex: string): { allowed: boolean; movedRows: number } {
+    const k = hex.toLowerCase();
+    this.stAddAllow.run(k, Date.now());
+    // Re-bucket existing quarantined rows.
+    const result = this.stUpdateStatusByCounter.run('inbox', k);
+    return { allowed: true, movedRows: result.changes };
+  }
+  /**
+   * Add a pubkey to the blocklist + delete every message from them.
+   * The inbox worker consults the blocklist on unwrap so future wraps
+   * are dropped before they ever land in the store.
+   */
+  blockCounterparty(hex: string): { blocked: boolean; deletedRows: number } {
+    const k = hex.toLowerCase();
+    this.stAddBlock.run(k, Date.now());
+    this.stRemoveAllow.run(k);  // can't be both allow + block
+    const result = this.stDeleteByCounterparty.run(k);
+    return { blocked: true, deletedRows: result.changes };
+  }
+  unblockCounterparty(hex: string): void {
+    this.stRemoveBlock.run(hex.toLowerCase());
+  }
+  unallowCounterparty(hex: string): void {
+    this.stRemoveAllow.run(hex.toLowerCase());
   }
 
   messagesForThread(counterparty: string): StoredMessage[] {

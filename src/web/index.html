@@ -558,6 +558,15 @@
              Populated by MailPanel in app.js. -->
         <div class="mail-status" id="mail-status"></div>
 
+        <!-- Bucket tabs: Inbox · Requests · Blocked. -->
+        <div class="mail-tabs" id="mail-tabs" role="tablist">
+          <button class="mail-tab active" data-tab="inbox"    role="tab" aria-selected="true">Inbox</button>
+          <button class="mail-tab"        data-tab="requests" role="tab" aria-selected="false">
+            Requests <span class="mail-tab-badge" id="mail-tab-badge-requests" hidden>0</span>
+          </button>
+          <button class="mail-tab"        data-tab="blocked"  role="tab" aria-selected="false">Blocked</button>
+        </div>
+
         <!-- Inbox-relay management. Collapsed by default; the user opens
              it to add/remove relays or re-publish their kind 10050. -->
         <details class="mail-settings" id="mail-settings">
