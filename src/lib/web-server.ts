@@ -51,6 +51,7 @@ import { installNgit } from './ngit-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 import {
   readIdentity, setSetupComplete, isNsec,
+  setInprocBlossomEnabled,
 } from './identity.js';
 import {
   issueChallenge, consumeChallenge, createSession,
@@ -311,7 +312,14 @@ async function maybeStartInprocRelay(): Promise<void> {
 // freshly-added whitelist entry takes effect without a Blossom restart.
 
 function shouldStartInprocBlossom(): boolean {
-  return process.env.STATION_INPROC_BLOSSOM === '1';
+  // Env-var override takes precedence (useful for dev / CI / containers
+  // that want to force the server on regardless of UI state). Otherwise
+  // fall through to the persisted user preference in identity.json —
+  // set when the user clicks Enable in Config → Blossom or the
+  // Dashboard card. Matches how nvpn / app-relays remember their state.
+  if (process.env.STATION_INPROC_BLOSSOM === '1') return true;
+  try { return readIdentity().inprocBlossomEnabled === true; }
+  catch { return false; }
 }
 
 async function startInprocBlossom(): Promise<void> {
@@ -363,6 +371,26 @@ async function stopInprocBlossom(): Promise<void> {
 async function maybeStartInprocBlossom(): Promise<void> {
   if (!shouldStartInprocBlossom()) return;
   await startInprocBlossom();
+}
+
+// User-initiated enable/disable. Wraps the pure lifecycle start/stop with
+// the two side effects that matter for UX consistency:
+//   1. Persist the on/off preference to identity.json so the choice
+//      survives the next station restart (same pattern as appRelaysEnabled).
+//   2. Invalidate the /api/status SWR cache so the sidebar Health row
+//      reflects the new state on the next poll without waiting out the
+//      cache TTL (3s). The relay action route does the same — see line
+//      ~984 for the analogous invalidate after a relay start/stop.
+async function enableInprocBlossomUserInitiated(): Promise<void> {
+  await startInprocBlossom();
+  try { setInprocBlossomEnabled(true); } catch {}
+  cachedGatherStatus.invalidate();
+}
+
+async function disableInprocBlossomUserInitiated(): Promise<void> {
+  await stopInprocBlossom();
+  try { setInprocBlossomEnabled(false); } catch {}
+  cachedGatherStatus.invalidate();
 }
 
 async function maybeStartWatchdog(): Promise<void> {
@@ -1494,8 +1522,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // ── Blossom config + control (routes/blossom-config.ts) ───────────
       if (await handleBlossomConfig(req, res, fullUrl, method, {
         getServer: () => inprocBlossom,
-        start:     startInprocBlossom,
-        stop:      stopInprocBlossom,
+        // User-initiated start/stop persist the preference + invalidate
+        // the /api/status cache so the dashboard's three Blossom-aware
+        // surfaces (Config section, Dashboard card, sidebar Health row)
+        // all reflect the new state on the very next poll instead of
+        // waiting out the SWR TTL.
+        start:     enableInprocBlossomUserInitiated,
+        stop:      disableInprocBlossomUserInitiated,
       })) return;
 
       // ── Identity (extracted to routes/identity.ts) ─────────────────────

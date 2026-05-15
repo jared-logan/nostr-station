@@ -33,6 +33,13 @@ export interface Identity {
   // user gets a working feed without configuring anything. Toggled from
   // Config → Client Relays. Mirrors Ditto's "App Relays" enable switch.
   appRelaysEnabled?: boolean;
+  // Persisted on/off state for the in-process Blossom server. The user
+  // toggles this via Config → Blossom or the Dashboard card; on next
+  // station boot, the in-process server is started iff this is true
+  // (or STATION_INPROC_BLOSSOM=1 is set as an env override). Default
+  // false / undefined — Blossom stays off until explicitly enabled, so
+  // installs that never touch blob storage pay no boot cost.
+  inprocBlossomEnabled?: boolean;
   // Opt-out of dashboard auth for localhost requests (127.0.0.1, ::1). Default
   // true — manual override only, not surfaced in the UI yet.
   requireAuth?: boolean;
@@ -99,6 +106,10 @@ export function readIdentity(): Identity {
       // baseline. Explicit false (user toggled it off) is the only way
       // to disable them. Anything truthy normalises to true.
       appRelaysEnabled: parsed.appRelaysEnabled === false ? false : true,
+      // In-process Blossom enable bit — default off (undefined → false).
+      // Boolean true persists across restarts; the env-var override
+      // STATION_INPROC_BLOSSOM=1 still wins independent of this.
+      inprocBlossomEnabled: parsed.inprocBlossomEnabled === true ? true : undefined,
       requireAuth: parsed.requireAuth === false ? false : undefined,
       setupComplete: typeof parsed.setupComplete === 'boolean' ? parsed.setupComplete : undefined,
     };
@@ -156,6 +167,19 @@ export function getEffectiveReadRelays(): string[] {
 // Flip the App Relays enable bit. Mirrors addReadRelay / removeReadRelay
 // in surface shape (returns the new state). Persisted to identity.json
 // so the choice survives a restart.
+// Same shape as setAppRelaysEnabled but for the in-process Blossom
+// server's persisted on/off state. Called from /api/blossom/{start,stop}
+// so the choice survives a restart — analogous to how nvpn / app-relays
+// persistence works. Returning the new value lets callers update local
+// state without re-reading identity.json.
+export function setInprocBlossomEnabled(enabled: boolean): { ok: true; inprocBlossomEnabled: boolean } {
+  const ident = readIdentity();
+  if (enabled) ident.inprocBlossomEnabled = true;
+  else delete ident.inprocBlossomEnabled;  // keep the on-disk JSON sparse
+  writeIdentity(ident);
+  return { ok: true, inprocBlossomEnabled: !!enabled };
+}
+
 export function setAppRelaysEnabled(enabled: boolean): { ok: true; appRelaysEnabled: boolean } {
   const ident = readIdentity();
   ident.appRelaysEnabled = !!enabled;
