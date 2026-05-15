@@ -1152,8 +1152,11 @@ const IdentityDrawer = (() => {
         } else if (status.lastError) {
           updMsg.textContent = `check failed: ${status.lastError}`;
           updMsg.classList.add('err');
-        } else if (status.available) {
-          const n = status.behindBy || 1;
+        } else if (Updates.anyAvailable(status)) {
+          // Combined count: nostr-station commits + pinned-binary tool
+          // upgrades. The modal renders each section separately and
+          // drains tools first, then the self-update.
+          const n = Updates.totalCount(status);
           updMsg.textContent = `${n} update${n === 1 ? '' : 's'} available`;
           updMsg.classList.add('ok');
           // Replace the check button with Install so the row stays
@@ -15413,8 +15416,8 @@ const ConfigPanel = (() => {
           result.classList.add('err');
           return;
         }
-        if (status.available) {
-          const n = status.behindBy || 1;
+        if (Updates.anyAvailable(status)) {
+          const n = Updates.totalCount(status);
           result.innerHTML = `<span class="ok-strong">${n} update${n === 1 ? '' : 's'} available</span> `;
           const install = document.createElement('button');
           install.className = 'primary';
@@ -18372,23 +18375,39 @@ const Updates = (() => {
 
   function pill() { return document.getElementById(PILL_ID); }
 
+  // Total updates surfaced to the user: nostr-station commits + each
+  // pinned-binary tool with current < pinned. Helper so the three
+  // entry points (pill, drawer, config) all count the same way.
+  function totalCount(status) {
+    if (!status) return 0;
+    const self  = status.available ? (status.behindBy || 1) : 0;
+    const tools = (status.toolUpdates || []).filter(t => t.updateAvailable).length;
+    return self + tools;
+  }
+
+  function anyAvailable(status) {
+    return totalCount(status) > 0;
+  }
+
   function renderPill(status) {
     const el = pill();
     if (!el) return;
-    if (!status?.supported || !status?.available) {
+    if (!status?.supported || !anyAvailable(status)) {
       el.hidden = true;
       return;
     }
     el.hidden = false;
     const textEl = el.querySelector('.update-pill-text');
+    const n = totalCount(status);
     if (textEl) {
-      const n = status.behindBy || 1;
       textEl.textContent = n > 1 ? `${n} updates available` : 'Update available';
     }
-    el.title = (status.commits || [])
-      .slice(0, 5)
-      .map(c => `· ${c.message}`)
-      .join('\n') || 'New commits available on origin/main';
+    const toolLines = (status.toolUpdates || [])
+      .filter(t => t.updateAvailable)
+      .map(t => `· ${t.name} ${t.currentVersion ?? '?'} → ${t.pinnedVersion}`);
+    const commitLines = (status.commits || []).slice(0, 5).map(c => `· ${c.message}`);
+    el.title = [...toolLines, ...commitLines].join('\n')
+      || 'New commits available on origin/main';
   }
 
   async function refresh(force) {
@@ -18406,7 +18425,18 @@ const Updates = (() => {
         // to land before we read /api/update-status.
         await new Promise(r => setTimeout(r, 1500));
       }
-      const status = await api('/api/update-status', undefined, { silent: true });
+      // Two independent checks: nostr-station's GitHub-compare poll
+      // (cached, 30-min cadence) and a fresh per-tool version probe
+      // (cheap — three spawns in parallel server-side). Run them in
+      // parallel so the slower one doesn't dominate the UI latency.
+      const [selfStatus, toolsRes] = await Promise.all([
+        api('/api/update-status', undefined, { silent: true }),
+        api('/api/tools/updates',  undefined, { silent: true }).catch(() => ({ tools: [] })),
+      ]);
+      const status = {
+        ...selfStatus,
+        toolUpdates: Array.isArray(toolsRes?.tools) ? toolsRes.tools : [],
+      };
       renderPill(status);
       return status;
     } catch {
@@ -18419,11 +18449,25 @@ const Updates = (() => {
   function openUpdateModal(initialStatus) {
     const body = document.createElement('div');
     body.className = 'exec-body';
+    const pendingTools = (initialStatus?.toolUpdates || []).filter(t => t.updateAvailable);
+    const hasSelfUpdate = !!initialStatus?.available;
     const commits = (initialStatus?.commits || [])
       .slice(0, 10)
       .map(c => `<li><code class="upd-sha">${escapeHtml(c.sha.slice(0,7))}</code> ${escapeHtml(c.message)}</li>`)
       .join('');
+    // Tool updates render above commits as a separate "Tool upgrades"
+    // section. Each row shows id, currentVersion → pinnedVersion. The
+    // server's tool-updates probe is fresh per modal open, so this is
+    // always up to date — no need for a refresh button here.
+    const toolsHtml = pendingTools.length
+      ? `<div class="upd-commits"><div class="upd-commits-title">Tool upgrades</div><ul class="upd-commit-list">${
+          pendingTools.map(t =>
+            `<li><code class="upd-sha">${escapeHtml(t.name)}</code> ${escapeHtml(t.currentVersion ?? '?')} → ${escapeHtml(t.pinnedVersion)}</li>`,
+          ).join('')
+        }</ul></div>`
+      : '';
     body.innerHTML = `
+      ${toolsHtml}
       ${commits ? `<div class="upd-commits"><div class="upd-commits-title">What's new</div><ul class="upd-commit-list">${commits}</ul></div>` : ''}
       <div class="term exec-term"><span class="line sys">Ready to update. Click Install to begin.</span><span class="cursor"></span></div>
     `;
@@ -18441,11 +18485,20 @@ const Updates = (() => {
     closeBtn.style.marginLeft = '8px';
     foot.appendChild(statusWrap); foot.appendChild(closeBtn); foot.appendChild(installBtn);
 
+    // Subtitle summarises everything the Install button will do, in
+    // order. nostr-station's commit count comes first because it's the
+    // primary update channel; tool upgrades are tagged onto it.
+    const subtitleBits = [];
+    if (hasSelfUpdate) {
+      const n = initialStatus.behindBy || 1;
+      subtitleBits.push(`${n} commit${n === 1 ? '' : 's'} behind origin/main`);
+    }
+    if (pendingTools.length) {
+      subtitleBits.push(`${pendingTools.length} tool upgrade${pendingTools.length === 1 ? '' : 's'}`);
+    }
     const modal = openModal({
       title:    'Update nostr-station',
-      subtitle: initialStatus?.behindBy
-        ? `${initialStatus.behindBy} commit${initialStatus.behindBy === 1 ? '' : 's'} behind origin/main`
-        : 'Pulling origin/main',
+      subtitle: subtitleBits.join(' · ') || 'Pulling origin/main',
       body, footer: foot,
     });
     modal.root.classList.add('exec-modal');
@@ -18469,6 +18522,84 @@ const Updates = (() => {
       modal.close();
     });
 
+    // Stream a tool installer's SSE/NDJSON response into the modal
+    // terminal. Returns ok/error. The two pinned-binary install endpoints
+    // use different wire formats:
+    //   - /api/exec/install/<slug>  — SSE: `data: { line, stream, done, code }`
+    //   - /api/setup/nvpn/install   — NDJSON: `{ type: progress|done, step|ok|detail }`
+    // Both are streamed line-by-line into the same addLine() sink, so
+    // the user just sees a single continuous log scroll.
+    async function streamToolUpdate(tool) {
+      addLine(`• Updating ${tool.name} (${tool.currentVersion ?? '?'} → ${tool.pinnedVersion})…`, 'sys');
+      const sep = tool.installEndpoint.includes('?') ? '&' : '?';
+      let res;
+      try {
+        res = await fetch(tool.installEndpoint + sep + 'force=1', {
+          method:  'POST',
+          headers: { 'Authorization': `Bearer ${getSessionToken() || ''}` },
+        });
+      } catch (e) {
+        addLine(`${tool.name}: ${e?.message || e}`, 'err');
+        return { ok: false, error: String(e?.message || e) };
+      }
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        addLine(`${tool.name}: HTTP ${res.status} — ${txt}`, 'err');
+        return { ok: false, error: `HTTP ${res.status}` };
+      }
+      const isNdjson = tool.installEndpoint === '/api/setup/nvpn/install';
+      const r = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let result = { ok: false, error: null };
+      while (true) {
+        let read;
+        try { read = await r.read(); } catch { break; }
+        if (read.done) break;
+        buf += dec.decode(read.value, { stream: true });
+        const lines = buf.split('\n'); buf = lines.pop();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          if (isNdjson) {
+            let msg;
+            try { msg = JSON.parse(trimmed); } catch { continue; }
+            if (msg.type === 'progress' && msg.step) {
+              addLine(`${tool.name}: ${msg.step}`);
+            } else if (msg.type === 'done') {
+              // nvpn returns warn:true (binary placed, service install
+              // needs sudo) as a partial success; treat as ok so the
+              // overall flow doesn't bail when the user has a usable
+              // updated binary.
+              result = {
+                ok:    !!msg.ok || !!msg.warn,
+                error: msg.ok ? null : (msg.detail || 'install failed'),
+              };
+            }
+          } else {
+            if (!line.startsWith('data: ')) continue;
+            const raw = line.slice(6).trim();
+            if (!raw) continue;
+            let msg;
+            try { msg = JSON.parse(raw); } catch { continue; }
+            if (msg.line) {
+              const cls = msg.stream === 'stderr' ? 'err' : '';
+              addLine(`${tool.name}: ${msg.line.replace(/\x1b\[[0-9;]*m/g, '')}`, cls);
+            }
+            if (msg.done) {
+              result = { ok: msg.code === 0, error: msg.code === 0 ? null : `exit ${msg.code}` };
+            }
+          }
+        }
+      }
+      if (result.ok) {
+        addLine(`${tool.name}: updated to ${tool.pinnedVersion}`, 'ok');
+      } else {
+        addLine(`${tool.name}: update failed${result.error ? ` — ${result.error}` : ''}`, 'err');
+      }
+      return result;
+    }
+
     installBtn.addEventListener('click', async () => {
       if (running) return;
       running = true;
@@ -18478,6 +18609,37 @@ const Updates = (() => {
       statusPill.innerHTML = '<span class="spinner"></span>running';
       // Clear the placeholder line.
       while (term.firstChild && term.firstChild !== cursor) term.removeChild(term.firstChild);
+
+      // Stage 1: per-tool updates, sequentially. Done first because the
+      // nostr-station self-update exits the server (UPDATE_RESTART_EXIT_CODE)
+      // and we want every tool upgrade to land before that happens. A
+      // single tool failing does NOT abort the rest — the user gets a
+      // diagnostic per row and can re-run.
+      let toolFailures = 0;
+      for (const tool of pendingTools) {
+        const r = await streamToolUpdate(tool);
+        if (!r.ok) toolFailures++;
+      }
+
+      // Stage 2: nostr-station self-update. Skip when there's nothing
+      // committed upstream — keeps the modal honest when the only
+      // pending work was tool upgrades.
+      if (!hasSelfUpdate) {
+        try { cursor.remove(); } catch {}
+        running = false;
+        if (toolFailures === 0) {
+          addLine('All tool upgrades complete.', 'ok');
+          statusPill.className = 'status-pill done'; statusPill.textContent = 'done';
+        } else {
+          addLine(`${toolFailures} tool upgrade${toolFailures === 1 ? '' : 's'} failed.`, 'err');
+          statusPill.className = 'status-pill error'; statusPill.textContent = `${toolFailures} failed`;
+        }
+        installBtn.disabled = false;
+        closeBtn.disabled = false;
+        // Refresh so the pill recounts whatever's left.
+        void refresh(false);
+        return;
+      }
 
       let res;
       try {
@@ -18587,7 +18749,7 @@ const Updates = (() => {
     if (el) {
       el.addEventListener('click', async () => {
         const status = await refresh(true);
-        if (!status?.available) {
+        if (!anyAvailable(status)) {
           toast('Already up to date', '', 'ok');
           return;
         }
@@ -18598,7 +18760,7 @@ const Updates = (() => {
     setInterval(() => { void refresh(false); }, BROWSER_REPOLL_MS);
   }
 
-  return { init, refresh, openModal: openUpdateModal };
+  return { init, refresh, openModal: openUpdateModal, totalCount, anyAvailable };
 })();
 
 // Entry point: /setup launches the first-run wizard; anywhere else

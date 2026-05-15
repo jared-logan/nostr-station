@@ -33,7 +33,10 @@ import {
 
 export type { InstallResult, ProgressCallback };
 
-export async function installNostrVpn(onProgress: ProgressCallback = () => {}): Promise<InstallResult> {
+export async function installNostrVpn(
+  onProgress: ProgressCallback = () => {},
+  opts: { force?: boolean } = {},
+): Promise<InstallResult> {
   const cargoBin = getCargoBin();
   const target   = getNvpnTarget();
   if (!target) {
@@ -46,18 +49,21 @@ export async function installNostrVpn(onProgress: ProgressCallback = () => {}): 
 
   const log = createInstallLogger('nvpn', onProgress);
   const nvpnBin = path.join(cargoBin, 'nvpn');
-  log.append(`target=${target} cargoBin=${cargoBin}`);
+  log.append(`target=${target} cargoBin=${cargoBin}${opts.force ? ' force=true' : ''}`);
 
   // Short-circuit when already installed. `nvpn status --json` would be
   // wrong here — it talks to the daemon and exits non-zero when
   // disconnected, forcing a reinstall every time the user re-ran the
-  // wizard on a working install.
-  log.step('checking for existing install');
-  try {
-    await execa(nvpnBin, ['--help'], { stdio: 'pipe', timeout: 5000 });
-    log.append('already installed — skipping');
-    return { ok: true, detail: 'already installed' };
-  } catch { /* fall through to install */ }
+  // wizard on a working install. `force` (per-tool update flow) bypasses
+  // this — the caller already version-compared and wants the binary swapped.
+  if (!opts.force) {
+    log.step('checking for existing install');
+    try {
+      await execa(nvpnBin, ['--help'], { stdio: 'pipe', timeout: 5000 });
+      log.append('already installed — skipping');
+      return { ok: true, detail: 'already installed' };
+    } catch { /* fall through to install */ }
+  }
 
   const pinnedVersion = COMPONENT_VERSIONS['nvpn'];
   if (!pinnedVersion) {
@@ -147,6 +153,23 @@ export async function installNostrVpn(onProgress: ProgressCallback = () => {}): 
   } catch (e: any) {
     const stderr = (e?.stderr?.toString?.() || '').trim();
     log.append(`install-cli skipped: ${stderr.slice(0, 160) || (e?.message || '').slice(0, 120)}`);
+  }
+
+  // Update path stops here: every remaining step is first-run setup
+  // (keypair init, systemd unit, drop-in caps, magic-dns-port seed)
+  // that's either idempotent-but-noisy or actively rewrites system
+  // state we don't want to touch on a binary refresh. The new binary
+  // is now on disk + on PATH; the daemon will pick it up on next
+  // service restart.
+  if (opts.force) {
+    const restartHint = process.platform === 'darwin'
+      ? 'sudo launchctl kickstart -k system/com.github.nvpn'
+      : 'sudo systemctl restart nvpn';
+    log.append('update mode — skipping init / caps / port-seed / service install');
+    return {
+      ok:     true,
+      detail: `binary updated at ${nvpnBin}. Run \`${restartHint}\` to load the new code now (otherwise it picks up on next service restart).`,
+    };
   }
 
   // nvpn init — best-effort. Upstream subcommand spelling has shifted

@@ -74,7 +74,10 @@ function findBinaryInTree(rootDir: string, name: string): string | null {
   return null;
 }
 
-export async function installNgit(onProgress: ProgressCallback = () => {}): Promise<InstallResult> {
+export async function installNgit(
+  onProgress: ProgressCallback = () => {},
+  opts: { force?: boolean } = {},
+): Promise<InstallResult> {
   const target = resolveTarget();
   if (!target) {
     return {
@@ -85,15 +88,19 @@ export async function installNgit(onProgress: ProgressCallback = () => {}): Prom
   }
 
   const log = createInstallLogger('ngit', onProgress);
-  log.append(`target=${target}`);
+  log.append(`target=${target}${opts.force ? ' force=true' : ''}`);
 
-  // Short-circuit when already installed and responding.
-  log.step('checking for existing install');
-  try {
-    await execa('ngit', ['--version'], { stdio: 'pipe', timeout: 5000 });
-    log.append('already installed — skipping');
-    return { ok: true, detail: 'already installed' };
-  } catch { /* fall through to install */ }
+  // Short-circuit when already installed and responding — unless the caller
+  // asked for `force` (per-tool update flow has already version-compared
+  // and wants the on-disk binary swapped).
+  if (!opts.force) {
+    log.step('checking for existing install');
+    try {
+      await execa('ngit', ['--version'], { stdio: 'pipe', timeout: 5000 });
+      log.append('already installed — skipping');
+      return { ok: true, detail: 'already installed' };
+    } catch { /* fall through to install */ }
+  }
 
   const pinnedVersion = COMPONENT_VERSIONS['ngit'];
   if (!pinnedVersion) {

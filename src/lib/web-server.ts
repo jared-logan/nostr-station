@@ -64,6 +64,7 @@ import {
   startUpdatePoller, stopUpdatePoller, getUpdateStatus,
   refreshUpdateStatus, streamApplyUpdate,
 } from './update-check.js';
+import { gatherToolUpdates } from './tool-updates.js';
 import {
   startNostrConnect, getBunkerSession, consumeBunkerSession,
   signWithBunkerUrl, silentBunkerSign,
@@ -785,6 +786,26 @@ export async function startWebServer(port: number): Promise<http.Server> {
         return;
       }
 
+      // GET /api/tools/updates returns the per-pinned-binary update list
+      // (nak / ngit / nvpn). The browser's Updates module merges this
+      // with /api/update-status so the modal renders self-update commits
+      // and tool upgrades side-by-side, behind one Install button.
+      // Probes are sub-second on a normal box (three spawn-and-parse
+      // operations in parallel); no caching for now — called once per
+      // pill check, not on a hot path.
+      if (url === '/api/tools/updates' && method === 'GET') {
+        if (!requireSession(req, res)) return;
+        try {
+          const tools = await gatherToolUpdates();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ tools }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ tools: [], error: String(e?.message || e) }));
+        }
+        return;
+      }
+
       // ── Gate everything else under /api/* ────────────────────────────
       // Public paths (auth endpoints above) are already handled via early
       // returns. Any other /api/* path requires a valid session token, or
@@ -1177,6 +1198,10 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // is in src/lib/nvpn-installer.ts; this handler just streams its
       // progress callbacks back to the browser.
       if (url === '/api/setup/nvpn/install' && method === 'POST') {
+        // The Updates modal re-uses this endpoint when nvpn is already
+        // installed but a newer version is pinned; `?force=1` tells the
+        // installer to skip its "already installed" short-circuit.
+        const force = new URL(fullUrl, 'http://localhost').searchParams.get('force') === '1';
         res.writeHead(200, {
           'Content-Type':      'application/x-ndjson',
           'Cache-Control':     'no-cache',
@@ -1186,7 +1211,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
         try {
           const result = await installNostrVpn((s) => {
             try { res.write(JSON.stringify({ type: 'progress', step: s }) + '\n'); } catch {}
-          });
+          }, { force });
           res.write(JSON.stringify({
             type:   'done',
             ok:     result.ok,
@@ -1253,6 +1278,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       const installMatch = url.match(/^\/api\/exec\/install\/([a-z][a-z0-9-]*)$/);
       if (installMatch && method === 'POST') {
         const slug = installMatch[1];
+        // ?force=1 (set by the Updates modal when re-installing a
+        // pinned-binary tool to a newer version) bypasses the installer's
+        // "already installed — skipping" short-circuit. Only honoured by
+        // the nak / ngit branches below; installTool()-driven slugs
+        // (npm-global, curl|bash) don't have an "already installed"
+        // optimization to skip.
+        const force = new URL(fullUrl, 'http://localhost').searchParams.get('force') === '1';
         res.writeHead(200, {
           'Content-Type':  'text/event-stream',
           'Cache-Control': 'no-cache',
@@ -1263,7 +1295,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
         // Custom installer slugs first.
         if (slug === 'nak') {
           try {
-            const result = await installNak((line) => emit({ line, stream: 'stdout' }));
+            const result = await installNak((line) => emit({ line, stream: 'stdout' }), { force });
             if (!result.ok && result.detail) {
               emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
             }
@@ -1283,7 +1315,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
 
         if (slug === 'ngit') {
           try {
-            const result = await installNgit((line) => emit({ line, stream: 'stdout' }));
+            const result = await installNgit((line) => emit({ line, stream: 'stdout' }), { force });
             if (!result.ok && result.detail) {
               emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
             }
