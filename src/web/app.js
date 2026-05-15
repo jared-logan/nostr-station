@@ -18325,7 +18325,17 @@ const NsitePanel = (() => {
     setMeta('');
     try {
       const url = `/api/nsite/resolve?addr=${encodeURIComponent(addr)}`;
-      const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      // Bearer header is required: web-server.ts gates all /api/* paths
+      // (except a tiny PUBLIC_API_PREFIXES list) behind requireSession.
+      // The shared `api()` helper would add it automatically but also
+      // throws + toasts on non-2xx, and we want to render the resolver's
+      // structured errors (`name_indexer_disabled`, `no_files`,
+      // `bad_address`, …) inline in the status pill instead of as a
+      // global red toast.
+      const token = getSessionToken();
+      const headers = { 'Accept': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(url, { headers });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         const msg = body?.message || body?.error || `HTTP ${res.status}`;

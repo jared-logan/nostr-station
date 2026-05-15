@@ -159,7 +159,7 @@ export async function resolveAddress(
     if (!nameIndexerUrl) {
       throw new NsiteError(
         'name_indexer_disabled',
-        'NSIT name resolution requires a name indexer URL — configure nsite.nameIndexerUrl in Config to enable.',
+        `NSIT name "${s}" needs a name indexer to resolve. Set NSITE_NAME_INDEXER_URL in the station env, or use the author's npub / NIP-05 directly.`,
       );
     }
     const pubkey = await resolveNsitName(s, nameIndexerUrl, fetchImpl);
