@@ -18342,7 +18342,8 @@ const NsitePanel = (() => {
         setStatus(msg, true);
         return;
       }
-      const { siteId, display, fileCount, latestAt, source, entry, blossomServers } = body;
+      const { siteId, display, fileCount, latestAt, source, entry,
+              blossomServers, relays } = body;
       const entryPath = entry || 'index.html';
       // Push new history entry (trim forward tail on fresh nav).
       if (cursor < history.length - 1) history.splice(cursor + 1);
@@ -18350,8 +18351,18 @@ const NsitePanel = (() => {
       cursor = history.length - 1;
       setStatus(`✓ ${fileCount} file${fileCount === 1 ? '' : 's'} — ${source}`);
       const ts = latestAt ? new Date(latestAt * 1000).toLocaleString() : '';
-      const servers = (blossomServers || []).map(s => s.replace(/^https?:\/\//, '')).join(', ');
-      setMeta(`Latest event: ${ts || 'unknown'} · Blossom: ${servers || 'defaults'}`);
+      // Build a single-line summary of what was queried where. Counts
+      // beat lists for legibility — full host names spill out of the
+      // narrow meta line on every nsite with more than 2 relays.
+      const ownerN  = relays?.owner?.length        ?? 0;
+      const outboxN = relays?.authorOutbox?.length ?? 0;
+      const blossomN = (blossomServers ?? []).length;
+      const relayBits = [];
+      relayBits.push(`Index: ${ownerN} your relay${ownerN === 1 ? '' : 's'}`);
+      if (outboxN > 0) relayBits.push(`+ ${outboxN} author outbox`);
+      relayBits.push(`Blossom: ${blossomN} server${blossomN === 1 ? '' : 's'}`);
+      const tsBit = `Latest event: ${ts || 'unknown'}`;
+      setMeta(`${tsBit} · ${relayBits.join(' · ')}`);
       loadIframe(siteId, entryPath, display);
       updateNavButtons();
     } catch (e) {

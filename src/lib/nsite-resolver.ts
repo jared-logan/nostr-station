@@ -97,6 +97,7 @@ export const DEFAULT_BLOSSOM_SERVERS: string[] = [
 const NSITE_FILE_KIND     = 34128;
 const BLOSSOM_SERVERS_KIND = 10063;
 const NSIT_NAME_KIND      = 35129;   // addressable name → pubkey index (NSIT)
+const OUTBOX_RELAYS_KIND  = 10002;   // NIP-65 relay list metadata
 const RELAY_QUERY_TIMEOUT_MS = 8_000;
 
 // Titan's hosted nsit-indexer (Rust service that watches Bitcoin blocks for
@@ -498,6 +499,71 @@ export async function fetchBlossomServers(
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(s);
+  }
+  return out;
+}
+
+// ── Author outbox relays (NIP-65 / kind:10002) ────────────────────────────
+//
+// When browsing someone else's nsite, their kind:34128 and kind:10063
+// events live on THEIR relays — which usually overlap with the station
+// owner's read set, but aren't guaranteed to. NIP-65 (kind:10002) is the
+// canonical "where do I publish" announcement: a list of relay URLs tagged
+// `r` with an optional read/write hint.
+//
+// Strategy: query the bootstrap relays (the owner's read set) for the
+// author's kind:10002, take the write-marked or untagged relay URLs
+// (those are the author's outbox), and return them. The caller unions
+// these with the bootstrap set before fetching the file index / Blossom
+// server list — maximizing the chance that the author's events are
+// reachable without changing the owner's relay config.
+//
+// If no kind:10002 is found, returns []. Caller can decide whether to
+// fall back to bootstrap relays alone (current behavior).
+export async function fetchAuthorOutboxRelays(
+  pubkey: string,
+  bootstrapRelays: string[],
+): Promise<string[]> {
+  if (bootstrapRelays.length === 0) return [];
+  const { events } = await queryRelaysDirect({
+    filter: { kinds: [OUTBOX_RELAYS_KIND], authors: [pubkey], limit: 5 },
+    relays: bootstrapRelays,
+    stream: false,
+    timeoutMs: 4_000,
+  });
+  // Replaceable kind: newest wins.
+  let newest: NostrEvent | null = null;
+  for (const ev of events) {
+    if (!newest || ev.created_at > newest.created_at) newest = ev;
+  }
+  if (!newest) return [];
+  const outbox: string[] = [];
+  for (const tag of getTags(newest, 'r')) {
+    const url = (tag[1] ?? '').trim();
+    if (!url || !/^wss?:\/\//i.test(url)) continue;
+    // NIP-65 marker: tag[2] is optional. "write" means outbox (we want),
+    // "read" means inbox-only (we don't want for nsite browsing), absent
+    // means both. Anything else: treat as both (forgiving).
+    const marker = (tag[2] ?? '').toLowerCase();
+    if (marker === 'read') continue;
+    outbox.push(url.replace(/\/+$/, ''));
+  }
+  return outbox;
+}
+
+/**
+ * Union of two relay lists, deduped (lowercased for the dedupe key so
+ * `wss://Foo/` and `wss://foo` don't both make it through), order
+ * preserved with `primary` first.
+ */
+export function unionRelays(primary: string[], secondary: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const r of [...primary, ...secondary]) {
+    const k = r.toLowerCase().replace(/\/+$/, '');
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
   }
   return out;
 }

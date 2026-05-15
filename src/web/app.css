@@ -9178,3 +9178,52 @@ a.client-mention {
   font-weight: 600;
   color: var(--text-bright);
 }
+.nsite-empty-intro {
+  max-width: 560px;
+  text-align: center;
+  line-height: 1.5;
+}
+.nsite-empty-card {
+  pointer-events: auto;
+  max-width: 620px;
+  margin-top: 12px;
+  padding: 14px 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  text-align: left;
+}
+.nsite-empty-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 8px;
+}
+.nsite-relay-model {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.nsite-relay-model li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nsite-relay-step {
+  font-weight: 600;
+  color: var(--text);
+}
+.nsite-relay-model code {
+  font-size: 11px;
+}
+.nsite-empty-foot {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}

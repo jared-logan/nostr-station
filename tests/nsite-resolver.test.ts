@@ -15,6 +15,7 @@ useTempHome();
 const mod = await import('../src/lib/nsite-resolver.ts');
 const {
   resolveAddress, resolveNsitName, normalizePath, mimeForPath, fetchBlob,
+  unionRelays,
   NsiteError, DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
   DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
 } = mod;
@@ -169,6 +170,31 @@ test('defaults: NSIT indexer pubkey is the canonical Titan one', () => {
   assert.match(DEFAULT_NSIT_INDEXER_PUBKEY, /^[0-9a-f]{64}$/);
   assert.ok(DEFAULT_NSIT_INDEXER_RELAYS.length >= 2);
   for (const r of DEFAULT_NSIT_INDEXER_RELAYS) assert.match(r, /^wss:\/\//);
+});
+
+// ── unionRelays ───────────────────────────────────────────────────────────
+
+test('unionRelays: dedupes case- and trailing-slash-insensitively', () => {
+  const out = unionRelays(
+    ['wss://Foo.com/', 'wss://bar.com'],
+    ['wss://foo.com',  'wss://baz.com/'],
+  );
+  // First occurrence wins; case + trailing slash collapsed in dedup key.
+  assert.deepEqual(out, ['wss://Foo.com/', 'wss://bar.com', 'wss://baz.com/']);
+});
+
+test('unionRelays: primary order preserved before secondary additions', () => {
+  const out = unionRelays(
+    ['wss://primary-1', 'wss://primary-2'],
+    ['wss://secondary-1', 'wss://primary-1'],
+  );
+  assert.deepEqual(out, ['wss://primary-1', 'wss://primary-2', 'wss://secondary-1']);
+});
+
+test('unionRelays: empty inputs handled', () => {
+  assert.deepEqual(unionRelays([], []), []);
+  assert.deepEqual(unionRelays(['wss://a'], []), ['wss://a']);
+  assert.deepEqual(unionRelays([], ['wss://a']), ['wss://a']);
 });
 
 test('resolveAddress: empty input rejected', async () => {
