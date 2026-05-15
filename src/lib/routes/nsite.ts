@@ -420,9 +420,28 @@ async function serveContent(
     }
   }
 
+  // Absolute-path rewriting for HTML / CSS.
+  //
+  // lez/nsite's spec is explicit that links in HTML use absolute paths
+  // (`<img src="/img/avatar.jpg">`) — that works on nsite.lol because each
+  // nsite lives on its own subdomain. We serve under a path prefix
+  // (`/nsite-content/<siteId>/…`) on the dashboard's origin, so an
+  // absolute `/img/avatar.jpg` reference from the rendered HTML resolves
+  // to the dashboard root (which 404s) instead of the nsite root. Fix:
+  // rewrite absolute paths in HTML and CSS responses to include the
+  // siteId prefix on the fly. JS-issued fetches aren't covered — modern
+  // SPAs that build with relative `publicPath` ("./") will work without
+  // rewriting; lez-style static sites work via this rewrite.
+  let bodyBytes = entry.bytes;
+  if (/^text\/html\b/i.test(entry.mime)) {
+    bodyBytes = rewriteHtmlAbsolutePaths(entry.bytes, siteId);
+  } else if (/^text\/css\b/i.test(entry.mime)) {
+    bodyBytes = rewriteCssAbsoluteUrls(entry.bytes, siteId);
+  }
+
   res.writeHead(200, {
     'Content-Type':    entry.mime,
-    'Content-Length':  String(entry.bytes.byteLength),
+    'Content-Length':  String(bodyBytes.byteLength),
     // Content-addressed → safe to cache aggressively for the lifetime of
     // the session. The URL incorporates a session-scoped siteId, so a
     // republish gets a fresh siteId and bypasses the browser cache.
@@ -438,7 +457,81 @@ async function serveContent(
     // which gives this response an opaque origin.
   });
   if (req.method === 'HEAD') { res.end(); return; }
-  res.end(entry.bytes);
+  res.end(bodyBytes);
+}
+
+// ── Absolute-path rewriting ───────────────────────────────────────────────
+
+const TEXT_DECODER = new TextDecoder('utf-8');
+const TEXT_ENCODER = new TextEncoder();
+
+/**
+ * Rewrite absolute-path references in HTML so they resolve under the
+ * nsite-content prefix instead of the dashboard root.
+ *
+ * Matches the common attribute patterns: `src="/path"`, `href="/path"`,
+ * `srcset="/path 1x, /path2 2x"`, plus url(/...) inside inline <style>
+ * blocks. Same-origin scheme-relative URLs (`//host/...`) and absolute
+ * URLs (`https://...`) are left alone — those go to a different origin
+ * by design. Protocol-relative and root-relative paths starting with `//`
+ * are deliberately NOT rewritten (they're cross-origin).
+ *
+ * Pure string rewrite, not a DOM parse — fast, but won't catch attributes
+ * with single quotes followed by a leading space, attributes without
+ * quotes, or paths constructed at runtime by JS. For sites that need
+ * those, the iframe + a service-worker shim would be the proper fix.
+ */
+export function rewriteHtmlAbsolutePaths(bytes: Uint8Array, siteId: string): Uint8Array {
+  const html = TEXT_DECODER.decode(bytes);
+  const prefix = `/nsite-content/${siteId}`;
+  const rewritten = html
+    // src="/..." and href="/..." — the bulk of <img>, <script>, <link>, <a>.
+    .replace(/\b(src|href)\s*=\s*"\/(?!\/)([^"]*)"/gi,
+             (_, attr, p) => `${attr}="${prefix}/${p}"`)
+    .replace(/\b(src|href)\s*=\s*'\/(?!\/)([^']*)'/gi,
+             (_, attr, p) => `${attr}='${prefix}/${p}'`)
+    // srcset is comma-separated. Rewrite each candidate's URL.
+    .replace(/\bsrcset\s*=\s*"([^"]*)"/gi,
+             (_, list) => `srcset="${rewriteSrcsetList(list, prefix)}"`)
+    .replace(/\bsrcset\s*=\s*'([^']*)'/gi,
+             (_, list) => `srcset='${rewriteSrcsetList(list, prefix)}'`)
+    // url(/...) inside inline <style> blocks. Conservative — matches
+    // only forms that obviously start with `/`.
+    .replace(/url\(\s*\/(?!\/)([^)"'\s]+)\s*\)/gi,
+             (_, p) => `url(${prefix}/${p})`)
+    .replace(/url\(\s*"\/(?!\/)([^")]+)"\s*\)/gi,
+             (_, p) => `url("${prefix}/${p}")`)
+    .replace(/url\(\s*'\/(?!\/)([^')]+)'\s*\)/gi,
+             (_, p) => `url('${prefix}/${p}')`);
+  return TEXT_ENCODER.encode(rewritten);
+}
+
+function rewriteSrcsetList(list: string, prefix: string): string {
+  return list.split(',').map(part => {
+    const trimmed = part.trim();
+    if (!trimmed) return trimmed;
+    const m = trimmed.match(/^(\/(?!\/)\S*)(.*)$/);
+    if (!m) return trimmed;
+    return `${prefix}${m[1]}${m[2]}`;
+  }).join(', ');
+}
+
+export function rewriteCssAbsoluteUrls(bytes: Uint8Array, siteId: string): Uint8Array {
+  const css = TEXT_DECODER.decode(bytes);
+  const prefix = `/nsite-content/${siteId}`;
+  const rewritten = css
+    .replace(/url\(\s*\/(?!\/)([^)"'\s]+)\s*\)/gi,
+             (_, p) => `url(${prefix}/${p})`)
+    .replace(/url\(\s*"\/(?!\/)([^")]+)"\s*\)/gi,
+             (_, p) => `url("${prefix}/${p}")`)
+    .replace(/url\(\s*'\/(?!\/)([^')]+)'\s*\)/gi,
+             (_, p) => `url('${prefix}/${p}')`)
+    // @import "/foo.css" — less common but valid.
+    .replace(/@import\s+"\/(?!\/)([^"]+)"/gi,
+             (_, p) => `@import "${prefix}/${p}"`)
+    .replace(/@import\s+'\/(?!\/)([^']+)'/gi,
+             (_, p) => `@import '${prefix}/${p}'`);
+  return TEXT_ENCODER.encode(rewritten);
 }
 
 // ── Tiny helpers ──────────────────────────────────────────────────────────
