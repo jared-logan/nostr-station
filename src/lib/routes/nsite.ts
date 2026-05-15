@@ -208,10 +208,15 @@ export async function handleNsite(
         unionRelays(ownerRelays, authorOutbox),
         contentFallback,
       );
-      // Pass the NSIT name (when known) into fetchSiteIndex so it can
-      // try kind:35128 (named v2 manifest) before falling back to
+      // Pass the v2-manifest name (when known) into fetchSiteIndex so
+      // it can try kind:35128 with d=<name> before falling back to
       // kind:15128 (root v2) and finally kind:34128 (v1 per-file).
-      const nsitName = resolved.source === 'nsit' ? resolved.display : undefined;
+      // resolved.name is set for both NSIT-resolved addresses AND for
+      // gateway URLs whose subdomain encodes `<pubkey><name>` (like
+      // `https://10vy5…e6nostr-station.nsite.lol` — Titan dispatches
+      // these the same way, surfacing the named manifest over the
+      // root/v1 publishes that may also live at the same pubkey).
+      const nsitName = resolved.name;
       // Run index + author Blossom-list in parallel against the unioned set.
       // Wrap fetchSiteIndex to attach the relay context to its no_files
       // error so the panel can render Diagnostics for the FAILURE case too.

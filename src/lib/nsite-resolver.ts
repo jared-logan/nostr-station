@@ -39,6 +39,13 @@ export interface ResolvedAddress {
   source: AddressSource;
   /** Display form preserved for the address bar (e.g. the bech32 npub). */
   display: string;
+  /** Optional v2 manifest name hint. Set when:
+   *   - source === 'nsit' (the NSIT registered name)
+   *   - source === 'npub' parsed from a gateway URL with a `<pubkey><name>`
+   *     subdomain (the suffix after the base36 pubkey).
+   *  Threaded into fetchSiteIndex to trigger a kind:35128 lookup with
+   *  d=<name> before the kind:15128 root / kind:34128 v1 fallbacks. */
+  name?: string;
 }
 
 export interface SiteIndex {
@@ -250,22 +257,27 @@ export async function resolveAddress(
   //      gateway, pubkey base36-encoded then project name appended
   //      (verified empirically: nostr-station's own published nsite).
   // Strip everything else and re-dispatch through the normal pubkey path.
+  let gatewayName: string | undefined;
   const gwMatch = s.match(/^https?:\/\/([^./]+)\.(?:nsite\.lol|nostr\.hu)(?::\d+)?(?:\/.*)?$/i);
   if (gwMatch) {
     const sub = gwMatch[1];
     const fromGateway = decodeGatewaySubdomain(sub);
-    if (fromGateway) s = fromGateway;
-    else throw new NsiteError(
-      'bad_address',
-      `gateway URL subdomain "${sub}" did not decode to a recognizable pubkey — paste the author's npub directly`,
-    );
+    if (fromGateway) {
+      s = fromGateway.npub;
+      gatewayName = fromGateway.name;
+    } else {
+      throw new NsiteError(
+        'bad_address',
+        `gateway URL subdomain "${sub}" did not decode to a recognizable pubkey — paste the author's npub directly`,
+      );
+    }
   }
 
   s = s.replace(/\/+$/, '');
 
   // Bare hex pubkey
   if (HEX64.test(s)) {
-    return { pubkey: s.toLowerCase(), source: 'hex', display: s.toLowerCase() };
+    return { pubkey: s.toLowerCase(), source: 'hex', display: s.toLowerCase(), name: gatewayName };
   }
 
   // bech32 npub
@@ -273,7 +285,7 @@ export async function resolveAddress(
     try {
       const dec = nip19.decode(s);
       if (dec.type !== 'npub') throw new NsiteError('bad_address', `expected npub, got ${dec.type}`);
-      return { pubkey: dec.data as string, source: 'npub', display: s };
+      return { pubkey: dec.data as string, source: 'npub', display: s, name: gatewayName };
     } catch (e: any) {
       if (e instanceof NsiteError) throw e;
       throw new NsiteError('bad_address', `invalid npub: ${e?.message || e}`);
@@ -295,7 +307,7 @@ export async function resolveAddress(
       );
     }
     const pubkey = await resolveNsitName(s, nsitConfig, queryFn);
-    return { pubkey, source: 'nsit', display: s };
+    return { pubkey, source: 'nsit', display: s, name: s };
   }
 
   // Final fallback: bare-domain NIP-05 (`name.tld` form → `_@<host>`).
@@ -325,28 +337,49 @@ export async function resolveAddress(
  * Returns the bech32 npub form so the caller can re-dispatch through the
  * existing npub branch (single source of truth for pubkey validation).
  */
-export function decodeGatewaySubdomain(sub: string): string | null {
+export interface GatewayDecode {
+  /** bech32 npub of the author. */
+  npub: string;
+  /** Optional project / NSIT name extracted from the subdomain suffix.
+   *  nsyte's nsite.lol URL pattern is `<base36-pubkey><name>.nsite.lol` —
+   *  the trailing `<name>` is what the publisher passed as the v2-named
+   *  manifest's `d` tag. Titan Browser uses this to dispatch the same
+   *  URL to `kind:35128 #d=<name>`, surfacing the Titan-named publish
+   *  rather than the v1 root events at the bare pubkey. */
+  name?: string;
+}
+
+export function decodeGatewaySubdomain(sub: string): GatewayDecode | null {
   if (!sub) return null;
 
-  // Direct bech32 npub.
+  // Direct bech32 npub (no name suffix — full label is the npub).
   if (/^npub1[023456789ac-hj-np-z]+$/.test(sub)) {
-    try { if (nip19.decode(sub).type === 'npub') return sub; } catch {}
+    try { if (nip19.decode(sub).type === 'npub') return { npub: sub }; } catch {}
   }
 
   // hrp-stripped bech32: prepend `npub1` and try.
   if (/^[023456789ac-hj-np-z]{58}$/.test(sub)) {
     const candidate = `npub1${sub}`;
-    try { if (nip19.decode(candidate).type === 'npub') return candidate; } catch {}
+    try { if (nip19.decode(candidate).type === 'npub') return { npub: candidate }; } catch {}
   }
 
-  // nsyte+nsite.lol base36 form. Try 50 then 49 leading chars.
+  // nsyte+nsite.lol base36 form: `<base36-pubkey><name?>`. Try 50 then 49
+  // leading chars; anything past the pubkey is the project name. Both
+  // pubkey-only (no name) and pubkey+name forms are handled.
   for (const prefixLen of [50, 49]) {
     if (sub.length < prefixLen) continue;
     const candidate = sub.slice(0, prefixLen).toLowerCase();
     if (!/^[0-9a-z]+$/.test(candidate)) continue;
     const hex = base36ToHex32(candidate);
     if (!hex) continue;
-    try { return nip19.npubEncode(hex); } catch { /* try next */ }
+    let npub: string;
+    try { npub = nip19.npubEncode(hex); } catch { continue; }
+    const tail = sub.slice(prefixLen);
+    // Trim a single leading separator that nsyte might emit
+    // (`<pubkey>-<name>`); the typical form is contiguous like
+    // `<pubkey>nostr-station` so the tail starts with a name char.
+    const name = tail.replace(/^[-_.]/, '').trim();
+    return name ? { npub, name } : { npub };
   }
   return null;
 }
@@ -598,9 +631,23 @@ async function fetchV1FileEvents(
   let latestAt  = 0;
   let oldestAt  = Number.MAX_SAFE_INTEGER;
   for (const [path, ev] of latestPerPath) {
-    const x = getTagValue(ev, 'x');
-    if (!x || !HEX64.test(x)) continue;
-    const sha = x.toLowerCase();
+    // Two SHA256-tag conventions in the wild:
+    //   ["sha256", "<hex>"]   — original lez/nsite README spec
+    //   ["x",      "<hex>"]   — nsyte's variant (NIP-94-style)
+    // Read both: prefer "sha256" (canonical), fall back to "x". Without
+    // this, sites published by tools following the original spec
+    // (nsite-cli, Shakespeare? — anything reading github.com/lez/nsite)
+    // are invisible to us even when the events ARE on the relays we
+    // query — exactly the symptom that surfaced as "we keep finding the
+    // stale `nsite works` placeholder while nsite.lol renders the real
+    // marketing page."
+    const sha256Tag = getTagValue(ev, 'sha256');
+    const xTag      = getTagValue(ev, 'x');
+    const raw = (sha256Tag && HEX64.test(sha256Tag)) ? sha256Tag
+              : (xTag      && HEX64.test(xTag))      ? xTag
+              : null;
+    if (!raw) continue;
+    const sha = raw.toLowerCase();
     files.set(path, sha);
     entries.push({ path, sha256: sha, createdAt: ev.created_at, eventId: ev.id });
     if (ev.created_at > latestAt) latestAt = ev.created_at;
