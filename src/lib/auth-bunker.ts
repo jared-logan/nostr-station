@@ -610,3 +610,110 @@ export async function signEventWithSavedBunker(
     try { await signer.close(); } catch {}
   }
 }
+
+// ── NIP-44 + get_public_key via the saved bunker ──────────────────────────
+//
+// The mail pipeline (NIP-17 seal/unwrap) needs three more verbs from the
+// remote signer: nip44_encrypt, nip44_decrypt, and get_public_key. Each
+// helper mirrors the shape of signEventWithSavedBunker — open the bunker
+// per call, run the op with a timeout, close. Per-call open/close is
+// expensive but acceptable for the MVP's volumes (a small inbox, a few
+// sends per minute). Callers needing higher throughput can build a pool
+// on top without changing this surface.
+
+async function withSavedBunker<T>(
+  fn: (signer: any) => Promise<T>,
+  timeoutMs: number = BUNKER_TIMEOUT_MS,
+): Promise<{ ok: true; value: T } | { ok: false; tried: boolean; error: string }> {
+  const ident = readIdentity();
+  if (!ident.npub) return { ok: false, tried: false, error: 'no station npub configured' };
+  const saved = readSavedBunkerClient(ident.npub);
+  if (!saved) return { ok: false, tried: false, error: 'no saved bunker client' };
+
+  const secretKey = hexToBytes(saved.clientSecretHex);
+  let signer: any;
+  try {
+    signer = BunkerSigner.fromBunker(secretKey, saved.bunker, {});
+  } catch (e: any) {
+    return { ok: false, tried: true, error: e?.message || 'bunker init failed' };
+  }
+
+  const withTimeout = <U>(p: Promise<U>, ms: number, label: string): Promise<U> =>
+    Promise.race([
+      p,
+      new Promise<U>((_, rej) => setTimeout(() => rej(new Error(`${label} timed out`)), ms)),
+    ]);
+
+  try {
+    await withTimeout(signer.connect(), timeoutMs, 'connect');
+    const value = await withTimeout(fn(signer), timeoutMs, 'bunker op');
+    return { ok: true, value };
+  } catch (e: any) {
+    return { ok: false, tried: true, error: e?.message || 'bunker op failed' };
+  } finally {
+    try { await signer.close(); } catch {}
+  }
+}
+
+export interface BunkerNip44EncryptResult {
+  ok:          boolean;
+  tried?:      boolean;
+  ciphertext?: string;
+  error?:      string;
+}
+
+export async function nip44EncryptWithSavedBunker(
+  thirdPartyPubkey: string,
+  plaintext:        string,
+  timeoutMs:        number = BUNKER_TIMEOUT_MS,
+): Promise<BunkerNip44EncryptResult> {
+  const r = await withSavedBunker<string>(
+    (signer) => signer.nip44Encrypt(thirdPartyPubkey, plaintext),
+    timeoutMs,
+  );
+  if (r.ok) return { ok: true, ciphertext: r.value };
+  return { ok: false, tried: r.tried, error: r.error };
+}
+
+export interface BunkerNip44DecryptResult {
+  ok:         boolean;
+  tried?:     boolean;
+  plaintext?: string;
+  error?:     string;
+}
+
+export async function nip44DecryptWithSavedBunker(
+  thirdPartyPubkey: string,
+  ciphertext:       string,
+  timeoutMs:        number = BUNKER_TIMEOUT_MS,
+): Promise<BunkerNip44DecryptResult> {
+  const r = await withSavedBunker<string>(
+    (signer) => signer.nip44Decrypt(thirdPartyPubkey, ciphertext),
+    timeoutMs,
+  );
+  if (r.ok) return { ok: true, plaintext: r.value };
+  return { ok: false, tried: r.tried, error: r.error };
+}
+
+export interface BunkerPubkeyResult {
+  ok:      boolean;
+  tried?:  boolean;
+  pubkey?: string;
+  error?:  string;
+}
+
+export async function getPubkeyWithSavedBunker(
+  timeoutMs: number = BUNKER_TIMEOUT_MS,
+): Promise<BunkerPubkeyResult> {
+  const r = await withSavedBunker<string>(
+    async (signer) => {
+      if (typeof signer.getPublicKey === 'function') return signer.getPublicKey();
+      const bp = signer?.bp;
+      if (typeof bp?.pubkey === 'string') return bp.pubkey;
+      throw new Error('bunker exposes no getPublicKey + no bp.pubkey');
+    },
+    timeoutMs,
+  );
+  if (r.ok) return { ok: true, pubkey: r.value };
+  return { ok: false, tried: r.tried, error: r.error };
+}
