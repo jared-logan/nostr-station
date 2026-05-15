@@ -81,11 +81,17 @@ export const DEFAULT_NSITE_RELAYS: string[] = [
   'wss://relay.nostr.band',
 ];
 
-// Same defaults `nostr-station nsite init` proposes. Used when the author's
-// kind:10063 list is empty or unfetchable.
+// Same defaults `nostr-station nsite init` proposes, plus the broader
+// public Blossom pool. Used as a fallback union when the author's
+// kind:10063 list is missing, empty, or comes back 404 on every blob —
+// many published nsites announce only one server (e.g. their own
+// blossom.band instance), so without a fallback the panel renders blank
+// on a single-server outage. nsite.lol does the same union internally.
 export const DEFAULT_BLOSSOM_SERVERS: string[] = [
   'https://cdn.satellite.earth',
   'https://blossom.primal.net',
+  'https://blossom.band',
+  'https://nostr.download',
 ];
 
 const NSITE_FILE_KIND     = 34128;
@@ -425,7 +431,12 @@ export async function fetchSiteIndex(
   }
 
   if (files.size === 0) {
-    throw new NsiteError('no_files', `no kind:${NSITE_FILE_KIND} events found for ${pubkey.slice(0, 12)}…`);
+    // The author pubkey resolved fine but never published an nsite. Common
+    // case for newly-registered NSIT names whose owner hasn't deployed yet.
+    throw new NsiteError(
+      'no_files',
+      `pubkey ${pubkey.slice(0, 12)}… resolves correctly, but no kind:${NSITE_FILE_KIND} file events were found on the queried relays — the author may not have published an nsite under this address yet`,
+    );
   }
   return { files, latestAt };
 }
@@ -445,6 +456,16 @@ export function normalizePath(p: string): string {
 
 // ── Blossom server list (kind:10063 / BUD-03) ─────────────────────────────
 
+/**
+ * Returns the author's announced Blossom servers UNIONed with the public
+ * default pool, deduplicated, author-listed first. Why the union: many
+ * published nsites announce only their own single Blossom server, which
+ * then 404s for assets that weren't successfully uploaded (or have since
+ * been GC'd). Trying the public pool as a fallback recovers most of those
+ * cases — gateways like nsite.lol take the same approach internally.
+ *
+ * If the author published no kind:10063, we return the defaults alone.
+ */
 export async function fetchBlossomServers(
   pubkey: string,
   relays: string[],
@@ -460,13 +481,25 @@ export async function fetchBlossomServers(
   for (const ev of events) {
     if (!newest || ev.created_at > newest.created_at) newest = ev;
   }
-  if (!newest) return DEFAULT_BLOSSOM_SERVERS.slice();
-  const servers: string[] = [];
-  for (const tag of getTags(newest, 'server')) {
-    const url = safeHttpUrl(tag[1]);
-    if (url) servers.push(url.replace(/\/+$/, ''));
+  const authorListed: string[] = [];
+  if (newest) {
+    for (const tag of getTags(newest, 'server')) {
+      const url = safeHttpUrl(tag[1]);
+      if (url) authorListed.push(url.replace(/\/+$/, ''));
+    }
   }
-  return servers.length ? servers : DEFAULT_BLOSSOM_SERVERS.slice();
+  // Author-listed first (they're presumed canonical), defaults appended
+  // and deduped. Lowercased for the dedupe pass so http://x and http://X
+  // don't both make it through.
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const s of [...authorListed, ...DEFAULT_BLOSSOM_SERVERS]) {
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+  }
+  return out;
 }
 
 // ── Blob fetch with SHA256 verify ─────────────────────────────────────────

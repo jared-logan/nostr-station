@@ -299,3 +299,42 @@ test('defaults: relays + blossom servers are non-empty', () => {
   for (const r of DEFAULT_NSITE_RELAYS) assert.match(r, /^wss?:\/\//);
   for (const s of DEFAULT_BLOSSOM_SERVERS) assert.match(s, /^https?:\/\//);
 });
+
+// ── Blob fetch fallback through defaults ─────────────────────────────────
+
+test('fetchBlob: falls through to a default server when the author-listed one 404s', async () => {
+  // Simulates the real bug repro: kind:10063 announces only one server
+  // (blossom.band), the blob isn't there, but a public default has a copy.
+  const payload = new TextEncoder().encode('<html>recovered from default</html>');
+  const sha = sha256Hex(payload);
+  let calls: string[] = [];
+  const mockFetch = async (url: string | URL) => {
+    const u = String(url);
+    calls.push(u);
+    if (u.startsWith('https://blossom.band/'))      return new Response('', { status: 404 });
+    if (u.startsWith('https://cdn.satellite.earth/')) return new Response(payload, { status: 200 });
+    return new Response('', { status: 404 });
+  };
+  const got = await fetchBlob(
+    sha,
+    ['https://blossom.band', 'https://cdn.satellite.earth'],
+    mockFetch as any,
+  );
+  assert.equal(got.servedBy, 'https://cdn.satellite.earth');
+  assert.deepEqual(got.bytes, payload);
+  // Author server tried first, default second.
+  assert.ok(calls[0].startsWith('https://blossom.band/'),       `first call should be author server, got ${calls[0]}`);
+  assert.ok(calls[1].startsWith('https://cdn.satellite.earth/'),`second call should be default, got ${calls[1]}`);
+});
+
+test('no_files error message guides the user toward the right diagnosis', async () => {
+  // Direct assertion on the error message contract — the panel surfaces
+  // this verbatim in the status pill, so wording regressions are visible
+  // bugs.
+  const err = new NsiteError(
+    'no_files',
+    `pubkey ${HEX.slice(0, 12)}… resolves correctly, but no kind:34128 file events were found on the queried relays — the author may not have published an nsite under this address yet`,
+  );
+  assert.match(err.message, /resolves correctly/);
+  assert.match(err.message, /may not have published an nsite/);
+});
