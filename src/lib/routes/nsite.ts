@@ -38,6 +38,7 @@ import {
   normalizePath, mimeForPath,
   DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
   DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
+  DEFAULT_CONTENT_RELAYS,
   NsiteError, type SiteIndex, type NsitResolveConfig,
 } from '../nsite-resolver.js';
 
@@ -166,7 +167,19 @@ export async function handleNsite(
       // events found" even though the nsite is fine.
       const authorOutbox = await fetchAuthorOutboxRelays(resolved.pubkey, ownerRelays)
         .catch(() => [] as string[]);
-      const contentRelays = unionRelays(ownerRelays, authorOutbox);
+      // Three-tier content discovery: owner read relays first (their
+      // existing subscription set), then the author's NIP-65 outbox
+      // (where they explicitly publish), then a small "always-on"
+      // fallback (Titan's FALLBACK_RELAYS — primarily relay.westernbtc.com
+      // for Titan-ecosystem nsites that otherwise wouldn't be reachable
+      // from a station whose owner doesn't happen to subscribe there).
+      // Order matters: when relays return the same event we count it
+      // once, but ordering shapes which connection wins the race for
+      // first byte.
+      const contentRelays = unionRelays(
+        unionRelays(ownerRelays, authorOutbox),
+        DEFAULT_CONTENT_RELAYS,
+      );
       // Run index + server list in parallel against the unioned set.
       const [index, blossomServers] = await Promise.all([
         fetchSiteIndex(resolved.pubkey, contentRelays),
@@ -192,6 +205,7 @@ export async function handleNsite(
         relays: {
           owner:        ownerRelays,
           authorOutbox: authorOutbox,
+          contentFallback: DEFAULT_CONTENT_RELAYS,
           queried:      contentRelays,
           nsitIndexer:  nsitConfig?.relays ?? [],
         },

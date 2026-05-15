@@ -18,6 +18,7 @@ const {
   unionRelays,
   NsiteError, DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
   DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
+  DEFAULT_CONTENT_RELAYS,
 } = mod;
 
 // Trivial fake indexer config used by NSIT tests below.
@@ -170,6 +171,14 @@ test('defaults: NSIT indexer pubkey is the canonical Titan one', () => {
   assert.match(DEFAULT_NSIT_INDEXER_PUBKEY, /^[0-9a-f]{64}$/);
   assert.ok(DEFAULT_NSIT_INDEXER_RELAYS.length >= 2);
   for (const r of DEFAULT_NSIT_INDEXER_RELAYS) assert.match(r, /^wss:\/\//);
+});
+
+test('defaults: content fallback mirrors Titan FALLBACK_RELAYS', () => {
+  // The actual list — not just shape. Drift here would silently regress
+  // the "browse Titan-ecosystem nsites without configuring anything" fix.
+  assert.ok(DEFAULT_CONTENT_RELAYS.includes('wss://relay.westernbtc.com'),
+    'relay.westernbtc.com is required — Titan-ecosystem nsites live here');
+  for (const r of DEFAULT_CONTENT_RELAYS) assert.match(r, /^wss:\/\//);
 });
 
 // ── unionRelays ───────────────────────────────────────────────────────────

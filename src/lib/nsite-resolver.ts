@@ -123,6 +123,28 @@ export const DEFAULT_NSIT_INDEXER_RELAYS = [
   'wss://relay.damus.io',
 ];
 
+// Content discovery fallback for kind:34128 / kind:10063 queries.
+//
+// Mirrors Titan's FALLBACK_RELAYS in btcjt/titan crates/titan-resolver/
+// src/lib.rs. Titan-ecosystem nsites land on relay.westernbtc.com (the
+// Titan crew's own content relay), and Titan Browser always queries this
+// set in addition to whatever NIP-65 / user-configured relays it has —
+// otherwise a fresh box with no read-relay overlap simply can't see
+// Titan-published content (this is exactly the bug surfaced when
+// nsite://titan rendered the full TITAN site in Titan Browser but came
+// up empty in nostr-station).
+//
+// Why a separate constant from DEFAULT_NSITE_RELAYS: DEFAULT_NSITE_RELAYS
+// is the publish-side default that `nsite init` writes into project.json
+// (changing it could surprise users who rely on those specific relays).
+// DEFAULT_CONTENT_RELAYS is the read-side discovery safety net —
+// always-on, complementary to the user's configured relays.
+export const DEFAULT_CONTENT_RELAYS = [
+  'wss://relay.westernbtc.com',
+  'wss://relay.primal.net',
+  'wss://relay.damus.io',
+];
+
 // ── Address resolution ────────────────────────────────────────────────────
 
 const HEX64 = /^[0-9a-f]{64}$/i;
