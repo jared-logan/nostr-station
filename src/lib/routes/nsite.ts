@@ -41,6 +41,9 @@ import {
   DEFAULT_CONTENT_RELAYS, PROFILE_DISCOVERY_RELAYS,
   NsiteError, type SiteIndex, type NsitResolveConfig,
 } from '../nsite-resolver.js';
+import {
+  readNsiteConfig, writeNsiteConfig, defaultNsiteConfig, nsiteConfigPath,
+} from '../nsite-config.js';
 
 // ── Settings ──────────────────────────────────────────────────────────────
 //
@@ -59,21 +62,40 @@ import {
 //   NSITE_BLOB_CACHE_MB        — defaults to 200 MiB in-memory.
 
 function getSettings() {
-  const cap = parseInt(process.env.NSITE_BLOB_CACHE_MB || '', 10);
+  // Layering (highest → lowest):
+  //   1. Env vars (ops escape hatch — set "disabled" to refuse NSIT)
+  //   2. nsite.json on disk (Config-panel editable)
+  //   3. Hardcoded defaults (Titan-mirrored, exported by nsite-resolver)
+  const file = readNsiteConfig();
+  const cap  = parseInt(process.env.NSITE_BLOB_CACHE_MB || '', 10);
+
+  // Indexer pubkey: env overrides file; literal "disabled" turns NSIT off.
   const indexerPubkeyRaw = (process.env.NSITE_NSIT_INDEXER_PUBKEY || '').trim();
-  const indexerPubkey = indexerPubkeyRaw.toLowerCase() === 'disabled'
-    ? null
-    : (indexerPubkeyRaw || DEFAULT_NSIT_INDEXER_PUBKEY);
-  const relaysRaw = (process.env.NSITE_NSIT_RELAYS || '').trim();
-  const indexerRelays = relaysRaw
-    ? relaysRaw.split(',').map(r => r.trim()).filter(r => /^wss?:\/\//i.test(r))
-    : DEFAULT_NSIT_INDEXER_RELAYS.slice();
+  let indexerPubkey: string | null;
+  if (indexerPubkeyRaw) {
+    indexerPubkey = indexerPubkeyRaw.toLowerCase() === 'disabled' ? null : indexerPubkeyRaw;
+  } else {
+    indexerPubkey = file.nsitIndexerPubkey && file.nsitIndexerPubkey.toLowerCase() !== 'disabled'
+      ? file.nsitIndexerPubkey
+      : null;
+  }
+
+  // Indexer relays: env overrides file.
+  const relaysRawEnv = (process.env.NSITE_NSIT_RELAYS || '').trim();
+  const indexerRelays = relaysRawEnv
+    ? relaysRawEnv.split(',').map(r => r.trim()).filter(r => /^wss?:\/\//i.test(r))
+    : file.nsitIndexerRelays;
+
   const nsitConfig: NsitResolveConfig | null = indexerPubkey
     ? { indexerPubkey, relays: indexerRelays }
     : null;
+
   return {
     nsitConfig,
-    cacheCapBytes: (Number.isFinite(cap) && cap > 0 ? cap : 200) * 1024 * 1024,
+    contentFallback:   file.contentRelays,
+    discoveryRelays:   file.discoveryRelays,
+    blossomFallback:   file.blossomServers,
+    cacheCapBytes:     (Number.isFinite(cap) && cap > 0 ? cap : 200) * 1024 * 1024,
   };
 }
 
@@ -155,7 +177,7 @@ export async function handleNsite(
   if (path === '/api/nsite/resolve' && method === 'GET') {
     const addr = (u.searchParams.get('addr') || '').trim();
     if (!addr) { json(res, 400, { error: 'addr required' }); return true; }
-    const { nsitConfig } = getSettings();
+    const { nsitConfig, contentFallback, discoveryRelays, blossomFallback } = getSettings();
     try {
       const ownerRelays = pickRelays();
       const resolved = await resolveAddress(addr, nsitConfig);
@@ -173,26 +195,23 @@ export async function handleNsite(
       // station owner happens to subscribe to. Mirrors Titan Browser's
       // observed behavior (its devtools shows a kept-alive WebSocket to
       // both profile-discovery relays during content fetches).
-      const outboxBootstrap = unionRelays(ownerRelays, PROFILE_DISCOVERY_RELAYS);
+      const outboxBootstrap = unionRelays(ownerRelays, discoveryRelays);
       const authorOutbox = await fetchAuthorOutboxRelays(resolved.pubkey, outboxBootstrap)
         .catch(() => [] as string[]);
       // Three-tier content discovery: owner read relays first (their
       // existing subscription set), then the author's NIP-65 outbox
-      // (where they explicitly publish), then a small "always-on"
-      // fallback (Titan's FALLBACK_RELAYS — primarily relay.westernbtc.com
-      // for Titan-ecosystem nsites that otherwise wouldn't be reachable
-      // from a station whose owner doesn't happen to subscribe there).
-      // Order matters: when relays return the same event we count it
-      // once, but ordering shapes which connection wins the race for
-      // first byte.
+      // (where they explicitly publish), then the user-configured content
+      // fallback (defaults to Titan's FALLBACK_RELAYS — primarily
+      // relay.westernbtc.com for Titan-ecosystem nsites that otherwise
+      // wouldn't be reachable). Editable in Config → nsite.
       const contentRelays = unionRelays(
         unionRelays(ownerRelays, authorOutbox),
-        DEFAULT_CONTENT_RELAYS,
+        contentFallback,
       );
       // Run index + server list in parallel against the unioned set.
       const [index, blossomServers] = await Promise.all([
         fetchSiteIndex(resolved.pubkey, contentRelays),
-        fetchBlossomServers(resolved.pubkey, contentRelays),
+        fetchBlossomServers(resolved.pubkey, contentRelays, blossomFallback),
       ]);
       gcSites();
       const id = shortId();
@@ -214,7 +233,7 @@ export async function handleNsite(
         relays: {
           owner:        ownerRelays,
           authorOutbox: authorOutbox,
-          contentFallback: DEFAULT_CONTENT_RELAYS,
+          contentFallback,
           queried:      contentRelays,
           nsitIndexer:  nsitConfig?.relays ?? [],
         },
@@ -241,6 +260,40 @@ export async function handleNsite(
       defaultRelays: DEFAULT_NSITE_RELAYS,
       defaultBlossomServers: DEFAULT_BLOSSOM_SERVERS,
     });
+    return true;
+  }
+
+  // Config get/put — what the Config panel section reads + writes.
+  // Reports env-var overrides so the UI can render an "overridden by
+  // env" badge instead of letting a user edit a field that won't take
+  // effect on the next resolve.
+  if (path === '/api/nsite/config' && method === 'GET') {
+    json(res, 200, {
+      config:   readNsiteConfig(),
+      defaults: defaultNsiteConfig(),
+      configPath: nsiteConfigPath(),
+      envOverrides: {
+        nsitIndexerPubkey: !!(process.env.NSITE_NSIT_INDEXER_PUBKEY || '').trim(),
+        nsitIndexerRelays: !!(process.env.NSITE_NSIT_RELAYS || '').trim(),
+      },
+    });
+    return true;
+  }
+  if (path === '/api/nsite/config' && method === 'PUT') {
+    let payload: any;
+    try { payload = JSON.parse(await readBody(req) || '{}'); }
+    catch { json(res, 400, { error: 'invalid_json' }); return true; }
+    try {
+      const merged = writeNsiteConfig(payload);
+      // Bust the per-pubkey site snapshot cache: a config change can
+      // shift which relays/Blossom servers we consult, and stale
+      // snapshots from the old config would mask the effect of the
+      // edit on the next resolve.
+      sites.clear();
+      json(res, 200, { config: merged });
+    } catch (e: any) {
+      json(res, 400, { error: 'invalid_field', message: String(e?.message || e) });
+    }
     return true;
   }
 

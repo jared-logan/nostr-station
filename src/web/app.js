@@ -13773,6 +13773,19 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
+      <!-- nsite section. Mirrors Titan Browser's Settings tab: content
+           relays, profile-discovery relays, Blossom fallback servers,
+           and the NSIT name indexer pubkey. Body filled lazily by JS. -->
+      <details class="config-section cfg-collapsible" id="cfg-nsite-section">
+        <summary>
+          <h3>nsite</h3>
+          <span class="cfg-summary-meta" id="cfg-nsite-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-nsite-body">
+          <div class="muted">loading nsite config…</div>
+        </div>
+      </details>
+
       <!-- PR 11: Mail section. Status line + the two toggles agreed
            in the planning round: enable-at-boot and read-state-sync.
            Folder management + inbox-relay editing stay in the Mail
@@ -14361,6 +14374,130 @@ const ConfigPanel = (() => {
     // muted "not running" line with an enable button.
     paintBlossomConfigSection();
     paintMailConfigSection();
+    paintNsiteConfigSection();
+  }
+
+  // ── nsite section ─────────────────────────────────────────────────────
+  // Five fields, mirroring Titan Browser's Settings tab. Edits are
+  // staged in <textarea> / <input> and committed via Save → PUT
+  // /api/nsite/config, which atomically replaces the on-disk file.
+  // Env-var overrides (NSITE_NSIT_INDEXER_PUBKEY / NSITE_NSIT_RELAYS)
+  // win at request time — when active, the affected fields render with
+  // a small "overridden by env" tag and are disabled.
+  async function paintNsiteConfigSection() {
+    const body    = $('cfg-nsite-body');
+    const summary = $('cfg-nsite-summary');
+    if (!body) return;
+    const data = await api('/api/nsite/config', undefined, { silent: true }).catch(() => null);
+    if (!data) {
+      if (summary) summary.textContent = 'unavailable';
+      body.innerHTML = `<div class="muted">nsite endpoint not reachable.</div>`;
+      return;
+    }
+    const cfg = data.config, def = data.defaults, env = data.envOverrides || {};
+    const linesOf = (arr) => Array.isArray(arr) ? arr.join('\n') : '';
+    const nsitOff = (cfg.nsitIndexerPubkey || '').toLowerCase() === 'disabled' || cfg.nsitIndexerPubkey === '';
+    if (summary) {
+      summary.textContent = nsitOff
+        ? `${cfg.contentRelays.length} content relays · NSIT off`
+        : `${cfg.contentRelays.length} content relays · NSIT on`;
+    }
+    const envBadge = (active) => active
+      ? `<span class="cfg-env-badge" title="Overridden by env var — edit ignored until env is unset">env</span>` : '';
+    body.innerHTML = `
+      <div class="cfg-nsite-grid">
+        <label class="cfg-nsite-field">
+          <div class="cfg-nsite-label">Content relays
+            <span class="muted">(unioned with your read relays + author NIP-65 outbox)</span>
+          </div>
+          <textarea id="cfg-nsite-content" rows="4" spellcheck="false"
+            placeholder="${escapeHtml(def.contentRelays.join('\n'))}">${escapeHtml(linesOf(cfg.contentRelays))}</textarea>
+          <div class="cfg-nsite-hint muted">one wss:// URL per line</div>
+        </label>
+
+        <label class="cfg-nsite-field">
+          <div class="cfg-nsite-label">Discovery relays
+            <span class="muted">(NIP-65 outbox lookup bootstrap)</span>
+          </div>
+          <textarea id="cfg-nsite-discovery" rows="3" spellcheck="false"
+            placeholder="${escapeHtml(def.discoveryRelays.join('\n'))}">${escapeHtml(linesOf(cfg.discoveryRelays))}</textarea>
+          <div class="cfg-nsite-hint muted">profile-relay indexers like purplepag.es</div>
+        </label>
+
+        <label class="cfg-nsite-field">
+          <div class="cfg-nsite-label">Blossom fallback servers
+            <span class="muted">(tried after the author's announced servers)</span>
+          </div>
+          <textarea id="cfg-nsite-blossom" rows="4" spellcheck="false"
+            placeholder="${escapeHtml(def.blossomServers.join('\n'))}">${escapeHtml(linesOf(cfg.blossomServers))}</textarea>
+          <div class="cfg-nsite-hint muted">one https:// URL per line</div>
+        </label>
+
+        <label class="cfg-nsite-field">
+          <div class="cfg-nsite-label">NSIT indexer pubkey ${envBadge(env.nsitIndexerPubkey)}
+            <span class="muted">(64-hex; "disabled" turns NSIT name lookup off; empty = use default)</span>
+          </div>
+          <input type="text" id="cfg-nsite-indexer-pk" spellcheck="false"
+            ${env.nsitIndexerPubkey ? 'disabled' : ''}
+            placeholder="${escapeHtml(def.nsitIndexerPubkey)}"
+            value="${escapeHtml(cfg.nsitIndexerPubkey || '')}">
+        </label>
+
+        <label class="cfg-nsite-field">
+          <div class="cfg-nsite-label">NSIT indexer relays ${envBadge(env.nsitIndexerRelays)}
+            <span class="muted">(where kind:35129 events live)</span>
+          </div>
+          <textarea id="cfg-nsite-indexer-relays" rows="3" spellcheck="false"
+            ${env.nsitIndexerRelays ? 'disabled' : ''}
+            placeholder="${escapeHtml(def.nsitIndexerRelays.join('\n'))}">${escapeHtml(linesOf(cfg.nsitIndexerRelays))}</textarea>
+        </label>
+      </div>
+
+      <div class="cfg-nsite-actions">
+        <button class="primary" id="cfg-nsite-save">Save</button>
+        <button id="cfg-nsite-reset">Reset to defaults</button>
+        <span class="muted cfg-nsite-path" id="cfg-nsite-path">${escapeHtml(data.configPath)}</span>
+      </div>
+    `;
+
+    const linesFrom = (id) => ($(id)?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+    $('cfg-nsite-save')?.addEventListener('click', async () => {
+      const payload = {
+        contentRelays:     linesFrom('cfg-nsite-content'),
+        discoveryRelays:   linesFrom('cfg-nsite-discovery'),
+        blossomServers:    linesFrom('cfg-nsite-blossom'),
+        nsitIndexerPubkey: ($('cfg-nsite-indexer-pk')?.value || '').trim(),
+        nsitIndexerRelays: linesFrom('cfg-nsite-indexer-relays'),
+      };
+      try {
+        await api('/api/nsite/config', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        toast('nsite config saved', 'Cleared resolve cache — next nsite open uses the new settings.');
+        paintNsiteConfigSection();
+      } catch (e) {
+        // api() already surfaced a red toast with the server's message.
+      }
+    });
+    $('cfg-nsite-reset')?.addEventListener('click', async () => {
+      try {
+        await api('/api/nsite/config', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            contentRelays:     def.contentRelays,
+            discoveryRelays:   def.discoveryRelays,
+            blossomServers:    def.blossomServers,
+            nsitIndexerPubkey: def.nsitIndexerPubkey,
+            nsitIndexerRelays: def.nsitIndexerRelays,
+          }),
+        });
+        toast('nsite config reset', 'Restored Titan-mirrored defaults.');
+        paintNsiteConfigSection();
+      } catch { /* api() already toasted */ }
+    });
   }
 
   async function paintBlossomConfigSection() {
