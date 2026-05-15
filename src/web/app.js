@@ -17134,7 +17134,18 @@ const ClientPanel = (() => {
     feed:          { events: [], profiles: {}, stats: {}, loadedAt: 0, loading: false, empty: null },
     notifications: { events: [], profiles: {}, stats: {}, loadedAt: 0, loading: false, empty: null },
     profile:       { target: null, profile: null, events: [], profiles: {}, stats: {}, loadedAt: 0, loading: false, error: null, empty: null },
+    // Note-detail / thread view: shown when the user clicks a note to
+    // drill in. Overrides the active tab's rendering until the user
+    // clicks back. `event` is the main note; `replies` is the list of
+    // direct kind-1 children (NIP-10 `e`-tagged at this event id).
+    thread:        { target: null, event: null, profile: null, replies: [], profiles: {}, stats: {}, loading: false, error: null, empty: null },
   };
+  // When set, the panel renders the thread view instead of the current
+  // tab. Cleared on back-button click.
+  let viewingThread = false;
+  // Remember which tab to return to when the user backs out of the
+  // thread view, so feed → drill → back lands on feed (not a fallback).
+  let preThreadTab = null;
   // Reply-target state for the compose box. null = top-level post.
   let replyTarget = null;
   let ownerHex = null;
@@ -17645,6 +17656,126 @@ const ClientPanel = (() => {
     });
   }
 
+  // Note-detail / thread view. Drill into a note from the feed (or
+  // notifications, or profile) → show the full note + direct replies
+  // with a back button. Replaces the active tab's render until the user
+  // clicks back. Pre-thread tab is remembered so back-out returns where
+  // you came from.
+  async function loadThread(eventId, hint) {
+    const cache = tabCache.thread;
+    cache.target  = eventId;
+    cache.loading = true;
+    cache.error   = null;
+    // If the caller passed a pre-loaded event (clicked from feed cache),
+    // render it immediately while we fetch replies — no loading flash.
+    if (hint?.event) {
+      cache.event    = hint.event;
+      cache.profile  = hint.profile || null;
+      cache.profiles = { ...(hint.profile ? { [hint.event.pubkey]: hint.profile } : {}) };
+      renderThread();
+    } else {
+      renderLoading('Loading note…');
+    }
+    try {
+      const [threadResp, repliesResp] = await Promise.all([
+        api(`/api/client/thread?id=${eventId}`).catch(() => null),
+        api(`/api/client/replies?id=${eventId}&limit=100`).catch(() => null),
+      ]);
+      if (threadResp?.event) {
+        cache.event   = threadResp.event;
+        cache.profile = threadResp.profiles?.[threadResp.event.pubkey] || cache.profile || null;
+        cache.profiles = { ...cache.profiles, ...(threadResp.profiles || {}) };
+      } else if (!cache.event) {
+        // Event genuinely couldn't be resolved (relays don't have it).
+        cache.error = threadResp?.empty || 'Note not found on your configured relays.';
+        renderThread();
+        return;
+      }
+      cache.replies  = Array.isArray(repliesResp?.events) ? repliesResp.events : [];
+      cache.profiles = { ...cache.profiles, ...(repliesResp?.profiles || {}) };
+      cache.stats    = {};
+      cache.empty    = cache.replies.length === 0 ? null : null;
+      cache.loadedAt = Date.now();
+      renderThread();
+      // Fetch engagement stats for the main note + replies so the
+      // counter UI doesn't show zeros for already-loved notes.
+      void loadEventStats('thread', [cache.event, ...cache.replies].filter(Boolean));
+    } catch (e) {
+      cache.error = 'Failed to load thread';
+      renderThread();
+    } finally {
+      cache.loading = false;
+    }
+  }
+
+  function renderThread() {
+    const cache = tabCache.thread;
+    if (cache.error && !cache.event) {
+      setEmpty(null);
+      listEl.innerHTML = `
+        <div class="client-thread-head">
+          <button class="client-thread-back" data-action="thread-back">← back</button>
+        </div>
+        <div class="client-empty">${escapeHtml(cache.error)}</div>
+      `;
+      wireThreadActions();
+      return;
+    }
+    if (!cache.event) { renderLoading('Loading note…'); return; }
+    setEmpty(null);
+
+    const profile = cache.profile || cache.profiles[cache.event.pubkey] || null;
+    const mainNote = renderNote(cache.event, profile, cache.profiles);
+    // Replies use the same renderer — drilling into a reply triggers
+    // another loadThread() seamlessly.
+    const repliesHtml = cache.replies.length === 0
+      ? `<div class="client-thread-empty muted">No replies yet. Be the first to reply!</div>`
+      : cache.replies.map(ev => renderNote(ev, cache.profiles[ev.pubkey] || null, cache.profiles)).join('');
+
+    listEl.innerHTML = `
+      <div class="client-thread-head">
+        <button class="client-thread-back" data-action="thread-back">← back</button>
+        <span class="muted client-thread-label">Short text note</span>
+      </div>
+      <div class="client-thread-main">${mainNote}</div>
+      <div class="client-thread-divider"><span>${cache.replies.length} repl${cache.replies.length === 1 ? 'y' : 'ies'}</span></div>
+      <div class="client-thread-replies">${repliesHtml}</div>
+    `;
+    wireNoteActions();
+    wireThreadActions();
+  }
+
+  function wireThreadActions() {
+    listEl.querySelectorAll('[data-action="thread-back"]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        exitThreadView();
+      });
+    });
+  }
+
+  function viewNoteDetail(eventId, hint) {
+    if (!/^[0-9a-f]{64}$/i.test(eventId)) return;
+    if (!viewingThread) {
+      viewingThread = true;
+      preThreadTab  = currentTab;
+    }
+    // Hide the compose box while drilled in — replying is per-note via
+    // the in-note Reply button.
+    composeEl.hidden = true;
+    // Clear the relay-count slot's "manage" link is fine; just paint.
+    loadThread(eventId, hint);
+  }
+
+  function exitThreadView() {
+    viewingThread = false;
+    const back = preThreadTab || 'feed';
+    preThreadTab = null;
+    // Force a re-load so the previous tab's content is fresh on return.
+    currentTab = back === 'feed' ? 'notifications' : 'feed';  // sentinel: force selectTab to fire
+    selectTab(back);
+  }
+
   // Find the immediate parent event id from a kind-1's tags per NIP-10.
   // Prefer the explicit "reply" marker; fall back to the LAST e tag (deprecated
   // positional shape: the last e is the immediate parent). Returns null
@@ -17670,9 +17801,18 @@ const ClientPanel = (() => {
     return `<div class="client-note-parent" data-parent-id="${escapeHtml(pid)}"><span class="muted">Replying to…</span></div>`;
   }
 
+  // Quick emoji reactions surfaced on hover of the React button. Picks
+  // mirror what Ditto / Damus default to for one-click sentiment.
+  // Curated user picks (from kind-10030) appear in the full picker
+  // launched by the ⋯ button at the end.
+  const QUICK_REACTIONS = ['❤️', '👍', '🔥', '😂', '🙏', '🚀'];
+
   function renderEngagementActions(ev, stats) {
     const s = stats || { reactions: 0, reposts: 0, replies: 0, mine: null };
     const liked = !!s.mine;
+    const quickHtml = QUICK_REACTIONS.map(emoji => `
+      <button class="client-react-quick" data-action="react-emoji" data-emoji="${escapeHtml(emoji)}" title="React with ${escapeHtml(emoji)}">${emoji}</button>
+    `).join('');
     return `
       <div class="client-note-actions">
         <button class="client-note-action" data-action="reply" title="Reply">
@@ -17681,9 +17821,15 @@ const ClientPanel = (() => {
         <button class="client-note-action" data-action="repost" title="Repost">
           <span class="cna-icon">↻</span><span class="cna-count" data-count="reposts">${s.reposts || ''}</span>
         </button>
-        <button class="client-note-action ${liked ? 'liked' : ''}" data-action="react" title="${liked ? 'You reacted' : 'React'}">
-          <span class="cna-icon">${liked ? '❤' : '♡'}</span><span class="cna-count" data-count="reactions">${s.reactions || ''}</span>
-        </button>
+        <div class="client-react-wrapper">
+          <button class="client-note-action ${liked ? 'liked' : ''}" data-action="react" title="${liked ? 'You reacted' : 'React'}">
+            <span class="cna-icon">${liked ? '❤' : '♡'}</span><span class="cna-count" data-count="reactions">${s.reactions || ''}</span>
+          </button>
+          <div class="client-react-flyout" role="menu">
+            ${quickHtml}
+            <button class="client-react-quick client-react-more" data-action="react-picker" title="More emojis…" aria-label="More emojis">⋯</button>
+          </div>
+        </div>
       </div>
     `;
   }
@@ -17757,6 +17903,10 @@ const ClientPanel = (() => {
         // elements are <a> tags; the avatar wrapper is also an <a>. Either
         // way preventDefault to keep the page from navigating.
         e.preventDefault();
+        // Stop the click from also bubbling up to the article's drill-in
+        // handler (registered below) — otherwise clicking React would
+        // both publish a reaction AND open the note detail.
+        e.stopPropagation();
         const trigger = e.currentTarget;
         const action = trigger.dataset.action;
         const note = trigger.closest('.client-note');
@@ -17785,8 +17935,43 @@ const ClientPanel = (() => {
     listEl.querySelectorAll('.client-mention[data-mention-pubkey]').forEach(a => {
       a.addEventListener('click', (e) => {
         e.preventDefault();
+        e.stopPropagation();
         const pubkey = a.dataset.mentionPubkey;
         if (pubkey) viewUser(pubkey);
+      });
+    });
+    // Click anywhere on a note (other than action buttons / inline links)
+    // → drill into note-detail view. The action buttons stopPropagation
+    // above, so they won't trigger this. Inline content <a> links also
+    // get their own preventDefault wiring inside renderContent — they
+    // navigate externally rather than drilling in.
+    listEl.querySelectorAll('.client-note').forEach(article => {
+      article.addEventListener('click', (e) => {
+        // Ignore clicks on actionable inner elements + selection events.
+        if (e.target.closest('[data-action]')) return;
+        if (e.target.closest('a:not([data-action])')) return;
+        if (window.getSelection && String(window.getSelection()).length > 0) return;
+        const id     = article.dataset.eventId;
+        const pubkey = article.dataset.eventPubkey;
+        if (!id || !pubkey) return;
+        // Pass the already-loaded event as a hint so the detail view
+        // can paint immediately, then refine when /thread + /replies
+        // resolve.
+        const hint = {};
+        const cached =
+          tabCache.feed.events.find(ev => ev.id === id) ||
+          tabCache.notifications.events.find(ev => ev.id === id) ||
+          tabCache.profile.events?.find(ev => ev.id === id) ||
+          tabCache.thread.replies.find(ev => ev.id === id);
+        if (cached) {
+          hint.event   = cached;
+          hint.profile = tabCache.feed.profiles[cached.pubkey]
+                      || tabCache.notifications.profiles[cached.pubkey]
+                      || tabCache.profile.profiles?.[cached.pubkey]
+                      || tabCache.thread.profiles[cached.pubkey]
+                      || null;
+        }
+        viewNoteDetail(id, hint);
       });
     });
   }
@@ -17908,7 +18093,13 @@ const ClientPanel = (() => {
 
   // ── Tab switching ──────────────────────────────────────────────────────
   function selectTab(name) {
-    if (name === currentTab) return;
+    // Allow re-selecting the same tab when we're transitioning out of
+    // the thread view — the caller flips currentTab to a sentinel
+    // before calling selectTab(back) to force this path.
+    if (name === currentTab && !viewingThread) return;
+    // Leaving the thread view → clear the flag so the regular tab
+    // renderers fire instead of renderThread().
+    viewingThread = false;
     currentTab = name;
     $$('#client-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.clientTab === name));
     // Compose box only renders on feed; hide on others. Also clear any
@@ -17936,6 +18127,9 @@ const ClientPanel = (() => {
   });
 
   refreshBtn.addEventListener('click', () => {
+    if (viewingThread && tabCache.thread.target) {
+      return loadThread(tabCache.thread.target);
+    }
     if (currentTab === 'feed')              return loadFeed(true);
     if (currentTab === 'notifications')     return loadNotifications(true);
     if (currentTab === 'profile')           return loadProfile(true);

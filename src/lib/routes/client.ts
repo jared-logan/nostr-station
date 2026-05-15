@@ -666,6 +666,40 @@ export async function handleClient(
     }
   }
 
+  // ── GET /api/client/replies?id=hex&limit= ────────────────────────────────
+  //
+  // Direct replies to a given event id — kind-1 events with an `e` tag
+  // pointing at this id. Used by the Client panel's note-detail (drill-in)
+  // view to render the conversation under a note. Server-side filter is
+  // `#e: [id]` which matches any e-tag value; per NIP-10 the LAST e-tag is
+  // the immediate parent, but for v1 we keep the simple "any e-tag" cut
+  // because most clients write the parent id as the only/last e-tag.
+  // Returns the event list + a flat profile map (same shape as /feed) so
+  // the renderer can resolve display names without a second fan-out.
+  if (path === '/api/client/replies' && method === 'GET') {
+    const id = (u.searchParams.get('id') || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(id)) return json(res, 400, { error: 'invalid event id' });
+    const limit = clampInt(u.searchParams.get('limit'), 50, 1, 200);
+    const relays = capRelays(readRelays());
+    if (relays.length === 0) return json(res, 200, { events: [], profiles: {}, ...unavailable('no-read-relays') });
+    try {
+      const r = await queryRelays({
+        filter: { kinds: [1], tags: { e: [id] }, limit },
+        relays,
+        timeoutMs: RELAY_QUERY_TIMEOUT_MS,
+        stream: false,
+      });
+      const events = sortAndDedupe(r.events).filter(e => e.id.toLowerCase() !== id);
+      const pubkeys = [...new Set(events.map(e => e.pubkey))];
+      const profiles = await fetchProfiles(pubkeys).catch(() => new Map<string, ProfileLite>());
+      const profileObj: Record<string, ProfileLite> = {};
+      for (const [k, v] of profiles) profileObj[k] = v;
+      return json(res, 200, { events, profiles: profileObj });
+    } catch (e: any) {
+      return json(res, 500, { error: String(e?.message || e) });
+    }
+  }
+
   // ── GET /api/client/event-stats?ids=hex,hex,… ────────────────────────────
   //
   // Aggregate reactions / reposts / reply counts for a batch of event ids.

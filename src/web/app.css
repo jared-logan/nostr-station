@@ -8143,11 +8143,78 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
   gap: 0;
 }
 
+/* Client panel: cap content width to a Twitter/Damus-style reading
+   column on wide screens so a 1500-pixel ultrawide doesn't spread one
+   note across the whole row. The panel header stays full width (its
+   actions belong at the panel edges); we constrain the BODY's direct
+   children only. Mobile / narrow viewports release the cap so content
+   uses every pixel. */
+.panel[data-panel="client"] .panel-body > * {
+  max-width: 680px;
+  margin-left: auto;
+  margin-right: auto;
+}
+@media (max-width: 760px) {
+  .panel[data-panel="client"] .panel-body > * {
+    max-width: none;
+  }
+}
+
+/* Thread / note-detail view — opened by clicking a note. Shows a back
+   button, the main note (slightly emphasised), then a divider + the
+   reply list. Replies are the same .client-note layout so the drill-in
+   feels recursive (click a reply → enter its thread). */
+.client-thread-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 6px 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+.client-thread-back {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.client-thread-back:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+}
+.client-thread-label { font-size: 13px; }
+.client-thread-main .client-note { padding: 18px 4px; }
+.client-thread-main .client-note-content {
+  font-size: 15px;  /* up from feed's default — primary note gets emphasis */
+  line-height: 1.5;
+}
+.client-thread-divider {
+  margin: 8px 0 0;
+  padding: 6px 4px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+}
+.client-thread-divider span { font-weight: 600; }
+.client-thread-empty {
+  padding: 28px 4px;
+  text-align: center;
+  font-size: 13px;
+}
+.client-thread-replies .client-note { padding-left: 16px; }
+
 .client-note {
   display: flex;
   gap: 12px;
   padding: 14px 4px;
   border-bottom: 1px solid var(--border);
+  cursor: pointer;  /* whole card is now a drill-in affordance */
+}
+.client-note:hover {
+  background: rgba(255,255,255,0.015);
 }
 .client-note:last-child { border-bottom: none; }
 
@@ -8201,19 +8268,34 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
 }
 .client-note-actions {
   display: flex;
-  gap: 12px;
-  margin-top: 8px;
+  gap: 4px;
+  margin-top: 10px;
+  align-items: center;
 }
 .client-note-action {
   background: none;
   border: none;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
-  padding: 2px 0;
+  padding: 6px 10px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background-color 0.12s ease, color 0.12s ease;
 }
 .client-note-action:hover {
   color: var(--accent-bright);
+  background: var(--accent-soft);
+}
+.client-note-action[data-action="react"]:hover {
+  color: #ff6b8a;
+  background: rgba(255, 107, 138, 0.10);
+}
+.client-note-action[data-action="repost"]:hover {
+  color: #5bd97e;
+  background: rgba(91, 217, 126, 0.10);
 }
 
 .client-notification {
@@ -8378,18 +8460,14 @@ a.client-mention {
   overflow: hidden;
 }
 
-/* Engagement counters in .client-note-actions. */
-.client-note-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
+/* Engagement counters in .client-note-actions. Sized up for a more
+   visible hit target — matches the Damus / Ditto convention. */
 .client-note-action .cna-icon {
-  font-size: 13px;
+  font-size: 16px;
   line-height: 1;
 }
 .client-note-action .cna-count {
-  font-size: 11px;
+  font-size: 12px;
   min-width: 12px;
 }
 .client-note-action.liked {
