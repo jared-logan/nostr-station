@@ -8074,6 +8074,51 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
 
 /* ── Client panel (built-in Nostr social client) ──────────────────────── */
 
+/* ── Client panel: embedded Ditto ──────────────────────────────────────
+   The Client panel now hosts Ditto inside an iframe (served from /ditto/
+   by the dashboard's static handler). The panel-body becomes a thin
+   wrapper that lets the iframe expand to fill the remaining viewport. */
+.panel[data-panel="client"] .panel-body.client-ditto-body {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.client-ditto-frame {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  display: block;
+}
+.client-ditto-missing {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 32px;
+  text-align: center;
+}
+.client-ditto-missing-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.client-ditto-missing code {
+  background: var(--bg-card);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+/* Legacy custom-client styles below — orphaned after the Ditto swap but
+   intentionally left in place. They're scoped under .client-* selectors
+   that no longer appear in the DOM, so they have zero render cost. A
+   follow-up PR can sweep them out cleanly. */
 .client-compose {
   display: flex;
   flex-direction: column;

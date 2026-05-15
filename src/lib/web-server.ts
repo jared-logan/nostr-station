@@ -17,7 +17,7 @@ import { nip19 } from 'nostr-tools';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { getKeychain } from './keychain.js';
 import {
-  serveStatic, serveVendorXterm, WEB_DIR, HTML_SECURITY_HEADERS,
+  serveStatic, serveVendorXterm, serveDitto, WEB_DIR, HTML_SECURITY_HEADERS,
 } from './web-server-static.js';
 import { runSetupVerify } from './setup-verify.js';
 // Most terminal helpers moved alongside their HTTP routes + the WS
@@ -1744,8 +1744,11 @@ export async function startWebServer(port: number): Promise<http.Server> {
       if (await handleTerminal(req, res, fullUrl, method)) return;
 
       // Static fallback — vendor libs first (fast path, strict whitelist),
-      // then the regular src/web tree.
+      // then the bundled Ditto SPA, then the regular src/web tree.
+      // serveDitto matches /ditto/* and falls through to serveStatic on
+      // miss (returns false), so the dashboard's own assets still win.
       if (method === 'GET' && serveVendorXterm(req, res)) return;
+      if (method === 'GET' && serveDitto(req, res)) return;
       if (method === 'GET' && serveStatic(req, res)) return;
 
       // SPA routes — served from index.html. The client router picks up

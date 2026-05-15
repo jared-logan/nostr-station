@@ -500,38 +500,36 @@
     <!-- CLIENT — nostr social client (feed + notifications + profile + compose).
          v1 reads from identity.readRelays and signs via the persisted bunker
          pairing; private DMs (NIP-17) are intentionally deferred. -->
+    <!-- CLIENT — embeds Ditto (https://about.ditto.pub) as a same-origin
+         iframe. nostr-station bundles Ditto's pre-built static SPA at
+         build time (scripts/fetch-ditto.mjs) and serves it from /ditto/*.
+         The dashboard keeps a slim chrome row (title + public chip +
+         refresh) so the panel still feels native; everything inside the
+         iframe is Ditto's own UX. Auth: NIP-07 (browser extension) carries
+         through automatically; NIP-46 (Amber) pairs separately inside
+         Ditto's own settings if the user wants it for posting from this
+         surface. -->
     <section class="panel" data-panel="client">
       <div class="panel-head">
         <div>
-          <div class="title">Client <span class="env-chip env-chip-public" title="Public Nostr — this panel always reads + posts via your App Relays ∪ Your Relays (Config → Client Relays). Never bound to any project's dev/prod active-env.">public</span></div>
-          <div class="subtitle" id="client-subtitle">Public Nostr — your doorway to the network. Reads + posts go via App Relays ∪ Your Relays (Config → Client Relays). Independent from any project's dev/prod active-env.</div>
+          <div class="title">Client <span class="env-chip env-chip-public" title="Public Nostr — Ditto bundled in nostr-station. Independent from any project's dev/prod active-env.">public</span></div>
+          <div class="subtitle" id="client-subtitle">Public Nostr via Ditto — your doorway to the network.</div>
         </div>
         <div class="panel-head-actions">
-          <button id="client-refresh" title="Refresh the current tab">refresh</button>
+          <button id="client-refresh" title="Reload the embedded Ditto SPA">refresh</button>
         </div>
       </div>
-      <div class="tabs" id="client-tabs">
-        <button class="tab active" data-client-tab="feed">Feed</button>
-        <button class="tab" data-client-tab="notifications">Notifications</button>
-        <button class="tab" data-client-tab="profile">Profile</button>
-        <button class="tab" data-client-tab="dms" title="Private DMs — coming in phase 2" disabled>DMs <span class="muted" style="font-size:10px">soon</span></button>
-      </div>
-      <div class="client-relay-status" id="client-relay-status" hidden>
-        <span class="muted">Reading from <b id="client-relay-count">…</b> <span id="client-relay-noun">relays</span></span>
-        <a href="#config" class="muted client-relay-config-link" title="Manage in Config → Client Relays">manage →</a>
-      </div>
-      <div class="panel-body">
-        <div class="client-compose" id="client-compose" hidden>
-          <textarea id="client-compose-input" placeholder="What's happening on Nostr? (⌘/Ctrl+⏎ to publish)"></textarea>
-          <div class="client-compose-actions">
-            <span class="client-compose-hint muted" id="client-compose-hint">stamped with <code>["client","nostr-station"]</code></span>
-            <span class="client-compose-count muted" id="client-compose-count">0</span>
-            <button class="primary" id="client-compose-send">publish</button>
-            <button id="client-compose-cancel" hidden>cancel</button>
+      <div class="panel-body client-ditto-body">
+        <iframe id="client-ditto-frame" class="client-ditto-frame" src="/ditto/" title="Ditto" loading="lazy"></iframe>
+        <div id="client-ditto-missing" class="client-ditto-missing" hidden>
+          <div class="client-ditto-missing-title">Ditto isn't bundled</div>
+          <div class="muted" style="max-width:520px;text-align:center">
+            The embedded Ditto SPA failed to download during the last build.
+            Run <code>npm run update-ditto</code> from the install directory, then
+            reload this panel.
           </div>
+          <button id="client-ditto-retry">Reload</button>
         </div>
-        <div class="client-empty" id="client-empty" hidden></div>
-        <div class="client-list" id="client-list"></div>
       </div>
     </section>
 
