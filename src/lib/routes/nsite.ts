@@ -208,11 +208,51 @@ export async function handleNsite(
         unionRelays(ownerRelays, authorOutbox),
         contentFallback,
       );
-      // Run index + server list in parallel against the unioned set.
-      const [index, blossomServers] = await Promise.all([
-        fetchSiteIndex(resolved.pubkey, contentRelays),
-        fetchBlossomServers(resolved.pubkey, contentRelays, blossomFallback),
-      ]);
+      // Pass the v2-manifest name (when known) into fetchSiteIndex so
+      // it can try kind:35128 with d=<name> before falling back to
+      // kind:15128 (root v2) and finally kind:34128 (v1 per-file).
+      // resolved.name is set for both NSIT-resolved addresses AND for
+      // gateway URLs whose subdomain encodes `<pubkey><name>` (like
+      // `https://10vy5…e6nostr-station.nsite.lol` — Titan dispatches
+      // these the same way, surfacing the named manifest over the
+      // root/v1 publishes that may also live at the same pubkey).
+      const nsitName = resolved.name;
+      // Run index + author Blossom-list in parallel against the unioned set.
+      // Wrap fetchSiteIndex to attach the relay context to its no_files
+      // error so the panel can render Diagnostics for the FAILURE case too.
+      let index, authorBlossomServers;
+      try {
+        [index, authorBlossomServers] = await Promise.all([
+          fetchSiteIndex(resolved.pubkey, contentRelays, { name: nsitName }),
+          fetchBlossomServers(resolved.pubkey, contentRelays, blossomFallback),
+        ]);
+      } catch (e: any) {
+        if (e instanceof NsiteError && e.code === 'no_files') {
+          json(res, 404, {
+            error:   e.code,
+            message: e.message,
+            pubkey:  resolved.pubkey,
+            display: resolved.display,
+            source:  resolved.source,
+            relays: {
+              owner:           ownerRelays,
+              authorOutbox,
+              contentFallback,
+              queried:         contentRelays,
+              nsitIndexer:     nsitConfig?.relays ?? [],
+            },
+          });
+          return true;
+        }
+        throw e;
+      }
+      // v2 manifests carry the canonical Blossom servers in their
+      // `server` tags — prefer those when present, then union with the
+      // kind:10063 list + configured fallback. This matches Titan's
+      // behavior: manifest servers first, kind:10063 next, defaults last.
+      const blossomServers = index.manifestServers.length
+        ? unionRelays(index.manifestServers, authorBlossomServers)
+        : authorBlossomServers;
       gcSites();
       const id = shortId();
       sites.set(id, {
@@ -231,6 +271,7 @@ export async function handleNsite(
         latestAt: index.latestAt,
         oldestAt: index.oldestAt,
         totalEventsSeen: index.totalEventsSeen,
+        format: index.format,
         // Per-file event details for the diagnostics panel — paths,
         // sha256, eventId, timestamp. Sorted by path. Capped at 50 to
         // bound the payload; nobody publishes 50+ files in v1 nsites
