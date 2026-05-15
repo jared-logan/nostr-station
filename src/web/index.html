@@ -525,10 +525,13 @@
           <div class="client-ditto-missing-title">Ditto isn't bundled</div>
           <div class="muted" style="max-width:520px;text-align:center">
             The embedded Ditto SPA failed to download during the last build.
-            Run <code>npm run update-ditto</code> from the install directory, then
-            reload this panel.
+            Click below to fetch it now (~6 MiB from GitLab), or run
+            <code>npm run update-ditto</code> from the install directory and reload this panel.
           </div>
-          <button id="client-ditto-retry">Reload</button>
+          <div style="display:flex;gap:10px">
+            <button class="primary" id="client-ditto-install">Fetch Ditto now</button>
+            <button id="client-ditto-retry">Reload</button>
+          </div>
         </div>
       </div>
     </section>

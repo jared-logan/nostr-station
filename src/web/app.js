@@ -17129,6 +17129,7 @@ const ClientPanel = (() => {
   const missing    = $('client-ditto-missing');
   const refreshBtn = $('client-refresh');
   const retryBtn   = $('client-ditto-retry');
+  const installBtn = $('client-ditto-install');
 
   let probed = false;
 
@@ -17137,7 +17138,7 @@ const ClientPanel = (() => {
     probed = true;
     try {
       const r = await fetch('/ditto/', { method: 'HEAD', cache: 'no-store' });
-      if (r.ok) return;          // bundle present, iframe will load normally
+      if (r.ok) { showFrame(); return; }   // bundle present
       showMissing();
     } catch {
       // Network / aborted — leave the iframe alone (it surfaces its own
@@ -17169,10 +17170,28 @@ const ClientPanel = (() => {
   retryBtn?.addEventListener('click', () => {
     // User just ran `npm run update-ditto` and clicked Reload — re-probe
     // + remount in case the bundle is now present.
-    showFrame();
     probed = false;
-    void probeDittoBundle();
-    reloadFrame();
+    void probeDittoBundle().then(() => reloadFrame());
+  });
+  // In-dashboard fetch — spawns scripts/fetch-ditto.mjs server-side and
+  // streams the output through the existing exec modal. Saves the user
+  // from SSH'ing to the VM when the build-time fetch failed. After the
+  // exec modal closes successfully, we re-probe + reload the iframe so
+  // the freshly-bundled Ditto mounts without a page refresh.
+  installBtn?.addEventListener('click', () => {
+    openExecModal({
+      title:    'Fetch Ditto',
+      subtitle: 'Downloads + extracts Ditto into dist/ditto/ (~6 MiB from GitLab)',
+      endpoint: '/api/ditto/install',
+    }).then(r => {
+      if (r.ok) {
+        toast('Ditto installed', 'Reloading the Client panel…', 'ok');
+        probed = false;
+        void probeDittoBundle().then(() => reloadFrame());
+      } else {
+        toast('Fetch failed', `exit code ${r.code}`, 'err');
+      }
+    });
   });
 
   return {
