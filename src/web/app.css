@@ -8891,3 +8891,53 @@ a.client-mention {
 .mail-relay-defaults code {
   font-size: 11px; color: var(--text-dim); background: transparent;
 }
+
+/* ── Mail · attachments ──────────────────────────────────────────────── */
+.mail-compose-attachments {
+  display: flex; flex-direction: column; gap: 6px;
+  min-height: 0;
+}
+.mail-compose-attach-empty {
+  font-size: 11px; color: var(--muted); padding: 4px 0;
+}
+.mail-compose-attach-bar {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 4px;
+}
+.mail-compose-attach-hint {
+  font-size: 11px; color: var(--muted);
+}
+.mail-att-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--card-elev, rgba(255,255,255,0.04));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.mail-att-icon   { font-size: 14px; }
+.mail-att-name   { color: var(--text-bright); font-weight: 500; }
+.mail-att-size   { color: var(--muted); }
+.mail-att-remove {
+  background: transparent; border: none;
+  color: var(--text-dim); cursor: pointer;
+  font-size: 16px; line-height: 1; padding: 0 4px;
+}
+.mail-att-remove:hover { color: var(--text-bright); }
+
+/* In-thread file chip */
+.mail-msg-fileChip {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 12px;
+  background: var(--card-elev, rgba(255,255,255,0.04));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-decoration: none;
+  color: inherit;
+}
+.mail-msg-fileChip:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.mail-msg-fileMeta   { display: flex; flex-direction: column; gap: 2px; }
+.mail-msg-fileName   { font-weight: 500; color: var(--text-bright); font-size: 13px; }
+.mail-msg-fileSub    { font-size: 11px; color: var(--muted); }

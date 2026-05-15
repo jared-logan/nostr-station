@@ -154,6 +154,17 @@ test('mail-routes: PUT /api/mail/inbox-relays validates entries', async (t) => {
   assert.match(empty.body, /at least one/);
 });
 
+test('mail-routes: /api/mail/attachment returns 409 when Blossom is off', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Blossom is disabled by default; the route should return a friendly
+  // 409 with a hint to enable it in Config → Blossom.
+  const r = await send(port, 'POST', '/api/mail/attachment?mime=text/plain', 'hello');
+  assert.equal(r.status, 409);
+  assert.match(r.body, /Blossom is not running/);
+});
+
 test('mail-routes: PUT /api/mail/inbox-relays saves a valid list', async (t) => {
   const { server, port } = await bootOnRandomPort();
   t.after(() => new Promise<void>((r) => server.close(() => r())));

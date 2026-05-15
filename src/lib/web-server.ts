@@ -101,7 +101,7 @@ import { handleAi } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { handleNvpn } from './routes/nvpn.js';
 import { handleTemplates } from './routes/templates.js';
-import { handleMail } from './routes/mail.js';
+import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
 import { getInboxWorker } from './mail/inbox.js';
 
 // Static-asset + vendor + security-headers wiring lives in
@@ -1964,6 +1964,12 @@ export async function startWebServer(port: number): Promise<http.Server> {
           process.stderr.write(`[nvpn] log tailer failed to start: ${e?.message || e}\n`);
         }
       }
+
+      // Wire the in-process Blossom handle through to the mail route so
+      // /api/mail/attachment can upload without going through the public
+      // HTTP layer (we're inside the dashboard's authenticated session
+      // already; the BUD-02 NIP-98 ceremony is unnecessary here).
+      setMailBlossomAccessor(() => inprocBlossom);
 
       // Mail inbox worker (NIP-17). Off when STATION_DISABLE_MAIL=1, or
       // when there's no saved bunker client (decryption requires Amber).
