@@ -38,6 +38,7 @@ import {
   normalizePath, mimeForPath,
   DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
   DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
+  DEFAULT_CONTENT_RELAYS, PROFILE_DISCOVERY_RELAYS,
   NsiteError, type SiteIndex, type NsitResolveConfig,
 } from '../nsite-resolver.js';
 
@@ -164,9 +165,30 @@ export async function handleNsite(
       // — without it, an author who publishes exclusively to a relay the
       // station owner doesn't subscribe to would surface as "no kind:34128
       // events found" even though the nsite is fine.
-      const authorOutbox = await fetchAuthorOutboxRelays(resolved.pubkey, ownerRelays)
+      // Bootstrap NIP-65 lookup with the owner relays + profile-discovery
+      // relays (purplepag.es / user.kindpag.es) — those are where authors'
+      // kind:10002 outbox announcements actually live. Without the
+      // profile-discovery set, the outbox tier silently collapses to []
+      // for any author whose kind:10002 isn't already on a relay the
+      // station owner happens to subscribe to. Mirrors Titan Browser's
+      // observed behavior (its devtools shows a kept-alive WebSocket to
+      // both profile-discovery relays during content fetches).
+      const outboxBootstrap = unionRelays(ownerRelays, PROFILE_DISCOVERY_RELAYS);
+      const authorOutbox = await fetchAuthorOutboxRelays(resolved.pubkey, outboxBootstrap)
         .catch(() => [] as string[]);
-      const contentRelays = unionRelays(ownerRelays, authorOutbox);
+      // Three-tier content discovery: owner read relays first (their
+      // existing subscription set), then the author's NIP-65 outbox
+      // (where they explicitly publish), then a small "always-on"
+      // fallback (Titan's FALLBACK_RELAYS — primarily relay.westernbtc.com
+      // for Titan-ecosystem nsites that otherwise wouldn't be reachable
+      // from a station whose owner doesn't happen to subscribe there).
+      // Order matters: when relays return the same event we count it
+      // once, but ordering shapes which connection wins the race for
+      // first byte.
+      const contentRelays = unionRelays(
+        unionRelays(ownerRelays, authorOutbox),
+        DEFAULT_CONTENT_RELAYS,
+      );
       // Run index + server list in parallel against the unioned set.
       const [index, blossomServers] = await Promise.all([
         fetchSiteIndex(resolved.pubkey, contentRelays),
@@ -192,6 +214,7 @@ export async function handleNsite(
         relays: {
           owner:        ownerRelays,
           authorOutbox: authorOutbox,
+          contentFallback: DEFAULT_CONTENT_RELAYS,
           queried:      contentRelays,
           nsitIndexer:  nsitConfig?.relays ?? [],
         },

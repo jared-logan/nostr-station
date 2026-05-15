@@ -598,8 +598,11 @@
                   <span class="nsite-relay-step">File index + Blossom list</span>
                   <span class="muted">→ your read relays from
                   <a href="#config">Config</a>, unioned with the author's
-                  own NIP-65 outbox relays so their events are reachable
-                  even when they publish to relays you don't subscribe to.</span>
+                  own NIP-65 outbox relays AND a small always-on content
+                  fallback (<code>relay.westernbtc.com</code>,
+                  <code>relay.primal.net</code>, <code>relay.damus.io</code> —
+                  mirrors Titan Browser's fallback set so Titan-ecosystem
+                  nsites resolve regardless of your read-relay config).</span>
                 </li>
                 <li>
                   <span class="nsite-relay-step">Blob bytes</span>

@@ -123,6 +123,45 @@ export const DEFAULT_NSIT_INDEXER_RELAYS = [
   'wss://relay.damus.io',
 ];
 
+// Profile / outbox discovery relays. Purplepag.es and user.kindpag.es
+// specifically index profile-adjacent kinds — kind:0 metadata, kind:3
+// follows, kind:10002 NIP-65 relay lists, etc. Titan Browser keeps a
+// connection open to these during content fetch (visible in its devtools
+// network tab) so that the author's kind:10002 outbox announcement can
+// be discovered even when neither the station owner nor any of their
+// configured relays carry it.
+//
+// Without this, the NIP-65 union we added in #106 has a bootstrap
+// problem: we use the OWNER'S relays to find the AUTHOR's outbox event,
+// so if the owner's relays don't have the author's kind:10002 we get an
+// empty outbox tier even though the author has one announced elsewhere.
+export const PROFILE_DISCOVERY_RELAYS = [
+  'wss://purplepag.es',
+  'wss://user.kindpag.es',
+];
+
+// Content discovery fallback for kind:34128 / kind:10063 queries.
+//
+// Mirrors Titan's FALLBACK_RELAYS in btcjt/titan crates/titan-resolver/
+// src/lib.rs. Titan-ecosystem nsites land on relay.westernbtc.com (the
+// Titan crew's own content relay), and Titan Browser always queries this
+// set in addition to whatever NIP-65 / user-configured relays it has —
+// otherwise a fresh box with no read-relay overlap simply can't see
+// Titan-published content (this is exactly the bug surfaced when
+// nsite://titan rendered the full TITAN site in Titan Browser but came
+// up empty in nostr-station).
+//
+// Why a separate constant from DEFAULT_NSITE_RELAYS: DEFAULT_NSITE_RELAYS
+// is the publish-side default that `nsite init` writes into project.json
+// (changing it could surprise users who rely on those specific relays).
+// DEFAULT_CONTENT_RELAYS is the read-side discovery safety net —
+// always-on, complementary to the user's configured relays.
+export const DEFAULT_CONTENT_RELAYS = [
+  'wss://relay.westernbtc.com',
+  'wss://relay.primal.net',
+  'wss://relay.damus.io',
+];
+
 // ── Address resolution ────────────────────────────────────────────────────
 
 const HEX64 = /^[0-9a-f]{64}$/i;
