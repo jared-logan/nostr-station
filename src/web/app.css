@@ -9229,6 +9229,36 @@ a.client-mention {
 }
 
 /* ── Config → nsite section ───────────────────────────────────────── */
+.cfg-nsite-intro {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.cfg-nsite-intro strong { color: var(--text-bright); }
+.cfg-nsite-intro code {
+  font-size: 11px;
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.cfg-nsite-help {
+  font-size: 11px;
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+.cfg-nsite-help code {
+  font-size: 10.5px;
+  background: var(--bg);
+  padding: 0 3px;
+  border-radius: 2px;
+}
+.cfg-nsite-help em { font-style: italic; }
+.cfg-nsite-help strong { color: var(--text); font-weight: 600; }
 .cfg-nsite-grid {
   display: flex;
   flex-direction: column;

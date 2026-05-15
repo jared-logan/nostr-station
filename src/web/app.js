@@ -14405,52 +14405,103 @@ const ConfigPanel = (() => {
     const envBadge = (active) => active
       ? `<span class="cfg-env-badge" title="Overridden by env var — edit ignored until env is unset">env</span>` : '';
     body.innerHTML = `
+      <div class="cfg-nsite-intro">
+        These settings govern the <strong>nsite browser panel</strong> only —
+        how it resolves <code>nsite://</code> addresses, finds an author's
+        published files, and fetches blob bytes. They are <strong>separate
+        from your Client / Identity read relays</strong> (Config → Identity),
+        which power your own feed, notifications, and outbound posts. Editing
+        the lists below does not change which relays your station publishes
+        to or reads its own social feed from. Defaults mirror Titan Browser's
+        Settings tab so an address that works in Titan also works here.
+      </div>
+
       <div class="cfg-nsite-grid">
-        <label class="cfg-nsite-field">
-          <div class="cfg-nsite-label">Content relays
-            <span class="muted">(unioned with your read relays + author NIP-65 outbox)</span>
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">Content relays</div>
+          <div class="cfg-nsite-help muted">
+            Always-on relays queried for the author's <code>kind:34128</code>
+            file events (the per-file path → SHA256 manifest). These are
+            <strong>unioned</strong> with your Identity read relays and the
+            author's own NIP-65 outbox — they don't replace either, they're
+            an additional safety net so nsites whose authors publish to
+            specialized relays (like <code>relay.westernbtc.com</code> for
+            Titan-ecosystem sites) still resolve even when those relays
+            aren't in your Identity config.
           </div>
           <textarea id="cfg-nsite-content" rows="4" spellcheck="false"
             placeholder="${escapeHtml(def.contentRelays.join('\n'))}">${escapeHtml(linesOf(cfg.contentRelays))}</textarea>
-          <div class="cfg-nsite-hint muted">one wss:// URL per line</div>
-        </label>
+          <div class="cfg-nsite-hint muted">one <code>wss://</code> URL per line</div>
+        </div>
 
-        <label class="cfg-nsite-field">
-          <div class="cfg-nsite-label">Discovery relays
-            <span class="muted">(NIP-65 outbox lookup bootstrap)</span>
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">Discovery relays</div>
+          <div class="cfg-nsite-help muted">
+            Profile-relay indexers (purplepag.es, user.kindpag.es) consulted
+            to bootstrap the NIP-65 outbox lookup — i.e., to find
+            <em>where the author themselves publishes</em>. Without these,
+            we'd only know about an author's outbox if their
+            <code>kind:10002</code> announcement happened to be on a relay
+            you already subscribe to via Identity. This is the same role
+            Titan Browser uses these relays for.
           </div>
           <textarea id="cfg-nsite-discovery" rows="3" spellcheck="false"
             placeholder="${escapeHtml(def.discoveryRelays.join('\n'))}">${escapeHtml(linesOf(cfg.discoveryRelays))}</textarea>
-          <div class="cfg-nsite-hint muted">profile-relay indexers like purplepag.es</div>
-        </label>
+          <div class="cfg-nsite-hint muted">one <code>wss://</code> URL per line</div>
+        </div>
 
-        <label class="cfg-nsite-field">
-          <div class="cfg-nsite-label">Blossom fallback servers
-            <span class="muted">(tried after the author's announced servers)</span>
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">Blossom fallback servers</div>
+          <div class="cfg-nsite-help muted">
+            HTTP servers (NOT Nostr relays) where SHA256-addressed blob
+            bytes are fetched. The author's own announced Blossom servers
+            (from their <code>kind:10063</code>) are tried first; if those
+            return 404 or are unreachable, these fallbacks are tried in
+            order. Every byte is hash-verified against the on-relay SHA256
+            before the iframe renders it. Independent of any relay
+            configuration.
           </div>
           <textarea id="cfg-nsite-blossom" rows="4" spellcheck="false"
             placeholder="${escapeHtml(def.blossomServers.join('\n'))}">${escapeHtml(linesOf(cfg.blossomServers))}</textarea>
-          <div class="cfg-nsite-hint muted">one https:// URL per line</div>
-        </label>
+          <div class="cfg-nsite-hint muted">one <code>https://</code> URL per line</div>
+        </div>
 
-        <label class="cfg-nsite-field">
-          <div class="cfg-nsite-label">NSIT indexer pubkey ${envBadge(env.nsitIndexerPubkey)}
-            <span class="muted">(64-hex; "disabled" turns NSIT name lookup off; empty = use default)</span>
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">NSIT indexer pubkey ${envBadge(env.nsitIndexerPubkey)}</div>
+          <div class="cfg-nsite-help muted">
+            64-character hex pubkey of the service whose <code>kind:35129</code>
+            events we trust for NSIT (Bitcoin-native) name resolution.
+            This is the pubkey that tells us, e.g., <code>nsite://titan</code>
+            maps to <code>bec1a370…</code>. The default is Titan's hosted
+            indexer; set to <code>disabled</code> to refuse NSIT name
+            lookups entirely (npub / NIP-05 / hex addresses still work).
+            Leave blank to use the default. Trust model: an honest
+            indexer always agrees with the Bitcoin chain, so a different
+            indexer should produce the same answer — change this only if
+            you run your own.
           </div>
           <input type="text" id="cfg-nsite-indexer-pk" spellcheck="false"
             ${env.nsitIndexerPubkey ? 'disabled' : ''}
             placeholder="${escapeHtml(def.nsitIndexerPubkey)}"
             value="${escapeHtml(cfg.nsitIndexerPubkey || '')}">
-        </label>
+        </div>
 
-        <label class="cfg-nsite-field">
-          <div class="cfg-nsite-label">NSIT indexer relays ${envBadge(env.nsitIndexerRelays)}
-            <span class="muted">(where kind:35129 events live)</span>
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">NSIT indexer relays ${envBadge(env.nsitIndexerRelays)}</div>
+          <div class="cfg-nsite-help muted">
+            Relays where the NSIT indexer publishes its
+            <code>kind:35129</code> name→pubkey events. Used <em>only</em>
+            during name resolution (the <code>titan</code> /
+            <code>westernbtc</code> step of <code>nsite://titan</code>) —
+            once a name resolves to a pubkey, content fetch falls back to
+            the Content relays / Identity read relays / author outbox set
+            above.
           </div>
           <textarea id="cfg-nsite-indexer-relays" rows="3" spellcheck="false"
             ${env.nsitIndexerRelays ? 'disabled' : ''}
             placeholder="${escapeHtml(def.nsitIndexerRelays.join('\n'))}">${escapeHtml(linesOf(cfg.nsitIndexerRelays))}</textarea>
-        </label>
+          <div class="cfg-nsite-hint muted">one <code>wss://</code> URL per line</div>
+        </div>
       </div>
 
       <div class="cfg-nsite-actions">
