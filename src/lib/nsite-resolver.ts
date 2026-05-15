@@ -26,7 +26,7 @@
 import { nip19 } from 'nostr-tools';
 import {
   queryRelaysDirect, getTagValue, getTags,
-  type NostrEvent,
+  type NostrEvent, type RelayQueryOptions, type RelayQueryResult,
 } from './nostr-query.js';
 import { safeHttpUrl } from './url-safety.js';
 
@@ -90,7 +90,31 @@ export const DEFAULT_BLOSSOM_SERVERS: string[] = [
 
 const NSITE_FILE_KIND     = 34128;
 const BLOSSOM_SERVERS_KIND = 10063;
+const NSIT_NAME_KIND      = 35129;   // addressable name → pubkey index (NSIT)
 const RELAY_QUERY_TIMEOUT_MS = 8_000;
+
+// Titan's hosted nsit-indexer (Rust service that watches Bitcoin blocks for
+// NSIT OP_RETURNs and publishes kind:35129 name→pubkey events). Hardcoded
+// in btcjt/titan crates/titan-resolver/src/lib.rs as INDEXER_PUBKEY_HEX.
+// Trust model: we accept this pubkey's signed events by default; anyone
+// who'd rather run their own indexer can override via env. NSIT names are
+// content-derived from Bitcoin, so an honest indexer will always agree
+// with the chain — the trust is in "this pubkey runs an honest indexer",
+// not "this pubkey decides who owns what".
+export const DEFAULT_NSIT_INDEXER_PUBKEY =
+  'bec1a370130fed4fb9f78f9efc725b35104d827470e75573558a87a9ac5cde44';
+
+// Discovery relays the indexer publishes to (Titan defaults). Standard
+// read relays (damus.io, nos.lol, …) rarely carry kind:35129 events, so
+// the resolver queries these dedicated index relays instead of the
+// station owner's read-relay set.
+export const DEFAULT_NSIT_INDEXER_RELAYS = [
+  'wss://purplepag.es',
+  'wss://user.kindpag.es',
+  'wss://relay.westernbtc.com',
+  'wss://relay.primal.net',
+  'wss://relay.damus.io',
+];
 
 // ── Address resolution ────────────────────────────────────────────────────
 
@@ -102,22 +126,42 @@ const HEX64 = /^[0-9a-f]{64}$/i;
 const NSIT_NAME = /^[a-z0-9-]{1,41}$/;
 
 /**
+ * Configuration for the NSIT (Bitcoin name) resolution path. Pass `null`
+ * to disable NSIT lookups entirely (then bare names produce
+ * `name_indexer_disabled`).
+ */
+export interface NsitResolveConfig {
+  /** 64-hex pubkey of the indexer service whose kind:35129 events we trust. */
+  indexerPubkey: string;
+  /** Relays where the indexer publishes kind:35129. Distinct from owner read relays. */
+  relays: string[];
+}
+
+/** Pluggable relay-query function — defaults to queryRelaysDirect. Tests inject their own. */
+export type QueryFn = (opts: RelayQueryOptions) => Promise<RelayQueryResult>;
+
+/**
  * Normalize whatever the user typed into a resolved pubkey + display form.
  * Accepts:
- *   - `npub1...`                  → bech32 decode
- *   - bare hex pubkey (64 chars)  → passthrough
- *   - `user@host` / `user.host`   → NIP-05 lookup
- *   - `nsite://<x>`               → strip scheme, re-dispatch
- *   - bare NSIT name              → trusted-indexer lookup
+ *   - `npub1...`                          → bech32 decode
+ *   - bare hex pubkey (64 chars)          → passthrough
+ *   - `user@host`                         → NIP-05 lookup
+ *   - `user.tld` (no `@`, has a dot)      → NIP-05 `_@<host>` fallback
+ *   - `nsite://<x>`                       → strip scheme, re-dispatch
+ *   - `https://<x>.nsite.lol/...` or
+ *     `https://<x>.nostr.hu/...`          → recognize as gateway URL,
+ *                                            extract the npub-encoded
+ *                                            subdomain, re-dispatch
+ *   - bare NSIT name (a-z0-9-, 1–41ch)    → indexer lookup via kind:35129
  *
- * `nameIndexerUrl` is consulted ONLY for bare NSIT names. Pass null to
- * disable NSIT resolution; the function then throws `name_indexer_disabled`
- * for any input that's not an npub / hex / NIP-05.
+ * `nsitConfig === null` disables NSIT lookups; bare names then throw
+ * `name_indexer_disabled` so the caller can surface a clear message.
  */
 export async function resolveAddress(
   raw: string,
-  nameIndexerUrl: string | null,
+  nsitConfig: NsitResolveConfig | null,
   fetchImpl: typeof fetch = fetch,
+  queryFn: QueryFn = queryRelaysDirect,
 ): Promise<ResolvedAddress> {
   const trimmed = (raw || '').trim();
   if (!trimmed) throw new NsiteError('bad_address', 'empty address');
@@ -126,6 +170,24 @@ export async function resolveAddress(
   // works on the bare identifier.
   let s = trimmed;
   if (s.startsWith('nsite://')) s = s.slice('nsite://'.length);
+
+  // Gateway URLs paste-in fix: `https://<npub>.nsite.lol/path` and
+  // `https://<npub>.nostr.hu/path` both encode the author's npub in the
+  // leftmost subdomain. Strip everything else and re-dispatch as an npub.
+  // The .nsite.lol gateway uses a non-standard split (`<npub>nostr-station`
+  // style) so we keep just the leftmost label and trust the npub1 prefix
+  // to validate it as a real bech32 npub on the next pass.
+  const gwMatch = s.match(/^https?:\/\/([^./]+)\.(?:nsite\.lol|nostr\.hu)(?::\d+)?(?:\/.*)?$/i);
+  if (gwMatch) {
+    s = gwMatch[1];
+    // The gateway label is usually the bare bech32 npub. If it doesn't
+    // already start with `npub1`, prepend so the npub branch below can
+    // validate it.
+    if (!s.startsWith('npub1') && /^[023456789ac-hj-np-z]+$/.test(s)) {
+      s = `npub1${s}`;
+    }
+  }
+
   s = s.replace(/\/+$/, '');
 
   // Bare hex pubkey
@@ -145,29 +207,25 @@ export async function resolveAddress(
     }
   }
 
-  // NIP-05 identifier: must contain '@' OR be of the form `user.host.tld`
-  // with at least one '.' AND not look like a NSIT name. We require '@' or
-  // a dot-with-tld to avoid clashing with bare names like `titan` —
-  // those go through the indexer path below.
+  // NIP-05 identifier with explicit '@'.
   if (s.includes('@')) {
     const pubkey = await resolveNip05(s, fetchImpl);
     return { pubkey, source: 'nip05', display: s };
   }
 
-  // NSIT bare name
+  // NSIT bare name — query the trusted indexer via Nostr.
   if (NSIT_NAME.test(s)) {
-    if (!nameIndexerUrl) {
+    if (!nsitConfig) {
       throw new NsiteError(
         'name_indexer_disabled',
-        `NSIT name "${s}" needs a name indexer to resolve. Set NSITE_NAME_INDEXER_URL in the station env, or use the author's npub / NIP-05 directly.`,
+        `NSIT name "${s}" needs a name indexer to resolve. Set NSITE_NSIT_INDEXER_PUBKEY in the station env (default: Titan's hosted indexer), or use the author's npub / NIP-05 directly.`,
       );
     }
-    const pubkey = await resolveNsitName(s, nameIndexerUrl, fetchImpl);
+    const pubkey = await resolveNsitName(s, nsitConfig, queryFn);
     return { pubkey, source: 'nsit', display: s };
   }
 
-  // Final fallback: try NIP-05 (`name.tld` form, no `@` — NIP-05 implicitly
-  // uses `_@<host>` for the bare-domain case).
+  // Final fallback: bare-domain NIP-05 (`name.tld` form → `_@<host>`).
   if (s.includes('.')) {
     const pubkey = await resolveNip05(`_@${s}`, fetchImpl);
     return { pubkey, source: 'nip05', display: s };
@@ -201,49 +259,67 @@ async function resolveNip05(identifier: string, fetchImpl: typeof fetch): Promis
   return hex.toLowerCase();
 }
 
-// ── NSIT name indexer ─────────────────────────────────────────────────────
+// ── NSIT name resolution (kind:35129 via Nostr) ───────────────────────────
 //
-// The reference implementation (btcjt/titan, Rust) resolves NSIT names by
-// scanning Bitcoin OP_RETURN data. nostr-station deliberately does NOT do
-// that — we trust a configurable HTTP indexer instead. Expected response:
+// Titan's nsit-indexer service scans Bitcoin OP_RETURN data for NSIT
+// registrations and publishes a kind:35129 event per name:
 //
-//   GET <indexerUrl>/<name>          →  200  { "pubkey": "<64-hex>" }
-//                                    →  404  (name unregistered)
+//   kind:    35129  (parameterized replaceable; key = `d` tag)
+//   pubkey:  <indexer pubkey>  (signs the event — we filter on this)
+//   tags:    [["d", "<name>"], ["p", "<resolved-pubkey-hex>"], …]
 //
-// If the user's chosen indexer uses a different URL shape, they can point
-// `nameIndexerUrl` directly at a templated URL by including `{name}` in
-// it — we substitute, otherwise append `/{name}`.
+// We trust the configured indexer pubkey to honestly index the chain.
+// Bitcoin makes the mapping deterministic, so any honest indexer arrives
+// at the same answer. nostr-station never scans the chain itself —
+// running a Bitcoin node is out of scope for a Nostr station.
 
-async function resolveNsitName(
+export async function resolveNsitName(
   name: string,
-  indexerUrl: string,
-  fetchImpl: typeof fetch,
+  config: NsitResolveConfig,
+  queryFn: QueryFn = queryRelaysDirect,
 ): Promise<string> {
-  const base = safeHttpUrl(indexerUrl);
-  if (!base) throw new NsiteError('name_indexer_disabled', `invalid name indexer URL: ${indexerUrl}`);
-  const url = base.includes('{name}')
-    ? base.replace('{name}', encodeURIComponent(name))
-    : `${base.replace(/\/+$/, '')}/${encodeURIComponent(name)}`;
-  let res: Response;
-  try {
-    res = await fetchImpl(url, { redirect: 'follow' });
-  } catch (e: any) {
-    throw new NsiteError('name_not_found', `name indexer unreachable: ${e?.message || e}`);
+  if (!HEX64.test(config.indexerPubkey)) {
+    throw new NsiteError(
+      'name_indexer_disabled',
+      `indexer pubkey is not a valid 64-hex string`,
+    );
   }
-  if (res.status === 404) {
-    throw new NsiteError('name_not_found', `NSIT name '${name}' not registered`);
+  if (config.relays.length === 0) {
+    throw new NsiteError(
+      'name_indexer_disabled',
+      `no relays configured for NSIT name lookups`,
+    );
   }
-  if (!res.ok) {
-    throw new NsiteError('name_not_found', `name indexer returned status ${res.status}`);
+  const { events } = await queryFn({
+    filter: {
+      kinds:   [NSIT_NAME_KIND],
+      authors: [config.indexerPubkey],
+      tags:    { d: name },
+    },
+    relays:    config.relays,
+    stream:    false,
+    timeoutMs: 6_000,
+    // Short-circuit on the first matching event — replaceable events from
+    // a single author are unique by `d`, so one hit is the answer. The
+    // race-then-linger semantics Titan describes amount to this.
+    acceptUntil: (evs) => evs.length > 0,
+  });
+  if (!events.length) {
+    throw new NsiteError(
+      'name_not_found',
+      `NSIT name '${name}' not found on indexer relays — name may be unregistered, or the indexer is behind`,
+    );
   }
-  let json: any;
-  try { json = await res.json(); }
-  catch { throw new NsiteError('name_not_found', `name indexer returned invalid JSON`); }
-  const hex = typeof json?.pubkey === 'string' ? json.pubkey.toLowerCase() : '';
-  if (!HEX64.test(hex)) {
-    throw new NsiteError('name_not_found', `name indexer returned no usable pubkey for '${name}'`);
+  // Replaceable per (author, d) — newest wins if multiple slip through.
+  const newest = events.reduce((a, b) => (b.created_at > a.created_at ? b : a));
+  const p = getTagValue(newest, 'p');
+  if (!p || !HEX64.test(p)) {
+    throw new NsiteError(
+      'name_not_found',
+      `NSIT event for '${name}' lacks a valid p tag`,
+    );
   }
-  return hex;
+  return p.toLowerCase();
 }
 
 // ── Site index (kind:34128) ───────────────────────────────────────────────
