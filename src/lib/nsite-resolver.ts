@@ -88,6 +88,7 @@ export const DEFAULT_NSITE_RELAYS: string[] = [
 // blossom.band instance), so without a fallback the panel renders blank
 // on a single-server outage. nsite.lol does the same union internally.
 export const DEFAULT_BLOSSOM_SERVERS: string[] = [
+  'https://blossom.westernbtc.com',
   'https://cdn.satellite.earth',
   'https://blossom.primal.net',
   'https://blossom.band',
@@ -509,6 +510,9 @@ export function normalizePath(p: string): string {
 export async function fetchBlossomServers(
   pubkey: string,
   relays: string[],
+  /** Fallback Blossom server list. Defaults to DEFAULT_BLOSSOM_SERVERS;
+   *  the Config-panel-aware route passes the user-edited list instead. */
+  fallbackServers: string[] = DEFAULT_BLOSSOM_SERVERS,
 ): Promise<string[]> {
   const { events } = await queryRelaysDirect({
     filter: { kinds: [BLOSSOM_SERVERS_KIND], authors: [pubkey], limit: 5 },
@@ -533,7 +537,7 @@ export async function fetchBlossomServers(
   // don't both make it through.
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const s of [...authorListed, ...DEFAULT_BLOSSOM_SERVERS]) {
+  for (const s of [...authorListed, ...fallbackServers]) {
     const k = s.toLowerCase();
     if (seen.has(k)) continue;
     seen.add(k);
