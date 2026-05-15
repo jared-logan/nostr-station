@@ -1971,12 +1971,12 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // already; the BUD-02 NIP-98 ceremony is unnecessary here).
       setMailBlossomAccessor(() => inprocBlossom);
 
-      // Mail inbox worker (NIP-17). Off when STATION_DISABLE_MAIL=1, or
-      // when there's no saved bunker client (decryption requires Amber).
-      // Worker.start() no-ops if either precondition fails; we don't try
-      // to be clever here — just kick it and let the worker self-report
-      // status via /api/mail/status.
-      if (process.env.STATION_DISABLE_MAIL !== '1') {
+      // Mail inbox worker (NIP-17/1301). Three gates, all must pass:
+      //   - STATION_DISABLE_MAIL!=1 (env override for headless / CI)
+      //   - identity.mailEnabled !== false (PR 11 user preference)
+      //   - worker.start() decides internally if a saved bunker exists
+      // Worker.start() no-ops on missing-bunker; we don't probe here.
+      if (process.env.STATION_DISABLE_MAIL !== '1' && readIdentity().mailEnabled !== false) {
         try { getInboxWorker().start(); }
         catch (e: any) {
           process.stderr.write(`[mail] inbox worker failed to start: ${e?.message || e}\n`);

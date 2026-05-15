@@ -47,6 +47,11 @@ export interface MailSettings {
   // new device's first boot pick up the configured set without an
   // extra round-trip.
   inboxRelays:    string[];
+  // PR 11: when true, /api/mail/mark-read publishes a kind-1985 label
+  // alongside the local read-flag flip so other devices on the same
+  // npub stay in sync. Default true. Turn off if you'd rather keep
+  // read-state metadata strictly local.
+  readStateSync:  boolean;
   // Timestamp of the source event. Last-write-wins ordered by this
   // value; applies/updates flow through applySettings() so a slow
   // relay can't roll back to an older settings document.
@@ -73,6 +78,7 @@ export function readLocalSettings(): MailSettings {
       version:       SCHEMA_VERSION,
       customFolders: [],
       inboxRelays:   readInboxRelays(),
+      readStateSync: true,
       updated_at:    0,
     };
   }
@@ -140,6 +146,10 @@ function normalizeSettings(raw: any): MailSettings {
           .filter((s: any): s is string => typeof s === 'string' && /^wss?:\/\//.test(s))
           .slice(0, 12)
       : DEFAULT_INBOX_RELAYS.slice(),
+    // PR 11: default-on read-state sync. Only `false` explicitly disables;
+    // unknown / missing / non-bool normalises to true so upgrades preserve
+    // the historic (always-published) behaviour.
+    readStateSync: raw?.readStateSync === false ? false : true,
     updated_at:    typeof raw?.updated_at === 'number' ? raw.updated_at : 0,
   };
   // Empty inbox-relays list is invalid (the worker has nothing to subscribe

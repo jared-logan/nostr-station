@@ -9081,3 +9081,18 @@ a.client-mention {
   color: var(--text);
   padding: 5px 8px; border-radius: 6px; font: inherit; font-size: 12px;
 }
+
+/* ── Config · Mail toggles (PR 11) ───────────────────────────────────── */
+.cfg-toggle-row {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.cfg-toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  cursor: pointer; user-select: none;
+  color: var(--text);
+}
+.cfg-toggle input[type="checkbox"] {
+  width: 14px; height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}

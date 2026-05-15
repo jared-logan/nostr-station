@@ -40,6 +40,12 @@ export interface Identity {
   // false / undefined — Blossom stays off until explicitly enabled, so
   // installs that never touch blob storage pay no boot cost.
   inprocBlossomEnabled?: boolean;
+  // PR 11: persisted on/off for the Mail inbox worker. Default ON
+  // (undefined treated as true) — Mail "just works" out of the box.
+  // The user can opt out via Config → Mail. STATION_DISABLE_MAIL=1 as
+  // an env override still wins so headless / CI installs can pin off
+  // without touching identity.json.
+  mailEnabled?: boolean;
   // Opt-out of dashboard auth for localhost requests (127.0.0.1, ::1). Default
   // true — manual override only, not surfaced in the UI yet.
   requireAuth?: boolean;
@@ -110,6 +116,13 @@ export function readIdentity(): Identity {
       // Boolean true persists across restarts; the env-var override
       // STATION_INPROC_BLOSSOM=1 still wins independent of this.
       inprocBlossomEnabled: parsed.inprocBlossomEnabled === true ? true : undefined,
+      // Mail-worker enable bit. Default ON for new + upgrading users
+      // so nostr-mail "just works"; only `false` explicitly turns it
+      // off. Mirrors appRelaysEnabled's polarity (default-on, opt-out
+      // shape) rather than inprocBlossomEnabled's default-off shape —
+      // Mail is core like the social Client panel, not opt-in like
+      // hosting blob storage.
+      mailEnabled: parsed.mailEnabled === false ? false : true,
       requireAuth: parsed.requireAuth === false ? false : undefined,
       setupComplete: typeof parsed.setupComplete === 'boolean' ? parsed.setupComplete : undefined,
     };
@@ -132,7 +145,7 @@ export function readIdentity(): Identity {
     }
     return ident;
   } catch {
-    return { npub: '', readRelays: DEFAULT_READ_RELAYS.slice(), appRelaysEnabled: true };
+    return { npub: '', readRelays: DEFAULT_READ_RELAYS.slice(), appRelaysEnabled: true, mailEnabled: true };
   }
 }
 
@@ -178,6 +191,13 @@ export function setInprocBlossomEnabled(enabled: boolean): { ok: true; inprocBlo
   else delete ident.inprocBlossomEnabled;  // keep the on-disk JSON sparse
   writeIdentity(ident);
   return { ok: true, inprocBlossomEnabled: !!enabled };
+}
+
+export function setMailEnabled(enabled: boolean): { ok: true; mailEnabled: boolean } {
+  const ident = readIdentity();
+  ident.mailEnabled = !!enabled;
+  writeIdentity(ident);
+  return { ok: true, mailEnabled: ident.mailEnabled };
 }
 
 export function setAppRelaysEnabled(enabled: boolean): { ok: true; appRelaysEnabled: boolean } {
