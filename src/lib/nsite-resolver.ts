@@ -46,6 +46,20 @@ export interface SiteIndex {
   files: Map<string, string>;
   /** Newest event's created_at; used for cache-bust + freshness indicator. */
   latestAt: number;
+  /** Oldest event's created_at; surfaces stale-publish situations. */
+  oldestAt: number;
+  /** Per-file diagnostic detail (the events that won the per-path dedup). */
+  entries: SiteIndexEntry[];
+  /** Total kind:34128 events seen across relays before per-path dedup. */
+  totalEventsSeen: number;
+}
+
+export interface SiteIndexEntry {
+  path:      string;
+  sha256:    string;
+  createdAt: number;
+  /** event id for cross-referencing with raw relay data (`nak event`, etc). */
+  eventId:   string;
 }
 
 export interface BlossomFetchResult {
@@ -443,8 +457,9 @@ export async function resolveNsitName(
 export async function fetchSiteIndex(
   pubkey: string,
   relays: string[],
+  queryFn: QueryFn = queryRelaysDirect,
 ): Promise<SiteIndex> {
-  const { events } = await queryRelaysDirect({
+  const { events } = await queryFn({
     filter: { kinds: [NSITE_FILE_KIND], authors: [pubkey], limit: 500 },
     relays,
     stream: false,
@@ -461,14 +476,22 @@ export async function fetchSiteIndex(
     if (!prev || ev.created_at > prev.created_at) latestPerPath.set(path, ev);
   }
 
-  const files = new Map<string, string>();
-  let latestAt = 0;
+  const files   = new Map<string, string>();
+  const entries: SiteIndexEntry[] = [];
+  let latestAt  = 0;
+  let oldestAt  = Number.MAX_SAFE_INTEGER;
   for (const [path, ev] of latestPerPath) {
     const x = getTagValue(ev, 'x');
     if (!x || !HEX64.test(x)) continue;
-    files.set(path, x.toLowerCase());
+    const sha = x.toLowerCase();
+    files.set(path, sha);
+    entries.push({ path, sha256: sha, createdAt: ev.created_at, eventId: ev.id });
     if (ev.created_at > latestAt) latestAt = ev.created_at;
+    if (ev.created_at < oldestAt) oldestAt = ev.created_at;
   }
+  if (oldestAt === Number.MAX_SAFE_INTEGER) oldestAt = 0;
+  // Sort entries by path for stable rendering in the diagnostics view.
+  entries.sort((a, b) => a.path.localeCompare(b.path));
 
   if (files.size === 0) {
     // The author pubkey resolved fine but never published an nsite. Common
@@ -478,7 +501,7 @@ export async function fetchSiteIndex(
       `pubkey ${pubkey.slice(0, 12)}… resolves correctly, but no kind:${NSITE_FILE_KIND} file events were found on the queried relays — the author may not have published an nsite under this address yet`,
     );
   }
-  return { files, latestAt };
+  return { files, latestAt, oldestAt, entries, totalEventsSeen: events.length };
 }
 
 /** Normalize a path tag to "no leading slash, lowercase". `/index.html` → `index.html`. */

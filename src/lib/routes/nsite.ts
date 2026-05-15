@@ -210,6 +210,14 @@ export async function handleNsite(
         display: resolved.display,
         fileCount: index.files.size,
         latestAt: index.latestAt,
+        oldestAt: index.oldestAt,
+        totalEventsSeen: index.totalEventsSeen,
+        // Per-file event details for the diagnostics panel — paths,
+        // sha256, eventId, timestamp. Sorted by path. Capped at 50 to
+        // bound the payload; nobody publishes 50+ files in v1 nsites
+        // (and the rest of the index is still served from the snapshot,
+        // this is just the rendered detail view).
+        entries: index.entries.slice(0, 50),
         blossomServers,
         relays: {
           owner:        ownerRelays,

@@ -9147,6 +9147,63 @@ a.client-mention {
   font-size: 11px;
   background: var(--bg-elev);
 }
+.nsite-diag {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 11px;
+}
+.nsite-diag > summary {
+  padding: 4px 12px;
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
+  list-style: none;
+}
+.nsite-diag > summary::-webkit-details-marker { display: none; }
+.nsite-diag > summary::before {
+  content: '▸ ';
+  display: inline-block;
+  width: 1em;
+}
+.nsite-diag[open] > summary::before { content: '▾ '; }
+.nsite-diag > summary:hover { color: var(--text); }
+.nsite-diag-body {
+  padding: 6px 12px 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--mono, monospace);
+}
+.nsite-diag-section {
+  margin-bottom: 8px;
+}
+.nsite-diag-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.nsite-diag-table {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 110px 130px;
+  gap: 2px 12px;
+  align-items: baseline;
+}
+.nsite-diag-table .head {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.nsite-diag-relays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.nsite-diag-relay {
+  font-size: 10px;
+  color: var(--muted);
+}
 .nsite-viewport {
   flex: 1;
   position: relative;
