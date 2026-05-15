@@ -13773,6 +13773,19 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
+      <!-- nsite section. Mirrors Titan Browser's Settings tab: content
+           relays, profile-discovery relays, Blossom fallback servers,
+           and the NSIT name indexer pubkey. Body filled lazily by JS. -->
+      <details class="config-section cfg-collapsible" id="cfg-nsite-section">
+        <summary>
+          <h3>nsite</h3>
+          <span class="cfg-summary-meta" id="cfg-nsite-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-nsite-body">
+          <div class="muted">loading nsite config…</div>
+        </div>
+      </details>
+
       <!-- PR 11: Mail section. Status line + the two toggles agreed
            in the planning round: enable-at-boot and read-state-sync.
            Folder management + inbox-relay editing stay in the Mail
@@ -14361,6 +14374,181 @@ const ConfigPanel = (() => {
     // muted "not running" line with an enable button.
     paintBlossomConfigSection();
     paintMailConfigSection();
+    paintNsiteConfigSection();
+  }
+
+  // ── nsite section ─────────────────────────────────────────────────────
+  // Five fields, mirroring Titan Browser's Settings tab. Edits are
+  // staged in <textarea> / <input> and committed via Save → PUT
+  // /api/nsite/config, which atomically replaces the on-disk file.
+  // Env-var overrides (NSITE_NSIT_INDEXER_PUBKEY / NSITE_NSIT_RELAYS)
+  // win at request time — when active, the affected fields render with
+  // a small "overridden by env" tag and are disabled.
+  async function paintNsiteConfigSection() {
+    const body    = $('cfg-nsite-body');
+    const summary = $('cfg-nsite-summary');
+    if (!body) return;
+    const data = await api('/api/nsite/config', undefined, { silent: true }).catch(() => null);
+    if (!data) {
+      if (summary) summary.textContent = 'unavailable';
+      body.innerHTML = `<div class="muted">nsite endpoint not reachable.</div>`;
+      return;
+    }
+    const cfg = data.config, def = data.defaults, env = data.envOverrides || {};
+    const linesOf = (arr) => Array.isArray(arr) ? arr.join('\n') : '';
+    const nsitOff = (cfg.nsitIndexerPubkey || '').toLowerCase() === 'disabled' || cfg.nsitIndexerPubkey === '';
+    if (summary) {
+      summary.textContent = nsitOff
+        ? `${cfg.contentRelays.length} content relays · NSIT off`
+        : `${cfg.contentRelays.length} content relays · NSIT on`;
+    }
+    const envBadge = (active) => active
+      ? `<span class="cfg-env-badge" title="Overridden by env var — edit ignored until env is unset">env</span>` : '';
+    body.innerHTML = `
+      <div class="cfg-nsite-intro">
+        These settings govern the <strong>nsite browser panel</strong> only —
+        how it resolves <code>nsite://</code> addresses, finds an author's
+        published files, and fetches blob bytes. They are <strong>separate
+        from your Client / Identity read relays</strong> (Config → Identity),
+        which power your own feed, notifications, and outbound posts. Editing
+        the lists below does not change which relays your station publishes
+        to or reads its own social feed from. Defaults mirror Titan Browser's
+        Settings tab so an address that works in Titan also works here.
+      </div>
+
+      <div class="cfg-nsite-grid">
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">Content relays</div>
+          <div class="cfg-nsite-help muted">
+            Always-on relays queried for the author's <code>kind:34128</code>
+            file events (the per-file path → SHA256 manifest). These are
+            <strong>unioned</strong> with your Identity read relays and the
+            author's own NIP-65 outbox — they don't replace either, they're
+            an additional safety net so nsites whose authors publish to
+            specialized relays (like <code>relay.westernbtc.com</code> for
+            Titan-ecosystem sites) still resolve even when those relays
+            aren't in your Identity config.
+          </div>
+          <textarea id="cfg-nsite-content" rows="4" spellcheck="false"
+            placeholder="${escapeHtml(def.contentRelays.join('\n'))}">${escapeHtml(linesOf(cfg.contentRelays))}</textarea>
+          <div class="cfg-nsite-hint muted">one <code>wss://</code> URL per line</div>
+        </div>
+
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">Discovery relays</div>
+          <div class="cfg-nsite-help muted">
+            Profile-relay indexers (purplepag.es, user.kindpag.es) consulted
+            to bootstrap the NIP-65 outbox lookup — i.e., to find
+            <em>where the author themselves publishes</em>. Without these,
+            we'd only know about an author's outbox if their
+            <code>kind:10002</code> announcement happened to be on a relay
+            you already subscribe to via Identity. This is the same role
+            Titan Browser uses these relays for.
+          </div>
+          <textarea id="cfg-nsite-discovery" rows="3" spellcheck="false"
+            placeholder="${escapeHtml(def.discoveryRelays.join('\n'))}">${escapeHtml(linesOf(cfg.discoveryRelays))}</textarea>
+          <div class="cfg-nsite-hint muted">one <code>wss://</code> URL per line</div>
+        </div>
+
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">Blossom fallback servers</div>
+          <div class="cfg-nsite-help muted">
+            HTTP servers (NOT Nostr relays) where SHA256-addressed blob
+            bytes are fetched. The author's own announced Blossom servers
+            (from their <code>kind:10063</code>) are tried first; if those
+            return 404 or are unreachable, these fallbacks are tried in
+            order. Every byte is hash-verified against the on-relay SHA256
+            before the iframe renders it. Independent of any relay
+            configuration.
+          </div>
+          <textarea id="cfg-nsite-blossom" rows="4" spellcheck="false"
+            placeholder="${escapeHtml(def.blossomServers.join('\n'))}">${escapeHtml(linesOf(cfg.blossomServers))}</textarea>
+          <div class="cfg-nsite-hint muted">one <code>https://</code> URL per line</div>
+        </div>
+
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">NSIT indexer pubkey ${envBadge(env.nsitIndexerPubkey)}</div>
+          <div class="cfg-nsite-help muted">
+            64-character hex pubkey of the service whose <code>kind:35129</code>
+            events we trust for NSIT (Bitcoin-native) name resolution.
+            This is the pubkey that tells us, e.g., <code>nsite://titan</code>
+            maps to <code>bec1a370…</code>. The default is Titan's hosted
+            indexer; set to <code>disabled</code> to refuse NSIT name
+            lookups entirely (npub / NIP-05 / hex addresses still work).
+            Leave blank to use the default. Trust model: an honest
+            indexer always agrees with the Bitcoin chain, so a different
+            indexer should produce the same answer — change this only if
+            you run your own.
+          </div>
+          <input type="text" id="cfg-nsite-indexer-pk" spellcheck="false"
+            ${env.nsitIndexerPubkey ? 'disabled' : ''}
+            placeholder="${escapeHtml(def.nsitIndexerPubkey)}"
+            value="${escapeHtml(cfg.nsitIndexerPubkey || '')}">
+        </div>
+
+        <div class="cfg-nsite-field">
+          <div class="cfg-nsite-label">NSIT indexer relays ${envBadge(env.nsitIndexerRelays)}</div>
+          <div class="cfg-nsite-help muted">
+            Relays where the NSIT indexer publishes its
+            <code>kind:35129</code> name→pubkey events. Used <em>only</em>
+            during name resolution (the <code>titan</code> /
+            <code>westernbtc</code> step of <code>nsite://titan</code>) —
+            once a name resolves to a pubkey, content fetch falls back to
+            the Content relays / Identity read relays / author outbox set
+            above.
+          </div>
+          <textarea id="cfg-nsite-indexer-relays" rows="3" spellcheck="false"
+            ${env.nsitIndexerRelays ? 'disabled' : ''}
+            placeholder="${escapeHtml(def.nsitIndexerRelays.join('\n'))}">${escapeHtml(linesOf(cfg.nsitIndexerRelays))}</textarea>
+          <div class="cfg-nsite-hint muted">one <code>wss://</code> URL per line</div>
+        </div>
+      </div>
+
+      <div class="cfg-nsite-actions">
+        <button class="primary" id="cfg-nsite-save">Save</button>
+        <button id="cfg-nsite-reset">Reset to defaults</button>
+        <span class="muted cfg-nsite-path" id="cfg-nsite-path">${escapeHtml(data.configPath)}</span>
+      </div>
+    `;
+
+    const linesFrom = (id) => ($(id)?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+    $('cfg-nsite-save')?.addEventListener('click', async () => {
+      const payload = {
+        contentRelays:     linesFrom('cfg-nsite-content'),
+        discoveryRelays:   linesFrom('cfg-nsite-discovery'),
+        blossomServers:    linesFrom('cfg-nsite-blossom'),
+        nsitIndexerPubkey: ($('cfg-nsite-indexer-pk')?.value || '').trim(),
+        nsitIndexerRelays: linesFrom('cfg-nsite-indexer-relays'),
+      };
+      try {
+        await api('/api/nsite/config', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        toast('nsite config saved', 'Cleared resolve cache — next nsite open uses the new settings.');
+        paintNsiteConfigSection();
+      } catch (e) {
+        // api() already surfaced a red toast with the server's message.
+      }
+    });
+    $('cfg-nsite-reset')?.addEventListener('click', async () => {
+      try {
+        await api('/api/nsite/config', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            contentRelays:     def.contentRelays,
+            discoveryRelays:   def.discoveryRelays,
+            blossomServers:    def.blossomServers,
+            nsitIndexerPubkey: def.nsitIndexerPubkey,
+            nsitIndexerRelays: def.nsitIndexerRelays,
+          }),
+        });
+        toast('nsite config reset', 'Restored Titan-mirrored defaults.');
+        paintNsiteConfigSection();
+      } catch { /* api() already toasted */ }
+    });
   }
 
   async function paintBlossomConfigSection() {
