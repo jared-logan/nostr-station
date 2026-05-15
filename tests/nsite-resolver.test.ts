@@ -274,6 +274,119 @@ test('fetchSiteIndex: throws no_files when zero events', async () => {
   );
 });
 
+// ── NIP-5A v2 manifest support ───────────────────────────────────────────
+
+/**
+ * Build a fake kind:35128 / 15128 v2 manifest event. Tag schema:
+ *   ["path", "<path>", "<sha256>"]   one per file
+ *   ["server", "<https-url>"]        one per Blossom server
+ *   ["d", "<name>"]                  on kind:35128 only
+ */
+function makeV2Manifest(opts: {
+  pubkey: string;
+  kind: 35128 | 15128;
+  name?: string;
+  ts: number;
+  files: Array<[string, string]>;
+  servers?: string[];
+  id?: string;
+}) {
+  const tags: any[] = [];
+  if (opts.kind === 35128 && opts.name) tags.push(['d', opts.name]);
+  for (const [p, s] of opts.files) tags.push(['path', p, s]);
+  for (const url of (opts.servers ?? [])) tags.push(['server', url]);
+  return {
+    id:         opts.id ?? 'm' + 'a'.repeat(63),
+    pubkey:     opts.pubkey,
+    kind:       opts.kind,
+    created_at: opts.ts,
+    tags,
+    content:    '',
+    sig:        'b'.repeat(128),
+  };
+}
+
+test('fetchSiteIndex: v2-named manifest preferred when NSIT name is given', async () => {
+  const sha1 = '1'.repeat(64);
+  const sha2 = '2'.repeat(64);
+  // Query receives a kind:35128 event with d=titan → returns it.
+  const queryFn = async (opts: any) => {
+    // Sanity: the filter MUST target kind:35128 with d=titan first.
+    if (opts.filter.kinds[0] === 35128 && opts.filter.tags?.d === 'titan') {
+      return mockQuery([makeV2Manifest({
+        pubkey: HEX, kind: 35128, name: 'titan', ts: 1_800_000_000,
+        files: [['/index.html', sha1], ['/style.css', sha2]],
+        servers: ['https://blossom.westernbtc.com'],
+      })])(opts);
+    }
+    return mockQuery([])(opts);
+  };
+  const idx = await fetchSiteIndex(HEX, ['wss://r1'], { name: 'titan' }, queryFn as any);
+  assert.equal(idx.format, 'v2-named');
+  assert.equal(idx.files.get('index.html'), sha1);
+  assert.equal(idx.files.get('style.css'), sha2);
+  assert.deepEqual(idx.manifestServers, ['https://blossom.westernbtc.com']);
+  assert.equal(idx.totalEventsSeen, 1);
+});
+
+test('fetchSiteIndex: falls through to v2-root when no NSIT name + named missing', async () => {
+  const sha = '3'.repeat(64);
+  // No name passed → goes straight to kind:15128 root probe.
+  const queryFn = async (opts: any) => {
+    if (opts.filter.kinds[0] === 15128) {
+      return mockQuery([makeV2Manifest({
+        pubkey: HEX, kind: 15128, ts: 1_900_000_000,
+        files: [['/index.html', sha]],
+      })])(opts);
+    }
+    return mockQuery([])(opts);
+  };
+  const idx = await fetchSiteIndex(HEX, ['wss://r1'], {}, queryFn as any);
+  assert.equal(idx.format, 'v2-root');
+  assert.equal(idx.files.get('index.html'), sha);
+});
+
+test('fetchSiteIndex: falls through to v1 when both v2 probes return empty', async () => {
+  const sha = '4'.repeat(64);
+  const queryFn = async (opts: any) => {
+    if (opts.filter.kinds[0] === 34128) {
+      return mockQuery([makeFileEvent(HEX, '/index.html', sha, 1_700_000_000)])(opts);
+    }
+    return mockQuery([])(opts);
+  };
+  const idx = await fetchSiteIndex(HEX, ['wss://r1'], { name: 'someone' }, queryFn as any);
+  assert.equal(idx.format, 'v1');
+  assert.equal(idx.files.get('index.html'), sha);
+  assert.deepEqual(idx.manifestServers, []);  // v1 has no manifest servers
+});
+
+test('fetchSiteIndex: v2 path-tag with bad sha256 is dropped, not crashed on', async () => {
+  const queryFn = async (opts: any) => {
+    if (opts.filter.kinds[0] === 35128) {
+      return mockQuery([makeV2Manifest({
+        pubkey: HEX, kind: 35128, name: 'titan', ts: 1_800_000_000,
+        files: [
+          ['/index.html', '1'.repeat(64)],   // valid
+          ['/bad.css',    'not-a-hash'],     // dropped silently
+        ],
+      })])(opts);
+    }
+    return mockQuery([])(opts);
+  };
+  const idx = await fetchSiteIndex(HEX, ['wss://r1'], { name: 'titan' }, queryFn as any);
+  assert.equal(idx.files.size, 1);
+  assert.ok(idx.files.has('index.html'));
+});
+
+test('fetchSiteIndex: positional queryFn (back-compat) still works', async () => {
+  // The original signature was fetchSiteIndex(pubkey, relays, queryFn).
+  // After adding the opts arg we accept either shape so existing call
+  // sites don't break.
+  const queryFn = mockQuery([makeFileEvent(HEX, '/index.html', '5'.repeat(64), 1_700_000_000)]);
+  const idx = await fetchSiteIndex(HEX, ['wss://r1'], queryFn as any);
+  assert.equal(idx.format, 'v1');
+});
+
 test('resolveAddress: empty input rejected', async () => {
   await assert.rejects(
     () => resolveAddress('   ', null),

@@ -50,8 +50,16 @@ export interface SiteIndex {
   oldestAt: number;
   /** Per-file diagnostic detail (the events that won the per-path dedup). */
   entries: SiteIndexEntry[];
-  /** Total kind:34128 events seen across relays before per-path dedup. */
+  /** Total file events seen across relays before per-path dedup. */
   totalEventsSeen: number;
+  /** Which NIP-5A flavor this index came from. v2 manifests pack a whole
+   *  site into one event; v1 has one event per file. */
+  format: 'v2-named' | 'v2-root' | 'v1';
+  /** Blossom servers announced in a v2 manifest's `server` tags. Empty
+   *  for v1 (use kind:10063 fetch instead). The route layer prefers
+   *  these over kind:10063 when present — they're the canonical
+   *  declaration for the specific publish. */
+  manifestServers: string[];
 }
 
 export interface SiteIndexEntry {
@@ -109,10 +117,12 @@ export const DEFAULT_BLOSSOM_SERVERS: string[] = [
   'https://nostr.download',
 ];
 
-const NSITE_FILE_KIND     = 34128;
-const BLOSSOM_SERVERS_KIND = 10063;
-const NSIT_NAME_KIND      = 35129;   // addressable name → pubkey index (NSIT)
-const OUTBOX_RELAYS_KIND  = 10002;   // NIP-65 relay list metadata
+const NSITE_FILE_KIND_V1        = 34128;  // NIP-5A v1: one event per file
+const NSITE_MANIFEST_KIND_NAMED = 35128;  // NIP-5A v2: name-keyed manifest (addressable, d-tag = name)
+const NSITE_MANIFEST_KIND_ROOT  = 15128;  // NIP-5A v2: root manifest (replaceable)
+const BLOSSOM_SERVERS_KIND      = 10063;
+const NSIT_NAME_KIND            = 35129;  // addressable name → pubkey index (NSIT)
+const OUTBOX_RELAYS_KIND        = 10002;  // NIP-65 relay list metadata
 const RELAY_QUERY_TIMEOUT_MS = 8_000;
 
 // Titan's hosted nsit-indexer (Rust service that watches Bitcoin blocks for
@@ -446,22 +456,128 @@ export async function resolveNsitName(
   return p.toLowerCase();
 }
 
-// ── Site index (kind:34128) ───────────────────────────────────────────────
+// ── Site index — NIP-5A v2 manifest preferred, v1 fallback ────────────────
+
+export interface FetchSiteIndexOpts {
+  /** NSIT site name when the address resolved via kind:35129. Triggers a
+   *  kind:35128 (`d=<name>`) lookup before the kind:15128 root probe. */
+  name?: string;
+}
 
 /**
- * Fetch the file manifest from the author's relays. Each kind:34128 event
- * is a single file: `d` tag = path, `x` tag = SHA256 hex. Replaceable per
- * (pubkey, d) so the latest event per path wins.
+ * Build the path → SHA256 manifest for an author. Tries three sources in
+ * order; the first non-empty result wins:
  *
- * Returns the deduped map. Throws `no_files` if zero file events came back.
+ *   1. Kind 35128 (NSIT-named v2 manifest, `d` tag = name)  — if `name` is set
+ *   2. Kind 15128 (root v2 manifest, replaceable)
+ *   3. Kind 34128 (v1, one event per file)
+ *
+ * v2 manifests carry the entire site in one event's tags (`["path", path,
+ * sha256]` per file, `["server", url]` per Blossom server). v1 spreads it
+ * across per-file events keyed by `d`.
+ *
+ * Mirrors Titan's `fetch_manifest` → `fetch_v1_file_events` fallback in
+ * btcjt/titan crates/titan-resolver/src/relay.rs; without this, Titan-
+ * ecosystem nsites published as v2 (notably nsite://titan and Shakespeare-
+ * built sites) are invisible to us.
+ *
+ * Throws `no_files` only when all three probes come back empty.
  */
 export async function fetchSiteIndex(
   pubkey: string,
   relays: string[],
+  opts: FetchSiteIndexOpts | QueryFn = {},
   queryFn: QueryFn = queryRelaysDirect,
 ): Promise<SiteIndex> {
+  // Back-compat: callers used to pass queryFn as the third positional arg.
+  // If we got a function in opts position, treat it as the queryFn and
+  // synthesize an empty opts.
+  let options: FetchSiteIndexOpts;
+  if (typeof opts === 'function') { queryFn = opts as QueryFn; options = {}; }
+  else options = opts;
+
+  // 1. Named v2 manifest (kind:35128)
+  if (options.name) {
+    const named = await tryV2Manifest(
+      pubkey, options.name, NSITE_MANIFEST_KIND_NAMED, 'v2-named', relays, queryFn,
+    );
+    if (named) return named;
+  }
+
+  // 2. Root v2 manifest (kind:15128)
+  const root = await tryV2Manifest(
+    pubkey, null, NSITE_MANIFEST_KIND_ROOT, 'v2-root', relays, queryFn,
+  );
+  if (root) return root;
+
+  // 3. Fall back to v1 — one event per file
+  return fetchV1FileEvents(pubkey, relays, queryFn);
+}
+
+async function tryV2Manifest(
+  pubkey: string,
+  name: string | null,
+  kind: number,
+  format: 'v2-named' | 'v2-root',
+  relays: string[],
+  queryFn: QueryFn,
+): Promise<SiteIndex | null> {
+  const filter: any = { kinds: [kind], authors: [pubkey], limit: 5 };
+  if (name) filter.tags = { d: name };
   const { events } = await queryFn({
-    filter: { kinds: [NSITE_FILE_KIND], authors: [pubkey], limit: 500 },
+    filter, relays, stream: false, timeoutMs: RELAY_QUERY_TIMEOUT_MS,
+  });
+  if (!events.length) return null;
+  // Replaceable: newest wins (kind:35128 is per-name addressable;
+  // kind:15128 is per-author replaceable).
+  const newest = events.reduce((a, b) => (b.created_at > a.created_at ? b : a));
+  return parseV2Manifest(newest, format, events.length);
+}
+
+function parseV2Manifest(
+  event: NostrEvent,
+  format: 'v2-named' | 'v2-root',
+  totalEventsSeen: number,
+): SiteIndex | null {
+  // Tag schema (verified against btcjt/titan crates/titan-resolver/src/manifest.rs):
+  //   ["path", "<path>", "<sha256-hex>"]    one per file
+  //   ["server", "<https-url>"]             one per Blossom server
+  //   ["d", "<name>"]                       present on kind:35128 only
+  const files   = new Map<string, string>();
+  const entries: SiteIndexEntry[] = [];
+  const servers: string[] = [];
+  for (const tag of event.tags) {
+    if (!Array.isArray(tag) || tag.length < 2) continue;
+    if (tag[0] === 'path' && tag.length >= 3 && typeof tag[1] === 'string' && typeof tag[2] === 'string' && HEX64.test(tag[2])) {
+      const path = normalizePath(tag[1]);
+      const sha  = tag[2].toLowerCase();
+      files.set(path, sha);
+      entries.push({ path, sha256: sha, createdAt: event.created_at, eventId: event.id });
+    } else if (tag[0] === 'server' && typeof tag[1] === 'string') {
+      const url = safeHttpUrl(tag[1]);
+      if (url) servers.push(url.replace(/\/+$/, ''));
+    }
+  }
+  if (files.size === 0) return null;
+  entries.sort((a, b) => a.path.localeCompare(b.path));
+  return {
+    files,
+    latestAt:        event.created_at,
+    oldestAt:        event.created_at,
+    entries,
+    totalEventsSeen,
+    format,
+    manifestServers: servers,
+  };
+}
+
+async function fetchV1FileEvents(
+  pubkey: string,
+  relays: string[],
+  queryFn: QueryFn,
+): Promise<SiteIndex> {
+  const { events } = await queryFn({
+    filter: { kinds: [NSITE_FILE_KIND_V1], authors: [pubkey], limit: 500 },
     relays,
     stream: false,
     timeoutMs: RELAY_QUERY_TIMEOUT_MS,
@@ -491,18 +607,23 @@ export async function fetchSiteIndex(
     if (ev.created_at < oldestAt) oldestAt = ev.created_at;
   }
   if (oldestAt === Number.MAX_SAFE_INTEGER) oldestAt = 0;
-  // Sort entries by path for stable rendering in the diagnostics view.
   entries.sort((a, b) => a.path.localeCompare(b.path));
 
   if (files.size === 0) {
-    // The author pubkey resolved fine but never published an nsite. Common
-    // case for newly-registered NSIT names whose owner hasn't deployed yet.
     throw new NsiteError(
       'no_files',
-      `pubkey ${pubkey.slice(0, 12)}… resolves correctly, but no kind:${NSITE_FILE_KIND} file events were found on the queried relays — the author may not have published an nsite under this address yet`,
+      `pubkey ${pubkey.slice(0, 12)}… resolves correctly, but no NIP-5A v2 manifest (kind:35128/15128) and no v1 file events (kind:34128) were found on the queried relays — the author may not have published an nsite under this address yet, or it lives on relays you don't currently query`,
     );
   }
-  return { files, latestAt, oldestAt, entries, totalEventsSeen: events.length };
+  return {
+    files,
+    latestAt,
+    oldestAt,
+    entries,
+    totalEventsSeen: events.length,
+    format:          'v1',
+    manifestServers: [],
+  };
 }
 
 /** Normalize a path tag to "no leading slash, lowercase". `/index.html` → `index.html`. */

@@ -18590,10 +18590,16 @@ const NsitePanel = (() => {
       if (!res.ok) {
         const msg = body?.message || body?.error || `HTTP ${res.status}`;
         setStatus(msg, true);
+        // For no_files (404 with relay context) the server attaches the
+        // relay tiers that were tried — render the Diagnostics block so
+        // the user can see WHERE we looked, not just that we came up
+        // empty. Useful for spotting "I see my publish on damus.io but
+        // we didn't query it" situations.
+        if (body?.relays) setDiagnostics(body);
         return;
       }
       const { siteId, display, fileCount, latestAt, source, entry,
-              blossomServers, relays } = body;
+              blossomServers, relays, format } = body;
       const entryPath = entry || 'index.html';
       // Push new history entry (trim forward tail on fresh nav).
       if (cursor < history.length - 1) history.splice(cursor + 1);
@@ -18612,7 +18618,14 @@ const NsitePanel = (() => {
       if (outboxN > 0) relayBits.push(`+ ${outboxN} author outbox`);
       relayBits.push(`Blossom: ${blossomN} server${blossomN === 1 ? '' : 's'}`);
       const tsBit = `Latest event: ${ts || 'unknown'}`;
-      setMeta(`${tsBit} · ${relayBits.join(' · ')}`);
+      // Format hint — v2-named/v2-root means we found a kind:35128/15128
+      // manifest (one event, all paths in tags). v1 means kind:34128
+      // per-file events.
+      const fmtBit = format === 'v2-named' ? 'NIP-5A v2 (named manifest)'
+                   : format === 'v2-root'  ? 'NIP-5A v2 (root manifest)'
+                   : format === 'v1'       ? 'NIP-5A v1 (per-file)'
+                   : '';
+      setMeta(`${fmtBit ? fmtBit + ' · ' : ''}${tsBit} · ${relayBits.join(' · ')}`);
       setDiagnostics(body);
       loadIframe(siteId, entryPath, display);
       updateNavButtons();
