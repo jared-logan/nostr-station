@@ -8,7 +8,7 @@ import { renderMarkdown, renderCodeBlock } from './markdown.js';
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'client', 'config'];
+const PANELS = ['status', 'chat', 'relay', 'blossom', 'projects', 'vpn', 'logs', 'client', 'config'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -1942,10 +1942,10 @@ const StatusPanel = {
             <span class="muted">loading…</span>
           </div>
         </a>
-        <a class="dash-card" href="#config" data-card="blossom" title="Local Blossom — bundled in-process. Manage in Config → Blossom.">
+        <a class="dash-card" href="#blossom" data-card="blossom" title="Local Blossom — bundled in-process. Browse + manage blobs in the Blossom panel.">
           <div class="dash-card-head">
             <span class="dash-card-label">Blossom</span>
-            <span class="dash-card-cta">Manage →</span>
+            <span class="dash-card-cta">Open →</span>
           </div>
           <div class="dash-card-body" id="dash-card-blossom">
             <span class="muted">loading…</span>
@@ -2083,6 +2083,11 @@ const StatusPanel = {
   //   - off       → "not enabled" + hint pointing at Config → Blossom
   //   - running   → URL + blob count + total/quota bytes
   //   - error     → unavailable banner (config endpoint unreachable)
+  // Informational Dashboard card. Controls (Start / Stop / Restart) live
+  // on the Status panel row + inside the Blossom panel itself — keeping
+  // controls in one canonical place avoids the cross-surface staleness
+  // we hit when multiple toggle points fought for sync. Card stays a
+  // pure click-to-open affordance for the Blossom panel.
   async _fillBlossomCard() {
     const el = $('dash-card-blossom');
     if (!el) return;
@@ -2092,52 +2097,14 @@ const StatusPanel = {
         el.innerHTML = `
           <div class="dash-sub warn">not enabled</div>
           <div class="dash-sub muted">bundled in-process · no install required</div>
-          <button class="dash-card-inline-btn" data-action="enable">Enable</button>
         `;
-      } else {
-        const stats = cfg.stats || { blobCount: 0, totalBytes: 0, quotaBytes: 0 };
-        el.innerHTML = `
-          <div class="dash-relay-url" title="${escapeHtml(cfg.url || '')}">${escapeHtml(cfg.url || '')}</div>
-          <div class="dash-sub"><b>${stats.blobCount}</b> blob${stats.blobCount === 1 ? '' : 's'} · <b>${escapeHtml(formatBytesDashboard(stats.totalBytes))}</b>${stats.quotaBytes ? ` of ${escapeHtml(formatBytesDashboard(stats.quotaBytes))}` : ''}</div>
-          <button class="dash-card-inline-btn" data-action="disable">Stop</button>
-        `;
+        return;
       }
-      // Wire the inline button. The whole card is an <a href="#config">,
-      // so we have to swallow propagation + default to keep clicks here
-      // from navigating to Config. After the action returns, fan out a
-      // refresh to all three Blossom-aware surfaces (this card, sidebar
-      // Health, Config section if visible) so they update in lockstep —
-      // the server already invalidated the /api/status cache.
-      const btn = el.querySelector('.dash-card-inline-btn');
-      if (btn) {
-        btn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          e.preventDefault();
-          const action = btn.dataset.action;
-          const origLabel = btn.textContent;
-          btn.disabled = true;
-          btn.textContent = action === 'enable' ? 'Enabling…' : 'Stopping…';
-          try {
-            await api(`/api/blossom/${action === 'enable' ? 'start' : 'stop'}`, { method: 'POST' });
-            apiInvalidate('/api/blossom-config');
-            apiInvalidate('/api/status');
-            await Promise.all([
-              this._fillBlossomCard(),
-              refreshHealth?.(),
-            ]);
-            // Repaint the Config section if it's mounted — keeps the
-            // three surfaces visually in sync even when the user
-            // toggled from the Dashboard. Exposed via ConfigPanel's
-            // public API so this closure doesn't reach into ConfigPanel's
-            // private scope.
-            try { await ConfigPanel?.refreshBlossomSection?.(); } catch {}
-          } catch (err) {
-            toast(`Blossom ${action} failed`, err?.message || '', 'err');
-            btn.disabled = false;
-            btn.textContent = origLabel;
-          }
-        });
-      }
+      const stats = cfg.stats || { blobCount: 0, totalBytes: 0, quotaBytes: 0 };
+      el.innerHTML = `
+        <div class="dash-relay-url" title="${escapeHtml(cfg.url || '')}">${escapeHtml(cfg.url || '')}</div>
+        <div class="dash-sub"><b>${stats.blobCount}</b> blob${stats.blobCount === 1 ? '' : 's'} · <b>${escapeHtml(formatBytesDashboard(stats.totalBytes))}</b>${stats.quotaBytes ? ` of ${escapeHtml(formatBytesDashboard(stats.quotaBytes))}` : ''}</div>
+      `;
     } catch {
       el.innerHTML = `<span class="muted">blossom config unavailable</span>`;
     }
