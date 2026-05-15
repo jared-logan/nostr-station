@@ -13760,6 +13760,16 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
+      <details class="config-section cfg-collapsible" id="cfg-client-section">
+        <summary>
+          <h3>Client (Ditto)</h3>
+          <span class="cfg-summary-meta" id="cfg-client-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-client-body">
+          <div class="muted">loading client settings…</div>
+        </div>
+      </details>
+
       <details class="config-section cfg-collapsible" id="cfg-blossom-section">
         <summary>
           <h3>Blossom (local blob storage)</h3>
@@ -14337,11 +14347,146 @@ const ConfigPanel = (() => {
       });
     }
 
+    // ── Client (Ditto) ─────────────────────────────────────────────────
+    // Toggle for routing the embedded Ditto SPA's signing through the
+    // station's saved NIP-46 bunker pairing instead of the user's NIP-07
+    // extension (Alby) inside the iframe. Round-trips to /api/sign/status
+    // to learn whether a bunker is paired (gates the toggle).
+    paintClientConfigSection();
+
     // ── Local Blossom (Phase C) ────────────────────────────────────────
     // Paint into the slot reserved by #cfg-blossom-section. Async since
     // it round-trips to /api/blossom-config — failures degrade to a
     // muted "not running" line with an enable button.
     paintBlossomConfigSection();
+  }
+
+  // localStorage key the Ditto iframe's station-signer.js reads to
+  // decide whether to install the shim. Two values are meaningful:
+  //   'station'    — install the shim (route signing through /api/sign).
+  //   'extension'  — bail; let whatever NIP-07 extension is installed
+  //                  inside the iframe own window.nostr (Alby et al).
+  // Absent → the shim treats as 'station' when a session token exists,
+  // so the first-load UX has unified signing without the user needing
+  // to flip the toggle first.
+  const DITTO_SIGNER_KEY = 'ns-ditto-signer';
+
+  function readDittoSignerMode() {
+    try {
+      const v = localStorage.getItem(DITTO_SIGNER_KEY);
+      return v === 'extension' ? 'extension' : 'station';
+    } catch (_) { return 'station'; }
+  }
+
+  function writeDittoSignerMode(mode) {
+    try {
+      if (mode === 'extension') localStorage.setItem(DITTO_SIGNER_KEY, 'extension');
+      else                       localStorage.setItem(DITTO_SIGNER_KEY, 'station');
+    } catch (_) {}
+  }
+
+  async function paintClientConfigSection() {
+    const body    = $('cfg-client-body');
+    const summary = $('cfg-client-summary');
+    if (!body) return;
+
+    let status = null;
+    try { status = await api('/api/sign/status', null, { silent: true }); }
+    catch (_) { /* surface as unavailable below */ }
+
+    if (!status) {
+      if (summary) summary.textContent = 'unavailable';
+      body.innerHTML = `<div class="muted">Sign status endpoint not reachable.</div>`;
+      return;
+    }
+
+    const mode = readDittoSignerMode();
+    const stationOn = mode === 'station' && status.bunkerPaired;
+
+    if (summary) {
+      summary.textContent = !status.bunkerPaired
+        ? 'no bunker paired'
+        : (stationOn ? 'station identity' : 'browser extension');
+    }
+
+    // Two states:
+    //   - bunker paired       → render the toggle + explanatory copy.
+    //   - bunker not paired   → render a disabled toggle + a setup hint
+    //                            pointing back at the wizard, so the
+    //                            user knows why the option is greyed out.
+    if (!status.bunkerPaired) {
+      body.innerHTML = `
+        <div class="muted" style="margin-bottom:10px">
+          The embedded Ditto client signs events through your browser
+          extension (Alby et al) inside its own iframe. To route those
+          signing requests through your station's NIP-46 pairing instead
+          — collapsing every Ditto event into a single trusted app from
+          your signer's perspective — pair a bunker (Amber, Alby Hub, …)
+          from the setup wizard first.
+        </div>
+        <div class="config-row">
+          <div class="k">Sign Ditto via station</div>
+          <div class="v">
+            <label class="toggle"><input type="checkbox" id="cfg-ditto-signer" disabled><span class="slider"></span></label>
+            <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">disabled — no bunker paired</span>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    body.innerHTML = `
+      <div class="muted" style="margin-bottom:10px">
+        Routes <b>window.nostr</b> inside the embedded Ditto client
+        through your station's NIP-46 pairing. Ditto's signing requests
+        — posts, follows, reactions, profile edits, webxdc events —
+        flow to your bunker (Amber / Alby Hub / …) as <b>nostr-station</b>,
+        a single trusted app. Off → Ditto signs through whatever
+        NIP-07 extension you sign in with inside its own UI, which
+        prompts per-origin per-event-kind.
+      </div>
+      <div class="config-row">
+        <div class="k">Sign Ditto via station</div>
+        <div class="v">
+          <label class="toggle">
+            <input type="checkbox" id="cfg-ditto-signer" ${stationOn ? 'checked' : ''}>
+            <span class="slider"></span>
+          </label>
+          <span style="margin-left:10px;font-size:11px;color:var(--text-dim)">
+            ${stationOn ? 'on — Ditto signs through your station bunker' : 'off — Ditto signs through its in-page extension'}
+          </span>
+        </div>
+      </div>
+      <div class="callout" style="margin-top:10px">
+        Encryption methods (NIP-04 / NIP-44) aren't proxied yet — Ditto's
+        DM features will still call your in-page extension or break
+        gracefully if you have none. Posts, follows, and webxdc apps
+        work fully through the station signer.
+      </div>
+    `;
+
+    $('cfg-ditto-signer')?.addEventListener('change', (e) => {
+      const on = !!e.target.checked;
+      writeDittoSignerMode(on ? 'station' : 'extension');
+      // Repaint to refresh the summary + helper text without waiting
+      // for the user to leave the section.
+      paintClientConfigSection();
+      // Re-mount the Client panel's iframe so Ditto's window.nostr
+      // re-evaluates against the new flag. ClientPanel exposes this
+      // hook via the panel registry; the IIFE pattern means we don't
+      // have a direct handle, so dispatch a CustomEvent that the
+      // panel listens for. Fire-and-forget; if the panel isn't
+      // mounted yet, the flag still takes effect on its next load.
+      document.dispatchEvent(new CustomEvent('ns-ditto-signer-changed', {
+        detail: { mode: on ? 'station' : 'extension' },
+      }));
+      toast(
+        on ? 'Ditto signing → station' : 'Ditto signing → extension',
+        on ? 'Reloading Client panel — signing now flows through your station bunker.'
+           : 'Reloading Client panel — Ditto will use its in-page extension.',
+        'ok',
+      );
+    });
   }
 
   async function paintBlossomConfigSection() {
@@ -17167,6 +17312,10 @@ const ClientPanel = (() => {
   }
 
   refreshBtn?.addEventListener('click', reloadFrame);
+  // Config-panel signer toggle re-mounts the iframe so Ditto's
+  // station-signer.js re-evaluates the localStorage flag and either
+  // installs / skips window.nostr accordingly.
+  document.addEventListener('ns-ditto-signer-changed', () => reloadFrame());
   retryBtn?.addEventListener('click', () => {
     // User just ran `npm run update-ditto` and clicked Reload — re-probe
     // + remount in case the bundle is now present.
@@ -17224,6 +17373,20 @@ function bootDashboard(localhostExempt) {
     refreshHealth();
     Updates.init();
     activatePanel(currentPanel());
+    // "Default ON" for the Ditto signer shim: on first dashboard visit
+    // with a bunker paired, opt in to station signing on this device.
+    // We only set the flag when it's currently absent (never overwrite
+    // an explicit user choice), and only when a bunker actually exists
+    // to back up the choice. Fire-and-forget; the next iframe load
+    // picks up the flag, or the user reloads the Client panel once if
+    // their navigation happens to race the fetch.
+    void (async () => {
+      try {
+        if (localStorage.getItem('ns-ditto-signer') !== null) return;
+        const s = await api('/api/sign/status', null, { silent: true });
+        if (s?.bunkerPaired) localStorage.setItem('ns-ditto-signer', 'station');
+      } catch (_) { /* non-fatal */ }
+    })();
     // Terminal panel is opt-in per session (user clicks to open) but the
     // capability probe + reconnect-if-live runs during boot so a refreshed
     // dashboard with a live ngit/Claude session resumes without user action.

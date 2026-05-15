@@ -91,6 +91,7 @@ import { listAllTestPubkeys } from './test-identities.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleDitto } from './routes/ditto.js';
 import { handleClient } from './routes/client.js';
+import { handleSign } from './routes/sign.js';
 import { handleNgit } from './routes/ngit.js';
 import { handleRepo } from './routes/repo.js';
 import { handlePatches } from './routes/patches.js';
@@ -1546,6 +1547,14 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // lookup + kind-1 publish. Reads from identity.readRelays; signs via
       // the persisted bunker pairing. Auto-stamps ["client","nostr-station"].
       if (await handleClient(req, res, fullUrl, method)) return;
+
+      // ── Sign routes (extracted to routes/sign.ts) ──────────────────
+      // Generic NIP-46 sign surface used by the Ditto iframe shim.
+      // /api/sign/event signs any kind through the saved bunker pairing
+      // without the kind whitelist + broadcast that /api/client/publish
+      // applies; /api/sign/{pubkey,status} support the Config toggle UI
+      // and the iframe shim's getPublicKey().
+      if (await handleSign(req, res, fullUrl, method)) return;
 
       // Setup wizard completion — called once from the Done stage. Flips
       // setupComplete=true (ending the localhost exemption on this box

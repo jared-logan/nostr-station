@@ -37,7 +37,24 @@ const SENTINEL   = path.join(TARGET_DIR, 'index.html');
 // Separate sentinel for the branding-applied state. If extraction
 // succeeded but branding wasn't applied yet (first build after the
 // branding feature lands), we re-apply without re-downloading.
+//
+// Versioned: when the branding payload grows new files (e.g. the
+// station-signer.js shim) the sentinel's first line must match the
+// current version or we re-run branding. Bump BRANDING_VERSION any
+// time applyBranding() writes a new file or rewrites HTML in a way
+// users on an existing install need picked up by `npm run build`.
 const BRANDING_SENTINEL = path.join(TARGET_DIR, '.nostr-station-branded');
+const BRANDING_VERSION  = 'v2-signer-shim';
+
+function isBrandingCurrent() {
+  if (!fs.existsSync(BRANDING_SENTINEL)) return false;
+  try {
+    const first = fs.readFileSync(BRANDING_SENTINEL, 'utf8').split('\n', 1)[0];
+    return first === BRANDING_VERSION;
+  } catch {
+    return false;
+  }
+}
 
 async function main() {
   if (process.env.STATION_SKIP_DITTO === '1') {
@@ -45,7 +62,7 @@ async function main() {
     return;
   }
   const needsFetch = !fs.existsSync(SENTINEL);
-  const needsBranding = !fs.existsSync(BRANDING_SENTINEL);
+  const needsBranding = !isBrandingCurrent();
   if (!needsFetch && !needsBranding) {
     console.log(`[ditto] already present + branded at ${path.relative(process.cwd(), TARGET_DIR)} — skipping.`);
     console.log(`[ditto] (run \`npm run update-ditto\` to force a fresh download)`);
@@ -240,6 +257,30 @@ function applyBranding() {
     console.warn(`[ditto] WARN: source logo not found at ${sourceLogo}; keeping Ditto's default`);
   }
 
+  // 1b. station-signer.js — the NIP-07 shim that routes window.nostr
+  //     through the station's saved bunker pairing. Copied alongside
+  //     Ditto's own assets and pulled in via a <script> injected into
+  //     index.html below. The shim itself decides whether to install
+  //     based on a localStorage flag, so shipping it is harmless even
+  //     for users who want to keep using their browser extension.
+  //     Looked up in src/web/ (dev) or dist/web/ (built, npm-installed).
+  const signerCandidates = [
+    path.join(REPO_ROOT, 'src',  'web', 'station-signer.js'),
+    path.join(REPO_ROOT, 'dist', 'web', 'station-signer.js'),
+  ];
+  const sourceSigner = signerCandidates.find(p => fs.existsSync(p));
+  const targetSigner = path.join(TARGET_DIR, 'station-signer.js');
+  if (sourceSigner) {
+    try {
+      fs.copyFileSync(sourceSigner, targetSigner);
+      console.log('[ditto] copied station-signer.js into bundle');
+    } catch (e) {
+      console.warn(`[ditto] WARN: station-signer copy failed — ${e.message}`);
+    }
+  } else {
+    console.warn(`[ditto] WARN: station-signer source not found in src/web or dist/web; station-side signing won't work in Ditto`);
+  }
+
   // 2a. index.html — title + description + og/twitter meta tags
   const indexPath = path.join(TARGET_DIR, 'index.html');
   if (fs.existsSync(indexPath)) {
@@ -280,8 +321,21 @@ function applyBranding() {
         /(<meta\s+name="theme-color"\s+content=")#161b2e(")/,
         '$1#0a0a0a$2',
       );
+      // Inject the station-signer shim as the first <script> in <head>
+      // — it MUST run before Ditto's main module bundle so it can claim
+      // window.nostr before Ditto reads it for NIP-07 detection.
+      // Inserted right after the opening <head> tag so it precedes
+      // everything (Ditto's CSP allows 'self' scripts, which this is).
+      // Idempotent: a marker class guards re-injection if applyBranding
+      // ever runs against an already-branded bundle.
+      if (!/data-station-signer/.test(html)) {
+        html = html.replace(
+          /<head>/i,
+          '<head>\n    <script data-station-signer src="/ditto/station-signer.js"></script>',
+        );
+      }
       fs.writeFileSync(indexPath, html);
-      console.log('[ditto] patched index.html (title + meta tags + theme-color)');
+      console.log('[ditto] patched index.html (title + meta tags + theme-color + signer shim)');
     } catch (e) {
       console.warn(`[ditto] WARN: index.html patch failed — ${e.message}`);
     }
@@ -360,7 +414,7 @@ function applyBranding() {
   // branding. `npm run update-ditto` (which deletes the whole dist/ditto
   // dir) re-runs everything from scratch.
   try {
-    fs.writeFileSync(BRANDING_SENTINEL, new Date().toISOString() + '\n');
+    fs.writeFileSync(BRANDING_SENTINEL, BRANDING_VERSION + '\n' + new Date().toISOString() + '\n');
     console.log('[ditto] branding complete.');
   } catch (e) {
     console.warn(`[ditto] WARN: sentinel write failed — ${e.message}`);
