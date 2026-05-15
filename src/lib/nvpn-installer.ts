@@ -155,6 +155,23 @@ export async function installNostrVpn(
     log.append(`install-cli skipped: ${stderr.slice(0, 160) || (e?.message || '').slice(0, 120)}`);
   }
 
+  // Update path stops here: every remaining step is first-run setup
+  // (keypair init, systemd unit, drop-in caps, magic-dns-port seed)
+  // that's either idempotent-but-noisy or actively rewrites system
+  // state we don't want to touch on a binary refresh. The new binary
+  // is now on disk + on PATH; the daemon will pick it up on next
+  // service restart.
+  if (opts.force) {
+    const restartHint = process.platform === 'darwin'
+      ? 'sudo launchctl kickstart -k system/com.github.nvpn'
+      : 'sudo systemctl restart nvpn';
+    log.append('update mode — skipping init / caps / port-seed / service install');
+    return {
+      ok:     true,
+      detail: `binary updated at ${nvpnBin}. Run \`${restartHint}\` to load the new code now (otherwise it picks up on next service restart).`,
+    };
+  }
+
   // nvpn init — best-effort. Upstream subcommand spelling has shifted
   // between releases; try --yes first, fall back to a stdin-newline.
   log.step('nvpn init');
