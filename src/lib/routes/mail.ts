@@ -28,7 +28,7 @@ import {
   shouldInlineByteCount, INLINE_THRESHOLD_BYTES,
   type AttachmentSpec,
 } from '../mail/rfc2822.js';
-import { readIdentity, npubToHex, isValidRelayUrl } from '../identity.js';
+import { readIdentity, npubToHex, isValidRelayUrl, setMailEnabled } from '../identity.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { encryptBlob, decryptBlob } from '../mail/file-crypto.js';
 import {
@@ -295,11 +295,14 @@ export async function handleMail(
     if (ids.length === 0) return json(res, 200, { ok: true, updated: 0 });
     const store = getMailStore();
     store.markRead(ids);
-    // ?sync=0 lets the bulk-on-open-thread call skip the kind-1985 publish
-    // — that flow fires once per panel switch and the Amber prompts
-    // would be intrusive. Explicit user toggles (single-message read,
-    // mass mark-read) should keep sync on.
-    const sync = parsed.searchParams.get('sync') !== '0';
+    // Two gates on the kind-1985 publish:
+    //   1. ?sync=0 — the bulk-on-open-thread call skips publish to avoid
+    //      a barrage of Amber prompts on every panel switch.
+    //   2. Mail settings: readStateSync = false (user toggled off via
+    //      Config → Mail) suppresses publish entirely. The local flip
+    //      always happens so the UI feels responsive.
+    const settingsSyncOn = readLocalSettings().readStateSync !== false;
+    const sync = parsed.searchParams.get('sync') !== '0' && settingsSyncOn;
     let synced = 0, failed = 0;
     if (sync) {
       for (const id of ids) {
@@ -335,6 +338,7 @@ export async function handleMail(
     const patch: Partial<MailSettings> = {};
     if (Array.isArray(body?.customFolders)) patch.customFolders = body.customFolders;
     if (Array.isArray(body?.inboxRelays))   patch.inboxRelays   = body.inboxRelays;
+    if (typeof body?.readStateSync === 'boolean') patch.readStateSync = body.readStateSync;
 
     const r = await publishSettings(patch);
     return json(res, 200, {
@@ -351,7 +355,31 @@ export async function handleMail(
   // for every keystroke.
   if (pathname === '/api/mail/status' && method === 'GET') {
     const worker = getInboxWorker();
-    return json(res, 200, { stats: worker.stats });
+    return json(res, 200, {
+      stats:   worker.stats,
+      enabled: readIdentity().mailEnabled !== false,
+    });
+  }
+
+  // ── PUT /api/mail/enabled ──────────────────────────────────────────────
+  // PR 11: runtime on/off for the inbox worker. Persists to identity.json
+  // (mailEnabled key) AND hot-starts / hot-stops the worker so the toggle
+  // takes effect immediately without a station restart.
+  if (pathname === '/api/mail/enabled' && method === 'PUT') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+    const enabled = body?.enabled === true;
+    setMailEnabled(enabled);
+    try {
+      if (enabled) getInboxWorker().start();
+      else         getInboxWorker().stop();
+    } catch (e: any) {
+      return json(res, 200, {
+        ok: true, enabled, warning: `worker hot-toggle failed: ${e?.message || e}`,
+      });
+    }
+    return json(res, 200, { ok: true, enabled });
   }
 
   // ── GET /api/mail/stream ───────────────────────────────────────────────

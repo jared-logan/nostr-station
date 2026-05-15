@@ -13770,6 +13770,21 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
+      <!-- PR 11: Mail section. Status line + the two toggles agreed
+           in the planning round: enable-at-boot and read-state-sync.
+           Folder management + inbox-relay editing stay in the Mail
+           panel itself (those are operational settings; Config holds
+           the on/off switches). -->
+      <details class="config-section cfg-collapsible" id="cfg-mail-section">
+        <summary>
+          <h3>Mail</h3>
+          <span class="cfg-summary-meta" id="cfg-mail-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-mail-body">
+          <div class="muted">loading mail status…</div>
+        </div>
+      </details>
+
       <details class="config-section cfg-collapsible" id="cfg-ai-section" open>
         <summary>
           <h3>AI</h3>
@@ -14342,6 +14357,7 @@ const ConfigPanel = (() => {
     // it round-trips to /api/blossom-config — failures degrade to a
     // muted "not running" line with an enable button.
     paintBlossomConfigSection();
+    paintMailConfigSection();
   }
 
   async function paintBlossomConfigSection() {
@@ -14436,6 +14452,121 @@ const ConfigPanel = (() => {
       if (!ok) return;
       try { await api('/api/blossom/wipe', { method: 'POST' }); paintBlossomConfigSection(); }
       catch (e) { toast('Wipe failed', e?.message || '', 'err'); }
+    });
+  }
+
+  // ── Mail section (PR 11) ───────────────────────────────────────────────
+  async function paintMailConfigSection() {
+    const body    = $('cfg-mail-body');
+    const summary = $('cfg-mail-summary');
+    if (!body) return;
+    let status   = null;
+    let settings = null;
+    try {
+      [status, settings] = await Promise.all([
+        api('/api/mail/status',   undefined, { silent: true }).catch(() => null),
+        api('/api/mail/settings', undefined, { silent: true }).catch(() => null),
+      ]);
+    } catch { /* fall through to unavailable */ }
+
+    if (!status || !settings) {
+      if (summary) summary.textContent = 'unavailable';
+      body.innerHTML = `<div class="muted">Mail endpoints not reachable.</div>`;
+      return;
+    }
+
+    const stats   = status.stats || {};
+    const enabled = status.enabled !== false;
+    const set     = settings.settings || {};
+    const readSync = set.readStateSync !== false;
+
+    if (summary) {
+      summary.textContent = enabled
+        ? `${stats.relaysConnected || 0} relay${(stats.relaysConnected || 0) === 1 ? '' : 's'} · ${stats.decryptedOk || 0} decrypted`
+        : 'disabled';
+    }
+
+    body.innerHTML = `
+      <div class="muted" style="margin-bottom:10px">
+        Encrypted email over Nostr (kind 1301 + NIP-59 gift wrap). Folder
+        management + inbox-relay editing live in the
+        <a href="#mail">Mail panel</a>; this section holds the on/off
+        switches.
+      </div>
+
+      <div class="config-row">
+        <div class="k">Status</div>
+        <div class="v">
+          ${enabled
+            ? `<span class="ok">running</span> · ${stats.relaysConnected || 0} inbox relay${(stats.relaysConnected || 0) === 1 ? '' : 's'} connected`
+            : `<span class="muted">worker stopped</span>`}
+        </div>
+      </div>
+      <div class="config-row">
+        <div class="k">Decrypted</div>
+        <div class="v">${stats.decryptedOk || 0}${stats.decryptFailed ? ` · ${stats.decryptFailed} dropped` : ''}</div>
+      </div>
+
+      <div class="cfg-toggle-row" style="margin-top:12px">
+        <label class="cfg-toggle">
+          <input type="checkbox" id="cfg-mail-enabled" ${enabled ? 'checked' : ''}>
+          <span>Enable Mail at boot</span>
+        </label>
+        <div class="muted" style="font-size:11px">
+          Starts the inbox worker on station launch. Turning off here also
+          stops the running worker immediately.
+        </div>
+      </div>
+
+      <div class="cfg-toggle-row" style="margin-top:8px">
+        <label class="cfg-toggle">
+          <input type="checkbox" id="cfg-mail-readsync" ${readSync ? 'checked' : ''}>
+          <span>Sync read state across devices</span>
+        </label>
+        <div class="muted" style="font-size:11px">
+          Publishes a NIP-32 (kind 1985) label when you mark mail as read
+          so other nostr-station instances on this npub stay in sync.
+          Turn off to keep read state local-only.
+        </div>
+      </div>
+
+      <div class="step-actions" style="margin-top:14px">
+        <a class="primary" href="#mail" style="text-decoration:none">Open Mail panel</a>
+      </div>
+    `;
+
+    $('cfg-mail-enabled')?.addEventListener('change', async (e) => {
+      const want = !!e.target.checked;
+      try {
+        await api('/api/mail/enabled', {
+          method:  'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: want }),
+        });
+        toast(want ? 'Mail enabled' : 'Mail disabled',
+              want ? 'Inbox worker started.' : 'Inbox worker stopped; will not restart at boot.',
+              'ok');
+        paintMailConfigSection();
+        refreshHealth?.();
+      } catch (err) {
+        toast('Failed to toggle Mail', err?.message || '', 'err');
+        e.target.checked = !want;
+      }
+    });
+
+    $('cfg-mail-readsync')?.addEventListener('change', async (e) => {
+      const want = !!e.target.checked;
+      try {
+        await api('/api/mail/settings', {
+          method:  'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ readStateSync: want }),
+        });
+        toast('Saved', want ? 'Read state will sync across devices.' : 'Read state stays local-only.', 'ok');
+      } catch (err) {
+        toast('Save failed', err?.message || '', 'err');
+        e.target.checked = !want;
+      }
     });
   }
 
@@ -15313,6 +15444,7 @@ const ConfigPanel = (() => {
     // happens to be mounted. Lockstep update across the three surfaces
     // (Dashboard card / sidebar Health / this section).
     refreshBlossomSection: paintBlossomConfigSection,
+    refreshMailSection:    paintMailConfigSection,
     isDirty() { return dirty; },
     // Re-exported so the Dashboard's Identity card can drive the same
     // follower / following lookup without duplicating the helper.
