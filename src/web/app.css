@@ -9005,3 +9005,14 @@ a.client-mention {
   margin-left: 4px;
   opacity: 0.8;
 }
+
+/* ── Mail · attachment list within message body (PR 9) ──────────────── */
+.mail-msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.mail-msg-attachments .mail-msg-fileChip {
+  flex: 0 0 auto;
+}

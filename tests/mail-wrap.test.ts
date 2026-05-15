@@ -16,7 +16,7 @@ import { verifyEvent } from 'nostr-tools/pure';
 import { LocalSigner } from '../src/lib/mail/signer.js';
 import { buildGiftWrap, unwrapGift, buildGiftWrapPair } from '../src/lib/mail/wrap.js';
 import {
-  KIND_SEAL, KIND_DM_RUMOR, KIND_GIFT_WRAP,
+  KIND_SEAL, KIND_EMAIL, KIND_GIFT_WRAP,
 } from '../src/lib/mail/types.js';
 
 function makePair() {
@@ -36,7 +36,7 @@ test('round-trip: alice → bob recovers identical rumor', async () => {
   const { alice, bob, alicePub, bobPub } = makePair();
 
   const tpl = {
-    kind:    KIND_DM_RUMOR,
+    kind:    KIND_EMAIL,
     content: 'hello bob',
     tags:    [
       ['p',       bobPub],
@@ -64,7 +64,7 @@ test('round-trip: alice → bob recovers identical rumor', async () => {
 
   // Rumor content survives intact.
   assert.equal(decrypted.rumor.content, 'hello bob');
-  assert.equal(decrypted.rumor.kind,    KIND_DM_RUMOR);
+  assert.equal(decrypted.rumor.kind,    KIND_EMAIL);
   assert.equal(decrypted.rumor.pubkey,  alicePub);
   assert.equal(decrypted.rumor.id,      rumor.id);
   // Subject tag preserved.
@@ -76,7 +76,7 @@ test('round-trip: alice → bob recovers identical rumor', async () => {
 
 test('wrap pubkey is unique per send (ephemeral, never reused)', async () => {
   const { alice, bobPub } = makePair();
-  const tpl = { kind: KIND_DM_RUMOR, content: 'one', tags: [['p', bobPub]] };
+  const tpl = { kind: KIND_EMAIL, content: 'one', tags: [['p', bobPub]] };
 
   const a = await buildGiftWrap(tpl, bobPub, alice);
   const b = await buildGiftWrap(tpl, bobPub, alice);
@@ -89,7 +89,7 @@ test('wrap pubkey is unique per send (ephemeral, never reused)', async () => {
 
 test('seal under the wrap is kind 13, signed by sender, verifies', async () => {
   const { alice, bob, alicePub, bobPub } = makePair();
-  const tpl = { kind: KIND_DM_RUMOR, content: 'seal-check', tags: [['p', bobPub]] };
+  const tpl = { kind: KIND_EMAIL, content: 'seal-check', tags: [['p', bobPub]] };
   const { wrap } = await buildGiftWrap(tpl, bobPub, alice);
 
   // We need to peek INSIDE the wrap to verify the seal — easiest path is
@@ -111,7 +111,7 @@ test('rumor created_at is preserved through the round trip', async () => {
   const { alice, bob, bobPub } = makePair();
   const fixedAt = 1735689600;  // 2025-01-01 00:00:00 UTC
   const tpl = {
-    kind:       KIND_DM_RUMOR,
+    kind:       KIND_EMAIL,
     content:    'fixed-time',
     tags:       [['p', bobPub]],
     created_at: fixedAt,
@@ -130,7 +130,7 @@ test('unwrap rejects a wrap aimed at a different recipient', async () => {
   const { alice, bobPub } = makePair();
   const { bob: charlie } = makePair();  // a different identity
 
-  const tpl = { kind: KIND_DM_RUMOR, content: 'for-bob', tags: [['p', bobPub]] };
+  const tpl = { kind: KIND_EMAIL, content: 'for-bob', tags: [['p', bobPub]] };
   const { wrap } = await buildGiftWrap(tpl, bobPub, alice);
 
   // Charlie tries to unwrap a wrap addressed to bob — nip44 decrypt fails
@@ -150,7 +150,7 @@ test('unwrap rejects a tampered seal pubkey (anti-spoof guard)', async () => {
   const malloryPub = getPublicKey(malloryPrivkey);
 
   // Build a normal wrap from alice to bob — this gives us a valid seal.
-  const tpl = { kind: KIND_DM_RUMOR, content: 'genuine', tags: [['p', bobPub]] };
+  const tpl = { kind: KIND_EMAIL, content: 'genuine', tags: [['p', bobPub]] };
   const { wrap } = await buildGiftWrap(tpl, bobPub, alice);
 
   // Peek inside, rewrite the rumor's pubkey to mallory, and re-seal +
@@ -186,7 +186,7 @@ test('unwrap rejects a tampered seal pubkey (anti-spoof guard)', async () => {
 
 test('buildGiftWrapPair produces a recipient wrap AND a self wrap', async () => {
   const { alice, bob, alicePub, bobPub } = makePair();
-  const tpl = { kind: KIND_DM_RUMOR, content: 'sent-mail', tags: [['p', bobPub]] };
+  const tpl = { kind: KIND_EMAIL, content: 'sent-mail', tags: [['p', bobPub]] };
 
   const { rumor, recipientWrap, selfWrap } = await buildGiftWrapPair(tpl, bobPub, alice);
 

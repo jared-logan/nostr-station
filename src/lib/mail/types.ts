@@ -26,8 +26,19 @@
 import type { NostrEvent } from '../nostr-query.js';
 
 export const KIND_SEAL          = 13;
+// Legacy: NIP-17 DM (14) + file message (15). Pre-PR-9 builds used
+// these for the mail panel; the worker now drops them on receive and
+// the store's startup migration deletes any rows left behind. The
+// constants are kept (no callers reference them post-migration) so a
+// future "Direct Messages" panel can re-import them without inventing
+// fresh numbers — they remain the canonical NIP-17 kinds.
 export const KIND_DM_RUMOR      = 14;
 export const KIND_FILE_RUMOR    = 15;
+// Active wire kind for nostr-mail. Carries an RFC 2822 message
+// (headers + body, optionally multipart with attachments) inside the
+// content field. Wrapped end-to-end via the existing NIP-59 pipeline.
+// Matches the format nogringo/nostr-mail's SDK emits + parses.
+export const KIND_EMAIL         = 1301;
 export const KIND_GIFT_WRAP     = 1059;
 export const KIND_INBOX_RELAYS  = 10050;
 

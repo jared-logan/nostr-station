@@ -26,7 +26,7 @@ import { unwrapGift } from './wrap.js';
 import { getMailStore } from './store.js';
 import { readInboxRelays } from './inbox-relays.js';
 import { isContact } from './contacts.js';
-import { KIND_GIFT_WRAP, type NostrEvent } from './types.js';
+import { KIND_GIFT_WRAP, KIND_EMAIL, type NostrEvent } from './types.js';
 
 interface RelayState {
   url:        string;
@@ -241,6 +241,19 @@ export class InboxWorker extends EventEmitter {
     try {
       const { rumor } = await unwrapGift(ev, this.signer);
       const sender = rumor.pubkey.toLowerCase();
+
+      // PR 9: nostr-mail is kind-1301-only. Anything else (NIP-17 DMs
+      // at kind 14, file messages at kind 15, etc.) is silently
+      // discarded. Future panels may consume those — the mail panel
+      // doesn't. Mark the wrap seen so we don't keep re-decrypting it
+      // on relay re-delivery; the cost is irreversible (we lose the
+      // ability to claim "kind 14 dropped" if the consumer panel ever
+      // looks back), but the inbox worker has no idea what other
+      // panels might care about and decryption is expensive.
+      if (rumor.kind !== KIND_EMAIL) {
+        store.markSeenWrap(ev.id);
+        return;
+      }
 
       // Spam-filter decision (PR 7):
       //   - Blocklisted sender → drop entirely. Mark the wrap seen so

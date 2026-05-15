@@ -37,7 +37,22 @@ import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { KIND_DM_RUMOR, KIND_FILE_RUMOR, type Rumor } from './types.js';
+import { KIND_EMAIL, type Rumor } from './types.js';
+import { parseMessage, type ParsedAttachment } from './rfc2822.js';
+
+export interface StoredAttachment {
+  name:    string;
+  mime:    string;
+  size:    number;
+  // EXACTLY one of these is set on a stored attachment.
+  inlineBase64?: string;        // small attachment, decoded on the client
+  blossom?: {
+    url:      string;
+    sha256:   string;
+    keyHex:   string;
+    nonceHex: string;
+  };
+}
 
 export interface StoredMessage {
   id:           string;
@@ -45,8 +60,16 @@ export interface StoredMessage {
   direction:    'in' | 'out';
   kind:         number;
   subject:      string;
-  body:         string;
-  tags:         string[][];
+  body:         string;          // plaintext extracted from the RFC 2822 body
+  tags:         string[][];      // the rumor's outer tags (just ["p", recipient] now)
+  // PR 9: parsed RFC 2822 attachments. Each item is either inline (base64
+  // bytes) or a Blossom reference with AES-256-GCM metadata. The compose
+  // form populated these via /api/mail/attachment; the receive path
+  // populated them by parsing the rumor's RFC 2822 content.
+  attachments:  StoredAttachment[];
+  // PR 9: RFC 2822 threading metadata.
+  message_id:   string;
+  in_reply_to:  string;
   created_at:   number;
   read:         boolean;
   wrap_id:      string;
@@ -151,6 +174,24 @@ export class MailStore {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_status_thread
                   ON messages(status, counterparty, created_at DESC)`);
 
+    // PR 9 migration: drop any kind 14 (NIP-17 DM) / kind 15 (NIP-17
+    // file message) rows left over from the pre-kind-1301 design. The
+    // protocol cutover replaces both with kind 1301 + RFC 2822 in the
+    // rumor's content field. Idempotent — running on an already-clean
+    // DB is a no-op.
+    this.db.prepare(`DELETE FROM messages WHERE kind IN (14, 15)`).run();
+    // Add parsed-attachments + threading columns. Same backfill pattern
+    // as the PR 7 status column above.
+    if (!cols.some(c => c.name === 'attachments_json')) {
+      this.db.exec(`ALTER TABLE messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'`);
+    }
+    if (!cols.some(c => c.name === 'message_id')) {
+      this.db.exec(`ALTER TABLE messages ADD COLUMN message_id TEXT NOT NULL DEFAULT ''`);
+    }
+    if (!cols.some(c => c.name === 'in_reply_to')) {
+      this.db.exec(`ALTER TABLE messages ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''`);
+    }
+
     this.prepare();
   }
 
@@ -158,9 +199,11 @@ export class MailStore {
     this.stInsertMessage = this.db.prepare(
       `INSERT OR IGNORE INTO messages
          (id, counterparty, direction, kind, subject, body, tags_json,
-          created_at, read, wrap_id, received_at, status)
+          created_at, read, wrap_id, received_at, status,
+          attachments_json, message_id, in_reply_to)
        VALUES
-         (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+         (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?,
+          ?, ?, ?)`,
     );
     this.stHasMessage  = this.db.prepare(`SELECT 1 FROM messages WHERE id = ? LIMIT 1`);
     this.stHasSeenWrap = this.db.prepare(`SELECT 1 FROM seen_wraps WHERE wrap_id = ? LIMIT 1`);
@@ -170,14 +213,14 @@ export class MailStore {
     this.stMarkRead = this.db.prepare(`UPDATE messages SET read = 1 WHERE id = ?`);
     this.stMessagesByCounterparty = this.db.prepare(
       `SELECT id, counterparty, direction, kind, subject, body, tags_json,
-              created_at, read, wrap_id
+              created_at, read, wrap_id, attachments_json, message_id, in_reply_to
          FROM messages
         WHERE counterparty = ?
         ORDER BY created_at ASC`,
     );
     this.stMessageById = this.db.prepare(
       `SELECT id, counterparty, direction, kind, subject, body, tags_json,
-              created_at, read, wrap_id
+              created_at, read, wrap_id, attachments_json, message_id, in_reply_to
          FROM messages WHERE id = ? LIMIT 1`,
     );
     this.stCountUnreadByCounterparty = this.db.prepare(
@@ -281,10 +324,10 @@ export class MailStore {
     ownPubkey: string,
     bucket:    MessageBucket = 'inbox',
   ): StoredMessage | null {
-    if (rumor.kind !== KIND_DM_RUMOR && rumor.kind !== KIND_FILE_RUMOR) {
-      // Out of scope for the mail panel — silently drop. (NIP-17 also
-      // allows kind 7 reactions on threads; we'll surface those in a
-      // later patch as inline emoji on individual messages.)
+    if (rumor.kind !== KIND_EMAIL) {
+      // Post-PR-9, nostr-mail is kind-1301-only. Other rumor kinds
+      // (NIP-17 DMs at kind 14/15, etc.) are silently dropped — they
+      // belong to other panels' problem space, not the mail panel.
       return null;
     }
     if (this.stHasMessage.get(rumor.id)) {
@@ -295,24 +338,40 @@ export class MailStore {
     const direction: 'in' | 'out' = rumor.pubkey.toLowerCase() === own ? 'out' : 'in';
 
     // counterparty: for outgoing, the recipient (first p tag that isn't
-    // us). For incoming, the rumor signer. NIP-17 specifies one primary
-    // recipient + an optional set of `p` tags for group threads; for the
-    // MVP we only support 1-to-1.
+    // us). For incoming, the rumor signer. nostr-mail's wire protocol
+    // is 1-to-1 only (per nogringo/nostr-mail's spec); future group-
+    // mail support would need a different counterparty model.
     let counterparty: string;
     if (direction === 'out') {
       const recipientTag = rumor.tags.find(
         t => t[0] === 'p' && typeof t[1] === 'string' && t[1].toLowerCase() !== own,
       );
-      // Defensive: an "out" message with no other recipient means we
-      // sent to ourselves. Group under the self pubkey so the row
-      // doesn't get lost — the UI can dedupe a "Me → Me" thread.
       counterparty = recipientTag?.[1]?.toLowerCase() ?? own;
     } else {
       counterparty = rumor.pubkey.toLowerCase();
     }
 
-    const subject = (rumor.tags.find(t => t[0] === 'subject')?.[1] ?? '').toString();
-    const body    = typeof rumor.content === 'string' ? rumor.content : '';
+    // Parse the RFC 2822 content inside the rumor. Failures here aren't
+    // fatal — we keep the row but with empty subject / body / no
+    // attachments so the UI can still surface "couldn't parse this
+    // message" rather than silently dropping it.
+    let subject = '';
+    let body    = '';
+    let messageId = '';
+    let inReplyTo = '';
+    let attachments: StoredAttachment[] = [];
+    try {
+      const parsed = parseMessage(typeof rumor.content === 'string' ? rumor.content : '');
+      subject     = parsed.subject;
+      body        = parsed.body;
+      messageId   = parsed.messageId;
+      inReplyTo   = parsed.inReplyTo;
+      attachments = parsed.attachments.map(parsedToStored);
+    } catch {
+      // Leave defaults in place. The raw rumor content is still
+      // recoverable from the wrap_id if forensics are ever needed.
+    }
+
     // Outgoing mail always lands in inbox — the user pressed Send, so
     // their own thread should never be marked as a Request even when
     // the recipient is a stranger.
@@ -321,6 +380,7 @@ export class MailStore {
     this.stInsertMessage.run(
       rumor.id, counterparty, direction, rumor.kind, subject, body,
       JSON.stringify(rumor.tags), rumor.created_at, wrapId, Date.now(), finalBucket,
+      JSON.stringify(attachments), messageId, inReplyTo,
     );
 
     return {
@@ -331,6 +391,9 @@ export class MailStore {
       subject,
       body,
       tags:         rumor.tags,
+      attachments,
+      message_id:   messageId,
+      in_reply_to:  inReplyTo,
       created_at:   rumor.created_at,
       read:         false,
       wrap_id:      wrapId,
@@ -402,47 +465,18 @@ export class MailStore {
     this.stRemoveAllow.run(hex.toLowerCase());
   }
 
-  // Single-message lookup, used by /api/mail/download to find the
-  // encryption-key + url tags for a kind-15 attachment.
+  // Single-message lookup. Used by /api/mail/download to read the
+  // attachment metadata for a Blossom-hosted attachment so the proxy
+  // route can fetch + decrypt the ciphertext.
   messageById(id: string): StoredMessage | null {
-    const r = this.stMessageById.get(id) as {
-      id: string; counterparty: string; direction: 'in' | 'out'; kind: number;
-      subject: string; body: string; tags_json: string; created_at: number;
-      read: number; wrap_id: string;
-    } | undefined;
+    const r = this.stMessageById.get(id) as StoredRow | undefined;
     if (!r) return null;
-    return {
-      id:           r.id,
-      counterparty: r.counterparty,
-      direction:    r.direction,
-      kind:         r.kind,
-      subject:      r.subject,
-      body:         r.body,
-      tags:         safeParseTags(r.tags_json),
-      created_at:   r.created_at,
-      read:         !!r.read,
-      wrap_id:      r.wrap_id,
-    };
+    return rowToStored(r);
   }
 
   messagesForThread(counterparty: string): StoredMessage[] {
-    const rows = this.stMessagesByCounterparty.all(counterparty.toLowerCase()) as Array<{
-      id: string; counterparty: string; direction: 'in' | 'out'; kind: number;
-      subject: string; body: string; tags_json: string; created_at: number;
-      read: number; wrap_id: string;
-    }>;
-    return rows.map(r => ({
-      id:           r.id,
-      counterparty: r.counterparty,
-      direction:    r.direction,
-      kind:         r.kind,
-      subject:      r.subject,
-      body:         r.body,
-      tags:         safeParseTags(r.tags_json),
-      created_at:   r.created_at,
-      read:         !!r.read,
-      wrap_id:      r.wrap_id,
-    }));
+    const rows = this.stMessagesByCounterparty.all(counterparty.toLowerCase()) as StoredRow[];
+    return rows.map(rowToStored);
   }
 
   countUnreadFor(counterparty: string): number {
@@ -470,6 +504,69 @@ function safeParseTags(json: string): string[][] {
   } catch {
     return [];
   }
+}
+
+function safeParseAttachments(json: string): StoredAttachment[] {
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((a: any): a is StoredAttachment => !!a && typeof a.name === 'string'
+        && typeof a.mime === 'string' && typeof a.size === 'number');
+  } catch {
+    return [];
+  }
+}
+
+// Row shape returned by the messageById / messagesForThread statements.
+// Sharing this between the two callers keeps the column list in one place.
+interface StoredRow {
+  id:               string;
+  counterparty:     string;
+  direction:        'in' | 'out';
+  kind:             number;
+  subject:          string;
+  body:             string;
+  tags_json:        string;
+  created_at:       number;
+  read:             number;
+  wrap_id:          string;
+  attachments_json: string;
+  message_id:       string;
+  in_reply_to:      string;
+}
+function rowToStored(r: StoredRow): StoredMessage {
+  return {
+    id:           r.id,
+    counterparty: r.counterparty,
+    direction:    r.direction,
+    kind:         r.kind,
+    subject:      r.subject,
+    body:         r.body,
+    tags:         safeParseTags(r.tags_json),
+    attachments:  safeParseAttachments(r.attachments_json),
+    message_id:   r.message_id,
+    in_reply_to:  r.in_reply_to,
+    created_at:   r.created_at,
+    read:         !!r.read,
+    wrap_id:      r.wrap_id,
+  };
+}
+
+// ParsedAttachment (from rfc2822.ts) → StoredAttachment (this module).
+// Inline buffers are converted to base64 for JSON storage. Blossom
+// references pass through unchanged.
+function parsedToStored(p: ParsedAttachment): StoredAttachment {
+  if (p.blossom) {
+    return {
+      name: p.name, mime: p.mime, size: p.size,
+      blossom: { ...p.blossom },
+    };
+  }
+  return {
+    name: p.name, mime: p.mime, size: p.size,
+    inlineBase64: p.inline ? p.inline.toString('base64') : '',
+  };
 }
 
 // ── Singleton accessor ─────────────────────────────────────────────────────

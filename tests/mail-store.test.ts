@@ -11,13 +11,17 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { generateSecretKey, getPublicKey, getEventHash } from 'nostr-tools/pure';
 import { MailStore } from '../src/lib/mail/store.js';
-import { KIND_DM_RUMOR, type Rumor } from '../src/lib/mail/types.js';
+import { KIND_EMAIL, type Rumor } from '../src/lib/mail/types.js';
+import { buildMessage, mintMessageId } from '../src/lib/mail/rfc2822.js';
 
 function tmpDbPath(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-store-'));
   return path.join(dir, 'mail.db');
 }
 
+// Builds a kind-1301 rumor whose `content` is a real RFC 2822 message,
+// matching what the worker would insert on receive. The store parses
+// the content at insert time so subject + body live in their columns.
 function makeRumor(opts: {
   fromSecret?: Uint8Array;
   to:          string;
@@ -27,11 +31,17 @@ function makeRumor(opts: {
 }): Rumor {
   const secret = opts.fromSecret ?? generateSecretKey();
   const pubkey = getPublicKey(secret);
-  const tags: string[][] = [['p', opts.to]];
-  if (opts.subject) tags.push(['subject', opts.subject]);
   const created_at = opts.createdAt ?? Math.floor(Date.now() / 1000);
+  const rfc2822 = buildMessage({
+    fromPubkey: pubkey,
+    toPubkey:   opts.to,
+    subject:    opts.subject ?? '',
+    body:       opts.content,
+    messageId:  mintMessageId(),
+  });
   const template = {
-    pubkey, kind: KIND_DM_RUMOR, created_at, tags, content: opts.content,
+    pubkey, kind: KIND_EMAIL, created_at,
+    tags: [['p', opts.to]], content: rfc2822,
   };
   return { ...template, id: getEventHash(template as any) };
 }
