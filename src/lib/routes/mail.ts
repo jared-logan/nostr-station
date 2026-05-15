@@ -114,6 +114,64 @@ export async function handleMail(
     return json(res, 200, { stats: worker.stats });
   }
 
+  // ── GET /api/mail/stream ───────────────────────────────────────────────
+  // Server-sent events stream so the Mail panel can update the inbox in
+  // real time instead of polling /api/mail/inbox every 6 seconds.
+  //
+  // Frame shapes:
+  //   data: { type: "hello",          stats }      — sent on connect
+  //   data: { type: "mail-received",  rumorId }    — InboxWorker decoded a new rumor
+  //   data: { type: "relay-retry",    url, delay } — inbox-relay reconnect heads-up
+  //
+  // EventSource cannot set Authorization, so callers append ?token=… and
+  // the loopback-only guard in web-server.ts checks origin/referer.
+  if (pathname === '/api/mail/stream' && method === 'GET') {
+    res.writeHead(200, {
+      'Content-Type':      'text/event-stream',
+      'Cache-Control':     'no-cache, no-transform',
+      'Connection':        'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const worker = getInboxWorker();
+    const emit = (payload: object) => {
+      if (res.writableEnded) return;
+      try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch { /* socket gone */ }
+    };
+
+    emit({ type: 'hello', stats: worker.stats });
+
+    const onMailReceived = (info: { rumorId: string }) => {
+      emit({ type: 'mail-received', rumorId: info?.rumorId });
+    };
+    const onRelayRetry = (info: { url: string; delay: number; reason: string }) => {
+      emit({ type: 'relay-retry', url: info?.url, delay: info?.delay, reason: info?.reason });
+    };
+    const onRelayClosed = (info: { url: string; reason: string }) => {
+      emit({ type: 'relay-closed', url: info?.url, reason: info?.reason });
+    };
+    worker.on('mail-received', onMailReceived);
+    worker.on('relay-retry',   onRelayRetry);
+    worker.on('relay-closed',  onRelayClosed);
+
+    // 15s heartbeat keeps proxies / browsers from idling the connection
+    // out when no mail has arrived.
+    const heartbeat = setInterval(() => {
+      if (res.writableEnded) return;
+      try { res.write(': heartbeat\n\n'); } catch {}
+    }, 15_000);
+
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      worker.off('mail-received', onMailReceived);
+      worker.off('relay-retry',   onRelayRetry);
+      worker.off('relay-closed',  onRelayClosed);
+    };
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    return true;
+  }
+
   // ── POST /api/mail/resolve ─────────────────────────────────────────────
   // Pre-flight lookup that the compose form calls as the user types a
   // recipient. Returns the resolved pubkey + the recipient's inbox

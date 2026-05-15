@@ -21,8 +21,13 @@ import path from 'node:path';
 // will subscribe to all of them in parallel. Sources: NIP-17-aware
 // clients (0xchat, Coracle, NostrMail) advertise these as their default
 // inbox relay list.
+//
+// inbox.nostr.wine is intentionally NOT in this list. It's a high-quality
+// inbox relay but requires both a paid subscription and NIP-42 AUTH to
+// receive kind 1059 — we don't implement the AUTH responder yet, and we
+// don't want to ship a paid dependency as a default. Users who pay for
+// it can add it via the Mail panel's "Inbox relays" settings.
 export const DEFAULT_INBOX_RELAYS: string[] = [
-  'wss://inbox.nostr.wine',
   'wss://relay.0xchat.com',
   'wss://auth.nostr1.com',
 ];
