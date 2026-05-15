@@ -177,6 +177,10 @@
           <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></span>
           Client
         </a>
+        <a href="#nsite" data-panel="nsite">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg></span>
+          nsite
+        </a>
         <a href="#mail" data-panel="mail">
           <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></span>
           Mail
@@ -536,6 +540,54 @@
           <div style="display:flex;gap:10px">
             <button class="primary" id="client-ditto-install">Fetch Ditto now</button>
             <button id="client-ditto-retry">Reload</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- NSITE -->
+    <section class="panel" data-panel="nsite">
+      <div class="panel-head">
+        <div>
+          <div class="title">nsite</div>
+          <div class="subtitle">Browse decentralized sites — Nostr addressing, Blossom-hosted bytes, SHA256-verified.</div>
+        </div>
+        <div class="panel-head-actions">
+          <button id="nsite-publish-link" title="Publish a site from a project">publish help</button>
+        </div>
+      </div>
+      <div class="panel-body nsite-body">
+        <div class="nsite-bar">
+          <button id="nsite-back"    title="Back"    aria-label="Back"    disabled>&larr;</button>
+          <button id="nsite-forward" title="Forward" aria-label="Forward" disabled>&rarr;</button>
+          <button id="nsite-reload"  title="Reload"  aria-label="Reload">&#x21bb;</button>
+          <input id="nsite-addr"
+                 type="text"
+                 spellcheck="false"
+                 autocomplete="off"
+                 placeholder="npub1…  or  user@host  or  nsite://name"
+                 class="nsite-addr-input" />
+          <button id="nsite-go" class="primary">Go</button>
+          <span id="nsite-status" class="nsite-status muted" aria-live="polite"></span>
+        </div>
+        <div class="nsite-meta muted" id="nsite-meta" hidden></div>
+        <div class="nsite-viewport">
+          <iframe id="nsite-frame"
+                  class="nsite-frame"
+                  sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
+                  referrerpolicy="no-referrer"
+                  title="nsite content"></iframe>
+          <div class="nsite-empty" id="nsite-empty">
+            <div class="nsite-empty-title">Enter an nsite address to browse</div>
+            <div class="muted" style="max-width:560px;text-align:center;line-height:1.5">
+              Accepts <code>npub1…</code>, a NIP-05 identifier like <code>user@host</code>,
+              an <code>nsite://&lt;npub&gt;</code> URI, or a registered NSIT name
+              (requires a configured name indexer).
+              <br>
+              Content is fetched from the author's Blossom servers via Nostr relays,
+              with every byte verified against its on-relay SHA256. The render frame
+              runs in a sandboxed origin with no access to the station.
+            </div>
           </div>
         </div>
       </div>
