@@ -2034,15 +2034,53 @@ const StatusPanel = {
       if (!cfg?.running) {
         el.innerHTML = `
           <div class="dash-sub warn">not enabled</div>
-          <div class="dash-sub muted">turn on in Config → Blossom</div>
+          <div class="dash-sub muted">bundled in-process · no install required</div>
+          <button class="dash-card-inline-btn" data-action="enable">Enable</button>
         `;
-        return;
+      } else {
+        const stats = cfg.stats || { blobCount: 0, totalBytes: 0, quotaBytes: 0 };
+        el.innerHTML = `
+          <div class="dash-relay-url" title="${escapeHtml(cfg.url || '')}">${escapeHtml(cfg.url || '')}</div>
+          <div class="dash-sub"><b>${stats.blobCount}</b> blob${stats.blobCount === 1 ? '' : 's'} · <b>${escapeHtml(formatBytesDashboard(stats.totalBytes))}</b>${stats.quotaBytes ? ` of ${escapeHtml(formatBytesDashboard(stats.quotaBytes))}` : ''}</div>
+          <button class="dash-card-inline-btn" data-action="disable">Stop</button>
+        `;
       }
-      const stats = cfg.stats || { blobCount: 0, totalBytes: 0, quotaBytes: 0 };
-      el.innerHTML = `
-        <div class="dash-relay-url" title="${escapeHtml(cfg.url || '')}">${escapeHtml(cfg.url || '')}</div>
-        <div class="dash-sub"><b>${stats.blobCount}</b> blob${stats.blobCount === 1 ? '' : 's'} · <b>${escapeHtml(formatBytesDashboard(stats.totalBytes))}</b>${stats.quotaBytes ? ` of ${escapeHtml(formatBytesDashboard(stats.quotaBytes))}` : ''}</div>
-      `;
+      // Wire the inline button. The whole card is an <a href="#config">,
+      // so we have to swallow propagation + default to keep clicks here
+      // from navigating to Config. After the action returns, fan out a
+      // refresh to all three Blossom-aware surfaces (this card, sidebar
+      // Health, Config section if visible) so they update in lockstep —
+      // the server already invalidated the /api/status cache.
+      const btn = el.querySelector('.dash-card-inline-btn');
+      if (btn) {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          const action = btn.dataset.action;
+          const origLabel = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = action === 'enable' ? 'Enabling…' : 'Stopping…';
+          try {
+            await api(`/api/blossom/${action === 'enable' ? 'start' : 'stop'}`, { method: 'POST' });
+            apiInvalidate('/api/blossom-config');
+            apiInvalidate('/api/status');
+            await Promise.all([
+              this._fillBlossomCard(),
+              refreshHealth?.(),
+            ]);
+            // Repaint the Config section if it's mounted — keeps the
+            // three surfaces visually in sync even when the user
+            // toggled from the Dashboard. Exposed via ConfigPanel's
+            // public API so this closure doesn't reach into ConfigPanel's
+            // private scope.
+            try { await ConfigPanel?.refreshBlossomSection?.(); } catch {}
+          } catch (err) {
+            toast(`Blossom ${action} failed`, err?.message || '', 'err');
+            btn.disabled = false;
+            btn.textContent = origLabel;
+          }
+        });
+      }
     } catch {
       el.innerHTML = `<span class="muted">blossom config unavailable</span>`;
     }
@@ -13819,8 +13857,12 @@ const ConfigPanel = (() => {
       $('cfg-blossom-enable')?.addEventListener('click', async () => {
         try {
           await api('/api/blossom/start', { method: 'POST' });
+          apiInvalidate('/api/blossom-config');
+          apiInvalidate('/api/status');
           paintBlossomConfigSection();
           refreshHealth?.();
+          // Lockstep refresh: the Dashboard card might also be in view.
+          try { await StatusPanel?._fillBlossomCard?.(); } catch {}
         } catch (e) {
           toast('Failed to start Blossom', e?.message || '', 'err');
         }
@@ -13847,12 +13889,24 @@ const ConfigPanel = (() => {
         <button class="danger" id="cfg-blossom-wipe">Wipe all blobs</button>
       </div>
     `;
+    // After any Blossom action: invalidate the SWR caches the three
+    // surfaces read from (so the next poll returns fresh state without
+    // waiting out the 3s TTL), repaint this section, refresh sidebar
+    // Health, and re-fill the Dashboard card. The trio updates in
+    // lockstep regardless of which control the user clicked.
+    const refreshBlossomSurfaces = async () => {
+      apiInvalidate('/api/blossom-config');
+      apiInvalidate('/api/status');
+      paintBlossomConfigSection();
+      refreshHealth?.();
+      try { await StatusPanel?._fillBlossomCard?.(); } catch {}
+    };
     $('cfg-blossom-stop')?.addEventListener('click', async () => {
-      try { await api('/api/blossom/stop', { method: 'POST' }); paintBlossomConfigSection(); refreshHealth?.(); }
+      try { await api('/api/blossom/stop', { method: 'POST' }); await refreshBlossomSurfaces(); }
       catch (e) { toast('Stop failed', e?.message || '', 'err'); }
     });
     $('cfg-blossom-restart')?.addEventListener('click', async () => {
-      try { await api('/api/blossom/restart', { method: 'POST' }); paintBlossomConfigSection(); refreshHealth?.(); }
+      try { await api('/api/blossom/restart', { method: 'POST' }); await refreshBlossomSurfaces(); }
       catch (e) { toast('Restart failed', e?.message || '', 'err'); }
     });
     $('cfg-blossom-wipe')?.addEventListener('click', async () => {
@@ -14736,6 +14790,11 @@ const ConfigPanel = (() => {
     // ngit-login terminal-flow retry schedule) use this to defer the
     // panel rebuild until the user is actually on Config. See loadIfVisible.
     reloadIfVisible: loadIfVisible,
+    // Re-paint only the Blossom subsection — used when the user toggled
+    // enable/disable from the Dashboard card and the Config panel
+    // happens to be mounted. Lockstep update across the three surfaces
+    // (Dashboard card / sidebar Health / this section).
+    refreshBlossomSection: paintBlossomConfigSection,
     isDirty() { return dirty; },
     // Re-exported so the Dashboard's Identity card can drive the same
     // follower / following lookup without duplicating the helper.
