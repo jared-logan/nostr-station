@@ -13,6 +13,7 @@ import http from 'http';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { nip19 } from 'nostr-tools';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { getKeychain } from './keychain.js';
@@ -1742,6 +1743,41 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // wired below via mountTerminalWebSocket() so it shares this
       // request handler's allowedHosts / isLoopbackUrl primitives.
       if (await handleTerminal(req, res, fullUrl, method)) return;
+
+      // ── POST /api/ditto/install — dashboard-mediated Ditto fetch ────
+      //
+      // The bundle is normally pulled by scripts/fetch-ditto.mjs during
+      // `npm run build`. If that download failed (network flake on the
+      // install box, CI artifact rotation, etc.) the Client panel ends
+      // up with no Ditto and shows a missing-bundle empty state. This
+      // endpoint lets the user retry from inside the dashboard — spawns
+      // the same fetch script, streams its stdout via SSE into the
+      // existing exec modal. After it completes the panel's HEAD probe
+      // picks up the freshly-bundled SPA on the next reload.
+      if (url === '/api/ditto/install' && method === 'POST') {
+        const here = path.dirname(fileURLToPath(import.meta.url));
+        const root = path.resolve(here, '..', '..');
+        const script = path.join(root, 'scripts', 'fetch-ditto.mjs');
+        // Wipe any stale partial extraction so fetch-ditto takes the
+        // full-fetch path (rather than the "already present, skipping"
+        // short-circuit — which would no-op if the user has a broken
+        // dist/ditto/ from a prior failed run).
+        try {
+          fs.rmSync(path.join(root, 'dist', 'ditto'), { recursive: true, force: true });
+        } catch {}
+        streamExec(
+          {
+            bin:  process.execPath,
+            args: [script],
+            // Generous timeout — the GitLab artifact zip pulls in
+            // 6 MiB but the API endpoint can be slow under load.
+            timeoutMs: 180_000,
+          },
+          res, req, root,
+          { line: '$ node scripts/fetch-ditto.mjs', stream: 'stdout' },
+        );
+        return;
+      }
 
       // Static fallback — vendor libs first (fast path, strict whitelist),
       // then the bundled Ditto SPA, then the regular src/web tree.
