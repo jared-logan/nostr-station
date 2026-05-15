@@ -8,7 +8,7 @@ import { renderMarkdown, renderCodeBlock } from './markdown.js';
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'client', 'config'];
+const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'client', 'mail', 'config'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -17199,6 +17199,941 @@ const ClientPanel = (() => {
   };
 })();
 
+// ── Panel: Mail ──────────────────────────────────────────────────────────
+//
+// Encrypted NIP-17 mail. Two-pane layout — thread list on the left,
+// active thread on the right. Reads from /api/mail/inbox + /api/mail/thread;
+// the inbox worker decrypts gift wraps in the background and persists
+// rumors to mail.db, so the panel only needs to render decrypted state.
+//
+// This PR ships read-only. Compose + send arrive in the follow-up patch
+// that wires up the recipient resolver + the send pipeline.
+
+const MailPanel = (() => {
+  let threads        = [];
+  let requests       = [];        // PR 7: quarantine bucket
+  let blocked        = [];        // PR 7: blocklist entries
+  let folders        = { defaults: [], custom: [] };  // PR 10: folder counts
+  let activeTab      = 'inbox';   // 'inbox' | 'requests' | 'blocked'
+  let activeFolder   = 'inbox';   // PR 10: active folder when activeTab === 'inbox'
+  let activeCounter  = null;      // hex pubkey of the open thread, or null
+  let activeMessages = [];
+  let lastStatus     = null;
+
+  function npubShort(hex) {
+    if (!hex) return '';
+    return `${hex.slice(0, 8)}…${hex.slice(-4)}`;
+  }
+  function fmtAge(epochS) {
+    if (!epochS) return '';
+    const s = Math.max(0, Date.now() / 1000 - epochS);
+    if (s < 60)     return `${Math.floor(s)}s`;
+    if (s < 3600)   return `${Math.floor(s / 60)}m`;
+    if (s < 86400)  return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
+  }
+  function preview(s) {
+    return String(s || '').replace(/\s+/g, ' ').slice(0, 120);
+  }
+
+  async function load() {
+    try {
+      // Fetch inbox (filtered by active folder) + requests + folder
+      // counts + status in parallel. Blocked list is fetched lazily.
+      const inboxPath = activeTab === 'inbox' && activeFolder !== 'inbox'
+        ? `/api/mail/inbox?bucket=inbox&folder=${encodeURIComponent(activeFolder)}`
+        : '/api/mail/inbox?bucket=inbox';
+      const [inbox, reqs, foldersResp, status] = await Promise.all([
+        api(inboxPath,                            undefined, { silent: true }),
+        api('/api/mail/requests',                 undefined, { silent: true }).catch(() => ({ threads: [] })),
+        api('/api/mail/folders',                  undefined, { silent: true }).catch(() => null),
+        api('/api/mail/status',                   undefined, { silent: true }).catch(() => null),
+      ]);
+      threads    = Array.isArray(inbox?.threads) ? inbox.threads : [];
+      requests   = Array.isArray(reqs?.threads)  ? reqs.threads  : [];
+      if (foldersResp) folders = {
+        defaults: Array.isArray(foldersResp.defaults) ? foldersResp.defaults : [],
+        custom:   Array.isArray(foldersResp.custom)   ? foldersResp.custom   : [],
+      };
+      lastStatus = status?.stats || null;
+      renderStatus();
+      renderTabBadges();
+      renderFolders();
+      renderThreads();
+      updateBadge();
+      // If a thread is open, reload its messages too — new arrivals are
+      // surfaced live by re-rendering from the store.
+      if (activeCounter) await loadThread(activeCounter);
+    } catch (e) {
+      const el = $('mail-threads');
+      if (el) el.innerHTML = `<div class="mail-empty">Failed to load: ${escapeHtml(e?.message || e)}</div>`;
+    }
+  }
+
+  // ── Folder sidebar (PR 10) ─────────────────────────────────────────────
+  const FOLDER_LABELS = {
+    inbox:   'Inbox',
+    sent:    'Sent',
+    archive: 'Archive',
+    trash:   'Trash',
+  };
+  const FOLDER_ICONS = {
+    inbox:   '📥',
+    sent:    '📤',
+    archive: '🗄️',
+    trash:   '🗑️',
+  };
+  function renderFolders() {
+    const el = $('mail-folders');
+    if (!el) return;
+    // Folder sidebar is only visible in the Inbox tab; Requests and
+    // Blocked are flat lists by design.
+    if (activeTab !== 'inbox') { el.hidden = true; return; }
+    el.hidden = false;
+    const renderRow = (f, isCustom) => {
+      const label = FOLDER_LABELS[f.id] ?? f.id;
+      const icon  = FOLDER_ICONS[f.id]  ?? '📁';
+      const active = f.id === activeFolder ? ' active' : '';
+      const unread = f.unread > 0
+        ? `<span class="mail-folder-unread">${f.unread > 99 ? '99+' : f.unread}</span>`
+        : '';
+      return `<button class="mail-folder-row${active}" data-folder="${escapeHtml(f.id)}">
+        <span class="mail-folder-icon">${icon}</span>
+        <span class="mail-folder-label">${escapeHtml(label)}</span>
+        ${unread}
+        <span class="mail-folder-total" title="${f.total} total">${f.total || ''}</span>
+      </button>`;
+    };
+    el.innerHTML = `
+      <div class="mail-folder-section">
+        ${(folders.defaults || []).map(f => renderRow(f, false)).join('')}
+      </div>
+      ${(folders.custom || []).length > 0 ? `
+        <div class="mail-folder-section">
+          <div class="mail-folder-section-title">Folders</div>
+          ${folders.custom.map(f => renderRow(f, true)).join('')}
+        </div>` : ''}
+      <button class="mail-folder-add" id="mail-folder-add">+ new folder</button>
+    `;
+    for (const btn of $$('.mail-folder-row', el)) {
+      btn.addEventListener('click', () => {
+        const f = btn.getAttribute('data-folder');
+        if (!f || f === activeFolder) return;
+        activeFolder = f;
+        activeCounter  = null;
+        activeMessages = [];
+        renderFolders();
+        void load();
+        renderThread();
+      });
+    }
+    $('mail-folder-add')?.addEventListener('click', async () => {
+      const name = prompt('New folder name (a-z, 0-9, dash, underscore; max 32 chars):');
+      if (!name) return;
+      if (!/^[a-z0-9_-]{1,32}$/i.test(name)) {
+        toast('Bad folder name', 'Use only letters, numbers, dash, underscore (max 32).', 'warn');
+        return;
+      }
+      if (folders.defaults.find(f => f.id === name) || folders.custom.find(f => f.id === name)) {
+        toast('Folder exists', `"${name}" is already in your list.`, 'warn');
+        return;
+      }
+      try {
+        const next = [...folders.custom.map(f => f.id), name];
+        await api('/api/mail/settings', {
+          method:  'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ customFolders: next }),
+        });
+        toast('Folder created', `"${name}" added.`, 'ok');
+        await load();
+      } catch { /* api() already toasted */ }
+    });
+  }
+
+  async function loadBlocked() {
+    try {
+      const r = await api('/api/mail/lists', undefined, { silent: true });
+      blocked = Array.isArray(r?.blocklist) ? r.blocklist : [];
+      if (activeTab === 'blocked') renderThreads();
+    } catch {
+      blocked = [];
+    }
+  }
+
+  function renderTabBadges() {
+    const b = $('mail-tab-badge-requests');
+    if (!b) return;
+    if (requests.length > 0) {
+      b.hidden = false;
+      b.textContent = String(requests.length > 99 ? '99+' : requests.length);
+    } else {
+      b.hidden = true;
+    }
+  }
+
+  function setTab(tab) {
+    if (tab !== 'inbox' && tab !== 'requests' && tab !== 'blocked') return;
+    activeTab = tab;
+    activeCounter  = null;
+    activeMessages = [];
+    for (const btn of $$('.mail-tab')) {
+      const on = btn.getAttribute('data-tab') === tab;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
+    renderFolders();
+    renderThreads();
+    renderThread();
+    if (tab === 'blocked') void loadBlocked();
+    // Switching back to Inbox re-fetches with the current folder filter.
+    if (tab === 'inbox') void load();
+  }
+
+  async function loadThread(counterparty) {
+    try {
+      const r = await api(`/api/mail/thread?counterparty=${encodeURIComponent(counterparty)}`,
+                          undefined, { silent: true });
+      activeMessages = Array.isArray(r?.messages) ? r.messages : [];
+      renderThread();
+      // Auto-mark incoming as read on open. Best-effort — failure here
+      // just leaves them unread until the next click.
+      const unreadIds = activeMessages.filter(m => m.direction === 'in' && !m.read).map(m => m.id);
+      if (unreadIds.length) {
+        await api('/api/mail/mark-read', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ ids: unreadIds }),
+        }, { silent: true }).catch(() => {});
+        // Reflect read-state in the in-memory cache without refetching.
+        for (const m of activeMessages) if (unreadIds.includes(m.id)) m.read = true;
+        const t = threads.find(t => t.counterparty === counterparty);
+        if (t) t.unread = 0;
+        renderThreads();
+        updateBadge();
+      }
+    } catch (e) {
+      const el = $('mail-thread');
+      if (el) el.innerHTML = `<div class="mail-empty">Failed to load thread: ${escapeHtml(e?.message || e)}</div>`;
+    }
+  }
+
+  function renderStatus() {
+    const el = $('mail-status');
+    if (!el) return;
+    if (!lastStatus) { el.textContent = ''; return; }
+    const bits = [];
+    bits.push(`${lastStatus.relaysConnected} inbox relay${lastStatus.relaysConnected === 1 ? '' : 's'} connected`);
+    bits.push(`${lastStatus.decryptedOk} decrypted`);
+    if (lastStatus.decryptFailed) bits.push(`${lastStatus.decryptFailed} dropped`);
+    el.textContent = bits.join(' · ');
+    if (lastStatus.lastError) el.title = lastStatus.lastError;
+  }
+
+  function renderThreads() {
+    const el = $('mail-threads');
+    if (!el) return;
+
+    // Blocked tab: pubkey list with Unblock buttons. No threads view.
+    if (activeTab === 'blocked') {
+      if (!blocked.length) {
+        el.innerHTML = `<div class="mail-empty">No blocked senders.</div>`;
+        return;
+      }
+      el.innerHTML = blocked.map(b => `
+        <div class="mail-thread-item mail-block-row">
+          <div class="mail-thread-row1">
+            <span class="mail-thread-who">${escapeHtml(npubShort(b.pubkey))}</span>
+            <span class="mail-thread-age">${escapeHtml(fmtAge(Math.floor(b.added_at / 1000)))}</span>
+          </div>
+          <div class="mail-thread-actions">
+            <button class="mail-thread-unblock" data-pubkey="${escapeHtml(b.pubkey)}">unblock</button>
+          </div>
+        </div>`).join('');
+      for (const btn of $$('.mail-thread-unblock', el)) {
+        btn.addEventListener('click', async () => {
+          const pk = btn.getAttribute('data-pubkey');
+          try {
+            await api('/api/mail/unblock', {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify({ pubkey: pk }),
+            });
+            toast('Unblocked', `${npubShort(pk)} can send mail again.`, 'ok');
+            await loadBlocked();
+          } catch { /* api() already toasted */ }
+        });
+      }
+      return;
+    }
+
+    const list = activeTab === 'requests' ? requests : threads;
+    if (!list.length) {
+      const msg = activeTab === 'requests'
+        ? 'No requests yet. Mail from senders you don\'t follow lands here.'
+        : 'No mail yet. Encrypted messages addressed to your npub will appear here.';
+      el.innerHTML = `<div class="mail-empty">${escapeHtml(msg)}</div>`;
+      return;
+    }
+    const items = list.map(t => {
+      const active = activeCounter === t.counterparty ? ' active' : '';
+      const unreadDot = t.unread > 0 ? '<span class="mail-unread-dot" aria-label="unread"></span>' : '';
+      const requestActions = activeTab === 'requests' ? `
+        <div class="mail-thread-actions">
+          <button class="mail-thread-accept" data-pubkey="${escapeHtml(t.counterparty)}">accept</button>
+          <button class="mail-thread-block danger" data-pubkey="${escapeHtml(t.counterparty)}">block</button>
+        </div>` : '';
+      return `<button class="mail-thread-item${active}" data-counter="${escapeHtml(t.counterparty)}">
+        ${unreadDot}
+        <div class="mail-thread-row1">
+          <span class="mail-thread-who">${escapeHtml(npubShort(t.counterparty))}</span>
+          <span class="mail-thread-age">${escapeHtml(fmtAge(t.last_created_at))}</span>
+        </div>
+        <div class="mail-thread-subj">${escapeHtml(t.last_subject || '(no subject)')}</div>
+        <div class="mail-thread-prev">${escapeHtml(preview(t.last_preview))}</div>
+        ${requestActions}
+      </button>`;
+    }).join('');
+    el.innerHTML = items;
+    for (const btn of $$('.mail-thread-item', el)) {
+      btn.addEventListener('click', (e) => {
+        // The inner accept/block buttons stop propagation themselves;
+        // this fires for clicks on the body of the chip.
+        const c = btn.getAttribute('data-counter');
+        if (!c) return;
+        activeCounter = c;
+        renderThreads();
+        void loadThread(c);
+      });
+    }
+    for (const btn of $$('.mail-thread-accept', el)) {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const pk = btn.getAttribute('data-pubkey');
+        try {
+          await api('/api/mail/accept', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ pubkey: pk }),
+          });
+          toast('Accepted', `${npubShort(pk)} moved to inbox.`, 'ok');
+          await load();
+        } catch { /* api() already toasted */ }
+      });
+    }
+    for (const btn of $$('.mail-thread-block', el)) {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const pk = btn.getAttribute('data-pubkey');
+        try {
+          await api('/api/mail/block', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ pubkey: pk }),
+          });
+          toast('Blocked', `${npubShort(pk)} is blocked and their history was deleted.`, 'ok');
+          if (activeCounter === pk) {
+            activeCounter  = null;
+            activeMessages = [];
+            renderThread();
+          }
+          await load();
+        } catch { /* api() already toasted */ }
+      });
+    }
+  }
+
+  function renderThread() {
+    const el = $('mail-thread');
+    if (!el) return;
+    if (!activeCounter) {
+      el.innerHTML = `<div class="mail-empty">Pick a conversation to view messages.</div>`;
+      return;
+    }
+    if (!activeMessages.length) {
+      el.innerHTML = `<div class="mail-empty">No messages in this thread yet.</div>`;
+      return;
+    }
+    // Subject of the most recent message is shown at the top.
+    const lastSubj = activeMessages[activeMessages.length - 1].subject;
+    const head = `<div class="mail-thread-head">
+      <div>
+        <div class="mail-thread-counter">${escapeHtml(npubShort(activeCounter))}</div>
+        <div class="mail-thread-headsubj">${escapeHtml(lastSubj || '(no subject)')}</div>
+      </div>
+      <div class="mail-thread-head-actions">
+        <select id="mail-thread-move" title="Move thread to folder">
+          <option value="">Move to…</option>
+          ${[...(folders.defaults || []), ...(folders.custom || [])]
+            .map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(FOLDER_LABELS[f.id] ?? f.id)}</option>`)
+            .join('')}
+        </select>
+        <button class="primary mail-thread-reply" id="mail-thread-reply">reply</button>
+      </div>
+    </div>`;
+    function fmtSize(size) {
+      return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MiB`
+           : size > 1024        ? `${(size / 1024).toFixed(1)} KiB`
+                                 : `${size} B`;
+    }
+    function renderAttachmentChip(m, a) {
+      const tok = getSessionToken();
+      let href;
+      if (a.blossom) {
+        // Blossom-hosted, AES-256-GCM encrypted. Route through the
+        // proxy-decrypt endpoint so the browser sees plaintext.
+        href = `/api/mail/download?id=${encodeURIComponent(m.id)}&sha=${encodeURIComponent(a.blossom.sha256)}${tok ? `&token=${tok}` : ''}`;
+      } else if (a.inlineBase64 != null) {
+        // Inline base64 — decode to a data URL for direct download. The
+        // bytes were already E2E-encrypted at rest inside the gift wrap;
+        // there's nothing to fetch.
+        href = `data:${a.mime};base64,${a.inlineBase64}`;
+      } else {
+        href = '#';
+      }
+      const name = a.name || (a.blossom?.sha256 || '').slice(0, 12) || 'attachment';
+      return `<a class="mail-msg-fileChip" href="${escapeHtml(href)}"
+                 ${a.blossom ? 'target="_blank" rel="noopener noreferrer"' : `download="${escapeHtml(name)}"`}>
+        <span class="mail-att-icon">📎</span>
+        <div class="mail-msg-fileMeta">
+          <div class="mail-msg-fileName">${escapeHtml(name)} <span class="mail-att-lock" title="end-to-end encrypted">🔒</span></div>
+          <div class="mail-msg-fileSub">${escapeHtml(a.mime || 'application/octet-stream')} · ${escapeHtml(fmtSize(a.size || 0))}</div>
+        </div>
+      </a>`;
+    }
+
+    const msgs = activeMessages.map(m => {
+      const side  = m.direction === 'out' ? ' mail-msg-out' : ' mail-msg-in';
+      const at    = new Date(m.created_at * 1000).toLocaleString();
+      const subj  = m.subject ? `<div class="mail-msg-subj">${escapeHtml(m.subject)}</div>` : '';
+      const body  = renderMarkdown
+        ? renderMarkdown(String(m.body || ''))
+        : escapeHtml(String(m.body || ''));
+      const atts  = Array.isArray(m.attachments) && m.attachments.length > 0
+        ? `<div class="mail-msg-attachments">${m.attachments.map(a => renderAttachmentChip(m, a)).join('')}</div>`
+        : '';
+      return `<div class="mail-msg${side}">
+        <div class="mail-msg-meta">
+          <span class="mail-msg-who">${m.direction === 'out' ? 'You' : escapeHtml(npubShort(activeCounter))}</span>
+          <span class="mail-msg-at">${escapeHtml(at)}</span>
+        </div>
+        ${subj}
+        <div class="mail-msg-body">${body}</div>
+        ${atts}
+      </div>`;
+    }).join('');
+    el.innerHTML = `${head}<div class="mail-msgs">${msgs}</div>`;
+    const moveSel = $('mail-thread-move');
+    if (moveSel) {
+      moveSel.addEventListener('change', async () => {
+        const target = moveSel.value;
+        if (!target) return;
+        const ids = activeMessages.map(m => m.id);
+        try {
+          await api('/api/mail/folder', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ ids, folder: target }),
+          });
+          toast('Moved', `Thread moved to ${FOLDER_LABELS[target] ?? target}.`, 'ok');
+          activeCounter  = null;
+          activeMessages = [];
+          await load();
+          renderThread();
+        } catch { /* api() already toasted */ }
+        moveSel.value = '';
+      });
+    }
+    const replyBtn = $('mail-thread-reply');
+    if (replyBtn) {
+      replyBtn.addEventListener('click', () => {
+        const subj = lastSubj && !/^re:\s/i.test(lastSubj) ? `Re: ${lastSubj}` : lastSubj;
+        // PR 9: thread the reply via RFC 2822 Message-ID + References.
+        // Most recent message's message-id becomes In-Reply-To; we walk
+        // backwards collecting the chain so other RFC 2822 clients can
+        // thread correctly.
+        const lastWithId = [...activeMessages].reverse().find(m => m.message_id);
+        const refs = activeMessages
+          .map(m => m.message_id)
+          .filter(id => !!id);
+        onCompose({
+          to:         activeCounter,
+          subject:    subj,
+          inReplyTo:  lastWithId?.message_id,
+          references: refs,
+        });
+      });
+    }
+  }
+
+  function updateBadge() {
+    const badge = $('mail-badge');
+    if (!badge) return;
+    const totalUnread = threads.reduce((n, t) => n + (t.unread || 0), 0);
+    if (totalUnread > 0) {
+      badge.textContent = String(totalUnread > 99 ? '99+' : totalUnread);
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  // Live updates via SSE. The inbox worker fires events when new mail
+  // arrives; we trigger a fresh load() so the inbox/threads/badge all
+  // refresh together. A 60s safety-net poll catches the rare case where
+  // the SSE socket drops silently (mobile suspend, NAT timeout) without
+  // the EventSource onerror firing — refresh-on-arrival is exact, the
+  // safety net is a backstop only.
+  let eventStream = null;
+  let safetyTimer = null;
+  function startStream() {
+    stopStream();
+    const tok = getSessionToken();
+    if (!tok) return;  // no session yet — load() will retry on next nav
+    try {
+      eventStream = new EventSource(`/api/mail/stream?token=${tok}`);
+    } catch { return; }
+    eventStream.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      // We never trust the rumorId from the frame as a source of truth —
+      // the inbox worker has already persisted it. Just reload the
+      // visible state. Same response handles "hello", "mail-received",
+      // and "relay-retry" — the UI only needs to refresh status + threads.
+      if (msg?.type === 'mail-received' || msg?.type === 'hello') {
+        void load();
+      } else if (msg?.type === 'relay-retry' || msg?.type === 'relay-closed') {
+        // No reload needed; relay reconnect status is reflected in the
+        // next /api/mail/status poll. We could opportunistically refresh
+        // just the status line here, but keeping the SSE handler dumb
+        // means fewer surprising re-renders.
+      }
+    };
+    eventStream.onerror = () => {
+      // EventSource auto-reconnects with exponential backoff; we let it
+      // handle that. If the connection is fully dead, the safety-net
+      // poll below picks up the slack.
+    };
+    // Safety net: re-fetch the inbox once a minute even if SSE is
+    // silent. Cheap (one GET per minute) and self-healing.
+    safetyTimer = setInterval(() => { void load(); }, 60_000);
+  }
+  function stopStream() {
+    if (eventStream)  { try { eventStream.close(); } catch {} eventStream = null; }
+    if (safetyTimer)  { clearInterval(safetyTimer); safetyTimer = null; }
+  }
+
+  // ── Compose modal ─────────────────────────────────────────────────────
+  //
+  // Resolves the recipient on `to` blur so the user gets immediate
+  // feedback about delivery viability ("recipient has no inbox relay
+  // advertised — delivery may fail"), then runs the full send pipeline
+  // on submit via POST /api/mail/send.
+  function onCompose(prefill) {
+    const body = document.createElement('div');
+    body.className = 'mail-compose';
+    body.innerHTML = `
+      <div class="mail-compose-field">
+        <label for="mail-compose-to">to</label>
+        <input id="mail-compose-to" type="text" autocomplete="off" spellcheck="false"
+               placeholder="npub1… · hex pubkey · alice@example.com">
+        <div class="mail-compose-tohint" id="mail-compose-tohint"></div>
+      </div>
+      <div class="mail-compose-field">
+        <label for="mail-compose-subject">subject</label>
+        <input id="mail-compose-subject" type="text" autocomplete="off">
+      </div>
+      <div class="mail-compose-field mail-compose-body-field">
+        <label for="mail-compose-body">message</label>
+        <textarea id="mail-compose-body" rows="10"
+                  placeholder="Plain text. Markdown renders on receipt."></textarea>
+      </div>
+      <div class="mail-compose-field">
+        <label>attachments</label>
+        <div class="mail-compose-attachments" id="mail-compose-attachments"></div>
+        <div class="mail-compose-attach-bar">
+          <input type="file" id="mail-compose-file" multiple style="display:none">
+          <button type="button" id="mail-compose-attach-btn">+ add file</button>
+          <span class="mail-compose-attach-hint">
+            Files go through your Blossom server. URL is encrypted inside the message.
+          </span>
+        </div>
+      </div>
+    `;
+    const foot = document.createElement('div');
+    foot.style.display = 'flex'; foot.style.gap = '8px'; foot.style.width = '100%';
+    foot.style.justifyContent = 'flex-end';
+    const cancel = document.createElement('button'); cancel.textContent = 'cancel';
+    const send   = document.createElement('button'); send.textContent   = 'send'; send.className = 'primary';
+    foot.appendChild(cancel); foot.appendChild(send);
+
+    const modal = openModal({
+      title:    'Compose mail',
+      subtitle: 'NIP-17 · end-to-end encrypted',
+      body, footer: foot,
+    });
+    modal.root.classList.add('mail-compose-modal');
+
+    const toEl   = body.querySelector('#mail-compose-to');
+    const subjEl = body.querySelector('#mail-compose-subject');
+    const bodyEl = body.querySelector('#mail-compose-body');
+    const hintEl = body.querySelector('#mail-compose-tohint');
+    const attEl  = body.querySelector('#mail-compose-attachments');
+    const fileEl = body.querySelector('#mail-compose-file');
+    const attBtn = body.querySelector('#mail-compose-attach-btn');
+
+    // Pending attachments: array of { url, sha256, mime, size, name }.
+    // Each is uploaded to /api/mail/attachment as the user picks files;
+    // on send, the array is included in the POST body.
+    const attachments = [];
+
+    function fmtBytes(n) {
+      if (n < 1024)        return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+      return `${(n / 1024 / 1024).toFixed(1)} MiB`;
+    }
+    function renderAttachments() {
+      if (!attEl) return;
+      if (attachments.length === 0) {
+        attEl.innerHTML = `<div class="mail-compose-attach-empty">No attachments yet.</div>`;
+        return;
+      }
+      attEl.innerHTML = attachments.map((a, i) => `
+        <div class="mail-att-chip" data-i="${i}">
+          <span class="mail-att-icon">📎</span>
+          <span class="mail-att-name">${escapeHtml(a.name || a.sha256.slice(0, 12))}</span>
+          <span class="mail-att-size">${escapeHtml(fmtBytes(a.size))}</span>
+          <button class="mail-att-remove" data-i="${i}" aria-label="remove attachment">×</button>
+        </div>`).join('');
+      for (const btn of $$('.mail-att-remove', attEl)) {
+        btn.addEventListener('click', () => {
+          const i = Number(btn.getAttribute('data-i'));
+          attachments.splice(i, 1);
+          renderAttachments();
+        });
+      }
+    }
+    renderAttachments();
+
+    // PR 9: files ≤32 KiB get base64-encoded client-side and inlined in
+    // the outgoing RFC 2822 multipart body — no Blossom round-trip
+    // needed because the gift-wrap NIP-44 encryption already protects
+    // the bytes end-to-end. Larger files go through /api/mail/attachment
+    // for AES-GCM + Blossom upload as before.
+    const INLINE_THRESHOLD = 32 * 1024;
+    function arrayBufferToBase64(buf) {
+      // Chunked toString to avoid stack blowup on multi-MiB buffers
+      // (Function.apply with too many args throws on some engines).
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(binary);
+    }
+
+    attBtn?.addEventListener('click', () => fileEl.click());
+    fileEl?.addEventListener('change', async () => {
+      const files = Array.from(fileEl.files || []);
+      fileEl.value = '';  // reset so picking the same file twice still fires change
+      for (const f of files) {
+        try {
+          attBtn.disabled = true;
+          if (f.size <= INLINE_THRESHOLD) {
+            // Inline path: base64 client-side, no upload.
+            attBtn.textContent = `encoding ${f.name}…`;
+            const ab     = await f.arrayBuffer();
+            const base64 = arrayBufferToBase64(ab);
+            attachments.push({
+              kind:   'inline',
+              name:   f.name,
+              mime:   f.type || 'application/octet-stream',
+              size:   f.size,
+              base64,
+            });
+          } else {
+            // Blossom path: server encrypts + uploads ciphertext.
+            attBtn.textContent = `uploading ${f.name}…`;
+            const r = await api(
+              `/api/mail/attachment?mime=${encodeURIComponent(f.type || 'application/octet-stream')}&name=${encodeURIComponent(f.name)}`,
+              { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream' }, body: f },
+            );
+            attachments.push({
+              kind:            'blossom',
+              name:            r.name || f.name,
+              mime:            r.mime,
+              size:            r.size,
+              url:             r.url,
+              sha256:          r.sha256,
+              encryptionKey:   r.encryptionKey,
+              encryptionNonce: r.encryptionNonce,
+            });
+          }
+          renderAttachments();
+        } catch (e) {
+          // api() already toasted with the HTTP status — surface a hint
+          // for the common case (Blossom not running).
+          const msg = e?.message || String(e);
+          if (/409/.test(msg)) {
+            toast('Blossom is off', 'Files larger than 32 KiB need Blossom. Enable it in Config → Blossom or pick a smaller file.', 'warn');
+          }
+        } finally {
+          attBtn.disabled = false;
+          attBtn.textContent = '+ add file';
+        }
+      }
+    });
+
+    if (prefill) {
+      // When replying we pre-fill `to` with the counterparty's npub-ish
+      // hex; clicking "compose" from a thread keeps the user in flow.
+      if (prefill.to)      toEl.value   = prefill.to;
+      if (prefill.subject) subjEl.value = prefill.subject;
+      if (prefill.body)    bodyEl.value = prefill.body;
+    }
+    setTimeout(() => toEl.focus(), 50);
+
+    let resolvedRecipient = null;
+    let resolving         = false;
+    async function resolveNow() {
+      const v = toEl.value.trim();
+      if (!v) { hintEl.textContent = ''; resolvedRecipient = null; return; }
+      if (resolving) return;
+      resolving = true;
+      hintEl.textContent = 'resolving…';
+      hintEl.className = 'mail-compose-tohint';
+      try {
+        const r = await api('/api/mail/resolve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: v }),
+        }, { silent: true });
+        resolvedRecipient = r;
+        const short = `${r.pubkey.slice(0, 8)}…${r.pubkey.slice(-4)}`;
+        const inboxN = Array.isArray(r.inboxRelays) ? r.inboxRelays.length : 0;
+        if (r.hasInbox) {
+          hintEl.textContent = `✓ ${short} · ${inboxN} inbox relay${inboxN === 1 ? '' : 's'}`;
+          hintEl.className = 'mail-compose-tohint ok';
+        } else {
+          hintEl.textContent = `⚠ ${short} · no inbox relays advertised; delivery may fail`;
+          hintEl.className = 'mail-compose-tohint warn';
+        }
+      } catch (e) {
+        const msg = (e?.message || String(e)).replace(/^.* 400.*?: /, '');
+        hintEl.textContent = `✗ ${msg.slice(0, 120)}`;
+        hintEl.className = 'mail-compose-tohint err';
+        resolvedRecipient = null;
+      } finally {
+        resolving = false;
+      }
+    }
+    toEl.addEventListener('blur', () => { void resolveNow(); });
+
+    cancel.addEventListener('click', () => modal.close());
+    send.addEventListener('click', async () => {
+      const to   = toEl.value.trim();
+      const subj = subjEl.value.trim();
+      const msg  = bodyEl.value;
+      if (!to) { toast('Missing recipient', 'Enter an npub, hex pubkey, or NIP-05 address.', 'warn'); return; }
+      if (!msg.trim() && attachments.length === 0) {
+        toast('Empty message', 'Write something or attach a file.', 'warn');
+        return;
+      }
+
+      send.disabled = true; send.textContent = 'sending…';
+      try {
+        const r = await api('/api/mail/send', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            to, subject: subj, body: msg, attachments,
+            inReplyTo:  prefill?.inReplyTo,
+            references: prefill?.references,
+          }),
+        });
+        const okRecipients = (r.recipient?.results || []).filter(x => x.ok).length;
+        const totalRecipients = (r.recipient?.results || []).length;
+        if (okRecipients > 0) {
+          toast('Mail sent', `${okRecipients}/${totalRecipients} recipient inbox relays accepted.`, 'ok');
+          modal.close();
+          await load();
+        } else {
+          const reasons = (r.recipient?.results || []).map(x => x.reason).filter(Boolean).slice(0, 2);
+          toast('Send failed', reasons.join(' · ') || 'all recipient relays rejected the wrap', 'err');
+        }
+      } catch (e) {
+        // api() already toasts non-2xx — nothing more to do here.
+      } finally {
+        send.disabled = false; send.textContent = 'send';
+      }
+    });
+  }
+
+  function wireButtons() {
+    const refresh = $('mail-refresh');
+    if (refresh && !refresh.__wired) {
+      refresh.__wired = true;
+      refresh.addEventListener('click', () => { void load(); });
+    }
+    const compose = $('mail-compose');
+    if (compose && !compose.__wired) {
+      compose.__wired = true;
+      compose.addEventListener('click', () => onCompose());
+    }
+    const settings = $('mail-settings');
+    if (settings && !settings.__wired) {
+      settings.__wired = true;
+      settings.addEventListener('toggle', () => {
+        if (settings.open) void loadInboxRelays();
+      });
+    }
+    const tabs = $('mail-tabs');
+    if (tabs && !tabs.__wired) {
+      tabs.__wired = true;
+      tabs.addEventListener('click', (e) => {
+        const btn = e.target?.closest?.('.mail-tab');
+        if (!btn) return;
+        const tab = btn.getAttribute('data-tab');
+        if (tab) setTab(tab);
+      });
+    }
+  }
+
+  // ── Inbox-relay management ─────────────────────────────────────────────
+  //
+  // Renders an editable list of wss:// URLs plus "publish kind 10050 now"
+  // and "reset to defaults" buttons. The PUT call persists locally and
+  // tries to publish a fresh kind 10050 in one shot; the publish button
+  // is a manual retry hook for when the signed-publish step failed.
+
+  async function loadInboxRelays() {
+    const el = $('mail-settings-body');
+    const sub = $('mail-settings-sub');
+    if (!el) return;
+    el.innerHTML = '<div class="mail-empty">loading…</div>';
+    try {
+      const r = await api('/api/mail/inbox-relays', undefined, { silent: true });
+      const relays   = Array.isArray(r?.relays)   ? r.relays   : [];
+      const defaults = Array.isArray(r?.defaults) ? r.defaults : [];
+      if (sub) sub.textContent = `${relays.length} relay${relays.length === 1 ? '' : 's'}`;
+
+      const rows = relays.map((u, i) => `
+        <div class="mail-relay-row" data-i="${i}">
+          <input type="text" class="mail-relay-url" value="${escapeHtml(u)}" spellcheck="false">
+          <button class="danger mail-relay-remove" data-i="${i}">remove</button>
+        </div>`).join('');
+
+      el.innerHTML = `
+        <div class="mail-relay-list" id="mail-relay-list">${rows}</div>
+        <div class="mail-relay-add">
+          <input type="text" id="mail-relay-new" placeholder="wss://…" spellcheck="false">
+          <button id="mail-relay-add-btn">add</button>
+        </div>
+        <div class="mail-relay-actions">
+          <button id="mail-relay-save" class="primary">save + publish</button>
+          <button id="mail-relay-publish">publish only</button>
+          <button id="mail-relay-reset">reset to defaults</button>
+        </div>
+        <div class="mail-relay-defaults">
+          Defaults: <code>${escapeHtml(defaults.join('  '))}</code>
+        </div>`;
+
+      const readLocal = () => $$('.mail-relay-url', $('mail-relay-list'))
+        .map(i => i.value.trim()).filter(Boolean);
+
+      for (const btn of $$('.mail-relay-remove', el)) {
+        btn.addEventListener('click', () => {
+          btn.closest('.mail-relay-row')?.remove();
+          if (sub) sub.textContent = `${readLocal().length} relay${readLocal().length === 1 ? '' : 's'}`;
+        });
+      }
+      $('mail-relay-add-btn')?.addEventListener('click', () => {
+        const input = $('mail-relay-new');
+        const v = (input.value || '').trim();
+        if (!/^wss?:\/\//.test(v)) {
+          toast('Bad relay URL', 'must start with wss:// or ws://', 'warn');
+          return;
+        }
+        const list = $('mail-relay-list');
+        const i = $$('.mail-relay-row', list).length;
+        const row = document.createElement('div');
+        row.className = 'mail-relay-row';
+        row.dataset.i = String(i);
+        row.innerHTML = `<input type="text" class="mail-relay-url" value="${escapeHtml(v)}" spellcheck="false">
+                         <button class="danger mail-relay-remove" data-i="${i}">remove</button>`;
+        row.querySelector('.mail-relay-remove').addEventListener('click', () => row.remove());
+        list.appendChild(row);
+        input.value = '';
+        if (sub) sub.textContent = `${readLocal().length} relay${readLocal().length === 1 ? '' : 's'}`;
+      });
+
+      async function save(publish) {
+        const next = readLocal();
+        if (next.length === 0) {
+          toast('Need at least one inbox relay', 'Add a wss:// URL before saving.', 'warn');
+          return;
+        }
+        try {
+          const r = await api('/api/mail/inbox-relays', {
+            method:  'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ relays: next, publish }),
+          });
+          if (publish && r?.publish?.attempted) {
+            if (r.publish.ok) toast('Saved + published', 'kind 10050 accepted.', 'ok');
+            else              toast('Saved (publish failed)', r.publish.error || 'no relays accepted the event', 'warn');
+          } else {
+            toast('Saved', 'Inbox relays updated locally.', 'ok');
+          }
+          // Refresh the worker stats so "N inbox relays connected" reflects
+          // the new set on the very next render tick.
+          await load();
+          await loadInboxRelays();
+        } catch { /* api() already toasted */ }
+      }
+
+      $('mail-relay-save')?.addEventListener('click', () => save(true));
+      $('mail-relay-publish')?.addEventListener('click', async () => {
+        try {
+          const r = await api('/api/mail/inbox-relays/publish', { method: 'POST' });
+          if (r.ok) toast('Published', 'kind 10050 broadcast to inbox + discovery relays.', 'ok');
+          else      toast('Publish failed', r.error || 'no relays accepted', 'err');
+        } catch { /* api() already toasted */ }
+      });
+      $('mail-relay-reset')?.addEventListener('click', () => {
+        const list = $('mail-relay-list');
+        list.innerHTML = defaults.map((u, i) => `
+          <div class="mail-relay-row" data-i="${i}">
+            <input type="text" class="mail-relay-url" value="${escapeHtml(u)}" spellcheck="false">
+            <button class="danger mail-relay-remove" data-i="${i}">remove</button>
+          </div>`).join('');
+        for (const btn of $$('.mail-relay-remove', list)) {
+          btn.addEventListener('click', () => {
+            btn.closest('.mail-relay-row')?.remove();
+            if (sub) sub.textContent = `${readLocal().length} relay${readLocal().length === 1 ? '' : 's'}`;
+          });
+        }
+        if (sub) sub.textContent = `${defaults.length} relay${defaults.length === 1 ? '' : 's'} (defaults)`;
+      });
+    } catch (e) {
+      el.innerHTML = `<div class="mail-empty">Failed to load relays: ${escapeHtml(e?.message || e)}</div>`;
+    }
+  }
+
+  return {
+    onEnter() {
+      wireButtons();
+      void load();
+      startStream();
+    },
+    // Exposed for cleanup / tests. activatePanel() doesn't currently
+    // call this — the SSE connection survives panel switches, which is
+    // what we want (badge stays accurate).
+    _stop: stopStream,
+  };
+})();
+
 // ── Registry + boot ──────────────────────────────────────────────────────
 
 const Panels = {
@@ -17210,6 +18145,7 @@ const Panels = {
   vpn:      VpnPanel,
   logs:     LogsPanel,
   client:   ClientPanel,
+  mail:     MailPanel,
   config:   ConfigPanel,
 };
 

@@ -1,0 +1,316 @@
+/**
+ * Smoke tests for the mail HTTP surface.
+ *
+ * Boots the dashboard server on a random port, then verifies the four
+ * read-only routes registered in this PR respond with the expected
+ * shapes. Disabled side effects: in-process relay, nvpn tailer, and
+ * the mail inbox worker (we want the routes only, not a real Amber
+ * round trip).
+ */
+
+import { useTempHome } from './_home.js';
+useTempHome();
+process.env.STATION_INPROC_RELAY      = '0';
+process.env.STATION_DISABLE_NVPN_TAIL = '1';
+process.env.STATION_DISABLE_MAIL      = '1';
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import type { Server } from 'node:http';
+
+const { startWebServer } = await import('../src/lib/web-server.js');
+
+async function bootOnRandomPort(): Promise<{ server: Server; port: number }> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const port = 30000 + Math.floor(Math.random() * 20000);
+    try {
+      const server = await startWebServer(port);
+      return { server, port };
+    } catch (e: any) {
+      if (!/EADDRINUSE/.test(e?.message ?? '')) throw e;
+    }
+  }
+  throw new Error('could not find a free high port after 5 attempts');
+}
+
+function get(port: number, path: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path, method: 'GET',
+        headers: { host: `127.0.0.1:${port}` } },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end',  () => resolve({
+          status: res.statusCode ?? 0,
+          body:   Buffer.concat(chunks).toString('utf8'),
+        }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Same wrapper but issues a request body + sets Origin so the CSRF guard
+// lets the mutation through to the handler.
+function send(port: number, method: string, path: string, body: any): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const payload = body == null ? '' : JSON.stringify(body);
+    const req = http.request(
+      { host: '127.0.0.1', port, path, method,
+        headers: {
+          host: `127.0.0.1:${port}`,
+          'content-type': 'application/json',
+          'origin': `http://127.0.0.1:${port}`,
+          'content-length': Buffer.byteLength(payload).toString(),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end',  () => resolve({
+          status: res.statusCode ?? 0,
+          body:   Buffer.concat(chunks).toString('utf8'),
+        }));
+      },
+    );
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+test('mail-routes: /api/mail/inbox returns an empty thread list initially', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/inbox');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.ok(Array.isArray(parsed.threads), 'response carries a threads array');
+  assert.equal(parsed.threads.length, 0, 'no mail yet on a fresh install');
+});
+
+test('mail-routes: /api/mail/thread rejects a bad counterparty', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/thread?counterparty=not-hex');
+  assert.equal(r.status, 400);
+  assert.match(r.body, /64-char hex/);
+});
+
+test('mail-routes: /api/mail/thread accepts valid hex and returns empty list', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const hex = 'a'.repeat(64);
+  const r = await get(port, `/api/mail/thread?counterparty=${hex}`);
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.equal(parsed.counterparty, hex);
+  assert.ok(Array.isArray(parsed.messages));
+  assert.equal(parsed.messages.length, 0);
+});
+
+test('mail-routes: /api/mail/status returns inbox worker stats', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/status');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.equal(typeof parsed.stats, 'object');
+  assert.equal(typeof parsed.stats.relaysConnected, 'number');
+  assert.equal(typeof parsed.stats.eventsSeen,      'number');
+});
+
+test('mail-routes: GET /api/mail/inbox-relays returns defaults', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/inbox-relays');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.ok(Array.isArray(parsed.relays));
+  assert.ok(parsed.relays.length > 0, 'fresh install ships with default inbox relays');
+  assert.ok(Array.isArray(parsed.defaults));
+});
+
+test('mail-routes: PUT /api/mail/inbox-relays validates entries', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const bad = await send(port, 'PUT', '/api/mail/inbox-relays',
+    { relays: ['http://insecure.example'], publish: false });
+  assert.equal(bad.status, 400);
+  assert.match(bad.body, /invalid relay url/);
+
+  const empty = await send(port, 'PUT', '/api/mail/inbox-relays',
+    { relays: [], publish: false });
+  assert.equal(empty.status, 400);
+  assert.match(empty.body, /at least one/);
+});
+
+test('mail-routes: /api/mail/requests returns an empty quarantine bucket initially', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/requests');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.equal(parsed.bucket, 'quarantine');
+  assert.ok(Array.isArray(parsed.threads));
+  assert.equal(parsed.threads.length, 0);
+});
+
+test('mail-routes: /api/mail/accept and /api/mail/block validate pubkey shape', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const badAccept = await send(port, 'POST', '/api/mail/accept', { pubkey: 'not-hex' });
+  assert.equal(badAccept.status, 400);
+  assert.match(badAccept.body, /64-char hex/);
+
+  const badBlock = await send(port, 'POST', '/api/mail/block', { pubkey: 'not-hex' });
+  assert.equal(badBlock.status, 400);
+  assert.match(badBlock.body, /64-char hex/);
+});
+
+test('mail-routes: /api/mail/accept allowlists a pubkey, /api/mail/lists reads it back', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const pk = 'a'.repeat(64);
+  const ok = await send(port, 'POST', '/api/mail/accept', { pubkey: pk });
+  assert.equal(ok.status, 200);
+
+  const lists = await get(port, '/api/mail/lists');
+  assert.equal(lists.status, 200);
+  const parsed = JSON.parse(lists.body);
+  assert.ok(Array.isArray(parsed.allowlist));
+  assert.ok(parsed.allowlist.some((e: any) => e.pubkey === pk));
+});
+
+test('mail-routes: GET /api/mail/folders returns the 4 default folders', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/folders');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.ok(Array.isArray(parsed.defaults));
+  // Inbox, Sent, Archive, Trash — the canonical four.
+  assert.deepEqual(parsed.defaults.map((f: any) => f.id).sort(),
+                   ['archive', 'inbox', 'sent', 'trash']);
+  assert.ok(Array.isArray(parsed.custom));
+});
+
+test('mail-routes: GET /api/mail/inbox respects the folder query param', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/inbox?folder=archive');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.equal(parsed.bucket, 'inbox');
+  assert.equal(parsed.folder, 'archive');
+  assert.ok(Array.isArray(parsed.threads));
+  assert.equal(parsed.threads.length, 0, 'archive is empty on a fresh install');
+});
+
+test('mail-routes: POST /api/mail/folder validates inputs', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Empty ids array → 400 with a clear message.
+  const noIds = await send(port, 'POST', '/api/mail/folder', { ids: [], folder: 'archive' });
+  assert.equal(noIds.status, 400);
+  assert.match(noIds.body, /non-empty array/);
+
+  // Bad folder name → 400.
+  const badFolder = await send(port, 'POST', '/api/mail/folder', {
+    ids: ['a'.repeat(64)], folder: 'has spaces',
+  });
+  assert.equal(badFolder.status, 400);
+  assert.match(badFolder.body, /1-32 chars/);
+});
+
+test('mail-routes: GET /api/mail/settings returns defaults on a fresh install', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/settings');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.equal(parsed.settings.version, 1);
+  assert.ok(Array.isArray(parsed.settings.customFolders));
+  assert.ok(Array.isArray(parsed.settings.inboxRelays));
+});
+
+test('mail-routes: /api/mail/stream sends a hello frame on connect', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Open a raw socket so we can read the SSE preamble without an
+  // EventSource (node:test has no DOM globals). The hello frame is
+  // written synchronously after the headers — we read enough bytes to
+  // see it, then close the connection.
+  const helloFrame = await new Promise<string>((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: '/api/mail/stream', method: 'GET',
+        headers: { host: `127.0.0.1:${port}`, accept: 'text/event-stream' } },
+      (res) => {
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.headers['content-type'], 'text/event-stream');
+        let buf = '';
+        res.on('data', (chunk) => {
+          buf += chunk.toString('utf8');
+          // First `data:` line is the hello frame; close as soon as we see one.
+          const m = buf.match(/^data: (.+?)\n\n/m);
+          if (m) {
+            res.destroy();
+            resolve(m[1]);
+          }
+        });
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+
+  const parsed = JSON.parse(helloFrame);
+  assert.equal(parsed.type, 'hello');
+  assert.equal(typeof parsed.stats, 'object');
+});
+
+test('mail-routes: /api/mail/attachment returns 409 when Blossom is off', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Blossom is disabled by default; the route should return a friendly
+  // 409 with a hint to enable it in Config → Blossom.
+  const r = await send(port, 'POST', '/api/mail/attachment?mime=text/plain', 'hello');
+  assert.equal(r.status, 409);
+  assert.match(r.body, /Blossom is not running/);
+});
+
+test('mail-routes: PUT /api/mail/inbox-relays saves a valid list', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const want = ['wss://relay.example.test', 'wss://another.example.test'];
+  // publish:false to avoid the kind 10050 broadcast attempt (no bunker is paired in tests).
+  const r = await send(port, 'PUT', '/api/mail/inbox-relays', { relays: want, publish: false });
+  assert.equal(r.status, 200);
+  const saved = JSON.parse(r.body);
+  assert.deepEqual(saved.relays, want);
+
+  // Re-read to confirm persistence.
+  const after = await get(port, '/api/mail/inbox-relays');
+  const afterParsed = JSON.parse(after.body);
+  assert.deepEqual(afterParsed.relays, want);
+});

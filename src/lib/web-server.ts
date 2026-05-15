@@ -101,6 +101,8 @@ import { handleAi } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { handleNvpn } from './routes/nvpn.js';
 import { handleTemplates } from './routes/templates.js';
+import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
+import { getInboxWorker } from './mail/inbox.js';
 
 // Static-asset + vendor + security-headers wiring lives in
 // ./web-server-static.ts. We re-import the four names the orchestrator
@@ -1726,6 +1728,11 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // buttons and the Logs panel's nostr-vpn meta strip.
       if (await handleNvpn(req, res, fullUrl, method)) return;
 
+      // ── Mail (routes/mail.ts) ──────────────────────────────────────────
+      // NIP-17 mail panel: read-only inbox + thread view. Send + compose
+      // + inbox-relay management arrive in follow-up PRs.
+      if (await handleMail(req, res, fullUrl, method)) return;
+
       // ── AI provider system (extracted to routes/ai.ts)
       // Covers /api/ai/providers, /api/ai/config,
       // /api/ai/providers/:id/key (POST/DELETE),
@@ -1855,6 +1862,9 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // Stop the GitHub update poller so the interval doesn't keep
       // Node alive past close (the unref above is best-effort).
       stopUpdatePoller();
+      // Mail inbox worker holds long-lived WebSockets to public relays;
+      // close them so they don't keep Node alive past server.close.
+      try { getInboxWorker().stop(); } catch {}
       // Snapshot live sessions so a one-click update restart drops
       // the user back in authenticated. Best-effort; failure here
       // just means the user logs in again post-restart.
@@ -1954,6 +1964,25 @@ export async function startWebServer(port: number): Promise<http.Server> {
           process.stderr.write(`[nvpn] log tailer failed to start: ${e?.message || e}\n`);
         }
       }
+
+      // Wire the in-process Blossom handle through to the mail route so
+      // /api/mail/attachment can upload without going through the public
+      // HTTP layer (we're inside the dashboard's authenticated session
+      // already; the BUD-02 NIP-98 ceremony is unnecessary here).
+      setMailBlossomAccessor(() => inprocBlossom);
+
+      // Mail inbox worker (NIP-17). Off when STATION_DISABLE_MAIL=1, or
+      // when there's no saved bunker client (decryption requires Amber).
+      // Worker.start() no-ops if either precondition fails; we don't try
+      // to be clever here — just kick it and let the worker self-report
+      // status via /api/mail/status.
+      if (process.env.STATION_DISABLE_MAIL !== '1') {
+        try { getInboxWorker().start(); }
+        catch (e: any) {
+          process.stderr.write(`[mail] inbox worker failed to start: ${e?.message || e}\n`);
+        }
+      }
+
       resolve(server);
     });
   });

@@ -177,6 +177,11 @@
           <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></span>
           Client
         </a>
+        <a href="#mail" data-panel="mail">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></span>
+          Mail
+          <span class="badge" id="mail-badge" style="display:none">0</span>
+        </a>
         <a href="#config" data-panel="config">
           <span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg></span>
           Config
@@ -532,6 +537,57 @@
             <button class="primary" id="client-ditto-install">Fetch Ditto now</button>
             <button id="client-ditto-retry">Reload</button>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- MAIL -->
+    <section class="panel" data-panel="mail">
+      <div class="panel-head">
+        <div>
+          <div class="title">Mail</div>
+          <div class="subtitle">Encrypted email over Nostr (NIP-17 · gift-wrapped)</div>
+        </div>
+        <div class="panel-head-actions">
+          <button id="mail-compose" class="primary">compose</button>
+          <button id="mail-refresh">refresh</button>
+        </div>
+      </div>
+      <div class="panel-body mail-body" id="mail-body">
+        <!-- Two-column layout: thread list on the left, current thread on the right.
+             Populated by MailPanel in app.js. -->
+        <div class="mail-status" id="mail-status"></div>
+
+        <!-- Bucket tabs: Inbox · Requests · Blocked. -->
+        <div class="mail-tabs" id="mail-tabs" role="tablist">
+          <button class="mail-tab active" data-tab="inbox"    role="tab" aria-selected="true">Inbox</button>
+          <button class="mail-tab"        data-tab="requests" role="tab" aria-selected="false">
+            Requests <span class="mail-tab-badge" id="mail-tab-badge-requests" hidden>0</span>
+          </button>
+          <button class="mail-tab"        data-tab="blocked"  role="tab" aria-selected="false">Blocked</button>
+        </div>
+
+        <!-- Inbox-relay management. Collapsed by default; the user opens
+             it to add/remove relays or re-publish their kind 10050. -->
+        <details class="mail-settings" id="mail-settings">
+          <summary>
+            <span class="mail-settings-title">Inbox relays (kind 10050)</span>
+            <span class="mail-settings-sub" id="mail-settings-sub"></span>
+          </summary>
+          <div class="mail-settings-body" id="mail-settings-body">loading…</div>
+        </details>
+
+        <div class="mail-split" id="mail-split">
+          <!-- PR 10: folder sidebar — Inbox / Sent / Archive / Trash +
+               any custom folders the user has defined. Shown only in
+               the Inbox tab; hidden in Requests / Blocked. -->
+          <aside class="mail-folders" id="mail-folders" hidden></aside>
+          <aside class="mail-threads" id="mail-threads">
+            <div class="mail-empty">loading…</div>
+          </aside>
+          <section class="mail-thread" id="mail-thread">
+            <div class="mail-empty">Pick a conversation to view messages.</div>
+          </section>
         </div>
       </div>
     </section>
