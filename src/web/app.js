@@ -18495,6 +18495,67 @@ const NsitePanel = (() => {
     if (text) { els.meta.hidden = false; els.meta.textContent = text; }
     else      { els.meta.hidden = true;  els.meta.textContent = ''; }
   }
+
+  // Render the expandable "Diagnostics" block under the meta line. Lets the
+  // user see exactly which kind:34128 events were found (paths, hashes,
+  // ages) and which relays were consulted — invaluable for "I published
+  // but the panel shows stale content" debugging, since you can spot a
+  // year-old event lingering on one relay while your fresh publish never
+  // reached the queried set.
+  function setDiagnostics(body) {
+    if (!els.diag || !els.diagBody) return;
+    if (!body) { els.diag.hidden = true; els.diagBody.innerHTML = ''; return; }
+    const fmtAge = (sec) => {
+      if (!sec) return 'unknown';
+      const diff = Math.max(0, Math.floor(Date.now() / 1000) - sec);
+      if (diff < 60)        return `${diff}s ago`;
+      if (diff < 3600)      return `${Math.floor(diff / 60)}m ago`;
+      if (diff < 86400)     return `${Math.floor(diff / 3600)}h ago`;
+      if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d ago`;
+      return `${Math.floor(diff / 86400 / 7)}w ago`;
+    };
+    const fmtDate = (sec) =>
+      sec ? new Date(sec * 1000).toLocaleString() : '—';
+
+    const entries = body.entries || [];
+    const eventsHtml = entries.length
+      ? `<div class="nsite-diag-table">
+           <div class="head">path</div>
+           <div class="head">age</div>
+           <div class="head">sha256</div>
+           ${entries.map(e => `
+             <div title="${escapeHtml(e.path)}">${escapeHtml(e.path)}</div>
+             <div title="${escapeHtml(fmtDate(e.createdAt))}">${escapeHtml(fmtAge(e.createdAt))}</div>
+             <div title="${escapeHtml(e.sha256)}">${escapeHtml(e.sha256.slice(0, 12))}…</div>
+           `).join('')}
+         </div>`
+      : '<div class="muted">No kind:34128 events found.</div>';
+
+    const relayLines = (label, arr) => arr && arr.length
+      ? `<div class="nsite-diag-section">
+           <div class="nsite-diag-section-title">${escapeHtml(label)} (${arr.length})</div>
+           <div class="nsite-diag-relays">
+             ${arr.map(r => `<span class="nsite-diag-relay">${escapeHtml(r)}</span>`).join('')}
+           </div>
+         </div>`
+      : '';
+    const r = body.relays || {};
+    const stale = (body.oldestAt && body.latestAt && body.oldestAt !== body.latestAt)
+      ? `<div class="muted" style="margin-top:6px">Oldest event ${fmtAge(body.oldestAt)}, newest ${fmtAge(body.latestAt)} — multiple publishes detected.</div>`
+      : '';
+
+    els.diagBody.innerHTML = `
+      <div class="nsite-diag-section">
+        <div class="nsite-diag-section-title">Files (${entries.length} of ${body.totalEventsSeen || entries.length} kind:34128 seen)</div>
+        ${eventsHtml}
+        ${stale}
+      </div>
+      ${relayLines('Your read relays',    r.owner)}
+      ${relayLines('Author NIP-65 outbox', r.authorOutbox)}
+      ${relayLines('Queried (union)',     r.queried)}
+    `;
+    els.diag.hidden = false;
+  }
   function setEmpty(visible) {
     if (els.empty) els.empty.style.display = visible ? '' : 'none';
     if (els.frame) els.frame.style.display = visible ? 'none' : '';
@@ -18511,6 +18572,7 @@ const NsitePanel = (() => {
     if (!addr) return;
     setStatus('Resolving…');
     setMeta('');
+    setDiagnostics(null);
     try {
       const url = `/api/nsite/resolve?addr=${encodeURIComponent(addr)}`;
       // Bearer header is required: web-server.ts gates all /api/* paths
@@ -18551,6 +18613,7 @@ const NsitePanel = (() => {
       relayBits.push(`Blossom: ${blossomN} server${blossomN === 1 ? '' : 's'}`);
       const tsBit = `Latest event: ${ts || 'unknown'}`;
       setMeta(`${tsBit} · ${relayBits.join(' · ')}`);
+      setDiagnostics(body);
       loadIframe(siteId, entryPath, display);
       updateNavButtons();
     } catch (e) {
@@ -18620,6 +18683,8 @@ const NsitePanel = (() => {
     els.frame    = $('nsite-frame');
     els.status   = $('nsite-status');
     els.meta     = $('nsite-meta');
+    els.diag     = $('nsite-diag');
+    els.diagBody = $('nsite-diag-body');
     els.empty    = $('nsite-empty');
     els.pubLink  = $('nsite-publish-link');
     if (!els.addr) return;

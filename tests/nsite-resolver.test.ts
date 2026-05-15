@@ -15,11 +15,28 @@ useTempHome();
 const mod = await import('../src/lib/nsite-resolver.ts');
 const {
   resolveAddress, resolveNsitName, normalizePath, mimeForPath, fetchBlob,
-  unionRelays,
+  unionRelays, fetchSiteIndex,
   NsiteError, DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
   DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
   DEFAULT_CONTENT_RELAYS,
 } = mod;
+
+/**
+ * Build a fake kind:34128 file event. The dedupe is per (pubkey, d) so
+ * tests can simulate multiple publishes of the same path with different
+ * timestamps + hashes to exercise the "newest wins" path.
+ */
+function makeFileEvent(pubkey: string, path: string, sha: string, ts: number, id?: string) {
+  return {
+    id:         id ?? sha,
+    pubkey,
+    kind:       34128,
+    created_at: ts,
+    tags:       [['d', path], ['x', sha]],
+    content:    '',
+    sig:        'b'.repeat(128),
+  };
+}
 
 // Trivial fake indexer config used by NSIT tests below.
 const FAKE_INDEXER = 'd'.repeat(64);
@@ -204,6 +221,57 @@ test('unionRelays: empty inputs handled', () => {
   assert.deepEqual(unionRelays([], []), []);
   assert.deepEqual(unionRelays(['wss://a'], []), ['wss://a']);
   assert.deepEqual(unionRelays([], ['wss://a']), ['wss://a']);
+});
+
+// ── fetchSiteIndex diagnostics shape ─────────────────────────────────────
+
+test('fetchSiteIndex: per-event entries returned alongside the path map', async () => {
+  const pk = HEX;
+  const sha1 = '1'.repeat(64);
+  const sha2 = '2'.repeat(64);
+  const queryFn = mockQuery([
+    makeFileEvent(pk, '/index.html', sha1, 1_700_000_000, 'eid-1'),
+    makeFileEvent(pk, '/style.css',  sha2, 1_700_001_000, 'eid-2'),
+  ]);
+  const idx = await fetchSiteIndex(pk, ['wss://r1'], queryFn as any);
+  assert.equal(idx.files.size, 2);
+  assert.equal(idx.entries.length, 2);
+  // Sorted by path → index.html before style.css.
+  assert.equal(idx.entries[0].path,    'index.html');
+  assert.equal(idx.entries[0].sha256,  sha1);
+  assert.equal(idx.entries[0].eventId, 'eid-1');
+  assert.equal(idx.entries[1].path,    'style.css');
+  assert.equal(idx.latestAt, 1_700_001_000);
+  assert.equal(idx.oldestAt, 1_700_000_000);
+  assert.equal(idx.totalEventsSeen, 2);
+});
+
+test('fetchSiteIndex: replaceable per-path — newest event wins, older is invisible', async () => {
+  // Repro of the user-reported scenario: an old "nsite works" placeholder
+  // event from a stale tool lingers on one relay, the new publish is
+  // newer and has a different hash. Newest-by-created_at wins.
+  const pk = HEX;
+  const oldSha = 'a'.repeat(64);
+  const newSha = 'b'.repeat(64);
+  const queryFn = mockQuery([
+    makeFileEvent(pk, '/index.html', oldSha, 1_700_000_000, 'old'),
+    makeFileEvent(pk, '/index.html', newSha, 1_800_000_000, 'new'),
+  ]);
+  const idx = await fetchSiteIndex(pk, ['wss://r1'], queryFn as any);
+  assert.equal(idx.files.get('index.html'), newSha);
+  assert.equal(idx.entries.length, 1);
+  assert.equal(idx.entries[0].eventId, 'new');
+  // But the diagnostic counter shows BOTH were seen, so the panel can
+  // surface "multiple publishes detected" hints if oldestAt !== latestAt.
+  assert.equal(idx.totalEventsSeen, 2);
+});
+
+test('fetchSiteIndex: throws no_files when zero events', async () => {
+  const queryFn = mockQuery([]);
+  await assert.rejects(
+    () => fetchSiteIndex(HEX, ['wss://r1'], queryFn as any),
+    (e: any) => e instanceof NsiteError && e.code === 'no_files',
+  );
 });
 
 test('resolveAddress: empty input rejected', async () => {
