@@ -17469,52 +17469,47 @@ const MailPanel = (() => {
       </div>
       <div><button class="primary mail-thread-reply" id="mail-thread-reply">reply</button></div>
     </div>`;
+    function fmtSize(size) {
+      return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MiB`
+           : size > 1024        ? `${(size / 1024).toFixed(1)} KiB`
+                                 : `${size} B`;
+    }
+    function renderAttachmentChip(m, a) {
+      const tok = getSessionToken();
+      let href;
+      if (a.blossom) {
+        // Blossom-hosted, AES-256-GCM encrypted. Route through the
+        // proxy-decrypt endpoint so the browser sees plaintext.
+        href = `/api/mail/download?id=${encodeURIComponent(m.id)}&sha=${encodeURIComponent(a.blossom.sha256)}${tok ? `&token=${tok}` : ''}`;
+      } else if (a.inlineBase64 != null) {
+        // Inline base64 — decode to a data URL for direct download. The
+        // bytes were already E2E-encrypted at rest inside the gift wrap;
+        // there's nothing to fetch.
+        href = `data:${a.mime};base64,${a.inlineBase64}`;
+      } else {
+        href = '#';
+      }
+      const name = a.name || (a.blossom?.sha256 || '').slice(0, 12) || 'attachment';
+      return `<a class="mail-msg-fileChip" href="${escapeHtml(href)}"
+                 ${a.blossom ? 'target="_blank" rel="noopener noreferrer"' : `download="${escapeHtml(name)}"`}>
+        <span class="mail-att-icon">📎</span>
+        <div class="mail-msg-fileMeta">
+          <div class="mail-msg-fileName">${escapeHtml(name)} <span class="mail-att-lock" title="end-to-end encrypted">🔒</span></div>
+          <div class="mail-msg-fileSub">${escapeHtml(a.mime || 'application/octet-stream')} · ${escapeHtml(fmtSize(a.size || 0))}</div>
+        </div>
+      </a>`;
+    }
+
     const msgs = activeMessages.map(m => {
       const side  = m.direction === 'out' ? ' mail-msg-out' : ' mail-msg-in';
       const at    = new Date(m.created_at * 1000).toLocaleString();
       const subj  = m.subject ? `<div class="mail-msg-subj">${escapeHtml(m.subject)}</div>` : '';
-
-      // kind 15 = file message. Render as a file chip with link + size +
-      // sha256 fingerprint. The chip is clickable; opens in a new tab.
-      if (m.kind === 15) {
-        const url      = m.tags.find(t => t[0] === 'url')?.[1]  || '';
-        const mime     = m.tags.find(t => t[0] === 'm')?.[1]    || 'application/octet-stream';
-        const sha      = m.tags.find(t => t[0] === 'x')?.[1]    || '';
-        const size     = Number(m.tags.find(t => t[0] === 'size')?.[1] || 0);
-        const name     = m.tags.find(t => t[0] === 'file')?.[1] || (m.body || '').slice(0, 80);
-        const hasKey   = !!m.tags.find(t => t[0] === 'encryption-key');
-        const sizeStr  = size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MiB`
-                        : size > 1024       ? `${(size / 1024).toFixed(1)} KiB`
-                        : `${size} B`;
-        // PR 8: encrypted attachments route through the proxy-decrypt
-        // endpoint so the browser sees plaintext. Plaintext attachments
-        // (pre-PR-8 / cross-client) link directly to the Blossom URL.
-        // EventSource auth fallback used here too — proxy is auth-gated.
-        const tok = getSessionToken();
-        const href = hasKey
-          ? `/api/mail/download?id=${encodeURIComponent(m.id)}${tok ? `&token=${tok}` : ''}`
-          : url;
-        const lockBadge = hasKey
-          ? '<span class="mail-att-lock" title="end-to-end encrypted">🔒</span>'
-          : '';
-        return `<div class="mail-msg${side} mail-msg-file">
-          <div class="mail-msg-meta">
-            <span class="mail-msg-who">${m.direction === 'out' ? 'You' : escapeHtml(npubShort(activeCounter))}</span>
-            <span class="mail-msg-at">${escapeHtml(at)}</span>
-          </div>
-          <a class="mail-msg-fileChip" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">
-            <span class="mail-att-icon">📎</span>
-            <div class="mail-msg-fileMeta">
-              <div class="mail-msg-fileName">${escapeHtml(name || sha.slice(0, 12))} ${lockBadge}</div>
-              <div class="mail-msg-fileSub">${escapeHtml(mime)} · ${escapeHtml(sizeStr)}</div>
-            </div>
-          </a>
-        </div>`;
-      }
-
-      const body = renderMarkdown
+      const body  = renderMarkdown
         ? renderMarkdown(String(m.body || ''))
         : escapeHtml(String(m.body || ''));
+      const atts  = Array.isArray(m.attachments) && m.attachments.length > 0
+        ? `<div class="mail-msg-attachments">${m.attachments.map(a => renderAttachmentChip(m, a)).join('')}</div>`
+        : '';
       return `<div class="mail-msg${side}">
         <div class="mail-msg-meta">
           <span class="mail-msg-who">${m.direction === 'out' ? 'You' : escapeHtml(npubShort(activeCounter))}</span>
@@ -17522,6 +17517,7 @@ const MailPanel = (() => {
         </div>
         ${subj}
         <div class="mail-msg-body">${body}</div>
+        ${atts}
       </div>`;
     }).join('');
     el.innerHTML = `${head}<div class="mail-msgs">${msgs}</div>`;
@@ -17529,7 +17525,20 @@ const MailPanel = (() => {
     if (replyBtn) {
       replyBtn.addEventListener('click', () => {
         const subj = lastSubj && !/^re:\s/i.test(lastSubj) ? `Re: ${lastSubj}` : lastSubj;
-        onCompose({ to: activeCounter, subject: subj });
+        // PR 9: thread the reply via RFC 2822 Message-ID + References.
+        // Most recent message's message-id becomes In-Reply-To; we walk
+        // backwards collecting the chain so other RFC 2822 clients can
+        // thread correctly.
+        const lastWithId = [...activeMessages].reverse().find(m => m.message_id);
+        const refs = activeMessages
+          .map(m => m.message_id)
+          .filter(id => !!id);
+        onCompose({
+          to:         activeCounter,
+          subject:    subj,
+          inReplyTo:  lastWithId?.message_id,
+          references: refs,
+        });
       });
     }
   }
@@ -17683,6 +17692,24 @@ const MailPanel = (() => {
     }
     renderAttachments();
 
+    // PR 9: files ≤32 KiB get base64-encoded client-side and inlined in
+    // the outgoing RFC 2822 multipart body — no Blossom round-trip
+    // needed because the gift-wrap NIP-44 encryption already protects
+    // the bytes end-to-end. Larger files go through /api/mail/attachment
+    // for AES-GCM + Blossom upload as before.
+    const INLINE_THRESHOLD = 32 * 1024;
+    function arrayBufferToBase64(buf) {
+      // Chunked toString to avoid stack blowup on multi-MiB buffers
+      // (Function.apply with too many args throws on some engines).
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(binary);
+    }
+
     attBtn?.addEventListener('click', () => fileEl.click());
     fileEl?.addEventListener('change', async () => {
       const files = Array.from(fileEl.files || []);
@@ -17690,30 +17717,43 @@ const MailPanel = (() => {
       for (const f of files) {
         try {
           attBtn.disabled = true;
-          attBtn.textContent = `uploading ${f.name}…`;
-          const r = await api(
-            `/api/mail/attachment?mime=${encodeURIComponent(f.type || 'application/octet-stream')}&name=${encodeURIComponent(f.name)}`,
-            { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream' }, body: f },
-          );
-          attachments.push({
-            url:    r.url,
-            sha256: r.sha256,
-            mime:   r.mime,
-            size:   r.size,
-            name:   r.name || f.name,
-            // PR 8: server returns these when it encrypted the blob.
-            // Backwards compatible — pre-PR-8 servers omit them and the
-            // send route falls back to plaintext attachments.
-            encryptionKey:   r.encryptionKey   || undefined,
-            encryptionNonce: r.encryptionNonce || undefined,
-          });
+          if (f.size <= INLINE_THRESHOLD) {
+            // Inline path: base64 client-side, no upload.
+            attBtn.textContent = `encoding ${f.name}…`;
+            const ab     = await f.arrayBuffer();
+            const base64 = arrayBufferToBase64(ab);
+            attachments.push({
+              kind:   'inline',
+              name:   f.name,
+              mime:   f.type || 'application/octet-stream',
+              size:   f.size,
+              base64,
+            });
+          } else {
+            // Blossom path: server encrypts + uploads ciphertext.
+            attBtn.textContent = `uploading ${f.name}…`;
+            const r = await api(
+              `/api/mail/attachment?mime=${encodeURIComponent(f.type || 'application/octet-stream')}&name=${encodeURIComponent(f.name)}`,
+              { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream' }, body: f },
+            );
+            attachments.push({
+              kind:            'blossom',
+              name:            r.name || f.name,
+              mime:            r.mime,
+              size:            r.size,
+              url:             r.url,
+              sha256:          r.sha256,
+              encryptionKey:   r.encryptionKey,
+              encryptionNonce: r.encryptionNonce,
+            });
+          }
           renderAttachments();
         } catch (e) {
           // api() already toasted with the HTTP status — surface a hint
           // for the common case (Blossom not running).
           const msg = e?.message || String(e);
           if (/409/.test(msg)) {
-            toast('Blossom is off', 'Enable the in-process Blossom server in Config → Blossom to attach files.', 'warn');
+            toast('Blossom is off', 'Files larger than 32 KiB need Blossom. Enable it in Config → Blossom or pick a smaller file.', 'warn');
           }
         } finally {
           attBtn.disabled = false;
@@ -17783,7 +17823,11 @@ const MailPanel = (() => {
         const r = await api('/api/mail/send', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ to, subject: subj, body: msg, attachments }),
+          body:    JSON.stringify({
+            to, subject: subj, body: msg, attachments,
+            inReplyTo:  prefill?.inReplyTo,
+            references: prefill?.references,
+          }),
         });
         const okRecipients = (r.recipient?.results || []).filter(x => x.ok).length;
         const totalRecipients = (r.recipient?.results || []).length;

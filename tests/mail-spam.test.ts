@@ -9,24 +9,36 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { generateSecretKey, getPublicKey, getEventHash } from 'nostr-tools/pure';
 import { MailStore } from '../src/lib/mail/store.js';
-import { KIND_DM_RUMOR, type Rumor } from '../src/lib/mail/types.js';
+import { KIND_EMAIL, type Rumor } from '../src/lib/mail/types.js';
+import { buildMessage, mintMessageId } from '../src/lib/mail/rfc2822.js';
 
 function tmpDbPath(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-spam-'));
   return path.join(dir, 'mail.db');
 }
 
+// Builds a kind-1301 rumor with RFC 2822 content — matches what the
+// inbox worker would insert on receive after PR 9.
 function makeRumor(opts: {
   fromSecret?: Uint8Array;
   to:          string;
   content:     string;
+  subject?:    string;
   createdAt?:  number;
 }): Rumor {
   const secret = opts.fromSecret ?? generateSecretKey();
   const pubkey = getPublicKey(secret);
-  const tags: string[][] = [['p', opts.to]];
   const created_at = opts.createdAt ?? Math.floor(Date.now() / 1000);
-  const template = { pubkey, kind: KIND_DM_RUMOR, created_at, tags, content: opts.content };
+  const rfc2822 = buildMessage({
+    fromPubkey: pubkey, toPubkey: opts.to,
+    subject:    opts.subject ?? '',
+    body:       opts.content,
+    messageId:  mintMessageId(),
+  });
+  const template = {
+    pubkey, kind: KIND_EMAIL, created_at,
+    tags: [['p', opts.to]], content: rfc2822,
+  };
   return { ...template, id: getEventHash(template as any) };
 }
 

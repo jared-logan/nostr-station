@@ -22,7 +22,12 @@ import {
   readInboxRelays, writeInboxRelays, DEFAULT_INBOX_RELAYS,
 } from '../mail/inbox-relays.js';
 import { publishEventToRelays } from './repo.js';
-import { KIND_DM_RUMOR, KIND_FILE_RUMOR, KIND_INBOX_RELAYS } from '../mail/types.js';
+import { KIND_EMAIL, KIND_INBOX_RELAYS } from '../mail/types.js';
+import {
+  buildMessage, mintMessageId,
+  shouldInlineByteCount, INLINE_THRESHOLD_BYTES,
+  type AttachmentSpec,
+} from '../mail/rfc2822.js';
 import { readIdentity, npubToHex, isValidRelayUrl } from '../identity.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { encryptBlob, decryptBlob } from '../mail/file-crypto.js';
@@ -46,31 +51,55 @@ function isHex64(s: any): s is string {
   return typeof s === 'string' && /^[0-9a-f]{64}$/i.test(s);
 }
 
-interface AttachmentRef {
-  url:    string;
-  sha256: string;
-  mime:   string;
-  size:   number;
-  name?:  string;
-  // PR 8: present when the blob in Blossom is AES-256-GCM encrypted.
-  // Embedded in the kind-15 rumor so only the recipient can decrypt.
-  encryptionKey?:   string;
-  encryptionNonce?: string;
+// Attachment input shape accepted by POST /api/mail/send. Two flavours:
+//
+//   inline  — small files (≤32 KiB). The compose form encoded the bytes
+//             as base64 client-side; we drop them straight into a MIME
+//             multipart section. No Blossom round-trip.
+//
+//   blossom — large files. The compose form uploaded via
+//             /api/mail/attachment first, which encrypted the bytes
+//             with AES-256-GCM and pushed the CIPHERTEXT to Blossom.
+//             Metadata (url + sha256 + key + nonce) travels in the
+//             X-Nostr-Blossom-* MIME headers; the part body is empty.
+//
+// Mixed sets in one send are fine.
+type AttachmentInput =
+  | { kind: 'inline';  name: string; mime: string; size: number; base64: string }
+  | { kind: 'blossom'; name: string; mime: string; size: number;
+      url: string; sha256: string; encryptionKey: string; encryptionNonce: string };
+
+function isValidAttachment(a: any): a is AttachmentInput {
+  if (!a || typeof a.name !== 'string' || typeof a.mime !== 'string'
+        || typeof a.size !== 'number' || a.size <= 0) return false;
+  if (a.kind === 'inline') {
+    return typeof a.base64 === 'string' && a.base64.length > 0;
+  }
+  if (a.kind === 'blossom') {
+    return typeof a.url    === 'string' && /^https?:\/\//.test(a.url)
+        && typeof a.sha256 === 'string' && /^[0-9a-f]{64}$/i.test(a.sha256)
+        && typeof a.encryptionKey   === 'string' && /^[0-9a-f]{64}$/i.test(a.encryptionKey)
+        && typeof a.encryptionNonce === 'string' && /^[0-9a-f]{24}$/i.test(a.encryptionNonce);
+  }
+  return false;
 }
-function isValidAttachment(a: any): a is AttachmentRef {
-  if (!a
-    || typeof a.url    !== 'string' || !/^https?:\/\//.test(a.url)
-    || typeof a.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(a.sha256)
-    || typeof a.mime   !== 'string'
-    || typeof a.size   !== 'number' || a.size <= 0) return false;
-  // If encryption fields are present they must be well-formed hex of the
-  // right length. (Backwards-compat: plaintext attachments from pre-PR-8
-  // clients have neither.)
-  if (a.encryptionKey   != null && !/^[0-9a-f]{64}$/i.test(a.encryptionKey))   return false;
-  if (a.encryptionNonce != null && !/^[0-9a-f]{24}$/i.test(a.encryptionNonce)) return false;
-  // If you provide one, you must provide both.
-  if ((a.encryptionKey == null) !== (a.encryptionNonce == null)) return false;
-  return true;
+
+function toRfc2822AttachmentSpec(a: AttachmentInput): AttachmentSpec {
+  if (a.kind === 'inline') {
+    return {
+      name: a.name, mime: a.mime, size: a.size,
+      inline: { base64: a.base64 },
+    };
+  }
+  return {
+    name: a.name, mime: a.mime, size: a.size,
+    blossom: {
+      url:      a.url,
+      sha256:   a.sha256,
+      keyHex:   a.encryptionKey,
+      nonceHex: a.encryptionNonce,
+    },
+  };
 }
 
 export async function handleMail(
@@ -281,20 +310,22 @@ export async function handleMail(
   }
 
   // ── POST /api/mail/attachment ──────────────────────────────────────────
-  // Upload a file to the in-process Blossom server and return the public
-  // URL + sha256 the compose UI needs to attach it to a send. Bypasses
-  // Blossom's NIP-98 auth path because we're already inside the
-  // authenticated dashboard session — the dashboard's session token
-  // gate has already run by the time control reaches this handler.
+  // Upload a LARGE file (>32 KiB) to the in-process Blossom server and
+  // return the URL + AES-256-GCM key/nonce the compose UI embeds in the
+  // outgoing RFC 2822 multipart MIME headers. Bypasses Blossom's
+  // NIP-98 auth path because we're already inside the authenticated
+  // dashboard session.
   //
-  // NOTE on privacy: the blob is stored UNENCRYPTED in Blossom and the
-  // URL is publicly retrievable by anyone who knows the sha256. The
-  // URL itself is encrypted inside the gift wrap (nobody can extract
-  // the URL without the recipient's key), so practical guessability is
-  // ~zero — but a sophisticated recipient could leak the URL out-of-band
-  // and the blob is then accessible. For users who need attachments that
-  // are E2E-secret too, this needs a future patch that encrypts the
-  // blob bytes with a per-attachment key embedded in the rumor.
+  // Files ≤32 KiB never hit this endpoint — the compose form
+  // base64-encodes them client-side and inlines them in the multipart
+  // body. The whole RFC 2822 message then gift-wraps end-to-end via
+  // NIP-44, so small attachments are E2E by construction.
+  //
+  // Large files: the body is AES-256-GCM encrypted server-side and the
+  // CIPHERTEXT is uploaded to Blossom. The key + nonce return to the
+  // client which puts them in the X-Nostr-Encryption-* MIME headers
+  // of the corresponding multipart section. /api/mail/download reverses
+  // the operation on receive.
   if (pathname === '/api/mail/attachment' && method === 'POST') {
     const server = _getBlossom();
     if (!server) {
@@ -381,54 +412,37 @@ export async function handleMail(
     });
   }
 
-  // ── GET /api/mail/download?id=<rumor-id> ──────────────────────────────
+  // ── GET /api/mail/download?id=<rumor-id>&sha=<attachment-sha256> ──────
   //
-  // Proxy-decrypt download for kind-15 attachments. Looks up the rumor
-  // in mail.db, reads its `url` + `encryption-key` + `encryption-nonce`
-  // + `m` tags, fetches the ciphertext from the URL, decrypts in
-  // memory, and streams the plaintext back with the original mime.
+  // Proxy-decrypt download for Blossom-hosted attachments. Looks up the
+  // rumor in mail.db, finds the matching attachment by sha256 within
+  // its parsed attachments[] list, fetches the ciphertext, decrypts
+  // with the embedded key/nonce, and streams the plaintext back.
   //
-  // Why a proxy rather than client-side decrypt: the browser would need
-  // a bundled AES-GCM implementation + the rumor's key to decrypt a
-  // direct Blossom download. Routing through the dashboard server is
-  // simpler, keeps the key on the server (which already has it via
-  // mail.db), and gives us a place to enforce session auth on the
-  // download itself.
+  // The sha256 disambiguates when one message carries multiple
+  // attachments. It also acts as a coarse access control — the proxy
+  // refuses to download any sha256 that isn't actually attached to one
+  // of the user's messages, so the endpoint can't be used to probe
+  // arbitrary Blossom content.
   if (pathname === '/api/mail/download' && method === 'GET') {
-    const rumorId = parsed.searchParams.get('id') || '';
+    const rumorId = parsed.searchParams.get('id')  || '';
+    const wantSha = (parsed.searchParams.get('sha') || '').toLowerCase();
     if (!/^[0-9a-f]{64}$/i.test(rumorId)) {
       return json(res, 400, { error: 'id must be 64-char hex rumor id' });
     }
-    const store = getMailStore();
-    // We need the rumor's tag set; messagesForThread returns by counterparty
-    // which we don't know up-front. Cheaper to do a direct lookup —
-    // expose one on the store and read it here.
-    const row = store.messageById(rumorId);
-    if (!row) return json(res, 404, { error: 'no message with that id' });
-    if (row.kind !== KIND_FILE_RUMOR) {
-      return json(res, 400, { error: 'message is not a file attachment' });
+    if (!/^[0-9a-f]{64}$/.test(wantSha)) {
+      return json(res, 400, { error: 'sha must be 64-char hex attachment sha256' });
     }
-
-    const tag = (name: string) => row.tags.find(t => t[0] === name)?.[1];
-    const url   = tag('url');
-    const key   = tag('encryption-key');
-    const nonce = tag('encryption-nonce');
-    const mime  = tag('m') || 'application/octet-stream';
-    const name  = tag('file') || 'attachment';
-    if (!url) return json(res, 400, { error: 'rumor has no url tag' });
-
-    // Pre-PR-8 attachments don't carry encryption tags — for those we
-    // 302 redirect to the public URL since the bytes are already
-    // plaintext.
-    if (!key || !nonce) {
-      res.writeHead(302, { Location: url });
-      res.end();
-      return true;
+    const row = getMailStore().messageById(rumorId);
+    if (!row) return json(res, 404, { error: 'no message with that id' });
+    const att = row.attachments.find(a => a.blossom?.sha256?.toLowerCase() === wantSha);
+    if (!att || !att.blossom) {
+      return json(res, 404, { error: 'no attachment with that sha on this message' });
     }
 
     let ciphertext: Buffer;
     try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      const r = await fetch(att.blossom.url, { signal: AbortSignal.timeout(20_000) });
       if (!r.ok) return json(res, 502, { error: `upstream returned ${r.status}` });
       const ab = await r.arrayBuffer();
       ciphertext = Buffer.from(ab);
@@ -436,13 +450,13 @@ export async function handleMail(
       return json(res, 502, { error: `fetch failed: ${e?.message || e}` });
     }
     let plaintext: Buffer;
-    try { plaintext = decryptBlob(ciphertext, key, nonce); }
+    try { plaintext = decryptBlob(ciphertext, att.blossom.keyHex, att.blossom.nonceHex); }
     catch (e: any) { return json(res, 500, { error: `decrypt failed: ${e?.message || e}` }); }
 
     res.writeHead(200, {
-      'Content-Type':        mime,
+      'Content-Type':        att.mime || 'application/octet-stream',
       'Content-Length':      String(plaintext.length),
-      'Content-Disposition': `attachment; filename="${name.replace(/"/g, '')}"`,
+      'Content-Disposition': `attachment; filename="${(att.name || 'attachment').replace(/"/g, '')}"`,
       'X-Content-Type-Options': 'nosniff',
     });
     res.end(plaintext);
@@ -450,18 +464,20 @@ export async function handleMail(
   }
 
   // ── POST /api/mail/send ────────────────────────────────────────────────
-  // Full NIP-17 send pipeline:
+  // nostr-mail send pipeline (PR 9 — kind 1301 + RFC 2822):
   //   1. Resolve the recipient (npub | hex | NIP-05).
-  //   2. Build the rumor (kind 14, with subject tag if present).
-  //   3. Seal + wrap for the recipient, AND seal + wrap a self-copy so
-  //      the sender's own inbox view shows their sent mail.
-  //   4. Publish the recipient wrap to the recipient's inbox relays
-  //      (with a fallback to the user's own inbox-relay list when the
-  //      recipient hasn't advertised any). Publish the self-wrap to
-  //      the user's own inbox relays only.
-  //   5. Persist the rumor in mail.db so the sender's UI updates
-  //      immediately, without waiting for the inbox worker to round-
-  //      trip the self-wrap back from a relay.
+  //   2. Build the RFC 2822 message — headers + plaintext body, OR
+  //      multipart/mixed with one part per attachment (inline base64
+  //      for ≤32 KiB; Blossom URL + AES-GCM metadata in
+  //      X-Nostr-Blossom-* MIME headers for larger).
+  //   3. Wrap the whole thing in a single kind-1301 rumor + NIP-59
+  //      gift wrap for the recipient, plus a self-wrap so the sender's
+  //      own inbox view sees the sent message across devices.
+  //   4. Publish the recipient wrap to the recipient's kind 10050
+  //      inbox relays (fall back to our own inbox-relays when they've
+  //      advertised none). Publish the self-wrap to our own inbox.
+  //   5. Persist the rumor in mail.db immediately so the sender's UI
+  //      updates without waiting for the self-wrap to round-trip back.
   if (pathname === '/api/mail/send' && method === 'POST') {
     let body: any;
     try { body = JSON.parse(await readBody(req)); }
@@ -470,10 +486,11 @@ export async function handleMail(
     const toInput  = typeof body?.to      === 'string' ? body.to      : '';
     const subject  = typeof body?.subject === 'string' ? body.subject : '';
     const content  = typeof body?.body    === 'string' ? body.body    : '';
-    // Each attachment is { url, sha256, mime, size, name? } — produced by
-    // /api/mail/attachment. We validate the shape but trust the values
-    // since they came back from our own Blossom put call.
-    const attachments: AttachmentRef[] = Array.isArray(body?.attachments)
+    const inReplyTo  = typeof body?.inReplyTo  === 'string' ? body.inReplyTo  : '';
+    const references = Array.isArray(body?.references)
+      ? body.references.filter((s: any): s is string => typeof s === 'string' && s.length > 0)
+      : [];
+    const attachments: AttachmentInput[] = Array.isArray(body?.attachments)
       ? body.attachments.filter(isValidAttachment)
       : [];
     if (!content.trim() && attachments.length === 0) {
@@ -489,15 +506,29 @@ export async function handleMail(
       return json(res, 500, { error: e?.message || 'resolve failed' });
     }
 
-    // Build the rumor + wrap pair via Amber.
-    const tags: string[][] = [['p', resolved.pubkey]];
-    if (subject.trim()) tags.push(['subject', subject.trim()]);
-
+    // Build the RFC 2822 payload. Sender pubkey comes from Amber so the
+    // From: header matches the rumor's signer (which the receiver will
+    // verify via the seal anyway — the header is display-only).
     const signer = new AmberSigner();
+    let senderPubkey: string;
+    try { senderPubkey = await signer.getPublicKey(); }
+    catch (e: any) { return json(res, 500, { error: `signer pubkey unavailable: ${e?.message || e}` }); }
+
+    const rfc2822 = buildMessage({
+      fromPubkey: senderPubkey,
+      toPubkey:   resolved.pubkey,
+      subject:    subject.trim(),
+      body:       content,
+      messageId:  mintMessageId(),
+      inReplyTo:  inReplyTo || undefined,
+      references: references.length > 0 ? references : undefined,
+      attachments: attachments.map(toRfc2822AttachmentSpec),
+    });
+
     let pair;
     try {
       pair = await buildGiftWrapPair(
-        { kind: KIND_DM_RUMOR, content, tags },
+        { kind: KIND_EMAIL, content: rfc2822, tags: [['p', resolved.pubkey]] },
         resolved.pubkey,
         signer,
       );
@@ -505,88 +536,39 @@ export async function handleMail(
       return json(res, 500, { error: `sign/wrap failed: ${e?.message || e}` });
     }
 
-    // Build one kind-15 rumor per attachment, wrapped for both sides
-    // (recipient + self) so the sender's UI sees them in the thread too.
-    // Each wrap is independent — they all surface as separate messages
-    // in the thread but are visually grouped by created_at.
-    const attachmentWraps: Array<{ rumor: any; recipientWrap: any; selfWrap: any }> = [];
-    try {
-      for (const a of attachments) {
-        const fileRumorTags: string[][] = [
-          ['p', resolved.pubkey],
-          ['url',  a.url],
-          ['m',    a.mime],
-          ['x',    a.sha256],
-          ['size', String(a.size)],
-        ];
-        if (a.name) fileRumorTags.push(['file', a.name]);
-        // PR 8: encryption material travels inside the rumor so only the
-        // recipient (who can decrypt the gift wrap) can recover the
-        // blob. Tag names mirror the conventions used by file-encryption
-        // discussions in the wider NIP-17 ecosystem.
-        if (a.encryptionKey && a.encryptionNonce) {
-          fileRumorTags.push(['encryption-algorithm', 'aes-256-gcm']);
-          fileRumorTags.push(['encryption-key',   a.encryptionKey]);
-          fileRumorTags.push(['encryption-nonce', a.encryptionNonce]);
-        }
-        const pairA = await buildGiftWrapPair(
-          { kind: KIND_FILE_RUMOR, content: a.name || a.url, tags: fileRumorTags },
-          resolved.pubkey,
-          signer,
-        );
-        attachmentWraps.push(pairA);
-      }
-    } catch (e: any) {
-      return json(res, 500, { error: `sign/wrap attachment failed: ${e?.message || e}` });
-    }
-
     // Publish.
     const ownInbox = readInboxRelays();
-    // Fall back to the user's own inbox list if recipient has no kind 10050.
     const recipientTargets = resolved.inboxRelays.length > 0
       ? resolved.inboxRelays
       : ownInbox;
-    const publishTasks: Array<Promise<any>> = [];
-    publishTasks.push(publishEventToRelays(pair.recipientWrap, recipientTargets));
-    publishTasks.push(publishEventToRelays(pair.selfWrap,      ownInbox));
-    for (const a of attachmentWraps) {
-      publishTasks.push(publishEventToRelays(a.recipientWrap, recipientTargets));
-      publishTasks.push(publishEventToRelays(a.selfWrap,      ownInbox));
-    }
-    const allResults = await Promise.all(publishTasks);
-    const recipientResults = allResults[0];
-    const selfResults      = allResults[1];
+    const [recipientResults, selfResults] = await Promise.all([
+      publishEventToRelays(pair.recipientWrap, recipientTargets),
+      publishEventToRelays(pair.selfWrap,      ownInbox),
+    ]);
 
-    // Persist the sender's view immediately. ownPubkey is read from
-    // identity.json; if it's missing, the rumor still goes onto the
-    // wire but won't show in the local inbox until the worker picks
-    // up the self-wrap on next connect.
+    // Persist the sender's view immediately.
     try {
       const ident = readIdentity();
       if (ident.npub) {
         const ownHex = npubToHex(ident.npub).toLowerCase();
         const store  = getMailStore();
-        // Replying to a quarantine sender implies trust — promote them
-        // to the allowlist and re-bucket any existing Requests thread
-        // before we insert the new message. acceptCounterparty is
+        // Replying implies trust — promote the recipient out of
+        // quarantine if they were there. acceptCounterparty is
         // idempotent so the call is safe even for already-trusted
         // recipients.
         if (resolved.pubkey !== ownHex && !store.isBlocklisted(resolved.pubkey)) {
           store.acceptCounterparty(resolved.pubkey);
         }
         store.insertMessage(pair.rumor, pair.selfWrap.id, ownHex);
-        for (const a of attachmentWraps) {
-          store.insertMessage(a.rumor, a.selfWrap.id, ownHex);
-        }
       }
     } catch { /* non-fatal; the worker will catch up */ }
 
     return json(res, 200, {
-      ok:          true,
-      rumorId:     pair.rumor.id,
-      recipient:   { results: recipientResults, targets: recipientTargets },
-      self:        { results: selfResults,      targets: ownInbox },
-      attachments: attachmentWraps.length,
+      ok:           true,
+      rumorId:      pair.rumor.id,
+      recipient:    { results: recipientResults, targets: recipientTargets },
+      self:         { results: selfResults,      targets: ownInbox },
+      attachments:  attachments.length,
       usedFallback: resolved.inboxRelays.length === 0,
     });
   }
