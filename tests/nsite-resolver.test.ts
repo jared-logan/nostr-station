@@ -187,6 +187,23 @@ test('resolveAddress: NSIT-resolved name is also returned as the v2 lookup hint'
   assert.equal(r.name, 'titan');
 });
 
+test('resolveAddress: gateway URL with name suffix sets display to nsite://<name>', async () => {
+  // Without this, the address bar shows just the bare npub and the user
+  // can't tell that the URL's name suffix (`nostr-station`) was actually
+  // used for v2-named lookup — they assume we threw it away.
+  const url = 'https://10vy5d0umw8izp3bcmh0btzl6k2szvsu8zestncxpsstb6l8e6nostr-station.nsite.lol/';
+  const r = await resolveAddress(url, null);
+  assert.equal(r.display, 'nsite://nostr-station');
+  assert.equal(r.name, 'nostr-station');
+});
+
+test('resolveAddress: gateway URL WITHOUT name suffix shows the npub', async () => {
+  const npubTail = NPUB.slice('npub1'.length);
+  const r = await resolveAddress(`https://${npubTail}.nsite.lol/`, null);
+  assert.equal(r.display, NPUB);
+  assert.equal(r.name, undefined);
+});
+
 test('resolveAddress: gateway URL with garbage subdomain rejected with helpful error', async () => {
   await assert.rejects(
     () => resolveAddress('https://!!!.nsite.lol/', null),
