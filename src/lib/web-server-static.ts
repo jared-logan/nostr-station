@@ -164,18 +164,49 @@ const DITTO_MIME: Record<string, string> = {
   '.map':   'application/json',
 };
 
-// Serve the bundled Ditto SPA at /ditto/* — the dashboard's Client panel
-// iframes this. Three response shapes:
+// Root-anchored paths Ditto's prebuilt bundle fetches as if served at /.
+// Vite's default `base: '/'` bakes absolute paths into index.html, into
+// CSS url() references for fonts, AND into runtime fetch() calls in
+// minified JS (the changelog page hits /CHANGELOG.md; the splash screen
+// hits /logo.svg). Patching the bundle would only catch the static
+// references, so we alias these at the server instead — they resolve
+// to dist/ditto/<file> regardless of whether the request originated
+// from /ditto/ or anywhere else with these paths.
 //
-//   - Real file (e.g. /ditto/assets/index-abc.js) → served as-is with
-//     the appropriate MIME + long-lived cache (Ditto fingerprints
-//     asset filenames, so they're safe to cache aggressively).
-//   - Unmatched no-extension path (e.g. /ditto/notifications) → SPA
-//     fallback, serves index.html. Per Ditto's docs: "Make sure your
-//     web server serves index.html for all routes."
-//   - Ditto not bundled (fetch-ditto skipped or failed at build) →
-//     404 JSON with { error: 'ditto-not-bundled' } so the dashboard's
-//     Client panel can detect the state and surface a clear message.
+// /assets/* covers JS chunks, CSS, fonts (all of the asset volume).
+// The named root files are everything else Ditto's bundle reaches for
+// that isn't under /assets/. None of these names overlap with the
+// dashboard's own static tree (dist/web/ — index.html, app.js, app.css,
+// nori.svg, etc.), so the alias is unambiguous.
+const DITTO_ROOT_FILES = new Set([
+  '/logo.svg',
+  '/apple-touch-icon.png',
+  '/manifest.webmanifest',
+  '/ditto.json',
+  '/CHANGELOG.md',
+  '/404.html',
+]);
+
+// Serve the bundled Ditto SPA. Two URL shapes:
+//
+//   - /ditto/* — the iframe's own URL space. /ditto/ → index.html;
+//     subpaths → real files when present, SPA-fallback to index.html
+//     for client-router routes (per Ditto's docs).
+//   - /assets/* + the DITTO_ROOT_FILES allowlist — root-anchored
+//     fetches from inside the iframe. Aliased to dist/ditto/<rest>
+//     so the bundle works without rebuilding it with base: '/ditto/'.
+//
+// Responses:
+//   - File present → served with the appropriate MIME + a long-lived
+//     cache for fingerprinted assets, no-cache for HTML.
+//   - /ditto/* miss with an extension → 404 (real missing-asset signal).
+//   - /ditto/* miss without an extension → SPA fallback to index.html.
+//   - Root-aliased miss → fall through to serveStatic (return false) so
+//     the regular static handler can 404 cleanly.
+//   - Ditto not bundled, /ditto entry → 404 JSON with
+//     { error: 'ditto-not-bundled' } so the Client panel detects the
+//     state and surfaces a clear message. Root-aliased requests in
+//     this state just fall through.
 //
 // Deliberately does NOT apply HTML_SECURITY_HEADERS. Ditto's SPA bundle
 // expects its own CSP context (inline scripts, eval-ish code paths in
@@ -183,10 +214,16 @@ const DITTO_MIME: Record<string, string> = {
 // hosting + the dashboard's `frame-src 'self'` are what gate access.
 export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const urlPath = (req.url || '/').split('?')[0];
-  if (urlPath !== '/ditto' && !urlPath.startsWith('/ditto/')) return false;
+  const isPrefixed   = urlPath === '/ditto' || urlPath.startsWith('/ditto/');
+  const isRootAlias  = urlPath.startsWith('/assets/') || DITTO_ROOT_FILES.has(urlPath);
+  if (!isPrefixed && !isRootAlias) return false;
 
   const dir = dittoDir();
   if (!dir) {
+    // Only the /ditto entry point reports the not-bundled state to the
+    // panel — root-aliased misses fall through to serveStatic, which
+    // 404s like any other missing asset.
+    if (!isPrefixed) return false;
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       error: 'ditto-not-bundled',
@@ -195,10 +232,17 @@ export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse):
     return true;
   }
 
-  // Strip the /ditto prefix; root request → index.html.
-  let rel = (urlPath === '/ditto' || urlPath === '/ditto/')
-    ? '/index.html'
-    : urlPath.slice('/ditto'.length);
+  // Resolve to a relative path inside dist/ditto/. For /ditto/* strip
+  // the prefix; for root-aliased paths the URL already points at the
+  // file's location inside the bundle (e.g. /assets/foo.js → assets/foo.js).
+  let rel: string;
+  if (isPrefixed) {
+    rel = (urlPath === '/ditto' || urlPath === '/ditto/')
+      ? '/index.html'
+      : urlPath.slice('/ditto'.length);
+  } else {
+    rel = urlPath;
+  }
   // Defence in depth — block .. traversal back out of DITTO_DIR.
   const resolved = path.resolve(dir, '.' + rel);
   if (!resolved.startsWith(dir)) {
@@ -208,6 +252,10 @@ export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse):
   let target = resolved;
   let isSpaFallback = false;
   if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+    // Root-aliased miss → not our problem. Fall through so the regular
+    // static handler can 404. SPA fallback only makes sense for the
+    // /ditto/* URL space (client-side router navigation).
+    if (!isPrefixed) return false;
     // SPA fallback: any path without a file extension → index.html.
     // Paths WITH an extension that aren't on disk → real 404 (otherwise
     // missing assets silently get HTML, which masks bugs).
