@@ -122,6 +122,135 @@ export function serveVendorXterm(req: http.IncomingMessage, res: http.ServerResp
   return true;
 }
 
+// Lazy-resolve the bundled Ditto dist directory. fetch-ditto.mjs writes
+// to <repo-root>/dist/ditto/ at `npm run build` time; in prod that's a
+// sibling of dist/lib, in dev (tsx) it's two levels up from src/lib.
+// Resolved per-request rather than at module load so a runtime
+// `npm run update-ditto` is picked up without restarting the dashboard.
+const DITTO_DIR_CANDIDATES = [
+  path.resolve(here, '..', 'ditto'),
+  path.resolve(here, '..', '..', 'dist', 'ditto'),
+];
+function dittoDir(): string | null {
+  for (const d of DITTO_DIR_CANDIDATES) {
+    try { if (fs.statSync(d).isDirectory()) return d; } catch {}
+  }
+  return null;
+}
+
+// Extended MIME map for Ditto's static assets — fonts, manifests,
+// images Ditto ships that the dashboard's narrow MIME map doesn't
+// cover. Keeps Ditto's bundle self-consistent.
+const DITTO_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.mjs':  'application/javascript; charset=utf-8',
+  '.json': 'application/json',
+  '.webmanifest': 'application/manifest+json',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.webp': 'image/webp',
+  '.ico':  'image/x-icon',
+  '.woff':  'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf':   'font/ttf',
+  '.otf':   'font/otf',
+  '.txt':   'text/plain; charset=utf-8',
+  '.md':    'text/markdown; charset=utf-8',
+  '.map':   'application/json',
+};
+
+// Serve the bundled Ditto SPA at /ditto/* — the dashboard's Client panel
+// iframes this. Three response shapes:
+//
+//   - Real file (e.g. /ditto/assets/index-abc.js) → served as-is with
+//     the appropriate MIME + long-lived cache (Ditto fingerprints
+//     asset filenames, so they're safe to cache aggressively).
+//   - Unmatched no-extension path (e.g. /ditto/notifications) → SPA
+//     fallback, serves index.html. Per Ditto's docs: "Make sure your
+//     web server serves index.html for all routes."
+//   - Ditto not bundled (fetch-ditto skipped or failed at build) →
+//     404 JSON with { error: 'ditto-not-bundled' } so the dashboard's
+//     Client panel can detect the state and surface a clear message.
+//
+// Deliberately does NOT apply HTML_SECURITY_HEADERS. Ditto's SPA bundle
+// expects its own CSP context (inline scripts, eval-ish code paths in
+// some bundlers) and our restrictive policy would break it. Same-origin
+// hosting + the dashboard's `frame-src 'self'` are what gate access.
+export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  const urlPath = (req.url || '/').split('?')[0];
+  if (urlPath !== '/ditto' && !urlPath.startsWith('/ditto/')) return false;
+
+  const dir = dittoDir();
+  if (!dir) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: 'ditto-not-bundled',
+      hint:  'run `npm run build` (or `npm run update-ditto`) to fetch the Ditto bundle.',
+    }));
+    return true;
+  }
+
+  // Strip the /ditto prefix; root request → index.html.
+  let rel = (urlPath === '/ditto' || urlPath === '/ditto/')
+    ? '/index.html'
+    : urlPath.slice('/ditto'.length);
+  // Defence in depth — block .. traversal back out of DITTO_DIR.
+  const resolved = path.resolve(dir, '.' + rel);
+  if (!resolved.startsWith(dir)) {
+    res.writeHead(403); res.end(); return true;
+  }
+
+  let target = resolved;
+  let isSpaFallback = false;
+  if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+    // SPA fallback: any path without a file extension → index.html.
+    // Paths WITH an extension that aren't on disk → real 404 (otherwise
+    // missing assets silently get HTML, which masks bugs).
+    const ext = path.extname(rel);
+    if (ext) {
+      res.writeHead(404); res.end('not found'); return true;
+    }
+    target = path.join(dir, 'index.html');
+    if (!fs.existsSync(target)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'ditto-not-bundled' }));
+      return true;
+    }
+    isSpaFallback = true;
+  }
+
+  const ext = path.extname(target).toLowerCase();
+  const mime = DITTO_MIME[ext] ?? 'application/octet-stream';
+  const headers: Record<string, string> = {
+    'Content-Type': mime,
+    // Fingerprinted assets in /ditto/assets/* are safe to cache forever.
+    // index.html (and the SPA fallback) stays no-cache so app-shell
+    // updates land on the next reload after `npm run update-ditto`.
+    'Cache-Control': (ext === '.html' || isSpaFallback)
+      ? 'no-cache'
+      : 'public, max-age=86400',
+  };
+  // HEAD responses get headers + Content-Length but no body. The Client
+  // panel's bundle-presence probe uses HEAD; without this branch the
+  // probe falls through to a 404 default and the panel falsely shows
+  // the "Ditto not installed" state even when the bundle is there.
+  const method = (req.method || 'GET').toUpperCase();
+  if (method === 'HEAD') {
+    try { headers['Content-Length'] = String(fs.statSync(target).size); } catch {}
+    res.writeHead(200, headers);
+    res.end();
+    return true;
+  }
+  res.writeHead(200, headers);
+  fs.createReadStream(target).pipe(res);
+  return true;
+}
+
 export function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const urlPath = (req.url || '/').split('?')[0];
   const rel = urlPath === '/' ? '/index.html' : urlPath;
