@@ -579,14 +579,38 @@
                   title="nsite content"></iframe>
           <div class="nsite-empty" id="nsite-empty">
             <div class="nsite-empty-title">Enter an nsite address to browse</div>
-            <div class="muted" style="max-width:560px;text-align:center;line-height:1.5">
+            <div class="muted nsite-empty-intro">
               Accepts <code>npub1…</code>, a NIP-05 identifier like <code>user@host</code>,
-              an <code>nsite://&lt;npub&gt;</code> URI, or a registered NSIT name
-              (requires a configured name indexer).
-              <br>
-              Content is fetched from the author's Blossom servers via Nostr relays,
-              with every byte verified against its on-relay SHA256. The render frame
-              runs in a sandboxed origin with no access to the station.
+              an <code>nsite://&lt;npub&gt;</code> URI, a registered NSIT name like
+              <code>nsite://titan</code>, or a pasted gateway URL
+              (<code>https://&lt;npub&gt;.nsite.lol/…</code>).
+            </div>
+            <div class="nsite-empty-card">
+              <div class="nsite-empty-card-title">How this panel uses relays</div>
+              <ul class="nsite-relay-model">
+                <li>
+                  <span class="nsite-relay-step">Name lookup</span>
+                  <span class="muted">→ a fixed set of NSIT indexer relays
+                  (<code>purplepag.es</code>, <code>user.kindpag.es</code>, …).
+                  Independent of your read relays.</span>
+                </li>
+                <li>
+                  <span class="nsite-relay-step">File index + Blossom list</span>
+                  <span class="muted">→ your read relays from
+                  <a href="#config">Config</a>, unioned with the author's
+                  own NIP-65 outbox relays so their events are reachable
+                  even when they publish to relays you don't subscribe to.</span>
+                </li>
+                <li>
+                  <span class="nsite-relay-step">Blob bytes</span>
+                  <span class="muted">→ the author's announced Blossom
+                  servers, falling back to a public pool (no relay
+                  involvement). SHA256-verified before render.</span>
+                </li>
+              </ul>
+              <div class="muted nsite-empty-foot">
+                Render frame runs in a sandboxed opaque origin with no access to the station.
+              </div>
             </div>
           </div>
         </div>

@@ -34,6 +34,7 @@ import { readBody } from './_shared.js';
 import { getEffectiveReadRelays } from '../identity.js';
 import {
   resolveAddress, fetchSiteIndex, fetchBlossomServers, fetchBlob,
+  fetchAuthorOutboxRelays, unionRelays,
   normalizePath, mimeForPath,
   DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
   DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
@@ -155,13 +156,21 @@ export async function handleNsite(
     if (!addr) { json(res, 400, { error: 'addr required' }); return true; }
     const { nsitConfig } = getSettings();
     try {
-      const relays = pickRelays();
+      const ownerRelays = pickRelays();
       const resolved = await resolveAddress(addr, nsitConfig);
-      // Run index + server list in parallel — they're independent relay
-      // queries against the same set of relays.
+      // NIP-65 outbox discovery: query the owner's read relays for the
+      // author's kind:10002, then union those outbox URLs with the owner's
+      // own read set. This is what makes "browse anyone's nsite" reliable
+      // — without it, an author who publishes exclusively to a relay the
+      // station owner doesn't subscribe to would surface as "no kind:34128
+      // events found" even though the nsite is fine.
+      const authorOutbox = await fetchAuthorOutboxRelays(resolved.pubkey, ownerRelays)
+        .catch(() => [] as string[]);
+      const contentRelays = unionRelays(ownerRelays, authorOutbox);
+      // Run index + server list in parallel against the unioned set.
       const [index, blossomServers] = await Promise.all([
-        fetchSiteIndex(resolved.pubkey, relays),
-        fetchBlossomServers(resolved.pubkey, relays),
+        fetchSiteIndex(resolved.pubkey, contentRelays),
+        fetchBlossomServers(resolved.pubkey, contentRelays),
       ]);
       gcSites();
       const id = shortId();
@@ -180,7 +189,12 @@ export async function handleNsite(
         fileCount: index.files.size,
         latestAt: index.latestAt,
         blossomServers,
-        relaysQueried: relays,
+        relays: {
+          owner:        ownerRelays,
+          authorOutbox: authorOutbox,
+          queried:      contentRelays,
+          nsitIndexer:  nsitConfig?.relays ?? [],
+        },
         entry: pickEntryPath(index),
       });
     } catch (e: any) {
