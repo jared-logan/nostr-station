@@ -75,10 +75,79 @@ export async function handleMail(
   const pathname = parsed.pathname;
 
   // ── GET /api/mail/inbox ────────────────────────────────────────────────
+  // Defaults to bucket=inbox so the existing UI keeps working. Passing
+  // ?bucket=quarantine returns the Requests bucket; passing ?bucket=all
+  // returns every thread regardless of bucket (used by callers that
+  // pre-date PR 7's spam protection).
   if (pathname === '/api/mail/inbox' && method === 'GET') {
-    const store    = getMailStore();
-    const threads  = store.threadSummaries();
-    return json(res, 200, { threads });
+    const store     = getMailStore();
+    const bucketIn  = (parsed.searchParams.get('bucket') || 'inbox').toLowerCase();
+    const threads   = bucketIn === 'all'
+      ? store.threadSummaries()
+      : store.threadSummaries(bucketIn === 'quarantine' ? 'quarantine' : 'inbox');
+    return json(res, 200, { threads, bucket: bucketIn });
+  }
+
+  // ── GET /api/mail/requests ─────────────────────────────────────────────
+  // Convenience alias for the Requests tab. Equivalent to
+  // /api/mail/inbox?bucket=quarantine.
+  if (pathname === '/api/mail/requests' && method === 'GET') {
+    return json(res, 200, {
+      threads: getMailStore().threadSummaries('quarantine'),
+      bucket:  'quarantine',
+    });
+  }
+
+  // ── GET /api/mail/lists ────────────────────────────────────────────────
+  // Read the current allowlist + blocklist. Drives the Blocked tab's
+  // UI and lets the user audit which senders they've explicitly accepted.
+  if (pathname === '/api/mail/lists' && method === 'GET') {
+    const store = getMailStore();
+    return json(res, 200, {
+      allowlist: store.allowlist(),
+      blocklist: store.blocklist(),
+    });
+  }
+
+  // ── POST /api/mail/accept ──────────────────────────────────────────────
+  // Move a counterparty's quarantined thread to the inbox + add them to
+  // the allowlist so future mail lands directly in inbox.
+  if (pathname === '/api/mail/accept' && method === 'POST') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+    const pubkey = typeof body?.pubkey === 'string' ? body.pubkey.toLowerCase() : '';
+    if (!isHex64(pubkey)) return json(res, 400, { error: 'pubkey must be 64-char hex' });
+    const r = getMailStore().acceptCounterparty(pubkey);
+    return json(res, 200, { ok: true, ...r });
+  }
+
+  // ── POST /api/mail/block ───────────────────────────────────────────────
+  // Block a counterparty: blocklist + delete every message we already
+  // have from them. The inbox worker drops future wraps before they
+  // ever land in the store.
+  if (pathname === '/api/mail/block' && method === 'POST') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+    const pubkey = typeof body?.pubkey === 'string' ? body.pubkey.toLowerCase() : '';
+    if (!isHex64(pubkey)) return json(res, 400, { error: 'pubkey must be 64-char hex' });
+    const r = getMailStore().blockCounterparty(pubkey);
+    return json(res, 200, { ok: true, ...r });
+  }
+
+  // ── POST /api/mail/unblock ─────────────────────────────────────────────
+  // Remove from blocklist. Doesn't restore deleted history — once blocked,
+  // history is gone — but future mail from this pubkey will go through
+  // the normal bucket-decision path.
+  if (pathname === '/api/mail/unblock' && method === 'POST') {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: 'bad json' }); }
+    const pubkey = typeof body?.pubkey === 'string' ? body.pubkey.toLowerCase() : '';
+    if (!isHex64(pubkey)) return json(res, 400, { error: 'pubkey must be 64-char hex' });
+    getMailStore().unblockCounterparty(pubkey);
+    return json(res, 200, { ok: true });
   }
 
   // ── GET /api/mail/thread?counterparty=hex ──────────────────────────────
@@ -383,6 +452,14 @@ export async function handleMail(
       if (ident.npub) {
         const ownHex = npubToHex(ident.npub).toLowerCase();
         const store  = getMailStore();
+        // Replying to a quarantine sender implies trust — promote them
+        // to the allowlist and re-bucket any existing Requests thread
+        // before we insert the new message. acceptCounterparty is
+        // idempotent so the call is safe even for already-trusted
+        // recipients.
+        if (resolved.pubkey !== ownHex && !store.isBlocklisted(resolved.pubkey)) {
+          store.acceptCounterparty(resolved.pubkey);
+        }
         store.insertMessage(pair.rumor, pair.selfWrap.id, ownHex);
         for (const a of attachmentWraps) {
           store.insertMessage(a.rumor, a.selfWrap.id, ownHex);

@@ -25,6 +25,7 @@ import { AmberSigner } from './signer.js';
 import { unwrapGift } from './wrap.js';
 import { getMailStore } from './store.js';
 import { readInboxRelays } from './inbox-relays.js';
+import { isContact } from './contacts.js';
 import { KIND_GIFT_WRAP, type NostrEvent } from './types.js';
 
 interface RelayState {
@@ -239,10 +240,31 @@ export class InboxWorker extends EventEmitter {
 
     try {
       const { rumor } = await unwrapGift(ev, this.signer);
-      store.insertMessage(rumor, ev.id, this.ownerPubkey);
+      const sender = rumor.pubkey.toLowerCase();
+
+      // Spam-filter decision (PR 7):
+      //   - Blocklisted sender → drop entirely. Mark the wrap seen so
+      //     we don't re-decrypt on relay re-delivery, but never put it
+      //     in the store.
+      //   - Outgoing (we authored it) → inbox; bucket inference inside
+      //     insertMessage overrides anything we pass anyway.
+      //   - Allowlisted OR in NIP-02 contacts → inbox.
+      //   - Anyone else → quarantine. The user can promote/block from
+      //     the Requests tab.
+      if (store.isBlocklisted(sender)) {
+        store.markSeenWrap(ev.id);
+        this.stats.decryptedOk++;
+        return;
+      }
+      let bucket: 'inbox' | 'quarantine' = 'inbox';
+      if (sender !== this.ownerPubkey) {
+        const trusted = store.isAllowlisted(sender) || await isContact(sender);
+        bucket = trusted ? 'inbox' : 'quarantine';
+      }
+      const inserted = store.insertMessage(rumor, ev.id, this.ownerPubkey, bucket);
       store.markSeenWrap(ev.id);
       this.stats.decryptedOk++;
-      this.emit('mail-received', { rumorId: rumor.id });
+      if (inserted) this.emit('mail-received', { rumorId: rumor.id, bucket: inserted.direction === 'out' ? 'inbox' : bucket });
     } catch (e: any) {
       // Decrypt failures are noisy at the protocol layer — spam wraps,
       // not-for-us misroutes, NIP-44 v1 wraps we can't handle. We

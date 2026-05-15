@@ -8941,3 +8941,60 @@ a.client-mention {
 .mail-msg-fileMeta   { display: flex; flex-direction: column; gap: 2px; }
 .mail-msg-fileName   { font-weight: 500; color: var(--text-bright); font-size: 13px; }
 .mail-msg-fileSub    { font-size: 11px; color: var(--muted); }
+
+/* ── Mail · bucket tabs (PR 7) ───────────────────────────────────────── */
+.mail-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  width: fit-content;
+}
+.mail-tab {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mail-tab:hover { color: var(--text-bright); }
+.mail-tab.active {
+  background: var(--accent-soft);
+  color: var(--text-bright);
+}
+.mail-tab-badge {
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  line-height: 1.4;
+}
+
+/* Per-thread accept/block/unblock actions */
+.mail-thread-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.mail-thread-actions button {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+.mail-thread-accept {
+  background: var(--accent-soft);
+  color: var(--text-bright);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.mail-block-row {
+  cursor: default;
+}
