@@ -17350,7 +17350,34 @@ const MailPanel = (() => {
       const side  = m.direction === 'out' ? ' mail-msg-out' : ' mail-msg-in';
       const at    = new Date(m.created_at * 1000).toLocaleString();
       const subj  = m.subject ? `<div class="mail-msg-subj">${escapeHtml(m.subject)}</div>` : '';
-      const body  = renderMarkdown
+
+      // kind 15 = file message. Render as a file chip with link + size +
+      // sha256 fingerprint. The chip is clickable; opens in a new tab.
+      if (m.kind === 15) {
+        const url   = m.tags.find(t => t[0] === 'url')?.[1]  || '';
+        const mime  = m.tags.find(t => t[0] === 'm')?.[1]    || 'application/octet-stream';
+        const sha   = m.tags.find(t => t[0] === 'x')?.[1]    || '';
+        const size  = Number(m.tags.find(t => t[0] === 'size')?.[1] || 0);
+        const name  = m.tags.find(t => t[0] === 'file')?.[1] || (m.body || '').slice(0, 80);
+        const sizeStr = size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MiB`
+                       : size > 1024       ? `${(size / 1024).toFixed(1)} KiB`
+                       : `${size} B`;
+        return `<div class="mail-msg${side} mail-msg-file">
+          <div class="mail-msg-meta">
+            <span class="mail-msg-who">${m.direction === 'out' ? 'You' : escapeHtml(npubShort(activeCounter))}</span>
+            <span class="mail-msg-at">${escapeHtml(at)}</span>
+          </div>
+          <a class="mail-msg-fileChip" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">
+            <span class="mail-att-icon">📎</span>
+            <div class="mail-msg-fileMeta">
+              <div class="mail-msg-fileName">${escapeHtml(name || sha.slice(0, 12))}</div>
+              <div class="mail-msg-fileSub">${escapeHtml(mime)} · ${escapeHtml(sizeStr)}</div>
+            </div>
+          </a>
+        </div>`;
+      }
+
+      const body = renderMarkdown
         ? renderMarkdown(String(m.body || ''))
         : escapeHtml(String(m.body || ''));
       return `<div class="mail-msg${side}">
@@ -17421,6 +17448,17 @@ const MailPanel = (() => {
         <textarea id="mail-compose-body" rows="10"
                   placeholder="Plain text. Markdown renders on receipt."></textarea>
       </div>
+      <div class="mail-compose-field">
+        <label>attachments</label>
+        <div class="mail-compose-attachments" id="mail-compose-attachments"></div>
+        <div class="mail-compose-attach-bar">
+          <input type="file" id="mail-compose-file" multiple style="display:none">
+          <button type="button" id="mail-compose-attach-btn">+ add file</button>
+          <span class="mail-compose-attach-hint">
+            Files go through your Blossom server. URL is encrypted inside the message.
+          </span>
+        </div>
+      </div>
     `;
     const foot = document.createElement('div');
     foot.style.display = 'flex'; foot.style.gap = '8px'; foot.style.width = '100%';
@@ -17440,6 +17478,76 @@ const MailPanel = (() => {
     const subjEl = body.querySelector('#mail-compose-subject');
     const bodyEl = body.querySelector('#mail-compose-body');
     const hintEl = body.querySelector('#mail-compose-tohint');
+    const attEl  = body.querySelector('#mail-compose-attachments');
+    const fileEl = body.querySelector('#mail-compose-file');
+    const attBtn = body.querySelector('#mail-compose-attach-btn');
+
+    // Pending attachments: array of { url, sha256, mime, size, name }.
+    // Each is uploaded to /api/mail/attachment as the user picks files;
+    // on send, the array is included in the POST body.
+    const attachments = [];
+
+    function fmtBytes(n) {
+      if (n < 1024)        return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+      return `${(n / 1024 / 1024).toFixed(1)} MiB`;
+    }
+    function renderAttachments() {
+      if (!attEl) return;
+      if (attachments.length === 0) {
+        attEl.innerHTML = `<div class="mail-compose-attach-empty">No attachments yet.</div>`;
+        return;
+      }
+      attEl.innerHTML = attachments.map((a, i) => `
+        <div class="mail-att-chip" data-i="${i}">
+          <span class="mail-att-icon">📎</span>
+          <span class="mail-att-name">${escapeHtml(a.name || a.sha256.slice(0, 12))}</span>
+          <span class="mail-att-size">${escapeHtml(fmtBytes(a.size))}</span>
+          <button class="mail-att-remove" data-i="${i}" aria-label="remove attachment">×</button>
+        </div>`).join('');
+      for (const btn of $$('.mail-att-remove', attEl)) {
+        btn.addEventListener('click', () => {
+          const i = Number(btn.getAttribute('data-i'));
+          attachments.splice(i, 1);
+          renderAttachments();
+        });
+      }
+    }
+    renderAttachments();
+
+    attBtn?.addEventListener('click', () => fileEl.click());
+    fileEl?.addEventListener('change', async () => {
+      const files = Array.from(fileEl.files || []);
+      fileEl.value = '';  // reset so picking the same file twice still fires change
+      for (const f of files) {
+        try {
+          attBtn.disabled = true;
+          attBtn.textContent = `uploading ${f.name}…`;
+          const r = await api(
+            `/api/mail/attachment?mime=${encodeURIComponent(f.type || 'application/octet-stream')}&name=${encodeURIComponent(f.name)}`,
+            { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream' }, body: f },
+          );
+          attachments.push({
+            url:    r.url,
+            sha256: r.sha256,
+            mime:   r.mime,
+            size:   r.size,
+            name:   r.name || f.name,
+          });
+          renderAttachments();
+        } catch (e) {
+          // api() already toasted with the HTTP status — surface a hint
+          // for the common case (Blossom not running).
+          const msg = e?.message || String(e);
+          if (/409/.test(msg)) {
+            toast('Blossom is off', 'Enable the in-process Blossom server in Config → Blossom to attach files.', 'warn');
+          }
+        } finally {
+          attBtn.disabled = false;
+          attBtn.textContent = '+ add file';
+        }
+      }
+    });
 
     if (prefill) {
       // When replying we pre-fill `to` with the counterparty's npub-ish
@@ -17491,15 +17599,18 @@ const MailPanel = (() => {
       const to   = toEl.value.trim();
       const subj = subjEl.value.trim();
       const msg  = bodyEl.value;
-      if (!to)         { toast('Missing recipient', 'Enter an npub, hex pubkey, or NIP-05 address.', 'warn'); return; }
-      if (!msg.trim()) { toast('Empty message', 'Write something to send.', 'warn'); return; }
+      if (!to) { toast('Missing recipient', 'Enter an npub, hex pubkey, or NIP-05 address.', 'warn'); return; }
+      if (!msg.trim() && attachments.length === 0) {
+        toast('Empty message', 'Write something or attach a file.', 'warn');
+        return;
+      }
 
       send.disabled = true; send.textContent = 'sending…';
       try {
         const r = await api('/api/mail/send', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ to, subject: subj, body: msg }),
+          body:    JSON.stringify({ to, subject: subj, body: msg, attachments }),
         });
         const okRecipients = (r.recipient?.results || []).filter(x => x.ok).length;
         const totalRecipients = (r.recipient?.results || []).length;

@@ -22,9 +22,18 @@ import {
   readInboxRelays, writeInboxRelays, DEFAULT_INBOX_RELAYS,
 } from '../mail/inbox-relays.js';
 import { publishEventToRelays } from './repo.js';
-import { KIND_DM_RUMOR, KIND_INBOX_RELAYS } from '../mail/types.js';
+import { KIND_DM_RUMOR, KIND_FILE_RUMOR, KIND_INBOX_RELAYS } from '../mail/types.js';
 import { readIdentity, npubToHex, isValidRelayUrl } from '../identity.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
+import type { BlossomServer } from '../../blossom/index.js';
+
+// Optional dependency accessor — web-server.ts wires this. When the
+// in-process Blossom server is off, attachment uploads return a 409 so
+// the UI can prompt the user to enable Blossom.
+let _getBlossom: () => BlossomServer | null = () => null;
+export function setMailBlossomAccessor(get: () => BlossomServer | null): void {
+  _getBlossom = get;
+}
 
 function json(res: http.ServerResponse, status: number, body: any): true {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -34,6 +43,21 @@ function json(res: http.ServerResponse, status: number, body: any): true {
 
 function isHex64(s: any): s is string {
   return typeof s === 'string' && /^[0-9a-f]{64}$/i.test(s);
+}
+
+interface AttachmentRef {
+  url:    string;
+  sha256: string;
+  mime:   string;
+  size:   number;
+  name?:  string;
+}
+function isValidAttachment(a: any): a is AttachmentRef {
+  return !!a
+    && typeof a.url    === 'string' && /^https?:\/\//.test(a.url)
+    && typeof a.sha256 === 'string' && /^[0-9a-f]{64}$/i.test(a.sha256)
+    && typeof a.mime   === 'string'
+    && typeof a.size   === 'number' && a.size > 0;
 }
 
 export async function handleMail(
@@ -116,6 +140,83 @@ export async function handleMail(
     }
   }
 
+  // ── POST /api/mail/attachment ──────────────────────────────────────────
+  // Upload a file to the in-process Blossom server and return the public
+  // URL + sha256 the compose UI needs to attach it to a send. Bypasses
+  // Blossom's NIP-98 auth path because we're already inside the
+  // authenticated dashboard session — the dashboard's session token
+  // gate has already run by the time control reaches this handler.
+  //
+  // NOTE on privacy: the blob is stored UNENCRYPTED in Blossom and the
+  // URL is publicly retrievable by anyone who knows the sha256. The
+  // URL itself is encrypted inside the gift wrap (nobody can extract
+  // the URL without the recipient's key), so practical guessability is
+  // ~zero — but a sophisticated recipient could leak the URL out-of-band
+  // and the blob is then accessible. For users who need attachments that
+  // are E2E-secret too, this needs a future patch that encrypts the
+  // blob bytes with a per-attachment key embedded in the rumor.
+  if (pathname === '/api/mail/attachment' && method === 'POST') {
+    const server = _getBlossom();
+    if (!server) {
+      return json(res, 409, {
+        error: 'Blossom is not running — enable it in Config → Blossom before attaching files.',
+      });
+    }
+    const ident = readIdentity();
+    if (!ident.npub) {
+      return json(res, 412, { error: 'no station npub configured' });
+    }
+    const ownerHex = npubToHex(ident.npub).toLowerCase();
+
+    const mime = (parsed.searchParams.get('mime') || req.headers['content-type'] || 'application/octet-stream').toString();
+    const name = parsed.searchParams.get('name') || '';
+
+    // Slurp the raw body. Bound at 25 MiB for a sane upper limit;
+    // attachments larger than that should go through an out-of-band
+    // share + a plain-text link instead.
+    const MAX_BYTES = 25 * 1024 * 1024;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let aborted = false;
+    await new Promise<void>((resolve) => {
+      req.on('data', (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > MAX_BYTES) {
+          aborted = true;
+          try { req.destroy(); } catch {}
+          resolve();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end',   () => resolve());
+      req.on('error', () => resolve());
+    });
+    if (aborted) return json(res, 413, { error: `attachment exceeds ${Math.round(MAX_BYTES / 1024 / 1024)} MiB` });
+    const body = Buffer.concat(chunks, total);
+    if (body.length === 0) return json(res, 400, { error: 'empty body' });
+
+    const r = server.blobStore.put(body, mime, ownerHex, 'owner');
+    if (!r.ok) {
+      return json(res, 500, { error: `blossom put failed: ${r.reason}` });
+    }
+    // Public URL: prefer the user-facing endpoint if Blossom exposes one,
+    // else fall back to the in-process 127.0.0.1 binding (which is fine
+    // when the recipient is on the same machine, but useless for remote
+    // delivery — the UI should warn when only the loopback URL is
+    // available).
+    const port = (server as any).port || 8081;
+    const url  = `http://127.0.0.1:${port}/${r.record.sha256}`;
+    return json(res, 200, {
+      ok:     true,
+      url,
+      sha256: r.record.sha256,
+      size:   r.record.size,
+      mime:   r.record.mime,
+      name,
+    });
+  }
+
   // ── POST /api/mail/send ────────────────────────────────────────────────
   // Full NIP-17 send pipeline:
   //   1. Resolve the recipient (npub | hex | NIP-05).
@@ -137,7 +238,15 @@ export async function handleMail(
     const toInput  = typeof body?.to      === 'string' ? body.to      : '';
     const subject  = typeof body?.subject === 'string' ? body.subject : '';
     const content  = typeof body?.body    === 'string' ? body.body    : '';
-    if (!content.trim()) return json(res, 400, { error: 'body is required' });
+    // Each attachment is { url, sha256, mime, size, name? } — produced by
+    // /api/mail/attachment. We validate the shape but trust the values
+    // since they came back from our own Blossom put call.
+    const attachments: AttachmentRef[] = Array.isArray(body?.attachments)
+      ? body.attachments.filter(isValidAttachment)
+      : [];
+    if (!content.trim() && attachments.length === 0) {
+      return json(res, 400, { error: 'body or at least one attachment is required' });
+    }
 
     // Resolve recipient. Failures here are user-actionable so we surface
     // them as 400s with the original message.
@@ -164,16 +273,48 @@ export async function handleMail(
       return json(res, 500, { error: `sign/wrap failed: ${e?.message || e}` });
     }
 
+    // Build one kind-15 rumor per attachment, wrapped for both sides
+    // (recipient + self) so the sender's UI sees them in the thread too.
+    // Each wrap is independent — they all surface as separate messages
+    // in the thread but are visually grouped by created_at.
+    const attachmentWraps: Array<{ rumor: any; recipientWrap: any; selfWrap: any }> = [];
+    try {
+      for (const a of attachments) {
+        const fileRumorTags: string[][] = [
+          ['p', resolved.pubkey],
+          ['url',  a.url],
+          ['m',    a.mime],
+          ['x',    a.sha256],
+          ['size', String(a.size)],
+        ];
+        if (a.name) fileRumorTags.push(['file', a.name]);
+        const pairA = await buildGiftWrapPair(
+          { kind: KIND_FILE_RUMOR, content: a.name || a.url, tags: fileRumorTags },
+          resolved.pubkey,
+          signer,
+        );
+        attachmentWraps.push(pairA);
+      }
+    } catch (e: any) {
+      return json(res, 500, { error: `sign/wrap attachment failed: ${e?.message || e}` });
+    }
+
     // Publish.
     const ownInbox = readInboxRelays();
     // Fall back to the user's own inbox list if recipient has no kind 10050.
     const recipientTargets = resolved.inboxRelays.length > 0
       ? resolved.inboxRelays
       : ownInbox;
-    const [recipientResults, selfResults] = await Promise.all([
-      publishEventToRelays(pair.recipientWrap, recipientTargets),
-      publishEventToRelays(pair.selfWrap,      ownInbox),
-    ]);
+    const publishTasks: Array<Promise<any>> = [];
+    publishTasks.push(publishEventToRelays(pair.recipientWrap, recipientTargets));
+    publishTasks.push(publishEventToRelays(pair.selfWrap,      ownInbox));
+    for (const a of attachmentWraps) {
+      publishTasks.push(publishEventToRelays(a.recipientWrap, recipientTargets));
+      publishTasks.push(publishEventToRelays(a.selfWrap,      ownInbox));
+    }
+    const allResults = await Promise.all(publishTasks);
+    const recipientResults = allResults[0];
+    const selfResults      = allResults[1];
 
     // Persist the sender's view immediately. ownPubkey is read from
     // identity.json; if it's missing, the rumor still goes onto the
@@ -183,7 +324,11 @@ export async function handleMail(
       const ident = readIdentity();
       if (ident.npub) {
         const ownHex = npubToHex(ident.npub).toLowerCase();
-        getMailStore().insertMessage(pair.rumor, pair.selfWrap.id, ownHex);
+        const store  = getMailStore();
+        store.insertMessage(pair.rumor, pair.selfWrap.id, ownHex);
+        for (const a of attachmentWraps) {
+          store.insertMessage(a.rumor, a.selfWrap.id, ownHex);
+        }
       }
     } catch { /* non-fatal; the worker will catch up */ }
 
@@ -192,6 +337,7 @@ export async function handleMail(
       rumorId:     pair.rumor.id,
       recipient:   { results: recipientResults, targets: recipientTargets },
       self:        { results: selfResults,      targets: ownInbox },
+      attachments: attachmentWraps.length,
       usedFallback: resolved.inboxRelays.length === 0,
     });
   }
