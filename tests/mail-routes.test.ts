@@ -194,6 +194,62 @@ test('mail-routes: /api/mail/accept allowlists a pubkey, /api/mail/lists reads i
   assert.ok(parsed.allowlist.some((e: any) => e.pubkey === pk));
 });
 
+test('mail-routes: GET /api/mail/folders returns the 4 default folders', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/folders');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.ok(Array.isArray(parsed.defaults));
+  // Inbox, Sent, Archive, Trash — the canonical four.
+  assert.deepEqual(parsed.defaults.map((f: any) => f.id).sort(),
+                   ['archive', 'inbox', 'sent', 'trash']);
+  assert.ok(Array.isArray(parsed.custom));
+});
+
+test('mail-routes: GET /api/mail/inbox respects the folder query param', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/inbox?folder=archive');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.equal(parsed.bucket, 'inbox');
+  assert.equal(parsed.folder, 'archive');
+  assert.ok(Array.isArray(parsed.threads));
+  assert.equal(parsed.threads.length, 0, 'archive is empty on a fresh install');
+});
+
+test('mail-routes: POST /api/mail/folder validates inputs', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Empty ids array → 400 with a clear message.
+  const noIds = await send(port, 'POST', '/api/mail/folder', { ids: [], folder: 'archive' });
+  assert.equal(noIds.status, 400);
+  assert.match(noIds.body, /non-empty array/);
+
+  // Bad folder name → 400.
+  const badFolder = await send(port, 'POST', '/api/mail/folder', {
+    ids: ['a'.repeat(64)], folder: 'has spaces',
+  });
+  assert.equal(badFolder.status, 400);
+  assert.match(badFolder.body, /1-32 chars/);
+});
+
+test('mail-routes: GET /api/mail/settings returns defaults on a fresh install', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await get(port, '/api/mail/settings');
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body);
+  assert.equal(parsed.settings.version, 1);
+  assert.ok(Array.isArray(parsed.settings.customFolders));
+  assert.ok(Array.isArray(parsed.settings.inboxRelays));
+});
+
 test('mail-routes: /api/mail/stream sends a hello frame on connect', async (t) => {
   const { server, port } = await bootOnRandomPort();
   t.after(() => new Promise<void>((r) => server.close(() => r())));

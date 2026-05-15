@@ -40,6 +40,11 @@ import os from 'node:os';
 import { KIND_EMAIL, type Rumor } from './types.js';
 import { parseMessage, type ParsedAttachment } from './rfc2822.js';
 
+// Default folder assignments per direction. PR 10 introduces folders;
+// pre-PR-10 rows backfill to these values via the schema migration
+// below.
+const FOLDER_FOR_DIRECTION = { in: 'inbox', out: 'sent' } as const;
+
 export interface StoredAttachment {
   name:    string;
   mime:    string;
@@ -73,6 +78,15 @@ export interface StoredMessage {
   created_at:   number;
   read:         boolean;
   wrap_id:      string;
+  // PR 10: folder assignment ('inbox' | 'sent' | 'archive' | 'trash' | custom).
+  // Synced cross-device via NIP-32 kind 1985 labels.
+  folder:       string;
+}
+
+export interface FolderCount {
+  folder: string;
+  total:  number;
+  unread: number;
 }
 
 export interface ThreadSummary {
@@ -118,6 +132,12 @@ export class MailStore {
   private stRemoveBlock!:             Database.Statement;
   private stListAllow!:               Database.Statement;
   private stListBlock!:               Database.Statement;
+  // Smart Syncing statements (PR 10).
+  private stThreadSummaryByFolder!:   Database.Statement;
+  private stSetFolderForRumor!:       Database.Statement;
+  private stFolderCounts!:            Database.Statement;
+  private stGetLabel!:                Database.Statement;
+  private stUpsertLabel!:             Database.Statement;
 
   constructor(dbPath: string = DEFAULT_DB_PATH) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -192,6 +212,28 @@ export class MailStore {
       this.db.exec(`ALTER TABLE messages ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''`);
     }
 
+    // PR 10 migration: folders. Add a column with backfill so existing
+    // rows land in the right default folder based on their direction
+    // — 'inbox' for incoming mail, 'sent' for outgoing.
+    if (!cols.some(c => c.name === 'folder')) {
+      this.db.exec(`ALTER TABLE messages ADD COLUMN folder TEXT NOT NULL DEFAULT 'inbox'`);
+      this.db.exec(`UPDATE messages SET folder = 'sent' WHERE direction = 'out'`);
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_folder_thread
+                  ON messages(folder, status, counterparty, created_at DESC)`);
+    // Track the latest applied label per (rumor_id, namespace) so we
+    // can ignore stale kind-1985 events that arrive out of order from
+    // different relays. created_at on the label event is the tie-breaker.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS mail_labels (
+        rumor_id   TEXT NOT NULL,
+        namespace  TEXT NOT NULL,
+        value      TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (rumor_id, namespace)
+      );
+    `);
+
     this.prepare();
   }
 
@@ -200,10 +242,10 @@ export class MailStore {
       `INSERT OR IGNORE INTO messages
          (id, counterparty, direction, kind, subject, body, tags_json,
           created_at, read, wrap_id, received_at, status,
-          attachments_json, message_id, in_reply_to)
+          attachments_json, message_id, in_reply_to, folder)
        VALUES
          (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?,
-          ?, ?, ?)`,
+          ?, ?, ?, ?)`,
     );
     this.stHasMessage  = this.db.prepare(`SELECT 1 FROM messages WHERE id = ? LIMIT 1`);
     this.stHasSeenWrap = this.db.prepare(`SELECT 1 FROM seen_wraps WHERE wrap_id = ? LIMIT 1`);
@@ -213,14 +255,14 @@ export class MailStore {
     this.stMarkRead = this.db.prepare(`UPDATE messages SET read = 1 WHERE id = ?`);
     this.stMessagesByCounterparty = this.db.prepare(
       `SELECT id, counterparty, direction, kind, subject, body, tags_json,
-              created_at, read, wrap_id, attachments_json, message_id, in_reply_to
+              created_at, read, wrap_id, attachments_json, message_id, in_reply_to, folder
          FROM messages
         WHERE counterparty = ?
         ORDER BY created_at ASC`,
     );
     this.stMessageById = this.db.prepare(
       `SELECT id, counterparty, direction, kind, subject, body, tags_json,
-              created_at, read, wrap_id, attachments_json, message_id, in_reply_to
+              created_at, read, wrap_id, attachments_json, message_id, in_reply_to, folder
          FROM messages WHERE id = ? LIMIT 1`,
     );
     this.stCountUnreadByCounterparty = this.db.prepare(
@@ -289,6 +331,48 @@ export class MailStore {
     this.stRemoveBlock = this.db.prepare(`DELETE FROM mail_blocklist WHERE pubkey = ?`);
     this.stListAllow = this.db.prepare(`SELECT pubkey, added_at FROM mail_allowlist ORDER BY added_at DESC`);
     this.stListBlock = this.db.prepare(`SELECT pubkey, added_at FROM mail_blocklist ORDER BY added_at DESC`);
+
+    // PR 10: thread summary filtered by both bucket AND folder. The UI
+    // shows folder sidebars within the Inbox bucket; the Requests
+    // bucket ignores folders entirely.
+    this.stThreadSummaryByFolder = this.db.prepare(
+      `SELECT counterparty,
+              (SELECT subject FROM messages m2
+                WHERE m2.counterparty = m.counterparty
+                  AND m2.status = m.status AND m2.folder = m.folder
+                ORDER BY m2.created_at DESC LIMIT 1) AS last_subject,
+              (SELECT body FROM messages m2
+                WHERE m2.counterparty = m.counterparty
+                  AND m2.status = m.status AND m2.folder = m.folder
+                ORDER BY m2.created_at DESC LIMIT 1) AS last_preview,
+              MAX(created_at) AS last_created_at,
+              SUM(CASE WHEN direction = 'in' AND read = 0 THEN 1 ELSE 0 END) AS unread,
+              COUNT(*) AS total
+         FROM messages m
+        WHERE status = ? AND folder = ?
+        GROUP BY counterparty
+        ORDER BY last_created_at DESC`,
+    );
+    this.stSetFolderForRumor = this.db.prepare(`UPDATE messages SET folder = ? WHERE id = ?`);
+    this.stFolderCounts = this.db.prepare(
+      `SELECT folder,
+              COUNT(*) AS total,
+              SUM(CASE WHEN direction = 'in' AND read = 0 THEN 1 ELSE 0 END) AS unread
+         FROM messages
+        WHERE status = 'inbox'
+        GROUP BY folder`,
+    );
+    this.stGetLabel = this.db.prepare(
+      `SELECT value, created_at FROM mail_labels WHERE rumor_id = ? AND namespace = ?`,
+    );
+    this.stUpsertLabel = this.db.prepare(
+      `INSERT INTO mail_labels (rumor_id, namespace, value, created_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(rumor_id, namespace) DO UPDATE SET
+         value      = excluded.value,
+         created_at = excluded.created_at
+       WHERE excluded.created_at > mail_labels.created_at`,
+    );
   }
 
   // ── Wrap dedup ──────────────────────────────────────────────────────────
@@ -377,10 +461,20 @@ export class MailStore {
     // the recipient is a stranger.
     const finalBucket: MessageBucket = direction === 'out' ? 'inbox' : bucket;
 
+    // PR 10: folder assignment.
+    //   - Direction drives the default: incoming → 'inbox', outgoing
+    //     → 'sent'.
+    //   - If a cross-device kind-1985 folder label has already been
+    //     observed for this rumor, use that instead so a label that
+    //     arrives BEFORE the rumor on a slow relay doesn't silently
+    //     bucket the message into the default.
+    const existingLabel = this.stGetLabel.get(rumor.id, 'nostr-mail/folder') as { value: string } | undefined;
+    const folder = existingLabel?.value ?? FOLDER_FOR_DIRECTION[direction];
+
     this.stInsertMessage.run(
       rumor.id, counterparty, direction, rumor.kind, subject, body,
       JSON.stringify(rumor.tags), rumor.created_at, wrapId, Date.now(), finalBucket,
-      JSON.stringify(attachments), messageId, inReplyTo,
+      JSON.stringify(attachments), messageId, inReplyTo, folder,
     );
 
     return {
@@ -397,6 +491,7 @@ export class MailStore {
       created_at:   rumor.created_at,
       read:         false,
       wrap_id:      wrapId,
+      folder,
     };
   }
 
@@ -463,6 +558,83 @@ export class MailStore {
   }
   unallowCounterparty(hex: string): void {
     this.stRemoveAllow.run(hex.toLowerCase());
+  }
+
+  // ── Folders + label sync (PR 10) ───────────────────────────────────────
+
+  /**
+   * Variant of threadSummaries() that filters on both bucket AND folder.
+   * The Mail panel's main view uses this when the user picks a folder.
+   * Pass the bucket explicitly — most callers want 'inbox' (Requests
+   * lives in 'quarantine' and ignores folders).
+   */
+  threadSummariesInFolder(bucket: MessageBucket, folder: string): ThreadSummary[] {
+    const rows = this.stThreadSummaryByFolder.all(bucket, folder) as Array<{
+      counterparty: string; last_subject: string | null; last_preview: string | null;
+      last_created_at: number; unread: number | null; total: number;
+    }>;
+    return rows.map(r => ({
+      counterparty:    r.counterparty,
+      last_subject:    r.last_subject ?? '',
+      last_preview:    (r.last_preview ?? '').slice(0, 240),
+      last_created_at: r.last_created_at,
+      unread:          Number(r.unread ?? 0),
+      total:           Number(r.total),
+    }));
+  }
+
+  folderCounts(): FolderCount[] {
+    const rows = this.stFolderCounts.all() as Array<{
+      folder: string; total: number; unread: number | null;
+    }>;
+    return rows.map(r => ({
+      folder: r.folder,
+      total:  Number(r.total),
+      unread: Number(r.unread ?? 0),
+    }));
+  }
+
+  /**
+   * Move a message to a different folder. Local write only — the route
+   * that calls this is responsible for publishing the corresponding
+   * kind-1985 label so the change syncs across devices.
+   */
+  setFolder(rumorId: string, folder: string): void {
+    this.stSetFolderForRumor.run(folder, rumorId);
+  }
+
+  /**
+   * Apply an incoming kind-1985 label observed by the worker. Idempotent
+   * + last-write-wins ordered by created_at, since labels can arrive
+   * from multiple relays out of order.
+   *
+   * Returns true when the label was newer than what we already had.
+   * Routes use the return value to decide whether to fire the SSE
+   * "mail-received" notification (so the UI re-renders).
+   */
+  applyLabel(rumorId: string, namespace: string, value: string, createdAt: number): boolean {
+    const existing = this.stGetLabel.get(rumorId, namespace) as { value: string; created_at: number } | undefined;
+    if (existing && existing.created_at >= createdAt) return false;
+    const result = this.stUpsertLabel.run(rumorId, namespace, value, createdAt);
+    if (result.changes === 0) return false;
+    // Folder labels mutate the row's folder column directly; read-state
+    // labels flip the read flag if the value is 'read'.
+    if (namespace === 'nostr-mail/folder') {
+      this.stSetFolderForRumor.run(value, rumorId);
+    } else if (namespace === 'nostr-mail/read' && value === 'read') {
+      this.stMarkRead.run(rumorId);
+    }
+    return true;
+  }
+
+  /**
+   * Look up the most recent label for (rumor, namespace). Used by the
+   * routes when publishing a fresh label so the new event's created_at
+   * is at least newer than any prior local label.
+   */
+  getLabel(rumorId: string, namespace: string): { value: string; created_at: number } | null {
+    const r = this.stGetLabel.get(rumorId, namespace) as { value: string; created_at: number } | undefined;
+    return r ?? null;
   }
 
   // Single-message lookup. Used by /api/mail/download to read the
@@ -534,6 +706,7 @@ interface StoredRow {
   attachments_json: string;
   message_id:       string;
   in_reply_to:      string;
+  folder:           string;
 }
 function rowToStored(r: StoredRow): StoredMessage {
   return {
@@ -550,6 +723,7 @@ function rowToStored(r: StoredRow): StoredMessage {
     created_at:   r.created_at,
     read:         !!r.read,
     wrap_id:      r.wrap_id,
+    folder:       r.folder || 'inbox',
   };
 }
 

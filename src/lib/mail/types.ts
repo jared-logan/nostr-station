@@ -41,6 +41,31 @@ export const KIND_FILE_RUMOR    = 15;
 export const KIND_EMAIL         = 1301;
 export const KIND_GIFT_WRAP     = 1059;
 export const KIND_INBOX_RELAYS  = 10050;
+// Smart Syncing (PR 10):
+//   - 1985 = NIP-32 generic label. Used to sync folder + read-state
+//            across the user's devices by labelling the rumor id (NOT
+//            the gift wrap id — the rumor id is local-only and reveals
+//            nothing to relay observers).
+//   - 30078 = NIP-78 application-specific replaceable. d-tag value
+//             "nostr-mail:settings" carries the user's mail prefs
+//             (inbox relays, custom folder list, …) as JSON.
+export const KIND_LABEL         = 1985;
+export const KIND_APP_DATA      = 30078;
+
+// NIP-32 namespaces we use. The namespace is also the L tag value;
+// the label itself goes in the `l` tag's second slot.
+export const LABEL_NS_FOLDER = 'nostr-mail/folder';
+export const LABEL_NS_READ   = 'nostr-mail/read';
+
+// NIP-78 d-tag for our settings blob. The dataset is parameterized-
+// replaceable on (kind, pubkey, d), so publishing a new one supersedes
+// the prior version atomically.
+export const APP_DATA_D_SETTINGS = 'nostr-mail:settings';
+
+// Default folder identifiers. Custom folders are arbitrary strings the
+// user picks; these reserved values back the UI's well-known folders.
+export const DEFAULT_FOLDERS = ['inbox', 'sent', 'archive', 'trash'] as const;
+export type DefaultFolder = typeof DEFAULT_FOLDERS[number];
 
 // An unsigned rumor — pubkey + id are set, sig is intentionally absent.
 // Matches what nostr-tools/nip59.createRumor() produces.
