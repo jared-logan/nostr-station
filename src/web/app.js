@@ -8,7 +8,7 @@ import { renderMarkdown, renderCodeBlock } from './markdown.js';
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'client', 'config'];
+const PANELS = ['status', 'chat', 'relay', 'projects', 'vpn', 'logs', 'client', 'mail', 'config'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -17199,6 +17199,227 @@ const ClientPanel = (() => {
   };
 })();
 
+// ── Panel: Mail ──────────────────────────────────────────────────────────
+//
+// Encrypted NIP-17 mail. Two-pane layout — thread list on the left,
+// active thread on the right. Reads from /api/mail/inbox + /api/mail/thread;
+// the inbox worker decrypts gift wraps in the background and persists
+// rumors to mail.db, so the panel only needs to render decrypted state.
+//
+// This PR ships read-only. Compose + send arrive in the follow-up patch
+// that wires up the recipient resolver + the send pipeline.
+
+const MailPanel = (() => {
+  let threads        = [];
+  let activeCounter  = null;     // hex pubkey of the open thread, or null
+  let activeMessages = [];
+  let lastStatus     = null;
+  let pollTimer      = null;
+
+  function npubShort(hex) {
+    if (!hex) return '';
+    return `${hex.slice(0, 8)}…${hex.slice(-4)}`;
+  }
+  function fmtAge(epochS) {
+    if (!epochS) return '';
+    const s = Math.max(0, Date.now() / 1000 - epochS);
+    if (s < 60)     return `${Math.floor(s)}s`;
+    if (s < 3600)   return `${Math.floor(s / 60)}m`;
+    if (s < 86400)  return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
+  }
+  function preview(s) {
+    return String(s || '').replace(/\s+/g, ' ').slice(0, 120);
+  }
+
+  async function load() {
+    try {
+      const [inbox, status] = await Promise.all([
+        api('/api/mail/inbox',  undefined, { silent: true }),
+        api('/api/mail/status', undefined, { silent: true }).catch(() => null),
+      ]);
+      threads    = Array.isArray(inbox?.threads) ? inbox.threads : [];
+      lastStatus = status?.stats || null;
+      renderStatus();
+      renderThreads();
+      updateBadge();
+      // If a thread is open, reload its messages too — new arrivals are
+      // surfaced live by re-rendering from the store.
+      if (activeCounter) await loadThread(activeCounter);
+    } catch (e) {
+      const el = $('mail-threads');
+      if (el) el.innerHTML = `<div class="mail-empty">Failed to load: ${escapeHtml(e?.message || e)}</div>`;
+    }
+  }
+
+  async function loadThread(counterparty) {
+    try {
+      const r = await api(`/api/mail/thread?counterparty=${encodeURIComponent(counterparty)}`,
+                          undefined, { silent: true });
+      activeMessages = Array.isArray(r?.messages) ? r.messages : [];
+      renderThread();
+      // Auto-mark incoming as read on open. Best-effort — failure here
+      // just leaves them unread until the next click.
+      const unreadIds = activeMessages.filter(m => m.direction === 'in' && !m.read).map(m => m.id);
+      if (unreadIds.length) {
+        await api('/api/mail/mark-read', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ ids: unreadIds }),
+        }, { silent: true }).catch(() => {});
+        // Reflect read-state in the in-memory cache without refetching.
+        for (const m of activeMessages) if (unreadIds.includes(m.id)) m.read = true;
+        const t = threads.find(t => t.counterparty === counterparty);
+        if (t) t.unread = 0;
+        renderThreads();
+        updateBadge();
+      }
+    } catch (e) {
+      const el = $('mail-thread');
+      if (el) el.innerHTML = `<div class="mail-empty">Failed to load thread: ${escapeHtml(e?.message || e)}</div>`;
+    }
+  }
+
+  function renderStatus() {
+    const el = $('mail-status');
+    if (!el) return;
+    if (!lastStatus) { el.textContent = ''; return; }
+    const bits = [];
+    bits.push(`${lastStatus.relaysConnected} inbox relay${lastStatus.relaysConnected === 1 ? '' : 's'} connected`);
+    bits.push(`${lastStatus.decryptedOk} decrypted`);
+    if (lastStatus.decryptFailed) bits.push(`${lastStatus.decryptFailed} dropped`);
+    el.textContent = bits.join(' · ');
+    if (lastStatus.lastError) el.title = lastStatus.lastError;
+  }
+
+  function renderThreads() {
+    const el = $('mail-threads');
+    if (!el) return;
+    if (!threads.length) {
+      el.innerHTML = `<div class="mail-empty">
+        No mail yet. Encrypted messages addressed to your npub will appear here.
+      </div>`;
+      return;
+    }
+    const items = threads.map(t => {
+      const active = activeCounter === t.counterparty ? ' active' : '';
+      const unreadDot = t.unread > 0 ? '<span class="mail-unread-dot" aria-label="unread"></span>' : '';
+      return `<button class="mail-thread-item${active}" data-counter="${escapeHtml(t.counterparty)}">
+        ${unreadDot}
+        <div class="mail-thread-row1">
+          <span class="mail-thread-who">${escapeHtml(npubShort(t.counterparty))}</span>
+          <span class="mail-thread-age">${escapeHtml(fmtAge(t.last_created_at))}</span>
+        </div>
+        <div class="mail-thread-subj">${escapeHtml(t.last_subject || '(no subject)')}</div>
+        <div class="mail-thread-prev">${escapeHtml(preview(t.last_preview))}</div>
+      </button>`;
+    }).join('');
+    el.innerHTML = items;
+    for (const btn of $$('.mail-thread-item', el)) {
+      btn.addEventListener('click', () => {
+        const c = btn.getAttribute('data-counter');
+        if (!c) return;
+        activeCounter = c;
+        renderThreads();
+        void loadThread(c);
+      });
+    }
+  }
+
+  function renderThread() {
+    const el = $('mail-thread');
+    if (!el) return;
+    if (!activeCounter) {
+      el.innerHTML = `<div class="mail-empty">Pick a conversation to view messages.</div>`;
+      return;
+    }
+    if (!activeMessages.length) {
+      el.innerHTML = `<div class="mail-empty">No messages in this thread yet.</div>`;
+      return;
+    }
+    // Subject of the most recent message is shown at the top.
+    const lastSubj = activeMessages[activeMessages.length - 1].subject;
+    const head = `<div class="mail-thread-head">
+      <div class="mail-thread-counter">${escapeHtml(npubShort(activeCounter))}</div>
+      <div class="mail-thread-headsubj">${escapeHtml(lastSubj || '(no subject)')}</div>
+    </div>`;
+    const msgs = activeMessages.map(m => {
+      const side  = m.direction === 'out' ? ' mail-msg-out' : ' mail-msg-in';
+      const at    = new Date(m.created_at * 1000).toLocaleString();
+      const subj  = m.subject ? `<div class="mail-msg-subj">${escapeHtml(m.subject)}</div>` : '';
+      const body  = renderMarkdown
+        ? renderMarkdown(String(m.body || ''))
+        : escapeHtml(String(m.body || ''));
+      return `<div class="mail-msg${side}">
+        <div class="mail-msg-meta">
+          <span class="mail-msg-who">${m.direction === 'out' ? 'You' : escapeHtml(npubShort(activeCounter))}</span>
+          <span class="mail-msg-at">${escapeHtml(at)}</span>
+        </div>
+        ${subj}
+        <div class="mail-msg-body">${body}</div>
+      </div>`;
+    }).join('');
+    el.innerHTML = `${head}<div class="mail-msgs">${msgs}</div>`;
+  }
+
+  function updateBadge() {
+    const badge = $('mail-badge');
+    if (!badge) return;
+    const totalUnread = threads.reduce((n, t) => n + (t.unread || 0), 0);
+    if (totalUnread > 0) {
+      badge.textContent = String(totalUnread > 99 ? '99+' : totalUnread);
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    // Light poll — the inbox worker pushes new rumors to the DB in
+    // the background; we just re-fetch the thread summary every 6s
+    // so newly-arrived mail surfaces without the user clicking refresh.
+    // Future patch will replace this with an SSE stream from the worker.
+    pollTimer = setInterval(() => { void load(); }, 6_000);
+  }
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  // Compose button is wired here so the badge / status pieces stay
+  // co-located with the panel. The send flow itself is added in the
+  // follow-up PR — for now we surface a "coming soon" notice so the
+  // button isn't dead in the navigation.
+  function onCompose() {
+    toast('Compose coming soon', 'Send/reply lands in the next patch — receive works today.', 'warn');
+  }
+
+  function wireButtons() {
+    const refresh = $('mail-refresh');
+    if (refresh && !refresh.__wired) {
+      refresh.__wired = true;
+      refresh.addEventListener('click', () => { void load(); });
+    }
+    const compose = $('mail-compose');
+    if (compose && !compose.__wired) {
+      compose.__wired = true;
+      compose.addEventListener('click', onCompose);
+    }
+  }
+
+  return {
+    onEnter() {
+      wireButtons();
+      void load();
+      startPolling();
+    },
+    // Exposed for tests / future SSE migration. The polling timer is
+    // page-lifetime cheap (a single fetch every 6s) so nothing currently
+    // calls this.
+    _stop: stopPolling,
+  };
+})();
+
 // ── Registry + boot ──────────────────────────────────────────────────────
 
 const Panels = {
@@ -17210,6 +17431,7 @@ const Panels = {
   vpn:      VpnPanel,
   logs:     LogsPanel,
   client:   ClientPanel,
+  mail:     MailPanel,
   config:   ConfigPanel,
 };
 
