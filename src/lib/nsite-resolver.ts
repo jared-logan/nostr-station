@@ -123,6 +123,23 @@ export const DEFAULT_NSIT_INDEXER_RELAYS = [
   'wss://relay.damus.io',
 ];
 
+// Profile / outbox discovery relays. Purplepag.es and user.kindpag.es
+// specifically index profile-adjacent kinds — kind:0 metadata, kind:3
+// follows, kind:10002 NIP-65 relay lists, etc. Titan Browser keeps a
+// connection open to these during content fetch (visible in its devtools
+// network tab) so that the author's kind:10002 outbox announcement can
+// be discovered even when neither the station owner nor any of their
+// configured relays carry it.
+//
+// Without this, the NIP-65 union we added in #106 has a bootstrap
+// problem: we use the OWNER'S relays to find the AUTHOR's outbox event,
+// so if the owner's relays don't have the author's kind:10002 we get an
+// empty outbox tier even though the author has one announced elsewhere.
+export const PROFILE_DISCOVERY_RELAYS = [
+  'wss://purplepag.es',
+  'wss://user.kindpag.es',
+];
+
 // Content discovery fallback for kind:34128 / kind:10063 queries.
 //
 // Mirrors Titan's FALLBACK_RELAYS in btcjt/titan crates/titan-resolver/

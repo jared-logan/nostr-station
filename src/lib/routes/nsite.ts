@@ -38,7 +38,7 @@ import {
   normalizePath, mimeForPath,
   DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
   DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
-  DEFAULT_CONTENT_RELAYS,
+  DEFAULT_CONTENT_RELAYS, PROFILE_DISCOVERY_RELAYS,
   NsiteError, type SiteIndex, type NsitResolveConfig,
 } from '../nsite-resolver.js';
 
@@ -165,7 +165,16 @@ export async function handleNsite(
       // — without it, an author who publishes exclusively to a relay the
       // station owner doesn't subscribe to would surface as "no kind:34128
       // events found" even though the nsite is fine.
-      const authorOutbox = await fetchAuthorOutboxRelays(resolved.pubkey, ownerRelays)
+      // Bootstrap NIP-65 lookup with the owner relays + profile-discovery
+      // relays (purplepag.es / user.kindpag.es) — those are where authors'
+      // kind:10002 outbox announcements actually live. Without the
+      // profile-discovery set, the outbox tier silently collapses to []
+      // for any author whose kind:10002 isn't already on a relay the
+      // station owner happens to subscribe to. Mirrors Titan Browser's
+      // observed behavior (its devtools shows a kept-alive WebSocket to
+      // both profile-discovery relays during content fetches).
+      const outboxBootstrap = unionRelays(ownerRelays, PROFILE_DISCOVERY_RELAYS);
+      const authorOutbox = await fetchAuthorOutboxRelays(resolved.pubkey, outboxBootstrap)
         .catch(() => [] as string[]);
       // Three-tier content discovery: owner read relays first (their
       // existing subscription set), then the author's NIP-65 outbox
