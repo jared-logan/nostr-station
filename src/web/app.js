@@ -18544,9 +18544,17 @@ const NsitePanel = (() => {
       ? `<div class="muted" style="margin-top:6px">Oldest event ${fmtAge(body.oldestAt)}, newest ${fmtAge(body.latestAt)} — multiple publishes detected.</div>`
       : '';
 
+    // Kind shown in the diag counter depends on which probe served the
+    // result: v2-named manifest is kind:35128, v2-root is kind:15128,
+    // v1 per-file is kind:34128. Without this hint the user sees the
+    // wrong kind number in the diagnostic — confusing when comparing
+    // against `nak` output for the same author.
+    const kindLabel = body.format === 'v2-named' ? 'kind:35128'
+                    : body.format === 'v2-root'  ? 'kind:15128'
+                    : 'kind:34128';
     els.diagBody.innerHTML = `
       <div class="nsite-diag-section">
-        <div class="nsite-diag-section-title">Files (${entries.length} of ${body.totalEventsSeen || entries.length} kind:34128 seen)</div>
+        <div class="nsite-diag-section-title">Files (${entries.length} of ${body.totalEventsSeen || entries.length} ${kindLabel} seen)</div>
         ${eventsHtml}
         ${stale}
       </div>
