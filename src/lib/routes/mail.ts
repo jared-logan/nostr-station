@@ -25,6 +25,7 @@ import { publishEventToRelays } from './repo.js';
 import { KIND_DM_RUMOR, KIND_FILE_RUMOR, KIND_INBOX_RELAYS } from '../mail/types.js';
 import { readIdentity, npubToHex, isValidRelayUrl } from '../identity.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
+import { encryptBlob, decryptBlob } from '../mail/file-crypto.js';
 import type { BlossomServer } from '../../blossom/index.js';
 
 // Optional dependency accessor — web-server.ts wires this. When the
@@ -51,13 +52,25 @@ interface AttachmentRef {
   mime:   string;
   size:   number;
   name?:  string;
+  // PR 8: present when the blob in Blossom is AES-256-GCM encrypted.
+  // Embedded in the kind-15 rumor so only the recipient can decrypt.
+  encryptionKey?:   string;
+  encryptionNonce?: string;
 }
 function isValidAttachment(a: any): a is AttachmentRef {
-  return !!a
-    && typeof a.url    === 'string' && /^https?:\/\//.test(a.url)
-    && typeof a.sha256 === 'string' && /^[0-9a-f]{64}$/i.test(a.sha256)
-    && typeof a.mime   === 'string'
-    && typeof a.size   === 'number' && a.size > 0;
+  if (!a
+    || typeof a.url    !== 'string' || !/^https?:\/\//.test(a.url)
+    || typeof a.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(a.sha256)
+    || typeof a.mime   !== 'string'
+    || typeof a.size   !== 'number' || a.size <= 0) return false;
+  // If encryption fields are present they must be well-formed hex of the
+  // right length. (Backwards-compat: plaintext attachments from pre-PR-8
+  // clients have neither.)
+  if (a.encryptionKey   != null && !/^[0-9a-f]{64}$/i.test(a.encryptionKey))   return false;
+  if (a.encryptionNonce != null && !/^[0-9a-f]{24}$/i.test(a.encryptionNonce)) return false;
+  // If you provide one, you must provide both.
+  if ((a.encryptionKey == null) !== (a.encryptionNonce == null)) return false;
+  return true;
 }
 
 export async function handleMail(
@@ -323,7 +336,24 @@ export async function handleMail(
     const body = Buffer.concat(chunks, total);
     if (body.length === 0) return json(res, 400, { error: 'empty body' });
 
-    const r = server.blobStore.put(body, mime, ownerHex, 'owner');
+    // ── PR 8: end-to-end encrypt the blob bytes ───────────────────────
+    //
+    // Generate a fresh AES-256-GCM key + nonce per attachment, encrypt
+    // the body, upload the CIPHERTEXT to Blossom. The blob is now
+    // unrecoverable without the key — and the key only travels inside
+    // the gift-wrapped rumor, so only the recipient can decrypt.
+    // Blossom stores the encrypted blob with mime=application/octet-stream
+    // (since the bytes aren't really an image/png/whatever anymore);
+    // the *original* mime travels in the rumor as the `m` tag and the
+    // download proxy uses it to set the response Content-Type.
+    const { ciphertext, keyHex, nonceHex } = encryptBlob(body);
+
+    const r = server.blobStore.put(
+      ciphertext,
+      'application/octet-stream',
+      ownerHex,
+      'owner',
+    );
     if (!r.ok) {
       return json(res, 500, { error: `blossom put failed: ${r.reason}` });
     }
@@ -337,11 +367,86 @@ export async function handleMail(
     return json(res, 200, {
       ok:     true,
       url,
-      sha256: r.record.sha256,
-      size:   r.record.size,
-      mime:   r.record.mime,
+      sha256: r.record.sha256,   // sha256 of the CIPHERTEXT — what the rumor's `x` tag should carry
+      // size + mime reflect the ORIGINAL plaintext (the value the UI shows
+      // and the value the recipient sees after decryption). The encrypted
+      // blob is 16 bytes larger and has mime octet-stream, but those
+      // numbers only matter to the proxy-download path.
+      size:   body.length,
+      mime,
       name,
+      // Embedded in the rumor as encryption-key / encryption-nonce tags.
+      encryptionKey:   keyHex,
+      encryptionNonce: nonceHex,
     });
+  }
+
+  // ── GET /api/mail/download?id=<rumor-id> ──────────────────────────────
+  //
+  // Proxy-decrypt download for kind-15 attachments. Looks up the rumor
+  // in mail.db, reads its `url` + `encryption-key` + `encryption-nonce`
+  // + `m` tags, fetches the ciphertext from the URL, decrypts in
+  // memory, and streams the plaintext back with the original mime.
+  //
+  // Why a proxy rather than client-side decrypt: the browser would need
+  // a bundled AES-GCM implementation + the rumor's key to decrypt a
+  // direct Blossom download. Routing through the dashboard server is
+  // simpler, keeps the key on the server (which already has it via
+  // mail.db), and gives us a place to enforce session auth on the
+  // download itself.
+  if (pathname === '/api/mail/download' && method === 'GET') {
+    const rumorId = parsed.searchParams.get('id') || '';
+    if (!/^[0-9a-f]{64}$/i.test(rumorId)) {
+      return json(res, 400, { error: 'id must be 64-char hex rumor id' });
+    }
+    const store = getMailStore();
+    // We need the rumor's tag set; messagesForThread returns by counterparty
+    // which we don't know up-front. Cheaper to do a direct lookup —
+    // expose one on the store and read it here.
+    const row = store.messageById(rumorId);
+    if (!row) return json(res, 404, { error: 'no message with that id' });
+    if (row.kind !== KIND_FILE_RUMOR) {
+      return json(res, 400, { error: 'message is not a file attachment' });
+    }
+
+    const tag = (name: string) => row.tags.find(t => t[0] === name)?.[1];
+    const url   = tag('url');
+    const key   = tag('encryption-key');
+    const nonce = tag('encryption-nonce');
+    const mime  = tag('m') || 'application/octet-stream';
+    const name  = tag('file') || 'attachment';
+    if (!url) return json(res, 400, { error: 'rumor has no url tag' });
+
+    // Pre-PR-8 attachments don't carry encryption tags — for those we
+    // 302 redirect to the public URL since the bytes are already
+    // plaintext.
+    if (!key || !nonce) {
+      res.writeHead(302, { Location: url });
+      res.end();
+      return true;
+    }
+
+    let ciphertext: Buffer;
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      if (!r.ok) return json(res, 502, { error: `upstream returned ${r.status}` });
+      const ab = await r.arrayBuffer();
+      ciphertext = Buffer.from(ab);
+    } catch (e: any) {
+      return json(res, 502, { error: `fetch failed: ${e?.message || e}` });
+    }
+    let plaintext: Buffer;
+    try { plaintext = decryptBlob(ciphertext, key, nonce); }
+    catch (e: any) { return json(res, 500, { error: `decrypt failed: ${e?.message || e}` }); }
+
+    res.writeHead(200, {
+      'Content-Type':        mime,
+      'Content-Length':      String(plaintext.length),
+      'Content-Disposition': `attachment; filename="${name.replace(/"/g, '')}"`,
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.end(plaintext);
+    return true;
   }
 
   // ── POST /api/mail/send ────────────────────────────────────────────────
@@ -415,6 +520,15 @@ export async function handleMail(
           ['size', String(a.size)],
         ];
         if (a.name) fileRumorTags.push(['file', a.name]);
+        // PR 8: encryption material travels inside the rumor so only the
+        // recipient (who can decrypt the gift wrap) can recover the
+        // blob. Tag names mirror the conventions used by file-encryption
+        // discussions in the wider NIP-17 ecosystem.
+        if (a.encryptionKey && a.encryptionNonce) {
+          fileRumorTags.push(['encryption-algorithm', 'aes-256-gcm']);
+          fileRumorTags.push(['encryption-key',   a.encryptionKey]);
+          fileRumorTags.push(['encryption-nonce', a.encryptionNonce]);
+        }
         const pairA = await buildGiftWrapPair(
           { kind: KIND_FILE_RUMOR, content: a.name || a.url, tags: fileRumorTags },
           resolved.pubkey,

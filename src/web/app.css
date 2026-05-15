@@ -8998,3 +8998,10 @@ a.client-mention {
 .mail-block-row {
   cursor: default;
 }
+
+/* ── Mail · attachment encryption indicator (PR 8) ───────────────────── */
+.mail-att-lock {
+  font-size: 11px;
+  margin-left: 4px;
+  opacity: 0.8;
+}

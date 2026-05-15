@@ -17477,23 +17477,35 @@ const MailPanel = (() => {
       // kind 15 = file message. Render as a file chip with link + size +
       // sha256 fingerprint. The chip is clickable; opens in a new tab.
       if (m.kind === 15) {
-        const url   = m.tags.find(t => t[0] === 'url')?.[1]  || '';
-        const mime  = m.tags.find(t => t[0] === 'm')?.[1]    || 'application/octet-stream';
-        const sha   = m.tags.find(t => t[0] === 'x')?.[1]    || '';
-        const size  = Number(m.tags.find(t => t[0] === 'size')?.[1] || 0);
-        const name  = m.tags.find(t => t[0] === 'file')?.[1] || (m.body || '').slice(0, 80);
-        const sizeStr = size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MiB`
-                       : size > 1024       ? `${(size / 1024).toFixed(1)} KiB`
-                       : `${size} B`;
+        const url      = m.tags.find(t => t[0] === 'url')?.[1]  || '';
+        const mime     = m.tags.find(t => t[0] === 'm')?.[1]    || 'application/octet-stream';
+        const sha      = m.tags.find(t => t[0] === 'x')?.[1]    || '';
+        const size     = Number(m.tags.find(t => t[0] === 'size')?.[1] || 0);
+        const name     = m.tags.find(t => t[0] === 'file')?.[1] || (m.body || '').slice(0, 80);
+        const hasKey   = !!m.tags.find(t => t[0] === 'encryption-key');
+        const sizeStr  = size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MiB`
+                        : size > 1024       ? `${(size / 1024).toFixed(1)} KiB`
+                        : `${size} B`;
+        // PR 8: encrypted attachments route through the proxy-decrypt
+        // endpoint so the browser sees plaintext. Plaintext attachments
+        // (pre-PR-8 / cross-client) link directly to the Blossom URL.
+        // EventSource auth fallback used here too — proxy is auth-gated.
+        const tok = getSessionToken();
+        const href = hasKey
+          ? `/api/mail/download?id=${encodeURIComponent(m.id)}${tok ? `&token=${tok}` : ''}`
+          : url;
+        const lockBadge = hasKey
+          ? '<span class="mail-att-lock" title="end-to-end encrypted">🔒</span>'
+          : '';
         return `<div class="mail-msg${side} mail-msg-file">
           <div class="mail-msg-meta">
             <span class="mail-msg-who">${m.direction === 'out' ? 'You' : escapeHtml(npubShort(activeCounter))}</span>
             <span class="mail-msg-at">${escapeHtml(at)}</span>
           </div>
-          <a class="mail-msg-fileChip" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">
+          <a class="mail-msg-fileChip" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">
             <span class="mail-att-icon">📎</span>
             <div class="mail-msg-fileMeta">
-              <div class="mail-msg-fileName">${escapeHtml(name || sha.slice(0, 12))}</div>
+              <div class="mail-msg-fileName">${escapeHtml(name || sha.slice(0, 12))} ${lockBadge}</div>
               <div class="mail-msg-fileSub">${escapeHtml(mime)} · ${escapeHtml(sizeStr)}</div>
             </div>
           </a>
@@ -17689,6 +17701,11 @@ const MailPanel = (() => {
             mime:   r.mime,
             size:   r.size,
             name:   r.name || f.name,
+            // PR 8: server returns these when it encrypted the blob.
+            // Backwards compatible — pre-PR-8 servers omit them and the
+            // send route falls back to plaintext attachments.
+            encryptionKey:   r.encryptionKey   || undefined,
+            encryptionNonce: r.encryptionNonce || undefined,
           });
           renderAttachments();
         } catch (e) {

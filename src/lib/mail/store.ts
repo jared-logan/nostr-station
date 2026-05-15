@@ -80,6 +80,7 @@ export class MailStore {
   private stInsertSeenWrap!:Database.Statement;
   private stMarkRead!:      Database.Statement;
   private stMessagesByCounterparty!: Database.Statement;
+  private stMessageById!:            Database.Statement;
   private stCountUnreadByCounterparty!: Database.Statement;
   private stThreadSummary!: Database.Statement;
   // Spam-protection statements (PR 7).
@@ -173,6 +174,11 @@ export class MailStore {
          FROM messages
         WHERE counterparty = ?
         ORDER BY created_at ASC`,
+    );
+    this.stMessageById = this.db.prepare(
+      `SELECT id, counterparty, direction, kind, subject, body, tags_json,
+              created_at, read, wrap_id
+         FROM messages WHERE id = ? LIMIT 1`,
     );
     this.stCountUnreadByCounterparty = this.db.prepare(
       `SELECT COUNT(*) AS n FROM messages
@@ -394,6 +400,29 @@ export class MailStore {
   }
   unallowCounterparty(hex: string): void {
     this.stRemoveAllow.run(hex.toLowerCase());
+  }
+
+  // Single-message lookup, used by /api/mail/download to find the
+  // encryption-key + url tags for a kind-15 attachment.
+  messageById(id: string): StoredMessage | null {
+    const r = this.stMessageById.get(id) as {
+      id: string; counterparty: string; direction: 'in' | 'out'; kind: number;
+      subject: string; body: string; tags_json: string; created_at: number;
+      read: number; wrap_id: string;
+    } | undefined;
+    if (!r) return null;
+    return {
+      id:           r.id,
+      counterparty: r.counterparty,
+      direction:    r.direction,
+      kind:         r.kind,
+      subject:      r.subject,
+      body:         r.body,
+      tags:         safeParseTags(r.tags_json),
+      created_at:   r.created_at,
+      read:         !!r.read,
+      wrap_id:      r.wrap_id,
+    };
   }
 
   messagesForThread(counterparty: string): StoredMessage[] {
