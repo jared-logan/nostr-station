@@ -36,7 +36,8 @@ import {
   resolveAddress, fetchSiteIndex, fetchBlossomServers, fetchBlob,
   normalizePath, mimeForPath,
   DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
-  NsiteError, type SiteIndex,
+  DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
+  NsiteError, type SiteIndex, type NsitResolveConfig,
 } from '../nsite-resolver.js';
 
 // ── Settings ──────────────────────────────────────────────────────────────
@@ -45,17 +46,31 @@ import {
 // a server restart. A real Config-panel wiring is a follow-up — this keeps
 // the surface minimal for v1 while still being configurable.
 //
-//   NSITE_NAME_INDEXER_URL  — e.g. `https://names.example/lookup/{name}`
-//                             (the `{name}` placeholder is substituted;
-//                             without it we append `/<name>` to the base).
-//                             Empty/unset disables NSIT name resolution.
-//   NSITE_BLOB_CACHE_MB     — defaults to 200 MiB in-memory.
+//   NSITE_NSIT_INDEXER_PUBKEY  — 64-hex pubkey of the indexer whose
+//                                 kind:35129 events we trust. Defaults
+//                                 to Titan's hosted indexer. Set to
+//                                 "disabled" (literal) to refuse NSIT
+//                                 lookups entirely.
+//   NSITE_NSIT_RELAYS          — comma-separated wss:// URLs to query for
+//                                 the name index. Defaults to Titan's
+//                                 discovery relays (purplepag.es etc.).
+//   NSITE_BLOB_CACHE_MB        — defaults to 200 MiB in-memory.
 
 function getSettings() {
-  const indexer = (process.env.NSITE_NAME_INDEXER_URL || '').trim();
   const cap = parseInt(process.env.NSITE_BLOB_CACHE_MB || '', 10);
+  const indexerPubkeyRaw = (process.env.NSITE_NSIT_INDEXER_PUBKEY || '').trim();
+  const indexerPubkey = indexerPubkeyRaw.toLowerCase() === 'disabled'
+    ? null
+    : (indexerPubkeyRaw || DEFAULT_NSIT_INDEXER_PUBKEY);
+  const relaysRaw = (process.env.NSITE_NSIT_RELAYS || '').trim();
+  const indexerRelays = relaysRaw
+    ? relaysRaw.split(',').map(r => r.trim()).filter(r => /^wss?:\/\//i.test(r))
+    : DEFAULT_NSIT_INDEXER_RELAYS.slice();
+  const nsitConfig: NsitResolveConfig | null = indexerPubkey
+    ? { indexerPubkey, relays: indexerRelays }
+    : null;
   return {
-    nameIndexerUrl: indexer || null,
+    nsitConfig,
     cacheCapBytes: (Number.isFinite(cap) && cap > 0 ? cap : 200) * 1024 * 1024,
   };
 }
@@ -138,10 +153,10 @@ export async function handleNsite(
   if (path === '/api/nsite/resolve' && method === 'GET') {
     const addr = (u.searchParams.get('addr') || '').trim();
     if (!addr) { json(res, 400, { error: 'addr required' }); return true; }
-    const { nameIndexerUrl } = getSettings();
+    const { nsitConfig } = getSettings();
     try {
       const relays = pickRelays();
-      const resolved = await resolveAddress(addr, nameIndexerUrl);
+      const resolved = await resolveAddress(addr, nsitConfig);
       // Run index + server list in parallel — they're independent relay
       // queries against the same set of relays.
       const [index, blossomServers] = await Promise.all([
@@ -183,7 +198,9 @@ export async function handleNsite(
   if (path === '/api/nsite/settings' && method === 'GET') {
     const s = getSettings();
     json(res, 200, {
-      nameIndexerConfigured: !!s.nameIndexerUrl,
+      nsitEnabled: !!s.nsitConfig,
+      nsitIndexerPubkey: s.nsitConfig?.indexerPubkey ?? null,
+      nsitRelays: s.nsitConfig?.relays ?? [],
       defaultRelays: DEFAULT_NSITE_RELAYS,
       defaultBlossomServers: DEFAULT_BLOSSOM_SERVERS,
     });

@@ -14,9 +14,40 @@ useTempHome();
 // @ts-expect-error — runtime .ts import; tsx resolves it.
 const mod = await import('../src/lib/nsite-resolver.ts');
 const {
-  resolveAddress, normalizePath, mimeForPath, fetchBlob,
+  resolveAddress, resolveNsitName, normalizePath, mimeForPath, fetchBlob,
   NsiteError, DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
+  DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
 } = mod;
+
+// Trivial fake indexer config used by NSIT tests below.
+const FAKE_INDEXER = 'd'.repeat(64);
+const NSIT_CFG = { indexerPubkey: FAKE_INDEXER, relays: ['wss://idx.example'] };
+
+// Helper to build a fake kind:35129 event matching the resolver's filter
+// shape. created_at is fixed so tests don't depend on the clock.
+function makeNsitEvent(name: string, pubkey: string, indexerPk: string) {
+  return {
+    id:         'a'.repeat(64),
+    pubkey:     indexerPk,
+    kind:       35129,
+    created_at: 1_700_000_000,
+    tags:       [['d', name], ['p', pubkey]],
+    content:    '',
+    sig:        'b'.repeat(128),
+  };
+}
+
+// Mock queryFn that returns a single event matching the filter, or empty.
+function mockQuery(events: any[]) {
+  return async () => ({
+    events,
+    diagnostics: {
+      eventsSeen: events.length, uniqueEvents: events.length,
+      parseFailures: 0, stderrTail: '', spawnError: null,
+      exitCode: null, nakArgs: [], durationMs: 0,
+    },
+  });
+}
 
 // A canonical pubkey + its bech32 form for round-trip checks.
 const HEX = 'a'.repeat(63) + 'b';
@@ -54,37 +85,75 @@ test('resolveAddress: bare NSIT name rejected without indexer', async () => {
   );
 });
 
-test('resolveAddress: NSIT name resolved through indexer', async () => {
-  // Mock fetch returns the canonical pubkey for the name.
-  const mockFetch = async (url: string | URL) => {
-    const u = String(url);
-    assert.ok(u.includes('/titan'), `expected lookup URL to include name, got: ${u}`);
-    return new Response(JSON.stringify({ pubkey: HEX }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
-  };
-  const r = await resolveAddress('titan', 'https://names.example/lookup', mockFetch as any);
+test('resolveAddress: NSIT name resolved through indexer (kind 35129)', async () => {
+  const ev = makeNsitEvent('titan', HEX, FAKE_INDEXER);
+  const queryFn = mockQuery([ev]);
+  const r = await resolveAddress('titan', NSIT_CFG, fetch as any, queryFn as any);
   assert.equal(r.pubkey, HEX);
   assert.equal(r.source, 'nsit');
 });
 
-test('resolveAddress: NSIT indexer URL template {name} is substituted', async () => {
-  let calledUrl = '';
-  const mockFetch = async (url: string | URL) => {
-    calledUrl = String(url);
-    return new Response(JSON.stringify({ pubkey: HEX }), { status: 200 });
-  };
-  await resolveAddress('alice', 'https://idx.example/v1/{name}.json', mockFetch as any);
-  assert.equal(calledUrl, 'https://idx.example/v1/alice.json');
-});
-
-test('resolveAddress: NSIT 404 raises name_not_found', async () => {
-  const mockFetch = async () => new Response('', { status: 404 });
+test('resolveAddress: NSIT name absent on indexer raises name_not_found', async () => {
+  const queryFn = mockQuery([]);
   await assert.rejects(
-    () => resolveAddress('nope', 'https://names.example', mockFetch as any),
+    () => resolveAddress('nope', NSIT_CFG, fetch as any, queryFn as any),
     (e: any) => e instanceof NsiteError && e.code === 'name_not_found',
   );
+});
+
+test('resolveNsitName: filter targets correct kind + author + d tag', async () => {
+  let capturedFilter: any = null;
+  const queryFn = async (opts: any) => {
+    capturedFilter = opts.filter;
+    return mockQuery([makeNsitEvent('alice', HEX, FAKE_INDEXER)])(opts);
+  };
+  const got = await resolveNsitName('alice', NSIT_CFG, queryFn as any);
+  assert.equal(got, HEX);
+  assert.deepEqual(capturedFilter.kinds, [35129]);
+  assert.deepEqual(capturedFilter.authors, [FAKE_INDEXER]);
+  assert.deepEqual(capturedFilter.tags, { d: 'alice' });
+});
+
+test('resolveNsitName: rejects invalid indexer pubkey', async () => {
+  await assert.rejects(
+    () => resolveNsitName('titan', { indexerPubkey: 'not-hex', relays: ['wss://x'] }, mockQuery([]) as any),
+    (e: any) => e instanceof NsiteError && e.code === 'name_indexer_disabled',
+  );
+});
+
+test('resolveNsitName: rejects empty relay list', async () => {
+  await assert.rejects(
+    () => resolveNsitName('titan', { indexerPubkey: FAKE_INDEXER, relays: [] }, mockQuery([]) as any),
+    (e: any) => e instanceof NsiteError && e.code === 'name_indexer_disabled',
+  );
+});
+
+test('resolveAddress: nsite.lol gateway URL is recognized', async () => {
+  // Real gateway URLs put the bare-bech32 (no `npub1` prefix) in the
+  // leftmost subdomain. We re-prepend it and decode.
+  const npubTail = NPUB.slice('npub1'.length);
+  const url = `https://${npubTail}.nsite.lol/some/path`;
+  const r = await resolveAddress(url, null);
+  assert.equal(r.pubkey, HEX);
+  assert.equal(r.source, 'npub');
+});
+
+test('resolveAddress: nostr.hu gateway URL is recognized', async () => {
+  const npubTail = NPUB.slice('npub1'.length);
+  const r = await resolveAddress(`https://${npubTail}.nostr.hu/`, null);
+  assert.equal(r.pubkey, HEX);
+});
+
+test('resolveAddress: full npub1 in gateway label also works', async () => {
+  const url = `https://${NPUB}.nsite.lol/`;
+  const r = await resolveAddress(url, null);
+  assert.equal(r.pubkey, HEX);
+});
+
+test('defaults: NSIT indexer pubkey is the canonical Titan one', () => {
+  assert.match(DEFAULT_NSIT_INDEXER_PUBKEY, /^[0-9a-f]{64}$/);
+  assert.ok(DEFAULT_NSIT_INDEXER_RELAYS.length >= 2);
+  for (const r of DEFAULT_NSIT_INDEXER_RELAYS) assert.match(r, /^wss:\/\//);
 });
 
 test('resolveAddress: empty input rejected', async () => {
