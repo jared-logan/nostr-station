@@ -32,19 +32,37 @@ import { fileURLToPath } from 'node:url';
 const DITTO_URL = 'https://gitlab.com/api/v4/projects/79646323/jobs/artifacts/main/download?job=build-web';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const TARGET_DIR = path.resolve(here, '..', 'dist', 'ditto');
+const REPO_ROOT  = path.resolve(here, '..');
+const TARGET_DIR = path.resolve(REPO_ROOT, 'dist', 'ditto');
 const SENTINEL   = path.join(TARGET_DIR, 'index.html');
+// Separate sentinel for the branding-applied state. If extraction
+// succeeded but branding wasn't applied yet (first build after the
+// branding feature lands), we re-apply without re-downloading.
+const BRANDING_SENTINEL = path.join(TARGET_DIR, '.nostr-station-branded');
 
 async function main() {
   if (process.env.STATION_SKIP_DITTO === '1') {
     console.log('[ditto] STATION_SKIP_DITTO=1 — skipping fetch.');
     return;
   }
-  if (fs.existsSync(SENTINEL)) {
-    console.log(`[ditto] already present at ${path.relative(process.cwd(), TARGET_DIR)} — skipping fetch.`);
-    console.log(`[ditto] (delete that directory to force a fresh download)`);
+  const needsFetch = !fs.existsSync(SENTINEL);
+  const needsBranding = !fs.existsSync(BRANDING_SENTINEL);
+  if (!needsFetch && !needsBranding) {
+    console.log(`[ditto] already present + branded at ${path.relative(process.cwd(), TARGET_DIR)} — skipping.`);
+    console.log(`[ditto] (run \`npm run update-ditto\` to force a fresh download)`);
     return;
   }
+  if (needsFetch) {
+    await fetchAndExtract();
+  } else {
+    console.log(`[ditto] bundle present but unbranded — applying branding only.`);
+  }
+  if (fs.existsSync(SENTINEL)) {
+    applyBranding();
+  }
+}
+
+async function fetchAndExtract() {
 
   console.log(`[ditto] fetching ${DITTO_URL}`);
   let buf;
@@ -107,6 +125,168 @@ async function main() {
   }
 
   console.log(`[ditto] extracted to ${path.relative(process.cwd(), TARGET_DIR)}`);
+}
+
+// Overlay nostr-station branding on top of the extracted Ditto bundle.
+// Three categories:
+//   1. Files we own outright — copy our logo over Ditto's logo.svg.
+//      Their <link rel="icon" type="image/svg+xml" href="/logo.svg">
+//      makes this the favicon too, so one file covers both surfaces.
+//   2. HTML / manifest patches — title, description, og:* / twitter:*
+//      meta tags, theme-color, manifest name + short_name. Regex
+//      replacements on the strings Ditto's pre-built bundle ships with.
+//   3. Speculative ditto.json — Ditto's docs say its config is read
+//      "at build time", which strictly speaking means a runtime drop-in
+//      shouldn't take effect. We ship it anyway: zero cost if ignored,
+//      free theming + default-relay alignment if Ditto's runtime ever
+//      starts honoring it.
+//
+// Idempotent: writes .nostr-station-branded as a sentinel file on
+// success. Re-runs short-circuit unless the sentinel is missing.
+function applyBranding() {
+  console.log('[ditto] applying nostr-station branding...');
+
+  // 1. Logo (also serves as favicon via the <link rel=icon> in Ditto's
+  //    index.html). nori.svg is nostr-station's mark — same SVG used
+  //    elsewhere in the dashboard for visual consistency.
+  const sourceLogo = path.join(REPO_ROOT, 'src', 'web', 'nori.svg');
+  const targetLogo = path.join(TARGET_DIR, 'logo.svg');
+  if (fs.existsSync(sourceLogo)) {
+    try {
+      fs.copyFileSync(sourceLogo, targetLogo);
+      console.log(`[ditto] replaced logo.svg with nori.svg`);
+    } catch (e) {
+      console.warn(`[ditto] WARN: logo copy failed — ${e.message}`);
+    }
+  } else {
+    console.warn(`[ditto] WARN: source logo not found at ${sourceLogo}; keeping Ditto's default`);
+  }
+
+  // 2a. index.html — title + description + og/twitter meta tags
+  const indexPath = path.join(TARGET_DIR, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    try {
+      let html = fs.readFileSync(indexPath, 'utf8');
+      html = html.replace(
+        /<title>[^<]*<\/title>/,
+        '<title>nostr-station — Public Nostr Client</title>',
+      );
+      html = html.replace(
+        /<meta name="description" content="[^"]*"\s*\/?>/,
+        '<meta name="description" content="nostr-station — Nostr-native dev environment. Public Nostr client powered by Ditto." />',
+      );
+      // og:title / og:site_name / twitter:title — all the simple "Ditto"
+      // strings become "nostr-station". og:description / twitter:description
+      // get the same descriptor.
+      html = html.replace(
+        /(<meta\s+(?:property|name)="(?:og:title|og:site_name|twitter:title)"\s+content=")[^"]*("\s*\/?>)/g,
+        '$1nostr-station$2',
+      );
+      html = html.replace(
+        /(<meta\s+(?:property|name)="(?:og:description|twitter:description)"\s+content=")[^"]*("\s*\/?>)/g,
+        '$1Nostr-native dev environment$2',
+      );
+      // og:url + og:image point at ditto.pub by default — drop them
+      // rather than redirect (we don't have a stable og image yet).
+      html = html.replace(
+        /<meta\s+property="og:(?:url|image|image:width|image:height|image:type)"[^>]*>\s*\n?/g,
+        '',
+      );
+      html = html.replace(
+        /<meta\s+name="twitter:image"[^>]*>\s*\n?/g,
+        '',
+      );
+      // theme-color — match nostr-station's dark background (#0a0a0a).
+      // Ditto's default ('#161b2e') is a deep navy; ours is near-black.
+      html = html.replace(
+        /(<meta\s+name="theme-color"\s+content=")#161b2e(")/,
+        '$1#0a0a0a$2',
+      );
+      fs.writeFileSync(indexPath, html);
+      console.log('[ditto] patched index.html (title + meta tags + theme-color)');
+    } catch (e) {
+      console.warn(`[ditto] WARN: index.html patch failed — ${e.message}`);
+    }
+  }
+
+  // 2b. manifest.webmanifest — PWA install name. Most users won't ever
+  //     install Ditto as a PWA from inside our iframe, but if they do,
+  //     it should say nostr-station.
+  const manifestPath = path.join(TARGET_DIR, 'manifest.webmanifest');
+  if (fs.existsSync(manifestPath)) {
+    try {
+      const raw = fs.readFileSync(manifestPath, 'utf8');
+      const manifest = JSON.parse(raw);
+      manifest.name = 'nostr-station';
+      manifest.short_name = 'nostr-station';
+      if (typeof manifest.description === 'string') {
+        manifest.description = 'nostr-station — Nostr-native dev environment.';
+      }
+      // PWA chrome colors — when the user installs Ditto as a standalone
+      // app the OS uses these for the splash screen + title bar. Match
+      // nostr-station's --bg (#0a0a0a) and --accent (#7B68EE) so the
+      // installed app reads as nostr-station, not Ditto.
+      manifest.background_color = '#0a0a0a';
+      manifest.theme_color      = '#7B68EE';
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      console.log('[ditto] patched manifest.webmanifest (name + short_name)');
+    } catch (e) {
+      console.warn(`[ditto] WARN: manifest patch failed — ${e.message}`);
+    }
+  }
+
+  // 3. ditto.json — drop-in config. Per Ditto's docs this is read at
+  //    build time, so a runtime drop-in shouldn't take effect on the
+  //    pre-built bundle. Shipping anyway because: (a) zero cost if
+  //    ignored, (b) free theme + relay-list alignment if Ditto's
+  //    runtime ever starts honoring it, (c) makes our intent
+  //    legible to anyone inspecting the bundle ("here's what
+  //    nostr-station WANTS Ditto to look like").
+  //
+  //    Color values are HSL space-separated (H S% L%), matching
+  //    Ditto's customTheme format. Sourced from nostr-station's
+  //    palette (--bg #0a0a0a, --text #c8c8d0, --accent #7B68EE).
+  //    Relay list mirrors our App Relays defaults.
+  const dittoJson = {
+    theme: 'custom',
+    customTheme: {
+      colors: {
+        background: '0 0% 4%',
+        text:       '240 6% 80%',
+        primary:    '248 80% 67%',
+      },
+    },
+    relayMetadata: {
+      relays: [
+        { url: 'wss://relay.damus.io',    read: true, write: true },
+        { url: 'wss://relay.nostr.band',  read: true, write: true },
+        { url: 'wss://nos.lol',           read: true, write: true },
+        { url: 'wss://relay.primal.net',  read: true, write: true },
+        { url: 'wss://relay.ditto.pub',   read: true, write: true },
+      ],
+      updatedAt: 0,
+    },
+  };
+  try {
+    fs.writeFileSync(
+      path.join(TARGET_DIR, 'ditto.json'),
+      JSON.stringify(dittoJson, null, 2),
+    );
+    console.log('[ditto] wrote ditto.json (speculative — may be ignored by pre-built bundle)');
+  } catch (e) {
+    console.warn(`[ditto] WARN: ditto.json write failed — ${e.message}`);
+  }
+
+  // Sentinel: any future `node scripts/fetch-ditto.mjs` invocation with
+  // the bundle present + this file present → skip both fetch and
+  // branding. `npm run update-ditto` (which deletes the whole dist/ditto
+  // dir) re-runs everything from scratch.
+  try {
+    fs.writeFileSync(BRANDING_SENTINEL, new Date().toISOString() + '\n');
+    console.log('[ditto] branding complete.');
+  } catch (e) {
+    console.warn(`[ditto] WARN: sentinel write failed — ${e.message}`);
+  }
 }
 
 main().catch(e => {
