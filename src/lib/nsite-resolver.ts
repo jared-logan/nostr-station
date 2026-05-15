@@ -171,21 +171,23 @@ export async function resolveAddress(
   let s = trimmed;
   if (s.startsWith('nsite://')) s = s.slice('nsite://'.length);
 
-  // Gateway URLs paste-in fix: `https://<npub>.nsite.lol/path` and
-  // `https://<npub>.nostr.hu/path` both encode the author's npub in the
-  // leftmost subdomain. Strip everything else and re-dispatch as an npub.
-  // The .nsite.lol gateway uses a non-standard split (`<npub>nostr-station`
-  // style) so we keep just the leftmost label and trust the npub1 prefix
-  // to validate it as a real bech32 npub on the next pass.
+  // Gateway URLs paste-in fix: `https://<encoded>.nsite.lol/path` and
+  // `https://<encoded>.nostr.hu/path` both encode the author's npub in the
+  // leftmost subdomain. Two encodings observed in the wild:
+  //   1. `<bech32-npub>.nsite.lol`         — full or hrp-stripped bech32
+  //   2. `<base36-pubkey><project-name>.nsite.lol` — nsyte's nsite.lol
+  //      gateway, pubkey base36-encoded then project name appended
+  //      (verified empirically: nostr-station's own published nsite).
+  // Strip everything else and re-dispatch through the normal pubkey path.
   const gwMatch = s.match(/^https?:\/\/([^./]+)\.(?:nsite\.lol|nostr\.hu)(?::\d+)?(?:\/.*)?$/i);
   if (gwMatch) {
-    s = gwMatch[1];
-    // The gateway label is usually the bare bech32 npub. If it doesn't
-    // already start with `npub1`, prepend so the npub branch below can
-    // validate it.
-    if (!s.startsWith('npub1') && /^[023456789ac-hj-np-z]+$/.test(s)) {
-      s = `npub1${s}`;
-    }
+    const sub = gwMatch[1];
+    const fromGateway = decodeGatewaySubdomain(sub);
+    if (fromGateway) s = fromGateway;
+    else throw new NsiteError(
+      'bad_address',
+      `gateway URL subdomain "${sub}" did not decode to a recognizable pubkey — paste the author's npub directly`,
+    );
   }
 
   s = s.replace(/\/+$/, '');
@@ -232,6 +234,67 @@ export async function resolveAddress(
   }
 
   throw new NsiteError('bad_address', `unrecognized address shape: ${trimmed}`);
+}
+
+// ── Gateway subdomain decoding ────────────────────────────────────────────
+
+/**
+ * Try to extract a 32-byte hex pubkey from a gateway subdomain. Handles
+ * three shapes seen in the wild on nsite.lol / nostr.hu:
+ *
+ *   - bare bech32 npub:           `npub1<58chars>`         (full)
+ *   - hrp-stripped bech32:        `<58chars>`              (no `npub1`)
+ *   - nsyte+nsite.lol form:       `<base36-pubkey><name>`  (49–50 chars
+ *                                                           of base36 +
+ *                                                           project name)
+ *
+ * Base36 of a random 32-byte value is almost always 50 chars (49 only when
+ * the high byte is 0x00, ~1/256). We try 50 first and fall back to 49.
+ *
+ * Returns the bech32 npub form so the caller can re-dispatch through the
+ * existing npub branch (single source of truth for pubkey validation).
+ */
+export function decodeGatewaySubdomain(sub: string): string | null {
+  if (!sub) return null;
+
+  // Direct bech32 npub.
+  if (/^npub1[023456789ac-hj-np-z]+$/.test(sub)) {
+    try { if (nip19.decode(sub).type === 'npub') return sub; } catch {}
+  }
+
+  // hrp-stripped bech32: prepend `npub1` and try.
+  if (/^[023456789ac-hj-np-z]{58}$/.test(sub)) {
+    const candidate = `npub1${sub}`;
+    try { if (nip19.decode(candidate).type === 'npub') return candidate; } catch {}
+  }
+
+  // nsyte+nsite.lol base36 form. Try 50 then 49 leading chars.
+  for (const prefixLen of [50, 49]) {
+    if (sub.length < prefixLen) continue;
+    const candidate = sub.slice(0, prefixLen).toLowerCase();
+    if (!/^[0-9a-z]+$/.test(candidate)) continue;
+    const hex = base36ToHex32(candidate);
+    if (!hex) continue;
+    try { return nip19.npubEncode(hex); } catch { /* try next */ }
+  }
+  return null;
+}
+
+/**
+ * Base36 → 32-byte hex (lowercase, zero-padded). Returns null if the
+ * decoded value overflows 256 bits (i.e. the prefix-length guess was too
+ * generous and the trailing chars are actually project-name letters).
+ */
+function base36ToHex32(s: string): string | null {
+  const DIGITS = '0123456789abcdefghijklmnopqrstuvwxyz';
+  let n = 0n;
+  for (const c of s) {
+    const v = DIGITS.indexOf(c);
+    if (v < 0) return null;
+    n = n * 36n + BigInt(v);
+  }
+  if (n >= (1n << 256n) || n === 0n) return null;
+  return n.toString(16).padStart(64, '0');
 }
 
 // ── NIP-05 ────────────────────────────────────────────────────────────────

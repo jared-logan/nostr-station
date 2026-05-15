@@ -128,9 +128,7 @@ test('resolveNsitName: rejects empty relay list', async () => {
   );
 });
 
-test('resolveAddress: nsite.lol gateway URL is recognized', async () => {
-  // Real gateway URLs put the bare-bech32 (no `npub1` prefix) in the
-  // leftmost subdomain. We re-prepend it and decode.
+test('resolveAddress: nsite.lol gateway URL with bare bech32 subdomain', async () => {
   const npubTail = NPUB.slice('npub1'.length);
   const url = `https://${npubTail}.nsite.lol/some/path`;
   const r = await resolveAddress(url, null);
@@ -138,15 +136,32 @@ test('resolveAddress: nsite.lol gateway URL is recognized', async () => {
   assert.equal(r.source, 'npub');
 });
 
-test('resolveAddress: nostr.hu gateway URL is recognized', async () => {
-  const npubTail = NPUB.slice('npub1'.length);
-  const r = await resolveAddress(`https://${npubTail}.nostr.hu/`, null);
+test('resolveAddress: full npub1 in gateway label also works', async () => {
+  const r = await resolveAddress(`https://${NPUB}.nsite.lol/`, null);
   assert.equal(r.pubkey, HEX);
 });
 
-test('resolveAddress: full npub1 in gateway label also works', async () => {
-  const url = `https://${NPUB}.nsite.lol/`;
+test('resolveAddress: nsite.lol nsyte form (base36 pubkey + project name)', async () => {
+  // Real-world repro from the bug report: nostr-station's own published
+  // nsite. Subdomain is base36(pubkey_bytes) + project_name.
+  const url = 'https://10vy5d0umw8izp3bcmh0btzl6k2szvsu8zestncxpsstb6l8e6nostr-station.nsite.lol/';
   const r = await resolveAddress(url, null);
+  assert.equal(r.pubkey, '291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe');
+  assert.equal(r.source, 'npub');
+});
+
+test('resolveAddress: gateway URL with garbage subdomain rejected with helpful error', async () => {
+  await assert.rejects(
+    () => resolveAddress('https://!!!.nsite.lol/', null),
+    (e: any) => e instanceof NsiteError
+            && e.code === 'bad_address'
+            && /paste the author's npub directly/.test(e.message),
+  );
+});
+
+test('resolveAddress: nostr.hu gateway URL is also recognized', async () => {
+  const npubTail = NPUB.slice('npub1'.length);
+  const r = await resolveAddress(`https://${npubTail}.nostr.hu/`, null);
   assert.equal(r.pubkey, HEX);
 });
 
