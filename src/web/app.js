@@ -1605,6 +1605,12 @@ const SERVICE_DETAILS = {
     summaryErr:  _ => 'nostr-vpn isn\'t installed. Click Install nvpn on this row to download + register the daemon.',
     panel: { hash: '#vpn', label: 'Open nostr-vpn panel' },
   },
+  'blossom': {
+    summaryOk:   s => `Running at <code class="cmd-inline">${s.value.replace(/\s*✓\s*$/, '')}</code>. Use Stop / Restart on this row, or open the Blossom panel to browse + manage stored blobs.`,
+    summaryWarn: _ => 'Bundled in-process — no install needed. Click Start on this row to launch the local Blossom server, or use the Blossom panel\'s enable button.',
+    summaryErr:  _ => 'Blossom is bundled with nostr-station and starts in-process — no install required. If you\'re seeing this state, something went wrong booting it; check the Logs panel.',
+    panel: { hash: '#blossom', label: 'Open Blossom panel' },
+  },
   'ngit': {
     summaryOk:   s => `Git-over-Nostr ready. <code class="cmd-inline">${escapeHtml(s.value)}</code>.`,
     summaryErr:  _ => 'ngit isn\'t installed. It lets you push signed git commits to Nostr relays instead of a central host.',
@@ -1658,6 +1664,57 @@ async function callNvpnAction(action, label) {
   } catch (e) {
     toast(`nvpn ${label} failed`, e?.message || '', 'err');
     return null;
+  }
+}
+
+// Same shape as appendNvpnControls — Start when warn (off), Stop +
+// Restart when ok (running). POSTs route through the persisted
+// /api/blossom/{start,stop,restart} handlers (which also invalidate
+// the /api/status cache so the row refreshes immediately).
+function appendBlossomControls(ctaRow, s) {
+  const callBlossomAction = async (verb) => {
+    try {
+      await api(`/api/blossom/${verb}`, { method: 'POST' });
+      apiInvalidate('/api/blossom-config');
+      apiInvalidate('/api/status');
+      await refreshHealth();
+      try { await StatusPanel?._fillBlossomCard?.(); } catch {}
+      try { await ConfigPanel?.refreshBlossomSection?.(); } catch {}
+    } catch (e) {
+      toast(`Blossom ${verb} failed`, e?.message || '', 'err');
+    }
+  };
+  if (s.state === 'ok') {
+    const restartBtn = document.createElement('button');
+    restartBtn.textContent = 'Restart';
+    restartBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      restartBtn.disabled = true;
+      await callBlossomAction('restart');
+      restartBtn.disabled = false;
+    });
+    ctaRow.appendChild(restartBtn);
+    const stopBtn = document.createElement('button');
+    stopBtn.className = 'danger';
+    stopBtn.textContent = 'Stop';
+    stopBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      stopBtn.disabled = true;
+      await callBlossomAction('stop');
+      stopBtn.disabled = false;
+    });
+    ctaRow.appendChild(stopBtn);
+  } else if (s.state === 'warn') {
+    const startBtn = document.createElement('button');
+    startBtn.className = 'primary';
+    startBtn.textContent = 'Start';
+    startBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      startBtn.disabled = true;
+      await callBlossomAction('start');
+      startBtn.disabled = false;
+    });
+    ctaRow.appendChild(startBtn);
   }
 }
 
@@ -2236,6 +2293,9 @@ function buildStatusRow(s) {
   // SSE flow used for ngit/nak/stacks).
   if (s.id === 'vpn' && s.state !== 'err') {
     appendNvpnControls(ctaRow, s);
+  }
+  if (s.id === 'blossom' && s.state !== 'err') {
+    appendBlossomControls(ctaRow, s);
   }
 
   if (s.state === 'err' && s.id === 'vpn') {
@@ -3509,6 +3569,464 @@ const RelayPanel = (() => {
       refreshWhitelist();
       if (!entered) { entered = true; connect(); }
     },
+  };
+})();
+
+// ── Panel: Blossom ───────────────────────────────────────────────────────
+//
+// Media explorer + manager for the in-process Blossom server. Mirrors
+// the Relay panel's role: a dedicated deep-dive surface for the service.
+// Reads from /api/blossom-config (status + stats) and /api/blossom/blobs
+// (paginated index). Writes through the admin-mediated delete endpoints
+// added in routes/blossom-config.ts.
+//
+// v1 scope:
+//   - Stats header (count, bytes, quota %, per-uploader breakdown)
+//   - Filter chips (All / Owner / Whitelist / Test-identity + mime
+//     buckets: image / video / audio / other)
+//   - Paginated grid view with thumbnails for images, icons otherwise
+//   - Per-blob detail overlay with preview + delete
+//   - Multi-select via per-card checkbox + bulk delete
+//   - Off-state CTA: Enable button that POSTs /api/blossom/start
+//
+// Deferred to v2: per-blob NIP-94 generation, upload from panel,
+// cross-references against the local relay, export/import.
+const BlossomPanel = (() => {
+  const PAGE_SIZE = 24;
+  const FILTERS = [
+    { id: 'all',           label: 'All',           kind: 'pseudo' },
+    { id: 'owner',         label: 'Owner',         kind: 'uploader' },
+    { id: 'whitelist',     label: 'Whitelist',     kind: 'uploader' },
+    { id: 'test-identity', label: 'Test users',    kind: 'uploader' },
+    { id: 'image',         label: 'Images',        kind: 'mime', prefix: 'image/' },
+    { id: 'video',         label: 'Videos',        kind: 'mime', prefix: 'video/' },
+    { id: 'audio',         label: 'Audio',         kind: 'mime', prefix: 'audio/' },
+    { id: 'other',         label: 'Other',         kind: 'mime', prefix: null /* anything not in image/video/audio */ },
+  ];
+
+  let state = {
+    running:  false,
+    url:      null,
+    stats:    null,
+    blobs:    [],
+    total:    0,
+    page:     0,
+    filter:   'all',
+    selected: new Set(),
+    loading:  false,
+  };
+
+  function fmtBytes(n) {
+    if (!n || n < 0) return '0 B';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+  }
+
+  function fmtAge(epochMs) {
+    if (!epochMs) return '';
+    const s = Math.max(0, (Date.now() - epochMs) / 1000);
+    if (s < 60)     return `${Math.floor(s)}s ago`;
+    if (s < 3600)   return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400)  return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+  }
+
+  function mimeIcon(mime) {
+    if (!mime) return '📄';
+    if (mime.startsWith('image/')) return '🖼️';
+    if (mime.startsWith('video/')) return '🎬';
+    if (mime.startsWith('audio/')) return '🎵';
+    if (mime.startsWith('text/'))  return '📝';
+    if (mime === 'application/pdf') return '📕';
+    return '📄';
+  }
+
+  function blobDirectUrl(sha) {
+    return state.url ? `${state.url}/${sha}` : `http://127.0.0.1:8081/${sha}`;
+  }
+
+  // ── Network ────────────────────────────────────────────────────────────
+
+  async function load() {
+    state.loading = true;
+    renderEmpty('Loading…');
+    try {
+      const cfg = await api('/api/blossom-config');
+      state.running = !!cfg?.running;
+      state.url     = cfg?.url || null;
+      state.stats   = cfg?.stats || null;
+      if (!state.running) {
+        state.blobs = []; state.total = 0;
+        renderOffState();
+        return;
+      }
+      // Server-side pagination: limit + offset on the blobs endpoint.
+      // Filters are applied client-side after fetch — for v1's volumes
+      // (single digits to maybe low hundreds) the simplicity is worth
+      // the extra ~few KB pulled. Phase 2 can push filters server-side.
+      const r = await api(`/api/blossom/blobs?limit=500&offset=0`);
+      state.blobs = Array.isArray(r?.blobs) ? r.blobs : [];
+      state.total = typeof r?.total === 'number' ? r.total : state.blobs.length;
+    } catch (e) {
+      renderEmpty(`Failed to load: ${escapeHtml(e?.message || String(e))}`);
+      state.running = false;
+    } finally {
+      state.loading = false;
+    }
+    render();
+  }
+
+  async function deleteBlob(sha) {
+    const r = await api(`/api/blossom/blobs/${encodeURIComponent(sha)}`, { method: 'DELETE' });
+    if (r?.ok === false) throw new Error(r?.error || 'delete failed');
+    return r;
+  }
+
+  async function bulkDelete(shas) {
+    const r = await api('/api/blossom/blobs/bulk-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha256s: shas }),
+    });
+    if (r?.ok === false) throw new Error(r?.error || 'bulk delete failed');
+    return r;
+  }
+
+  // ── Filtering / pagination ─────────────────────────────────────────────
+
+  function applyFilter(blobs) {
+    const f = FILTERS.find(x => x.id === state.filter) || FILTERS[0];
+    if (f.id === 'all') return blobs;
+    if (f.kind === 'uploader') {
+      return blobs.filter(b => b.uploaderKind === f.id);
+    }
+    if (f.kind === 'mime') {
+      if (f.id === 'other') {
+        return blobs.filter(b => {
+          const m = b.mime || '';
+          return !m.startsWith('image/') && !m.startsWith('video/') && !m.startsWith('audio/');
+        });
+      }
+      return blobs.filter(b => (b.mime || '').startsWith(f.prefix));
+    }
+    return blobs;
+  }
+
+  function paged(filtered) {
+    const start = state.page * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────
+
+  function renderOffState() {
+    const grid = $('blossom-grid');
+    const stats = $('blossom-stats');
+    const filters = $('blossom-filters');
+    const empty = $('blossom-empty');
+    const pager = $('blossom-pager');
+    const bulk = $('blossom-bulk-bar');
+    if (filters) filters.hidden = true;
+    if (pager)   pager.hidden = true;
+    if (bulk)    bulk.hidden = true;
+    if (stats) {
+      stats.innerHTML = `
+        <div class="blossom-off">
+          <div class="blossom-off-title">Blossom is not running</div>
+          <div class="muted" style="margin-bottom:8px">Bundled in-process — no install required.</div>
+          <button class="primary" id="blossom-enable">Enable Blossom</button>
+        </div>
+      `;
+      $('blossom-enable')?.addEventListener('click', async () => {
+        const btn = $('blossom-enable');
+        if (btn) { btn.disabled = true; btn.textContent = 'Enabling…'; }
+        try {
+          await api('/api/blossom/start', { method: 'POST' });
+          apiInvalidate('/api/blossom-config');
+          apiInvalidate('/api/status');
+          await load();
+          refreshHealth?.();
+          try { await StatusPanel?._fillBlossomCard?.(); } catch {}
+          try { await ConfigPanel?.refreshBlossomSection?.(); } catch {}
+        } catch (e) {
+          toast('Failed to enable Blossom', e?.message || '', 'err');
+          if (btn) { btn.disabled = false; btn.textContent = 'Enable Blossom'; }
+        }
+      });
+    }
+    if (grid) grid.innerHTML = '';
+    if (empty) empty.hidden = true;
+  }
+
+  function renderEmpty(message) {
+    const grid = $('blossom-grid');
+    const empty = $('blossom-empty');
+    if (grid) grid.innerHTML = '';
+    if (empty) {
+      empty.hidden = false;
+      empty.textContent = message;
+    }
+  }
+
+  function renderStats() {
+    const el = $('blossom-stats');
+    if (!el) return;
+    const s = state.stats || { blobCount: 0, totalBytes: 0, quotaBytes: 0, uploadsByKind: { owner: 0, whitelist: 0, 'test-identity': 0 } };
+    const pct = s.quotaBytes ? Math.min(100, Math.round((s.totalBytes / s.quotaBytes) * 100)) : 0;
+    el.innerHTML = `
+      <div class="blossom-stat-row">
+        <div class="blossom-stat-headline">
+          <b>${s.blobCount}</b> blob${s.blobCount === 1 ? '' : 's'} ·
+          <b>${escapeHtml(fmtBytes(s.totalBytes))}</b>${s.quotaBytes ? ` of <b>${escapeHtml(fmtBytes(s.quotaBytes))}</b>` : ''}
+          ${s.quotaBytes ? `<span class="muted">(${pct}%)</span>` : ''}
+        </div>
+        <div class="blossom-stat-url"><code>${escapeHtml(state.url || '')}</code></div>
+      </div>
+      ${s.quotaBytes ? `
+        <div class="blossom-quota-bar">
+          <div class="blossom-quota-fill" style="width:${pct}%"></div>
+        </div>
+      ` : ''}
+      <div class="blossom-stat-breakdown muted">
+        Owner: <b>${s.uploadsByKind?.owner || 0}</b> ·
+        Whitelist: <b>${s.uploadsByKind?.whitelist || 0}</b> ·
+        Test users: <b>${s.uploadsByKind?.['test-identity'] || 0}</b>
+      </div>
+    `;
+  }
+
+  function renderFilters() {
+    const el = $('blossom-filters');
+    if (!el) return;
+    el.hidden = false;
+    el.innerHTML = FILTERS.map(f => `
+      <button class="blossom-filter-chip ${state.filter === f.id ? 'active' : ''}" data-filter="${escapeHtml(f.id)}">
+        ${escapeHtml(f.label)}
+      </button>
+    `).join('');
+    el.querySelectorAll('.blossom-filter-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.filter = btn.dataset.filter;
+        state.page = 0;
+        state.selected.clear();
+        render();
+      });
+    });
+  }
+
+  function renderBulkBar() {
+    const el = $('blossom-bulk-bar');
+    if (!el) return;
+    if (state.selected.size === 0) { el.hidden = true; return; }
+    el.hidden = false;
+    $('blossom-bulk-count').textContent = `${state.selected.size} selected`;
+  }
+
+  function renderGrid() {
+    const grid = $('blossom-grid');
+    const empty = $('blossom-empty');
+    const pager = $('blossom-pager');
+    if (!grid) return;
+
+    const filtered = applyFilter(state.blobs);
+    const pageBlobs = paged(filtered);
+
+    if (filtered.length === 0) {
+      grid.innerHTML = '';
+      empty.hidden = false;
+      empty.textContent = state.blobs.length === 0
+        ? 'No blobs stored yet. Apps uploading to http://127.0.0.1:8081 via NIP-98 will appear here.'
+        : `No blobs match the "${FILTERS.find(f => f.id === state.filter)?.label}" filter.`;
+      pager.hidden = true;
+      return;
+    }
+    empty.hidden = true;
+
+    grid.innerHTML = pageBlobs.map(b => {
+      const isImg = (b.mime || '').startsWith('image/');
+      const isSelected = state.selected.has(b.sha256);
+      const thumb = isImg
+        ? `<img class="blossom-thumb" src="${escapeHtml(blobDirectUrl(b.sha256))}" alt="" loading="lazy">`
+        : `<div class="blossom-thumb blossom-thumb-icon">${mimeIcon(b.mime)}</div>`;
+      const kindClass = `blossom-kind-${b.uploaderKind}`;
+      return `
+        <div class="blossom-card ${isSelected ? 'selected' : ''}" data-sha="${escapeHtml(b.sha256)}">
+          <label class="blossom-card-check" title="Select for bulk action">
+            <input type="checkbox" data-sha="${escapeHtml(b.sha256)}" ${isSelected ? 'checked' : ''}>
+          </label>
+          ${thumb}
+          <div class="blossom-card-meta">
+            <div class="blossom-card-line"><code>${escapeHtml(b.sha256.slice(0, 12))}…</code></div>
+            <div class="blossom-card-line muted">
+              <span class="blossom-kind-chip ${kindClass}" title="uploader: ${escapeHtml(b.uploaderKind)}">${escapeHtml(b.uploaderKind)}</span>
+              <span>${escapeHtml(fmtBytes(b.size))}</span>
+              <span>${escapeHtml(fmtAge(b.createdAt))}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    // Wire interactions.
+    grid.querySelectorAll('.blossom-card').forEach(card => {
+      card.addEventListener('click', (e) => {
+        // Clicks on the checkbox itself shouldn't open the detail.
+        if (e.target.closest('.blossom-card-check')) return;
+        const sha = card.dataset.sha;
+        const blob = state.blobs.find(b => b.sha256 === sha);
+        if (blob) openDetail(blob);
+      });
+    });
+    grid.querySelectorAll('.blossom-card-check input').forEach(cb => {
+      cb.addEventListener('click', (e) => e.stopPropagation());
+      cb.addEventListener('change', () => {
+        const sha = cb.dataset.sha;
+        if (cb.checked) state.selected.add(sha);
+        else            state.selected.delete(sha);
+        cb.closest('.blossom-card')?.classList.toggle('selected', cb.checked);
+        renderBulkBar();
+      });
+    });
+
+    // Pager.
+    const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+    pager.hidden = totalPages <= 1;
+    $('blossom-page-label').textContent = `Page ${state.page + 1} of ${totalPages} (${filtered.length} matching)`;
+    $('blossom-prev').disabled = state.page <= 0;
+    $('blossom-next').disabled = state.page >= totalPages - 1;
+  }
+
+  function render() {
+    if (!state.running) { renderOffState(); return; }
+    renderStats();
+    renderFilters();
+    renderBulkBar();
+    renderGrid();
+  }
+
+  // ── Detail overlay ─────────────────────────────────────────────────────
+
+  function openDetail(blob) {
+    const isImg = (blob.mime || '').startsWith('image/');
+    const isVid = (blob.mime || '').startsWith('video/');
+    const isAud = (blob.mime || '').startsWith('audio/');
+    const url   = blobDirectUrl(blob.sha256);
+    const preview = isImg ? `<img src="${escapeHtml(url)}" class="blossom-detail-img" alt="">`
+                  : isVid ? `<video src="${escapeHtml(url)}" controls class="blossom-detail-media"></video>`
+                  : isAud ? `<audio src="${escapeHtml(url)}" controls class="blossom-detail-audio"></audio>`
+                  :         `<div class="blossom-detail-icon">${mimeIcon(blob.mime)}</div>`;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'blossom-detail-overlay';
+    overlay.innerHTML = `
+      <div class="blossom-detail-card">
+        <div class="blossom-detail-head">
+          <div class="blossom-detail-title">Blob detail</div>
+          <button class="blossom-detail-close" aria-label="Close">×</button>
+        </div>
+        <div class="blossom-detail-preview">${preview}</div>
+        <div class="blossom-detail-meta">
+          <div class="config-row"><div class="k">sha256</div><div class="v"><code>${escapeHtml(blob.sha256)}</code></div></div>
+          <div class="config-row"><div class="k">mime</div><div class="v">${escapeHtml(blob.mime || '(unset)')}</div></div>
+          <div class="config-row"><div class="k">size</div><div class="v">${escapeHtml(fmtBytes(blob.size))}</div></div>
+          <div class="config-row"><div class="k">uploader</div><div class="v">
+            <span class="blossom-kind-chip blossom-kind-${blob.uploaderKind}">${escapeHtml(blob.uploaderKind)}</span>
+            <code style="margin-left:6px">${escapeHtml(blob.uploaderPubkey?.slice(0, 12) || '')}…</code>
+          </div></div>
+          <div class="config-row"><div class="k">uploaded</div><div class="v">${escapeHtml(new Date(blob.createdAt).toLocaleString())}</div></div>
+          <div class="config-row"><div class="k">URL</div><div class="v"><a href="${escapeHtml(url)}" target="_blank" rel="noreferrer"><code>${escapeHtml(url)}</code></a></div></div>
+        </div>
+        <div class="blossom-detail-actions">
+          <button class="blossom-detail-copy">Copy URL</button>
+          <button class="danger blossom-detail-delete">Delete blob</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => { try { document.body.removeChild(overlay); } catch {} };
+    overlay.querySelector('.blossom-detail-close').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+    });
+
+    overlay.querySelector('.blossom-detail-copy').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(url); toast('URL copied', '', 'ok'); }
+      catch { toast('Clipboard blocked', 'copy manually', 'warn'); }
+    });
+    overlay.querySelector('.blossom-detail-delete').addEventListener('click', async () => {
+      const ok = await confirmDestructive({
+        title: 'Delete this blob?',
+        description: `sha256: ${blob.sha256.slice(0, 16)}…\n\nDeletes the file from disk and removes the index row. Apps that linked to this blob URL will 404.`,
+        confirmLabel: 'Delete',
+      });
+      if (!ok) return;
+      try {
+        await deleteBlob(blob.sha256);
+        toast('Blob deleted', '', 'ok');
+        close();
+        state.selected.delete(blob.sha256);
+        await load();
+      } catch (e) {
+        toast('Delete failed', e?.message || '', 'err');
+      }
+    });
+  }
+
+  // ── Static button wiring ───────────────────────────────────────────────
+
+  $('blossom-refresh')?.addEventListener('click', () => { apiInvalidate('/api/blossom-config'); load(); });
+  $('blossom-wipe-all')?.addEventListener('click', async () => {
+    if (!state.running) return;
+    const ok = await confirmDestructive({
+      title: 'Wipe all local blobs?',
+      description: `Deletes ${state.stats?.blobCount || 0} blob(s) (${fmtBytes(state.stats?.totalBytes || 0)}). Cannot be undone.`,
+      confirmLabel: 'Wipe',
+    });
+    if (!ok) return;
+    try {
+      await api('/api/blossom/wipe', { method: 'POST' });
+      toast('All blobs wiped', '', 'ok');
+      state.selected.clear();
+      await load();
+    } catch (e) {
+      toast('Wipe failed', e?.message || '', 'err');
+    }
+  });
+  $('blossom-prev')?.addEventListener('click', () => { if (state.page > 0) { state.page--; render(); } });
+  $('blossom-next')?.addEventListener('click', () => {
+    const filtered = applyFilter(state.blobs);
+    const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+    if (state.page < totalPages - 1) { state.page++; render(); }
+  });
+  $('blossom-bulk-clear')?.addEventListener('click', () => {
+    state.selected.clear();
+    render();
+  });
+  $('blossom-bulk-delete')?.addEventListener('click', async () => {
+    if (state.selected.size === 0) return;
+    const shas = [...state.selected];
+    const ok = await confirmDestructive({
+      title: `Delete ${shas.length} blob${shas.length === 1 ? '' : 's'}?`,
+      description: `Removes the selected blob${shas.length === 1 ? '' : 's'} from the local store. Cannot be undone.`,
+      confirmLabel: 'Delete',
+    });
+    if (!ok) return;
+    try {
+      const r = await bulkDelete(shas);
+      toast('Bulk delete', `${r.deletedCount}/${shas.length} removed`, r.deletedCount === shas.length ? 'ok' : 'warn');
+      state.selected.clear();
+      await load();
+    } catch (e) {
+      toast('Bulk delete failed', e?.message || '', 'err');
+    }
+  });
+
+  return {
+    onEnter() { load(); },
   };
 })();
 
@@ -17494,6 +18012,7 @@ const Panels = {
   status:   StatusPanel,
   chat:     ChatPanel,
   relay:    RelayPanel,
+  blossom:  BlossomPanel,
   projects: ProjectsPanel,
   vpn:      VpnPanel,
   logs:     LogsPanel,

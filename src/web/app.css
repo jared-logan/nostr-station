@@ -8443,3 +8443,177 @@ a.client-mention {
 .relay-list-readonly .item .url {
   color: var(--text);
 }
+
+/* ── Blossom panel ─────────────────────────────────────────────────────── */
+.blossom-stats {
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  margin-bottom: 14px;
+}
+.blossom-stat-row {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px;
+}
+.blossom-stat-headline { font-size: 14px; color: var(--text-bright); }
+.blossom-stat-url { font-size: 11px; color: var(--text-dim); }
+.blossom-stat-breakdown { font-size: 11px; margin-top: 6px; }
+.blossom-quota-bar {
+  height: 6px; margin-top: 8px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 3px; overflow: hidden;
+}
+.blossom-quota-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.blossom-off { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.blossom-off-title { font-size: 14px; font-weight: 600; color: var(--text-bright); }
+
+.blossom-filters {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 12px;
+}
+.blossom-filter-chip {
+  padding: 4px 12px;
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+  text-transform: lowercase;
+}
+.blossom-filter-chip:hover { border-color: var(--accent-dim); color: var(--text-bright); }
+.blossom-filter-chip.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-bright);
+}
+
+.blossom-bulk-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; margin-bottom: 10px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-dim);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.blossom-bulk-bar #blossom-bulk-count { color: var(--accent-bright); font-weight: 600; flex: 1; }
+
+.blossom-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+}
+.blossom-card {
+  position: relative;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.1s ease;
+  display: flex; flex-direction: column;
+}
+.blossom-card:hover { border-color: var(--accent-dim); }
+.blossom-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.blossom-card-check {
+  position: absolute; top: 6px; left: 6px;
+  background: rgba(0,0,0,0.55);
+  border-radius: 4px;
+  padding: 2px;
+  cursor: pointer;
+  z-index: 2;
+}
+.blossom-card-check input { cursor: pointer; }
+.blossom-thumb {
+  width: 100%; aspect-ratio: 1 / 1;
+  object-fit: cover;
+  background: rgba(255,255,255,0.02);
+  display: block;
+}
+.blossom-thumb-icon {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 48px;
+}
+.blossom-card-meta {
+  padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px;
+}
+.blossom-card-line {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+}
+.blossom-kind-chip {
+  display: inline-flex; padding: 1px 7px;
+  font-size: 9px; font-weight: 600; letter-spacing: 0.04em;
+  border-radius: 999px;
+  text-transform: lowercase;
+}
+.blossom-kind-owner        { background: rgba(123, 104, 238, 0.14); color: #b8aaff; border: 1px solid rgba(123, 104, 238, 0.40); }
+.blossom-kind-whitelist    { background: rgba(90, 165, 245, 0.14);  color: #88baf7; border: 1px solid rgba(90, 165, 245, 0.40);  }
+.blossom-kind-test-identity{ background: rgba(240, 170, 70, 0.14);  color: #e8a64a; border: 1px solid rgba(240, 170, 70, 0.40);  }
+
+.blossom-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+.blossom-pager {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ── Blossom detail overlay (per-blob preview + actions) ──────────────── */
+.blossom-detail-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.blossom-detail-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 0;
+}
+.blossom-detail-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.blossom-detail-title { font-size: 14px; font-weight: 600; color: var(--text-bright); }
+.blossom-detail-close {
+  background: transparent; border: none; color: var(--text-dim);
+  font-size: 24px; line-height: 1; cursor: pointer; padding: 0 4px;
+}
+.blossom-detail-close:hover { color: var(--text-bright); }
+.blossom-detail-preview {
+  padding: 18px;
+  background: rgba(0,0,0,0.3);
+  display: flex; align-items: center; justify-content: center;
+  min-height: 200px;
+  max-height: 50vh;
+}
+.blossom-detail-img    { max-width: 100%; max-height: 50vh; object-fit: contain; }
+.blossom-detail-media  { max-width: 100%; max-height: 50vh; }
+.blossom-detail-audio  { width: 100%; }
+.blossom-detail-icon   { font-size: 80px; }
+.blossom-detail-meta   { padding: 14px 18px; }
+.blossom-detail-actions {
+  display: flex; gap: 10px;
+  padding: 14px 18px; border-top: 1px solid var(--border);
+  justify-content: flex-end;
+}

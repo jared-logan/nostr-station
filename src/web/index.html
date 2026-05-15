@@ -156,6 +156,10 @@
           <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M5 12a7 7 0 0 1 14 0"/><path d="M8 12a4 4 0 0 1 8 0"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg></span>
           Relay
         </a>
+        <a href="#blossom" data-panel="blossom">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="6" r="3"/><circle cx="6" cy="14" r="3"/><circle cx="18" cy="14" r="3"/><circle cx="12" cy="18" r="3"/></svg></span>
+          Blossom
+        </a>
         <a href="#projects" data-panel="projects">
           <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 7.5V18a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-8l-2-2.5H5a2 2 0 0 0-2 2Z"/></svg></span>
           Projects
@@ -388,6 +392,38 @@
             </div>
             <button class="danger" id="relay-db-wipe">wipe</button>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- BLOSSOM — local blob storage browser + manager -->
+    <section class="panel" data-panel="blossom">
+      <div class="panel-head">
+        <div>
+          <div class="title">Blossom</div>
+          <div class="subtitle">Local blob storage — browse, preview, delete. In-process, bundled with nostr-station.</div>
+        </div>
+        <div class="panel-head-actions">
+          <button id="blossom-refresh">refresh</button>
+          <button id="blossom-wipe-all" class="danger">wipe all</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="blossom-stats" class="blossom-stats">
+          <div class="muted">loading…</div>
+        </div>
+        <div id="blossom-filters" class="blossom-filters" hidden></div>
+        <div id="blossom-bulk-bar" class="blossom-bulk-bar" hidden>
+          <span id="blossom-bulk-count">0 selected</span>
+          <button id="blossom-bulk-clear">clear</button>
+          <button id="blossom-bulk-delete" class="danger">delete selected</button>
+        </div>
+        <div id="blossom-grid" class="blossom-grid"></div>
+        <div id="blossom-empty" class="blossom-empty" hidden></div>
+        <div id="blossom-pager" class="blossom-pager" hidden>
+          <button id="blossom-prev">← prev</button>
+          <span id="blossom-page-label"></span>
+          <button id="blossom-next">next →</button>
         </div>
       </div>
     </section>
