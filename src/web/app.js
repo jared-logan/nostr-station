@@ -17214,7 +17214,6 @@ const MailPanel = (() => {
   let activeCounter  = null;     // hex pubkey of the open thread, or null
   let activeMessages = [];
   let lastStatus     = null;
-  let pollTimer      = null;
 
   function npubShort(hex) {
     if (!hex) return '';
@@ -17411,16 +17410,49 @@ const MailPanel = (() => {
     }
   }
 
-  function startPolling() {
-    if (pollTimer) return;
-    // Light poll — the inbox worker pushes new rumors to the DB in
-    // the background; we just re-fetch the thread summary every 6s
-    // so newly-arrived mail surfaces without the user clicking refresh.
-    // Future patch will replace this with an SSE stream from the worker.
-    pollTimer = setInterval(() => { void load(); }, 6_000);
+  // Live updates via SSE. The inbox worker fires events when new mail
+  // arrives; we trigger a fresh load() so the inbox/threads/badge all
+  // refresh together. A 60s safety-net poll catches the rare case where
+  // the SSE socket drops silently (mobile suspend, NAT timeout) without
+  // the EventSource onerror firing — refresh-on-arrival is exact, the
+  // safety net is a backstop only.
+  let eventStream = null;
+  let safetyTimer = null;
+  function startStream() {
+    stopStream();
+    const tok = getSessionToken();
+    if (!tok) return;  // no session yet — load() will retry on next nav
+    try {
+      eventStream = new EventSource(`/api/mail/stream?token=${tok}`);
+    } catch { return; }
+    eventStream.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      // We never trust the rumorId from the frame as a source of truth —
+      // the inbox worker has already persisted it. Just reload the
+      // visible state. Same response handles "hello", "mail-received",
+      // and "relay-retry" — the UI only needs to refresh status + threads.
+      if (msg?.type === 'mail-received' || msg?.type === 'hello') {
+        void load();
+      } else if (msg?.type === 'relay-retry' || msg?.type === 'relay-closed') {
+        // No reload needed; relay reconnect status is reflected in the
+        // next /api/mail/status poll. We could opportunistically refresh
+        // just the status line here, but keeping the SSE handler dumb
+        // means fewer surprising re-renders.
+      }
+    };
+    eventStream.onerror = () => {
+      // EventSource auto-reconnects with exponential backoff; we let it
+      // handle that. If the connection is fully dead, the safety-net
+      // poll below picks up the slack.
+    };
+    // Safety net: re-fetch the inbox once a minute even if SSE is
+    // silent. Cheap (one GET per minute) and self-healing.
+    safetyTimer = setInterval(() => { void load(); }, 60_000);
   }
-  function stopPolling() {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  function stopStream() {
+    if (eventStream)  { try { eventStream.close(); } catch {} eventStream = null; }
+    if (safetyTimer)  { clearInterval(safetyTimer); safetyTimer = null; }
   }
 
   // ── Compose modal ─────────────────────────────────────────────────────
@@ -17775,12 +17807,12 @@ const MailPanel = (() => {
     onEnter() {
       wireButtons();
       void load();
-      startPolling();
+      startStream();
     },
-    // Exposed for tests / future SSE migration. The polling timer is
-    // page-lifetime cheap (a single fetch every 6s) so nothing currently
-    // calls this.
-    _stop: stopPolling,
+    // Exposed for cleanup / tests. activatePanel() doesn't currently
+    // call this — the SSE connection survives panel switches, which is
+    // what we want (badge stays accurate).
+    _stop: stopStream,
   };
 })();
 

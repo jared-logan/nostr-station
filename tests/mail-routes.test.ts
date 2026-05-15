@@ -154,6 +154,43 @@ test('mail-routes: PUT /api/mail/inbox-relays validates entries', async (t) => {
   assert.match(empty.body, /at least one/);
 });
 
+test('mail-routes: /api/mail/stream sends a hello frame on connect', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Open a raw socket so we can read the SSE preamble without an
+  // EventSource (node:test has no DOM globals). The hello frame is
+  // written synchronously after the headers — we read enough bytes to
+  // see it, then close the connection.
+  const helloFrame = await new Promise<string>((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: '/api/mail/stream', method: 'GET',
+        headers: { host: `127.0.0.1:${port}`, accept: 'text/event-stream' } },
+      (res) => {
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.headers['content-type'], 'text/event-stream');
+        let buf = '';
+        res.on('data', (chunk) => {
+          buf += chunk.toString('utf8');
+          // First `data:` line is the hello frame; close as soon as we see one.
+          const m = buf.match(/^data: (.+?)\n\n/m);
+          if (m) {
+            res.destroy();
+            resolve(m[1]);
+          }
+        });
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+
+  const parsed = JSON.parse(helloFrame);
+  assert.equal(parsed.type, 'hello');
+  assert.equal(typeof parsed.stats, 'object');
+});
+
 test('mail-routes: /api/mail/attachment returns 409 when Blossom is off', async (t) => {
   const { server, port } = await bootOnRandomPort();
   t.after(() => new Promise<void>((r) => server.close(() => r())));
