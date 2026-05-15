@@ -226,7 +226,7 @@ export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse):
 
   const ext = path.extname(target).toLowerCase();
   const mime = DITTO_MIME[ext] ?? 'application/octet-stream';
-  res.writeHead(200, {
+  const headers: Record<string, string> = {
     'Content-Type': mime,
     // Fingerprinted assets in /ditto/assets/* are safe to cache forever.
     // index.html (and the SPA fallback) stays no-cache so app-shell
@@ -234,7 +234,19 @@ export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse):
     'Cache-Control': (ext === '.html' || isSpaFallback)
       ? 'no-cache'
       : 'public, max-age=86400',
-  });
+  };
+  // HEAD responses get headers + Content-Length but no body. The Client
+  // panel's bundle-presence probe uses HEAD; without this branch the
+  // probe falls through to a 404 default and the panel falsely shows
+  // the "Ditto not installed" state even when the bundle is there.
+  const method = (req.method || 'GET').toUpperCase();
+  if (method === 'HEAD') {
+    try { headers['Content-Length'] = String(fs.statSync(target).size); } catch {}
+    res.writeHead(200, headers);
+    res.end();
+    return true;
+  }
+  res.writeHead(200, headers);
   fs.createReadStream(target).pipe(res);
   return true;
 }

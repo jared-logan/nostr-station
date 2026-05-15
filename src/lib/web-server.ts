@@ -1747,8 +1747,9 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // then the bundled Ditto SPA, then the regular src/web tree.
       // serveDitto matches /ditto/* and falls through to serveStatic on
       // miss (returns false), so the dashboard's own assets still win.
+      // Allow HEAD on Ditto for the panel's bundle-presence probe.
       if (method === 'GET' && serveVendorXterm(req, res)) return;
-      if (method === 'GET' && serveDitto(req, res)) return;
+      if ((method === 'GET' || method === 'HEAD') && serveDitto(req, res)) return;
       if (method === 'GET' && serveStatic(req, res)) return;
 
       // SPA routes — served from index.html. The client router picks up
