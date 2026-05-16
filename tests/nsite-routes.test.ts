@@ -640,6 +640,15 @@ test('serveContent: clean URL /browse → /browse/index.html (directory-index fa
     : String(res.body);
   assert.ok(body.includes('browse page'),
     'must serve the /browse/index.html content, not the root index.html');
+  // Content-Type must be text/html, not the octet-stream fallback that
+  // would trigger Chrome's "Download is disallowed" classifier in a
+  // sandboxed iframe — the bug from PR #139 was that mime derivation
+  // ran against the REQUEST path (`browse`, no extension → octet-
+  // stream fallback) instead of the RESOLVED file path
+  // (`browse/index.html` → text/html). Field-confirmed regression
+  // guard against re-introducing it.
+  assert.match(String(res.headers['content-type']), /^text\/html\b/,
+    'directory-index resolution must derive Content-Type from the resolved file (browse/index.html), not the request path');
   _internal.sites.delete(sid);
   _internal.blobs.delete(sha);
 });
@@ -677,6 +686,11 @@ test('serveContent: clean URL with NO matching directory-index falls back to SPA
     : String(res.body);
   assert.ok(body.includes('root spa'),
     'unknown clean URLs must still fall through to the root SPA index');
+  // Same Content-Type contract as the directory-index case: SPA-root
+  // fallback must surface text/html, not the octet-stream default
+  // that would block the response in a sandboxed iframe.
+  assert.match(String(res.headers['content-type']), /^text\/html\b/,
+    'SPA-root fallback must derive Content-Type from the resolved index.html');
   _internal.sites.delete(sid);
   _internal.blobs.delete(sha);
 });
