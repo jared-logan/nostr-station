@@ -2589,9 +2589,18 @@ const SessionStore = (() => {
       permissionMode: null,
     };
   }
-  function makeProject(projectId, projectName) {
+  function newSessionId() {
+    // crypto.randomUUID is available in all browsers we target; fall back
+    // to a timestamp + random tail just in case (e.g. very old WebView).
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return 'cs_' + crypto.randomUUID();
+    }
+    return 'cs_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+  }
+
+  function makeProject(projectId, projectName, id) {
     return {
-      id: 'p:' + projectId,
+      id: id || newSessionId(),
       kind: 'project',
       projectId,
       title: projectName || 'Project session',
@@ -2691,10 +2700,27 @@ const SessionStore = (() => {
       persist();
       return s;
     }
-    const s = makeProject(projectId, projectName);
+    // First-ever session for this project — keep the legacy deterministic
+    // id so resumes from older builds (which used 'p:<projectId>') still
+    // line up. createForProject() uses UUIDs for genuine multi-session.
+    const s = makeProject(projectId, projectName, 'p:' + projectId);
     sessions[s.id] = s;
     lastOpenByProject[projectId] = s.id;
     if (!openOrder.includes(s.id)) openOrder.push(s.id);
+    persist();
+    notify();
+    return s;
+  }
+
+  function createForProject(projectId, projectName) {
+    // Always-fresh session, even if the project already has one open.
+    // Updates lastOpenByProject so the project card's "Open in chat" icon
+    // resumes the newest session next time (matches user intent: the
+    // most recent thread is what they were last working in).
+    const s = makeProject(projectId, projectName);
+    sessions[s.id] = s;
+    lastOpenByProject[projectId] = s.id;
+    openOrder.push(s.id);
     persist();
     notify();
     return s;
@@ -2776,7 +2802,7 @@ const SessionStore = (() => {
     STATION_ID,
     get, list, listOpen, listForProject,
     getActive, getActiveId, setActive,
-    ensureProjectSession,
+    ensureProjectSession, createForProject,
     appendMessage, setTitle, clearHistory, close,
     gcAgainstProjects,
     subscribe,
@@ -3246,7 +3272,17 @@ const ChatPanel = (() => {
     const turnSessionId = SessionStore.getActiveId();
     const userMsg = { role: 'user', content: text };
     SessionStore.appendMessage(turnSessionId, userMsg);
-    const history = SessionStore.get(turnSessionId).history.slice();
+    const turnSession = SessionStore.get(turnSessionId);
+    // Auto-title: the first user message becomes the session title, so
+    // project sessions in the nav read like "Add the X feature" rather
+    // than "Project session". Only fires on the first turn; rename via
+    // double-click on the nav row still wins from then on.
+    if (turnSession && turnSession.kind === 'project' && turnSession.history.length === 1) {
+      const stripped = text.replace(/\s+/g, ' ').trim();
+      const newTitle = stripped.length > 40 ? stripped.slice(0, 40) + '…' : stripped;
+      if (newTitle) SessionStore.setTitle(turnSessionId, newTitle);
+    }
+    const history = turnSession.history.slice();
     addMsg('user', text);
     const bodyEl = addMsg('asst', '');
     // Body is now a fragment sequence: text spans and tool-call blocks
@@ -3611,7 +3647,7 @@ const NavSessions = (() => {
       const row = document.createElement('a');
       row.className = 'nav-session' + (s.id === activeId ? ' active' : '');
       row.href = `#chat/s/${s.id}`;
-      row.title = s.title;
+      row.title = `${s.title}\nDouble-click to rename`;
       const label = document.createElement('span');
       label.className = 'nav-session-label';
       label.textContent = s.title;
@@ -3631,6 +3667,18 @@ const NavSessions = (() => {
           const siblings = SessionStore.listOpen().filter(x => x.projectId === s.projectId);
           location.hash = siblings.length ? `#chat/s/${siblings[0].id}` : '#chat';
         }
+      });
+      // Double-click to rename — prompt() is intentionally simple for v1;
+      // inline edit can come later if it proves friction. Stops the dblclick
+      // from also navigating the <a>.
+      row.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const next = window.prompt('Rename session', s.title);
+        if (next == null) return;
+        const trimmed = next.trim();
+        if (!trimmed) return;
+        SessionStore.setTitle(s.id, trimmed.slice(0, 80));
       });
       row.appendChild(label);
       row.appendChild(close);
@@ -5365,6 +5413,19 @@ const ProjectsPanel = (() => {
       `<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/></svg>`);
     chatBtn.addEventListener('click', (e) => { e.stopPropagation(); openInChat(p); });
     actionsEl.appendChild(chatBtn);
+
+    // "+" — always-fresh chat session for this project. Distinct from the
+    // chat icon (which resumes the most-recent session) so users can keep
+    // independent threads of work going on the same project without
+    // losing the prior context.
+    const newChatBtn = iconBtn('chat-new', 'New chat session',
+      `<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/><line x1="12" y1="8" x2="12" y2="14"/><line x1="9" y1="11" x2="15" y2="11"/></svg>`);
+    newChatBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const s = SessionStore.createForProject(p.id, p.name);
+      location.hash = `#chat/s/${s.id}`;
+    });
+    actionsEl.appendChild(newChatBtn);
 
     // "Open in <Terminal AI>" — spawns the configured terminal-native
     // provider (Claude Code, OpenCode, …) in a terminal tab with cwd
