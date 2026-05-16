@@ -616,7 +616,17 @@
                 </li>
               </ul>
               <div class="muted nsite-empty-foot">
-                Render frame runs in a sandboxed opaque origin with no access to the station.
+                <div><strong>Strict sandbox.</strong> Render frame runs in
+                an opaque origin with no access to the station. The
+                rendered nsite can connect to Nostr relays
+                (<code>wss://</code>) and load its own SHA256-verified
+                bytes — but cannot load external images, scripts, or
+                fonts from the public web. Authors who want
+                <code>nostr.build</code>-style images should republish
+                them through their own Blossom servers; the bytes are
+                identical (content-addressed) and the
+                <code>&lt;img src="/path"&gt;</code> reference resolves
+                via the SHA256-verified flow.</div>
               </div>
             </div>
           </div>
