@@ -18644,9 +18644,11 @@ const NsitePanel = (() => {
     // since both react to the same body/reports state.
     refreshTrustBanner();
     // Site Info sidebar (PR-3) reads from the same body — keep it in
-    // sync if currently open. Renderer is a no-op when the sidebar is
-    // hidden so the cost is bounded to a single early return.
-    if (els.siteInfo && !els.siteInfo.hidden) renderSiteInfo();
+    // sync if currently open AND showing siteinfo (not settings; we
+    // don't want a fresh resolve to clobber a half-edited form).
+    if (els.siteInfo && !els.siteInfo.hidden && paneMode === 'siteinfo') {
+      renderSiteInfo();
+    }
   }
 
   // Tooltip text for the `?` icon next to the trust toggle. Intentionally
@@ -19020,6 +19022,7 @@ const NsitePanel = (() => {
     els.menuBtn        = $('nsite-menu-btn');
     els.menu           = $('nsite-menu');
     els.siteInfo       = $('nsite-siteinfo');
+    els.siteInfoTitle  = $('nsite-siteinfo-title');
     els.siteInfoBody   = $('nsite-siteinfo-body');
     els.siteInfoClose  = $('nsite-siteinfo-close');
     if (!els.addr) return;
@@ -19115,19 +19118,143 @@ const NsitePanel = (() => {
     els.siteInfoClose?.addEventListener('click', closeSiteInfo);
   }
 
+  // Track which mode the side pane is currently in so a resolve doesn't
+  // accidentally rewrite a Settings form with Site Info content.
+  let paneMode = null;  // 'siteinfo' | 'settings' | null
+
   function openSettings() {
-    // Switch to the Config panel and scroll its nsite section into view.
-    // The hash router (activatePanel) handles the panel switch; we
-    // open + scroll on a microtask so the panel is mounted by then.
-    try { location.hash = '#config'; } catch {}
-    setTimeout(() => {
-      const sec = document.getElementById('cfg-nsite-section');
-      if (!sec) return;
-      // <details> open attribute — expand if collapsed so the user
-      // doesn't have to hunt for the section after we scroll there.
-      try { sec.open = true; } catch {}
-      sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 30);
+    // Render the editable settings form into the side pane, in-place,
+    // so the user can adjust relays / Blossom servers / indexer pubkey
+    // without leaving the browser. Mirrors the same /api/nsite/config
+    // surface the Config panel uses, so values stay consistent
+    // whichever entry point the user edits from. The fuller help text
+    // and env-override badges live in Config → nsite (one click via
+    // the "Open in Config panel" footer link), but the essentials are
+    // here.
+    paneMode = 'settings';
+    if (els.siteInfoTitle) els.siteInfoTitle.textContent = 'Settings';
+    if (els.siteInfo) els.siteInfo.hidden = false;
+    void renderSettings();
+  }
+
+  async function renderSettings() {
+    if (!els.siteInfoBody) return;
+    els.siteInfoBody.innerHTML = `<div class="nsite-siteinfo-empty">Loading…</div>`;
+    try {
+      const token = getSessionToken();
+      const headers = { 'Accept': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch('/api/nsite/config', { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const cfg = data.config   || {};
+      const def = data.defaults || {};
+      const env = data.envOverrides || {};
+      const linesOf = (arr) => Array.isArray(arr) ? arr.join('\n') : '';
+      const envBadge = (active) => active
+        ? `<span class="cfg-env-badge" title="Overridden by env var — edit ignored until env is unset">env</span>`
+        : '';
+      els.siteInfoBody.innerHTML = `
+        <div class="nsite-settings-help muted" style="font-size:11px;line-height:1.45">
+          Resolve / Blossom config for the nsite browser. Mirrors
+          <a href="#config" class="nsite-settings-deeplink">Config → nsite</a>
+          — edits here save to the same <code>nsite.json</code>.
+        </div>
+        <div class="nsite-settings-field">
+          <label class="nsite-settings-label">Content relays</label>
+          <textarea id="nsite-cfg-content" rows="3" spellcheck="false"
+            placeholder="${escapeHtml(linesOf(def.contentRelays))}">${escapeHtml(linesOf(cfg.contentRelays))}</textarea>
+          <div class="nsite-settings-hint muted">one <code>wss://</code> per line · unioned with Identity relays + author outbox</div>
+        </div>
+        <div class="nsite-settings-field">
+          <label class="nsite-settings-label">Discovery relays</label>
+          <textarea id="nsite-cfg-discovery" rows="2" spellcheck="false"
+            placeholder="${escapeHtml(linesOf(def.discoveryRelays))}">${escapeHtml(linesOf(cfg.discoveryRelays))}</textarea>
+          <div class="nsite-settings-hint muted">profile-relay indexers for NIP-65 outbox bootstrap</div>
+        </div>
+        <div class="nsite-settings-field">
+          <label class="nsite-settings-label">Blossom servers</label>
+          <textarea id="nsite-cfg-blossom" rows="3" spellcheck="false"
+            placeholder="${escapeHtml(linesOf(def.blossomServers))}">${escapeHtml(linesOf(cfg.blossomServers))}</textarea>
+          <div class="nsite-settings-hint muted">one <code>https://</code> per line · fallback when author's kind:10063 404s</div>
+        </div>
+        <div class="nsite-settings-field">
+          <label class="nsite-settings-label">NSIT indexer pubkey ${envBadge(env.nsitIndexerPubkey)}</label>
+          <input type="text" id="nsite-cfg-indexer-pk" spellcheck="false"
+            ${env.nsitIndexerPubkey ? 'disabled' : ''}
+            placeholder="${escapeHtml(def.nsitIndexerPubkey || '')}"
+            value="${escapeHtml(cfg.nsitIndexerPubkey || '')}">
+          <div class="nsite-settings-hint muted">64-hex · or <code>disabled</code> to refuse NSIT lookups</div>
+        </div>
+        <div class="nsite-settings-field">
+          <label class="nsite-settings-label">NSIT indexer relays ${envBadge(env.nsitIndexerRelays)}</label>
+          <textarea id="nsite-cfg-indexer-relays" rows="2" spellcheck="false"
+            ${env.nsitIndexerRelays ? 'disabled' : ''}
+            placeholder="${escapeHtml(linesOf(def.nsitIndexerRelays))}">${escapeHtml(linesOf(cfg.nsitIndexerRelays))}</textarea>
+          <div class="nsite-settings-hint muted">where the indexer publishes <code>kind:35129</code></div>
+        </div>
+        <div class="nsite-settings-actions">
+          <button class="primary" id="nsite-cfg-save" type="button">Save</button>
+          <button id="nsite-cfg-reset" type="button">Reset to defaults</button>
+          <span id="nsite-cfg-status" class="muted" aria-live="polite"></span>
+        </div>
+      `;
+      const linesFrom = (id) => ($(id)?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+      const setStatusPill = (msg, isError) => {
+        const el = $('nsite-cfg-status');
+        if (!el) return;
+        el.textContent = msg || '';
+        el.classList.toggle('err', !!isError);
+      };
+      $('nsite-cfg-save')?.addEventListener('click', async () => {
+        const payload = {
+          contentRelays:     linesFrom('nsite-cfg-content'),
+          discoveryRelays:   linesFrom('nsite-cfg-discovery'),
+          blossomServers:    linesFrom('nsite-cfg-blossom'),
+          nsitIndexerPubkey: ($('nsite-cfg-indexer-pk')?.value || '').trim(),
+          nsitIndexerRelays: linesFrom('nsite-cfg-indexer-relays'),
+        };
+        setStatusPill('Saving…');
+        try {
+          const tk = getSessionToken();
+          const hdr = { 'Content-Type': 'application/json' };
+          if (tk) hdr['Authorization'] = `Bearer ${tk}`;
+          const r = await fetch('/api/nsite/config', { method: 'PUT', headers: hdr, body: JSON.stringify(payload) });
+          if (!r.ok) {
+            const b = await r.json().catch(() => ({}));
+            throw new Error(b?.message || b?.error || `HTTP ${r.status}`);
+          }
+          setStatusPill('✓ Saved · reload an nsite to pick up new relays');
+        } catch (e) {
+          setStatusPill(`Save failed: ${e?.message || e}`, true);
+        }
+      });
+      $('nsite-cfg-reset')?.addEventListener('click', async () => {
+        // "Reset to defaults" wipes user overrides by writing the
+        // defaults the server already exposed in `data.defaults`.
+        const payload = {
+          contentRelays:     def.contentRelays     || [],
+          discoveryRelays:   def.discoveryRelays   || [],
+          blossomServers:    def.blossomServers    || [],
+          nsitIndexerPubkey: def.nsitIndexerPubkey || '',
+          nsitIndexerRelays: def.nsitIndexerRelays || [],
+        };
+        setStatusPill('Resetting…');
+        try {
+          const tk = getSessionToken();
+          const hdr = { 'Content-Type': 'application/json' };
+          if (tk) hdr['Authorization'] = `Bearer ${tk}`;
+          const r = await fetch('/api/nsite/config', { method: 'PUT', headers: hdr, body: JSON.stringify(payload) });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          // Re-render with the fresh defaults visible in the form.
+          void renderSettings();
+        } catch (e) {
+          setStatusPill(`Reset failed: ${e?.message || e}`, true);
+        }
+      });
+    } catch (e) {
+      els.siteInfoBody.innerHTML = `<div class="nsite-siteinfo-empty">Couldn't load settings: ${escapeHtml(String(e?.message || e))}</div>`;
+    }
   }
 
   function openDevTools() {
@@ -19145,11 +19272,14 @@ const NsitePanel = (() => {
 
   function openSiteInfo() {
     if (!els.siteInfo || !els.siteInfoBody) return;
+    paneMode = 'siteinfo';
+    if (els.siteInfoTitle) els.siteInfoTitle.textContent = 'Site info';
     renderSiteInfo();
     els.siteInfo.hidden = false;
   }
   function closeSiteInfo() {
     if (els.siteInfo) els.siteInfo.hidden = true;
+    paneMode = null;
   }
 
   // Render the Site Info sidebar from the active resolve response.

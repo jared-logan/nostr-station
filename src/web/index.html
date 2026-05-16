@@ -682,18 +682,20 @@
               </div>
             </div>
           </div>
-          <!-- Site Info sidebar — slides in from the right when the user
-               picks "Site info" from the panel menu. Becomes a flex sibling
-               to the iframe so the viewport reflows rather than overlaying;
-               width is capped so a small dashboard window still has room
-               to render the iframe content alongside. Closed by default. -->
-          <aside class="nsite-siteinfo" id="nsite-siteinfo" hidden aria-label="Site info">
+          <!-- Side pane — slides in from the right when the user picks
+               "Site info" or "Settings" from the panel menu. Becomes a
+               flex sibling to the iframe so the viewport reflows rather
+               than overlaying; width is capped so a small dashboard
+               window still has room to render the iframe content
+               alongside. The body swaps between modes (siteinfo |
+               settings) so a single element handles both panes. -->
+          <aside class="nsite-siteinfo" id="nsite-siteinfo" hidden aria-label="Side pane">
             <div class="nsite-siteinfo-head">
-              <div class="nsite-siteinfo-title">Site info</div>
+              <div class="nsite-siteinfo-title" id="nsite-siteinfo-title">Site info</div>
               <button class="nsite-siteinfo-close"
                       id="nsite-siteinfo-close"
                       type="button"
-                      aria-label="Close site info">&times;</button>
+                      aria-label="Close pane">&times;</button>
             </div>
             <div class="nsite-siteinfo-body" id="nsite-siteinfo-body"></div>
           </aside>
