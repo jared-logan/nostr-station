@@ -17539,6 +17539,29 @@ const ClientPanel = (() => {
     requestAnimationFrame(() => frame.setAttribute('src', url));
   }
 
+  // Bounce nsite-gateway navigations from inside Ditto into our own
+  // nsite browser panel. The injected script in Ditto's <head>
+  // (web-server-static.ts:DITTO_PREFIX_STRIP_SCRIPT) catches window.open
+  // and <a> clicks targeting *.nsite.lol / *.nsite.run / *.nsite.cloud /
+  // *.nosto.re / *.nwb.tf / *.nostr.hu and postMessages the URL up here.
+  // We re-validate origin, source, and the gateway pattern before
+  // accepting, then drop the URL onto #nsite/<encoded-url>. The nsite
+  // panel's existing maybeConsumeDeepLink() flow takes it from there:
+  // address bar, resolver, iframe boot — same code path as if the user
+  // typed the URL in directly.
+  const NSITE_GATEWAY_HOST = /^[^.]+\.(?:nsite\.lol|nsite\.run|nsite\.cloud|nosto\.re|nwb\.tf|nostr\.hu)$/i;
+  window.addEventListener('message', (event) => {
+    if (!frame || event.source !== frame.contentWindow) return;
+    if (event.origin !== location.origin) return;
+    const m = event.data;
+    if (!m || typeof m !== 'object') return;
+    if (m.type !== 'station:open-nsite' || typeof m.url !== 'string') return;
+    let host;
+    try { host = new URL(m.url, location.origin).hostname; } catch { return; }
+    if (!NSITE_GATEWAY_HOST.test(host)) return;
+    location.hash = '#nsite/' + encodeURIComponent(m.url);
+  });
+
   refreshBtn?.addEventListener('click', reloadFrame);
   retryBtn?.addEventListener('click', () => {
     // User just ran `npm run update-ditto` and clicked Reload — re-probe
