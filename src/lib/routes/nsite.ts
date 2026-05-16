@@ -272,6 +272,9 @@ export async function handleNsite(
         oldestAt: index.oldestAt,
         totalEventsSeen: index.totalEventsSeen,
         format: index.format,
+        // Sandbox / CSP posture of the iframe — surfaced to the panel
+        // so users can see "no external HTTP, WSS allowed" at a glance.
+        sandbox: { csp: 'strict-nsite' },
         // Per-file event details for the diagnostics panel — paths,
         // sha256, eventId, timestamp. Sorted by path. Capped at 50 to
         // bound the payload; nobody publishes 50+ files in v1 nsites
@@ -359,6 +362,60 @@ export async function handleNsite(
 }
 
 // ── Content serving ───────────────────────────────────────────────────────
+
+/**
+ * "B-strict" CSP policy applied to every byte served under
+ * /nsite-content/<siteId>/*. Matches the user-chosen lockdown level:
+ *
+ *   ALLOWED for the rendered nsite:
+ *     - same-origin bytes ('self' = the iframe's own /nsite-content/<id>/*)
+ *     - WebSocket connections (wss://) to any Nostr relay — required for
+ *       Titan-ecosystem nsites that query the name index at runtime;
+ *       this is the one "external" thing we keep because Nostr's whole
+ *       point is open relay access
+ *     - WebSocket to the station's in-process relay (ws://127.0.0.1:*)
+ *     - data: and blob: URIs for inline media
+ *     - inline <script> and <style> (covers bundled HTML + our runtime
+ *       shim) — but NOT 'unsafe-eval', so dynamic code synthesis is
+ *       blocked
+ *
+ *   BLOCKED:
+ *     - external HTTP images / fonts / scripts / stylesheets (no
+ *       `https:` in any -src directive)
+ *     - fetch/XHR/EventSource to external HTTPS endpoints (trackers,
+ *       analytics, third-party APIs)
+ *     - <object>, <embed>, <applet> (object-src 'none')
+ *     - acting as a clickjacking surface (frame-ancestors 'self')
+ *     - rebasing the document via <base> (base-uri 'self')
+ *
+ * The user-facing implication: nsites must be self-contained — author's
+ * own HTML + own SHA256-verified blobs on their own Blossom servers.
+ * Authors referencing external resources (nostr.build URLs, Google
+ * Fonts, etc.) will see those resources fail to load; the fix is to
+ * republish the bytes through their own Blossom servers and reference
+ * them as `/path` URLs (which the static rewrite + manifest lookup
+ * already handle).
+ *
+ * Defense-in-depth, not the sole defense:
+ *   1. CSP (here)             — browser refuses to load disallowed URLs
+ *   2. Iframe sandbox          — no allow-same-origin → opaque origin
+ *   3. CORS on dashboard /api/* — no ACAO → opaque origin can't read
+ *   4. Auth gate on /api/*     — Bearer required → iframe has no token
+ */
+export const STRICT_NSITE_CSP = [
+  "default-src 'self'",
+  "connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:* ws://[::1]:*",
+  "img-src 'self' data: blob:",
+  "media-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "style-src 'self' 'unsafe-inline'",
+  "script-src 'self' 'unsafe-inline'",
+  "frame-src 'self'",
+  "frame-ancestors 'self'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "object-src 'none'",
+].join('; ');
 
 async function serveContent(
   req: http.IncomingMessage,
@@ -451,10 +508,7 @@ async function serveContent(
     // X-Frame-Options: DENY for ITSELF; we deliberately allow same-origin
     // here so the panel's iframe can load us.
     'X-Frame-Options': 'SAMEORIGIN',
-    // Deliberately omit Content-Security-Policy here — the rendered
-    // nsite needs to run its own scripts, load its own assets, etc.
-    // Isolation comes from the sandbox attribute on the parent iframe,
-    // which gives this response an opaque origin.
+    'Content-Security-Policy': STRICT_NSITE_CSP,
   });
   if (req.method === 'HEAD') { res.end(); return; }
   res.end(bodyBytes);

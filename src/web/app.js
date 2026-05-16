@@ -18633,7 +18633,14 @@ const NsitePanel = (() => {
                    : format === 'v2-root'  ? 'NIP-5A v2 (root manifest)'
                    : format === 'v1'       ? 'NIP-5A v1 (per-file)'
                    : '';
-      setMeta(`${fmtBit ? fmtBit + ' · ' : ''}${tsBit} · ${relayBits.join(' · ')}`);
+      // Sandbox posture badge — shows the user that the iframe runs
+      // with a strict CSP (no external HTTP, only same-origin assets
+      // + WSS to Nostr relays). Trust signal: "the page you're about
+      // to see can't phone home with your IP via tracking pixels."
+      const sandboxBit = body.sandbox?.csp === 'strict-nsite'
+        ? 'strict sandbox' : '';
+      const bits = [fmtBit, tsBit, ...relayBits, sandboxBit].filter(Boolean);
+      setMeta(bits.join(' · '));
       setDiagnostics(body);
       loadIframe(siteId, entryPath, display);
       updateNavButtons();

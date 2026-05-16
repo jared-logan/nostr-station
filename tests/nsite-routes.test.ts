@@ -11,7 +11,7 @@ useTempHome();
 
 // @ts-expect-error — runtime .ts import
 const mod = await import('../src/lib/routes/nsite.ts');
-const { rewriteHtmlAbsolutePaths, rewriteCssAbsoluteUrls } = mod;
+const { rewriteHtmlAbsolutePaths, rewriteCssAbsoluteUrls, STRICT_NSITE_CSP } = mod;
 
 const dec = (b: Uint8Array) => new TextDecoder('utf-8').decode(b);
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -214,4 +214,53 @@ test('shim: fetch patch wraps strings, Requests, and same-origin already-prefixe
   const xhr = new fakeXHR();
   xhr.open('GET', '/data.json');
   assert.equal(captured.pop()!.url, `${PREFIX}/data.json`);
+});
+
+// ── B-strict CSP ──────────────────────────────────────────────────────────
+
+test('CSP: default-src locked to self', () => {
+  assert.match(STRICT_NSITE_CSP, /default-src 'self'/);
+});
+
+test('CSP: WebSocket connect allowed (Nostr relays need wss)', () => {
+  assert.match(STRICT_NSITE_CSP, /connect-src[^;]*wss:/);
+  assert.match(STRICT_NSITE_CSP, /connect-src[^;]*ws:\/\/127\.0\.0\.1:\*/,
+    'loopback ws should be allowed for the in-process relay');
+});
+
+test('CSP: external HTTPS images are NOT allowed (no `https:` in img-src)', () => {
+  const imgSrc = STRICT_NSITE_CSP.match(/img-src ([^;]+)/)?.[1] ?? '';
+  assert.ok(imgSrc.includes("'self'"),  'img-src must allow self');
+  assert.ok(imgSrc.includes('data:'),   'img-src must allow data: URIs');
+  assert.ok(imgSrc.includes('blob:'),   'img-src must allow blob: URIs');
+  assert.ok(!imgSrc.includes('https:'),
+    'img-src must NOT allow https: — that defeats the lockdown (nostr.build, trackers, etc.)');
+});
+
+test('CSP: external HTTPS scripts/styles/fonts blocked too', () => {
+  for (const directive of ['script-src', 'style-src', 'font-src']) {
+    const value = STRICT_NSITE_CSP.match(new RegExp(`${directive} ([^;]+)`))?.[1] ?? '';
+    assert.ok(!value.includes('https:'),
+      `${directive} must NOT allow https: (would let external CDNs / Google Fonts / etc. through)`);
+  }
+});
+
+test('CSP: object/embed/applet completely disabled', () => {
+  assert.match(STRICT_NSITE_CSP, /object-src 'none'/);
+});
+
+test('CSP: clickjacking + base-rebase protections', () => {
+  assert.match(STRICT_NSITE_CSP, /frame-ancestors 'self'/);
+  assert.match(STRICT_NSITE_CSP, /base-uri 'self'/);
+  assert.match(STRICT_NSITE_CSP, /form-action 'self'/);
+});
+
+test('CSP: inline scripts/styles allowed (covers runtime shim + bundled HTML)', () => {
+  // 'unsafe-inline' is intentional here — modern bundlers and the
+  // runtime shim both rely on inline scripts. We do NOT allow
+  // 'unsafe-eval' (no `eval()`/`new Function()` from inside the nsite).
+  assert.match(STRICT_NSITE_CSP, /script-src[^;]*'unsafe-inline'/);
+  assert.match(STRICT_NSITE_CSP, /style-src[^;]*'unsafe-inline'/);
+  assert.ok(!STRICT_NSITE_CSP.includes("'unsafe-eval'"),
+    'CSP must not allow unsafe-eval — blocks dynamic code synthesis');
 });
