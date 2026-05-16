@@ -599,6 +599,115 @@ test('serveContent: 404 (file missing inside an existing snapshot) also carries 
   _internal.sites.delete(sid);
 });
 
+// ── Directory-index fallback (clean URLs without trailing slash) ──────────
+//
+// Statically-exported framework apps (Next.js with trailingSlash:false,
+// many Astro builds, Hugo's ugly-URLs:false, etc.) publish files like
+// /browse/index.html + /register/index.html and link to them via
+// `<a href="/browse">`. Without a directory-index fallback we'd 404 (or
+// SPA-fallback to the wrong root index.html), and clicking the nav
+// links would silently fail — see TITAN field test.
+
+test('serveContent: clean URL /browse → /browse/index.html (directory-index fallback)', async () => {
+  const sid = '0000000000000020';
+  const sha = 'e'.repeat(64);
+  _internal.sites.set(sid, {
+    pubkey: 'f'.repeat(64), display: 'mock',
+    index: {
+      files: new Map([
+        ['index.html',        'a'.repeat(64)],  // root
+        ['browse/index.html', sha],             // per-route HTML
+      ]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v2-named', manifestServers: [],
+    },
+    blossomServers: [], createdAt: Date.now(),
+  });
+  _internal.blobs.set(sha, {
+    bytes: new TextEncoder().encode('<html><body>browse page</body></html>'),
+    mime:  'text/html; charset=utf-8',
+  });
+  const res = makeMockRes();
+  await handleNsite(
+    { method: 'GET' } as any,
+    res as any,
+    `/nsite-content/${sid}/browse`,
+    'GET',
+  );
+  assert.equal(res.statusCode, 200);
+  const body = res.body instanceof Uint8Array
+    ? new TextDecoder().decode(res.body)
+    : String(res.body);
+  assert.ok(body.includes('browse page'),
+    'must serve the /browse/index.html content, not the root index.html');
+  _internal.sites.delete(sid);
+  _internal.blobs.delete(sha);
+});
+
+test('serveContent: clean URL with NO matching directory-index falls back to SPA root', async () => {
+  // Pure SPAs (Vite/Rollup, no static per-route HTML) need the existing
+  // root-index fallback to keep working. /random-spa-route → root
+  // index.html so the SPA router can handle it client-side.
+  const sid = '0000000000000021';
+  const sha = '7'.repeat(64);
+  _internal.sites.set(sid, {
+    pubkey: '8'.repeat(64), display: 'mock',
+    index: {
+      // No /random-spa-route/index.html, no /random-spa-route — only root.
+      files: new Map([['index.html', sha]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v2-named', manifestServers: [],
+    },
+    blossomServers: [], createdAt: Date.now(),
+  });
+  _internal.blobs.set(sha, {
+    bytes: new TextEncoder().encode('<html><body>root spa</body></html>'),
+    mime:  'text/html; charset=utf-8',
+  });
+  const res = makeMockRes();
+  await handleNsite(
+    { method: 'GET' } as any,
+    res as any,
+    `/nsite-content/${sid}/random-spa-route`,
+    'GET',
+  );
+  assert.equal(res.statusCode, 200);
+  const body = res.body instanceof Uint8Array
+    ? new TextDecoder().decode(res.body)
+    : String(res.body);
+  assert.ok(body.includes('root spa'),
+    'unknown clean URLs must still fall through to the root SPA index');
+  _internal.sites.delete(sid);
+  _internal.blobs.delete(sha);
+});
+
+test('serveContent: asset-extension paths skip BOTH fallbacks (real 404)', async () => {
+  // Critical: /missing.png must NOT fall back to /missing.png/index.html
+  // nor to the root index — that would serve HTML where the browser
+  // expects an image and the load fails silently with no diagnostic.
+  // Asset extensions get a real 404 so the iframe Network tab tells
+  // the truth.
+  const sid = '0000000000000022';
+  _internal.sites.set(sid, {
+    pubkey: '9'.repeat(64), display: 'mock',
+    index: {
+      files: new Map([['index.html', '1'.repeat(64)]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v2-named', manifestServers: [],
+    },
+    blossomServers: [], createdAt: Date.now(),
+  });
+  const res = makeMockRes();
+  await handleNsite(
+    { method: 'GET' } as any,
+    res as any,
+    `/nsite-content/${sid}/missing.png`,
+    'GET',
+  );
+  assert.equal(res.statusCode, 404);
+  _internal.sites.delete(sid);
+});
+
 // ── injectReporterOnly (subdomain mode) ───────────────────────────────────
 //
 // In subdomain mode the per-nsite origin makes <img src="/foo"> resolve
