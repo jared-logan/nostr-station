@@ -356,15 +356,51 @@ export async function handleNsite(
   }
 
   // Content path: /nsite-content/<siteId>/<file path...>
+  //
+  // Legacy "path-prefix" mode. Still wired so direct hits work (and the
+  // existing tests/bookmarks don't break), but new iframe loads from
+  // the panel go through the per-origin subdomain mode below.
   const contentMatch = path.match(/^\/nsite-content\/([a-f0-9]{16})(\/.*)?$/);
   if (contentMatch && (method === 'GET' || method === 'HEAD')) {
     const siteId = contentMatch[1];
     const reqPath = contentMatch[2] ?? '/';
-    await serveContent(req, res, siteId, reqPath);
+    await serveContent(req, res, siteId, reqPath, { mode: 'path-prefix' });
     return true;
   }
 
   return false;
+}
+
+/**
+ * Entry point for *.nsite.localhost subdomain requests.
+ *
+ * Where path-prefix mode bundles the siteId into the URL
+ * (/nsite-content/<sid>/...), subdomain mode bundles it into the Host
+ * header (<sid>.nsite.localhost:<port>) and the URL is just the file
+ * path. The caller (web-server.ts) is responsible for parsing the
+ * Host and ensuring this is only invoked for recognized nsite hosts.
+ *
+ * The mode-aware `serveContent` skips the static path rewriter and
+ * runtime shim — paths resolve naturally to the same origin via the
+ * subdomain — and tunes the CSP so the dashboard (cross-origin parent)
+ * can still embed us.
+ */
+export async function handleNsiteSubdomain(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  siteId: string,
+  urlPath: string,
+): Promise<void> {
+  const method = req.method || 'GET';
+  if (method !== 'GET' && method !== 'HEAD') {
+    res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('method not allowed on nsite subdomain');
+    return;
+  }
+  // Strip query string for file lookup — nsite paths are content-
+  // addressed, not query-parameterized.
+  const path = urlPath.split('?')[0].split('#')[0];
+  await serveContent(req, res, siteId, path, { mode: 'subdomain' });
 }
 
 // ── Content serving ───────────────────────────────────────────────────────
@@ -440,11 +476,44 @@ export const STRICT_NSITE_CSP = [
   "object-src 'none'",
 ].join('; ');
 
+/**
+ * Serving modes:
+ *
+ *   path-prefix (legacy):
+ *     URL = `/nsite-content/<siteId>/<path>` on the dashboard's own origin.
+ *     The iframe sandbox has no `allow-same-origin`, so its effective
+ *     origin is opaque (`null`). HTML/CSS go through the static path
+ *     rewriter so absolute paths land back under /nsite-content/<siteId>/.
+ *     Module scripts get an importmap that maps `/` → /nsite-content/<sid>/.
+ *     Inline runtime shim patches fetch / XHR / EventSource to do the
+ *     same at runtime. Heavy, fragile, but kept for direct-hit URLs.
+ *
+ *   subdomain (new, used by the panel):
+ *     URL = `/<path>` on a dedicated `<siteId>.nsite.localhost:<port>`
+ *     origin. The siteId is bound to the Host header rather than the URL.
+ *     Each nsite is a real, distinct browser origin (Secure Context, real
+ *     `crypto.subtle`, real per-origin localStorage, real `Origin:` on
+ *     WebSocket). No path rewriting needed — `<img src="/img.jpg">`
+ *     natively resolves to `<sid>.nsite.localhost/img.jpg` which is the
+ *     same lookup we'd do anyway. We still inject the reporter <script>
+ *     for diagnostics, but skip the importmap, fetch-shim, and HTML/CSS
+ *     path rewriters.
+ *
+ * The X-Frame-Options + CSP frame-ancestors directives both depend on
+ * mode: in path-prefix mode the dashboard's origin == nsite's origin,
+ * so `SAMEORIGIN` + `frame-ancestors 'self'` work. In subdomain mode
+ * the dashboard is cross-origin, so we drop X-Frame-Options (the modern
+ * CSP frame-ancestors directive supersedes it) and explicitly grant the
+ * loopback dashboard origins to embed.
+ */
+type ServeMode = 'path-prefix' | 'subdomain';
+
 async function serveContent(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   siteId: string,
   reqPath: string,
+  opts: { mode: ServeMode } = { mode: 'path-prefix' },
 ) {
   // Permissive CORS on every /nsite-content/* response.
   //
@@ -533,41 +602,98 @@ async function serveContent(
     }
   }
 
-  // Absolute-path rewriting for HTML / CSS.
+  // Body transformations — mode-aware.
   //
-  // lez/nsite's spec is explicit that links in HTML use absolute paths
-  // (`<img src="/img/avatar.jpg">`) — that works on nsite.lol because each
-  // nsite lives on its own subdomain. We serve under a path prefix
-  // (`/nsite-content/<siteId>/…`) on the dashboard's origin, so an
-  // absolute `/img/avatar.jpg` reference from the rendered HTML resolves
-  // to the dashboard root (which 404s) instead of the nsite root. Fix:
-  // rewrite absolute paths in HTML and CSS responses to include the
-  // siteId prefix on the fly. JS-issued fetches aren't covered — modern
-  // SPAs that build with relative `publicPath` ("./") will work without
-  // rewriting; lez-style static sites work via this rewrite.
+  // path-prefix: rewrite absolute paths so `<img src="/foo">` resolves
+  // back under /nsite-content/<siteId>/. Inject the importmap + fetch
+  // shim so module imports and runtime fetches also reach the prefix.
+  // The reporter <script> goes in alongside everything else.
+  //
+  // subdomain: no rewriting (paths already resolve to <siteId>'s own
+  // origin), no importmap, no runtime shim. Inject just the reporter so
+  // the panel's Diagnostics still receives CSP violations / script
+  // errors / loaded signals.
   let bodyBytes = entry.bytes;
   if (/^text\/html\b/i.test(entry.mime)) {
-    bodyBytes = rewriteHtmlAbsolutePaths(entry.bytes, siteId);
-  } else if (/^text\/css\b/i.test(entry.mime)) {
+    bodyBytes = opts.mode === 'subdomain'
+      ? injectReporterOnly(entry.bytes, siteId)
+      : rewriteHtmlAbsolutePaths(entry.bytes, siteId);
+  } else if (/^text\/css\b/i.test(entry.mime) && opts.mode === 'path-prefix') {
     bodyBytes = rewriteCssAbsoluteUrls(entry.bytes, siteId);
   }
 
-  res.writeHead(200, {
+  // Frame embedding: in path-prefix mode the iframe is same-origin to
+  // the dashboard, so 'self' works. In subdomain mode the iframe lives
+  // on <siteId>.nsite.localhost:<port> and the dashboard parent is at
+  // localhost:<port> / 127.0.0.1:<port> / [::1]:<port> — all different
+  // origins. Grant exactly those, and drop X-Frame-Options entirely
+  // (CSP frame-ancestors supersedes it on every browser shipped in the
+  // last decade, and X-Frame-Options' ALLOW-FROM is obsolete).
+  const headers: Record<string, string> = {
     'Content-Type':    entry.mime,
     'Content-Length':  String(bodyBytes.byteLength),
     // Content-addressed → safe to cache aggressively for the lifetime of
     // the session. The URL incorporates a session-scoped siteId, so a
     // republish gets a fresh siteId and bypasses the browser cache.
     'Cache-Control':   'private, max-age=300',
-    // Belt-and-braces: forbid embedding outside our own dashboard's
-    // sandboxed iframe. The dashboard's main page sets
-    // X-Frame-Options: DENY for ITSELF; we deliberately allow same-origin
-    // here so the panel's iframe can load us.
-    'X-Frame-Options': 'SAMEORIGIN',
-    'Content-Security-Policy': STRICT_NSITE_CSP,
-  });
+    'Content-Security-Policy': buildCspForRequest(req, opts.mode),
+  };
+  if (opts.mode === 'path-prefix') {
+    headers['X-Frame-Options'] = 'SAMEORIGIN';
+  }
+  res.writeHead(200, headers);
   if (req.method === 'HEAD') { res.end(); return; }
   res.end(bodyBytes);
+}
+
+/**
+ * Build the CSP header for a single served response. The base policy
+ * (STRICT_NSITE_CSP) is the same across modes; only frame-ancestors
+ * needs to vary because the dashboard parent is same-origin in
+ * path-prefix mode and cross-origin in subdomain mode.
+ *
+ * We derive the dashboard port from the request's Host header so we
+ * don't need to thread the listening port through every call site.
+ * The host is already validated by web-server.ts before we get here.
+ */
+function buildCspForRequest(req: http.IncomingMessage, mode: ServeMode): string {
+  if (mode === 'path-prefix') return STRICT_NSITE_CSP;
+  // Subdomain mode: substitute frame-ancestors to allow the loopback
+  // dashboard origins. Port comes from the Host header (already
+  // shaped <siteId>.nsite.localhost:<port>).
+  const host = String(req.headers['host'] || '').toLowerCase();
+  const portMatch = host.match(/:(\d+)$/);
+  const port = portMatch ? portMatch[1] : '';
+  const ancestors = port
+    ? `http://localhost:${port} http://127.0.0.1:${port} http://[::1]:${port}`
+    : "http://localhost http://127.0.0.1 http://[::1]";
+  return STRICT_NSITE_CSP.replace(
+    "frame-ancestors 'self'",
+    `frame-ancestors ${ancestors}`,
+  );
+}
+
+/**
+ * Inject only the reporter <script> into the served HTML. Used in
+ * subdomain mode where the importmap / fetch-shim / static path
+ * rewriter aren't needed (the per-nsite origin makes absolute paths
+ * resolve correctly without any rewriting). The reporter itself stays
+ * because the panel's Diagnostics block still wants to see CSP
+ * violations / script errors / loaded signals.
+ *
+ * Reuses the same insertion logic as the full shim — <head>, then
+ * <html>, then prepend.
+ */
+export function injectReporterOnly(bytes: Uint8Array, siteId: string): Uint8Array {
+  const html = TEXT_DECODER.decode(bytes);
+  const reporter = buildReporterScript(siteId);
+  // <head> first, then <html>, then prepend.
+  let matched = false;
+  let out = html.replace(/<head\b[^>]*>/i, (m) => { matched = true; return m + reporter; });
+  if (matched) return TEXT_ENCODER.encode(out);
+  out = html.replace(/<html\b[^>]*>/i, (m) => { matched = true; return m + reporter; });
+  if (matched) return TEXT_ENCODER.encode(out);
+  return TEXT_ENCODER.encode(reporter + html);
 }
 
 // ── Absolute-path rewriting ───────────────────────────────────────────────
@@ -650,85 +776,34 @@ export function rewriteHtmlAbsolutePaths(bytes: Uint8Array, siteId: string): Uin
  * 'module' })` too, but blob: workers spawned by JS are out of reach.
  * Good enough for nsite-shaped content; not enough for arbitrary apps.
  */
-function injectRuntimeShim(html: string, prefix: string, siteId: string): string {
-  // The import map maps absolute-path specifiers under `/` to our prefix.
-  // Per the WHATWG import-maps spec, a key ending in `/` is a prefix
-  // mapping, so `import '/foo.js'` → `${prefix}/foo.js`.
-  const importMap = `<script type="importmap">${JSON.stringify({
-    imports: { '/': `${prefix}/` },
-  })}</script>`;
-
-  const fetchShim = `<script>(function(){var P=${JSON.stringify(prefix)};` +
-`function rw(u){if(typeof u!=="string")return u;` +
-`if(u.charCodeAt(0)!==47)return u;` +     // not starting with '/'
-`if(u.charCodeAt(1)===47)return u;` +     // protocol-relative '//'
-`if(u.indexOf(P+"/")===0)return u;` +     // already prefixed
-`return P+u;}` +
-`var of=window.fetch;` +
-`if(of){window.fetch=function(input,init){` +
-`if(typeof input==="string"){return of.call(this,rw(input),init);}` +
-`if(input&&typeof input==="object"&&"url" in input){` +
-`var n=rw(input.url);` +
-`if(n!==input.url){try{return of.call(this,new Request(n,input),init);}catch(e){}}` +
-`}return of.call(this,input,init);};}` +
-`var oo=XMLHttpRequest.prototype.open;` +
-`XMLHttpRequest.prototype.open=function(m,u){` +
-`var a=Array.prototype.slice.call(arguments);` +
-`a[1]=rw(u);return oo.apply(this,a);};` +
-`if(window.EventSource){var oES=window.EventSource;` +
-`window.EventSource=function(u,c){return new oES(rw(u),c);};` +
-`window.EventSource.prototype=oES.prototype;}` +
-`})();</script>`;
-
-  // CSP violation + page-error reporter. Forwards browser-emitted
-  // `securitypolicyviolation` events AND uncaught script errors to the
-  // parent dashboard via postMessage. Without this, when the strict
-  // CSP blocks an external resource (image, script, fetch), the
-  // failure happens silently inside the iframe's console — invisible
-  // to the user. With it, the panel's Diagnostics block shows e.g.
-  //   CSP blocked (2)
-  //     img      https://image.nostr.build/foo.jpg  (img-src)
-  //     connect  https://tracker.example.com/p     (connect-src)
-  // so the diagnosis of "why doesn't this render fully" goes from
-  // guesswork to inspection.
-  //
-  // Posts to '*' because the iframe is in an opaque origin and we
-  // can't restrict to a specific target; the parent must validate
-  // by message shape + the siteId it issued.
-  //
-  // Why the multi-path delivery (parent + top) and explicit console
-  // logging: the previous reporter (shipped in #115) wrapped the entire
-  // `parent.postMessage(...)` call in a `try/catch{}` that swallowed
-  // every error silently. Field reports across three test nsites
-  // (jaredlogan / titan / nostr-station) showed the panel's Diagnostics
-  // block NEVER rendering a "Sandbox clean" or "CSP blocked" section,
-  // even when the browser's own DevTools console logged matching
-  // securitypolicyviolation events. With the failure path silent we
-  // couldn't tell whether (a) the script never ran, (b) postMessage
-  // threw, or (c) the parent's listener filtered the message out.
-  //
-  // The new shape:
-  //   - logs a single `[nsite-report] boot {siteId}` line at script
-  //     entry, so an iframe-context devtools tells us at a glance
-  //     whether the inline script even executed (i.e. CSP didn't
-  //     block the inline reporter itself)
-  //   - tries `window.parent.postMessage` AND `window.top.postMessage`
-  //     (in a nested-iframe scenario these can differ; harmless
-  //     otherwise — postMessage to the same window is a no-op for the
-  //     parent listener's siteId filter)
-  //   - logs the actual thrown error if either path fails, so a future
-  //     "still silent" bug is one console line away from a diagnosis
-  //   - the IIFE itself is wrapped in a top-level try/catch that
-  //     console-logs setup failures (e.g. addEventListener throwing
-  //     in some exotic configuration), since silent listener-setup
-  //     failure would mask CSP / error reporting for the rest of the
-  //     iframe's lifetime
-  //
-  // The siteId is baked into the script at HTML-rewrite time via
-  // JSON.stringify, so each iframe load gets its own copy and the
-  // parent listener can validate messages against the siteId it
-  // issued at /api/nsite/resolve time.
-  const reporter = `<script>(function(){var S=${JSON.stringify(siteId)};` +
+/**
+ * Build the diagnostic-reporter <script> inline. Identical script in
+ * both path-prefix and subdomain modes — the reporter has no
+ * path-prefix dependency, only needs the siteId for postMessage
+ * authentication.
+ *
+ * CSP violation + page-error reporter. Forwards browser-emitted
+ * `securitypolicyviolation` events AND uncaught script errors to the
+ * parent dashboard via postMessage. Without this, when the strict
+ * CSP blocks an external resource (image, script, fetch), the failure
+ * happens silently inside the iframe's console — invisible to the
+ * user. With it, the panel's Diagnostics block shows e.g.
+ *   CSP blocked (2)
+ *     img      https://image.nostr.build/foo.jpg  (img-src)
+ *     connect  https://tracker.example.com/p     (connect-src)
+ *
+ * Posts to '*' because the iframe is either in an opaque origin
+ * (path-prefix mode) or a cross-origin subdomain (subdomain mode);
+ * the parent validates by message shape + siteId match.
+ *
+ * Multi-path delivery (parent + top) and explicit console.warn on
+ * failures: prior versions wrapped everything in a silent try/catch,
+ * which made "Diagnostics never updates" indistinguishable from
+ * "Sandbox clean". We log every failure path explicitly so the
+ * iframe-context console always tells the truth.
+ */
+function buildReporterScript(siteId: string): string {
+  return `<script>(function(){var S=${JSON.stringify(siteId)};` +
 `try{console.info("[nsite-report] boot",S);}catch(_){}` +
 `function send(t,p){` +
   `var msg=Object.assign({type:t,siteId:S},p);` +
@@ -759,6 +834,41 @@ function injectRuntimeShim(html: string, prefix: string, siteId: string): string
 `}catch(e){try{console.warn("[nsite-report] listener setup threw",e);}catch(_){}}` +
 `send("nsite-loaded",{href:String(location.href||"")});` +
 `})();</script>`;
+}
+
+function injectRuntimeShim(html: string, prefix: string, siteId: string): string {
+  // The import map maps absolute-path specifiers under `/` to our prefix.
+  // Per the WHATWG import-maps spec, a key ending in `/` is a prefix
+  // mapping, so `import '/foo.js'` → `${prefix}/foo.js`.
+  const importMap = `<script type="importmap">${JSON.stringify({
+    imports: { '/': `${prefix}/` },
+  })}</script>`;
+
+  const fetchShim = `<script>(function(){var P=${JSON.stringify(prefix)};` +
+`function rw(u){if(typeof u!=="string")return u;` +
+`if(u.charCodeAt(0)!==47)return u;` +     // not starting with '/'
+`if(u.charCodeAt(1)===47)return u;` +     // protocol-relative '//'
+`if(u.indexOf(P+"/")===0)return u;` +     // already prefixed
+`return P+u;}` +
+`var of=window.fetch;` +
+`if(of){window.fetch=function(input,init){` +
+`if(typeof input==="string"){return of.call(this,rw(input),init);}` +
+`if(input&&typeof input==="object"&&"url" in input){` +
+`var n=rw(input.url);` +
+`if(n!==input.url){try{return of.call(this,new Request(n,input),init);}catch(e){}}` +
+`}return of.call(this,input,init);};}` +
+`var oo=XMLHttpRequest.prototype.open;` +
+`XMLHttpRequest.prototype.open=function(m,u){` +
+`var a=Array.prototype.slice.call(arguments);` +
+`a[1]=rw(u);return oo.apply(this,a);};` +
+`if(window.EventSource){var oES=window.EventSource;` +
+`window.EventSource=function(u,c){return new oES(rw(u),c);};` +
+`window.EventSource.prototype=oES.prototype;}` +
+`})();</script>`;
+
+  // Reporter <script> — same one used in subdomain mode (via
+  // injectReporterOnly) since it has no path-prefix dependency.
+  const reporter = buildReporterScript(siteId);
 
   const inject = importMap + fetchShim + reporter;
 
