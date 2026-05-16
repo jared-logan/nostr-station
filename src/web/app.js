@@ -748,6 +748,13 @@ function currentPanel() {
 function activatePanel(name) {
   $$('.panel').forEach(el => el.classList.toggle('active', el.dataset.panel === name));
   $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.panel === name));
+  // If the active link lives inside a collapsed sidebar group, open it
+  // so the user can see what's selected.
+  const activeLink = document.querySelector('#nav a.active');
+  if (activeLink) {
+    const group = activeLink.closest('details.sidebar-group');
+    if (group && !group.open) group.open = true;
+  }
   if (name === 'logs') clearLogsBadge();
   Panels[name]?.onEnter?.();
 }
@@ -788,6 +795,22 @@ window.addEventListener('hashchange', () => activatePanel(currentPanel()));
   const mq = window.matchMedia('(min-width: 901px)');
   const onChange = () => { if (mq.matches) setOpen(false); };
   mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
+})();
+
+// Persist sidebar group open/closed state to localStorage so the user's
+// preference survives page reloads. Each <details class="sidebar-group">
+// gets its own key under its id.
+(function setupSidebarGroups() {
+  document.querySelectorAll('details.sidebar-group').forEach(g => {
+    if (!g.id) return;
+    const key = `sidebar-group:${g.id}`;
+    const saved = localStorage.getItem(key);
+    if (saved === 'closed') g.open = false;
+    else if (saved === 'open') g.open = true;
+    g.addEventListener('toggle', () => {
+      try { localStorage.setItem(key, g.open ? 'open' : 'closed'); } catch {}
+    });
+  });
 })();
 
 // ── Providers (mirrors src/lib/ai-providers.ts PROVIDERS) ────────────────
