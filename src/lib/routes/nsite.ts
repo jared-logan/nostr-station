@@ -661,12 +661,29 @@ function buildCspForRequest(req: http.IncomingMessage, mode: ServeMode): string 
   // Subdomain mode: substitute frame-ancestors to allow the loopback
   // dashboard origins. Port comes from the Host header (already
   // shaped <siteId>.nsite.localhost:<port>).
+  //
+  // No `http://[::1]:<port>` entry — same reason `ws://[::1]:*` got
+  // pulled from connect-src in #118. CSP3's host-source grammar
+  // doesn't accept bracketed IPv6 hosts; when Chromium's CSP parser
+  // hits one in a directive's source list, it can silently invalidate
+  // the WHOLE directive and fall back to that directive's default.
+  // For frame-ancestors the default is `'self'`, which means
+  // "same-origin only" — and the dashboard parent (`localhost:<port>`)
+  // is cross-origin to the nsite (`<sid>.nsite.localhost:<port>`)
+  // because they differ in hostname. End state: the iframe load gets
+  // `ERR_BLOCKED_BY_RESPONSE` ("This content is blocked. Contact the
+  // site owner to fix the issue."). Verified in field repro on Brave
+  // 1.x: removing the bracketed-IPv6 source unblocks all five test
+  // nsites (jaredlogan / titan / nostr-station / feed / Nostrord).
+  // The IPv4 + `localhost` forms together cover every loopback access
+  // path that matters; pure-IPv6 dashboard access (`http://[::1]:port`)
+  // isn't a configuration we support for the panel anyway.
   const host = String(req.headers['host'] || '').toLowerCase();
   const portMatch = host.match(/:(\d+)$/);
   const port = portMatch ? portMatch[1] : '';
   const ancestors = port
-    ? `http://localhost:${port} http://127.0.0.1:${port} http://[::1]:${port}`
-    : "http://localhost http://127.0.0.1 http://[::1]";
+    ? `http://localhost:${port} http://127.0.0.1:${port}`
+    : "http://localhost http://127.0.0.1";
   return STRICT_NSITE_CSP.replace(
     "frame-ancestors 'self'",
     `frame-ancestors ${ancestors}`,

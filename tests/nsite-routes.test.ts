@@ -688,6 +688,17 @@ test('handleNsiteSubdomain: serves index.html with no path rewriting, no X-Frame
     'CSP frame-ancestors must grant the dashboard loopback origin');
   assert.match(csp, /http:\/\/127\.0\.0\.1:3000/,
     'CSP frame-ancestors must grant 127.0.0.1 dashboard origin');
+  // Regression guard: CSP3's host-source grammar doesn't accept
+  // bracketed IPv6 hosts. Chromium silently invalidates the WHOLE
+  // frame-ancestors directive when one is present and falls back to
+  // `'self'` — and since the iframe origin (<sid>.nsite.localhost) is
+  // cross-origin to the dashboard parent (localhost), that effectively
+  // blocks every embed. Same fix shape as #118's `ws://[::1]:*` drop
+  // from connect-src. Confirmed in Brave field test: bracketed-IPv6
+  // present → ERR_BLOCKED_BY_RESPONSE on every iframe load; absent →
+  // all five test nsites render.
+  assert.ok(!/\[::1\]/.test(csp),
+    'CSP must not contain bracketed-IPv6 host in any directive — Chromium rejects the source and may invalidate the directive');
   // Body must contain the original /logo.png reference unchanged.
   // res.body is a Uint8Array — decode before string-matching.
   const body = res.body instanceof Uint8Array
