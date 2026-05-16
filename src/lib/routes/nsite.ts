@@ -557,7 +557,7 @@ export function rewriteHtmlAbsolutePaths(bytes: Uint8Array, siteId: string): Uin
              (_, p) => `url("${prefix}/${p}")`)
     .replace(/url\(\s*'\/(?!\/)([^')]+)'\s*\)/gi,
              (_, p) => `url('${prefix}/${p}')`);
-  return TEXT_ENCODER.encode(injectRuntimeShim(staticRewritten, prefix));
+  return TEXT_ENCODER.encode(injectRuntimeShim(staticRewritten, prefix, siteId));
 }
 
 /**
@@ -594,7 +594,7 @@ export function rewriteHtmlAbsolutePaths(bytes: Uint8Array, siteId: string): Uin
  * 'module' })` too, but blob: workers spawned by JS are out of reach.
  * Good enough for nsite-shaped content; not enough for arbitrary apps.
  */
-function injectRuntimeShim(html: string, prefix: string): string {
+function injectRuntimeShim(html: string, prefix: string, siteId: string): string {
   // The import map maps absolute-path specifiers under `/` to our prefix.
   // Per the WHATWG import-maps spec, a key ending in `/` is a prefix
   // mapping, so `import '/foo.js'` → `${prefix}/foo.js`.
@@ -624,7 +624,41 @@ function injectRuntimeShim(html: string, prefix: string): string {
 `window.EventSource.prototype=oES.prototype;}` +
 `})();</script>`;
 
-  const inject = importMap + fetchShim;
+  // CSP violation + page-error reporter. Forwards browser-emitted
+  // `securitypolicyviolation` events AND uncaught script errors to the
+  // parent dashboard via postMessage. Without this, when the strict
+  // CSP blocks an external resource (image, script, fetch), the
+  // failure happens silently inside the iframe's console — invisible
+  // to the user. With it, the panel's Diagnostics block shows e.g.
+  //   CSP blocked (2)
+  //     img      https://image.nostr.build/foo.jpg  (img-src)
+  //     connect  https://tracker.example.com/p     (connect-src)
+  // so the diagnosis of "why doesn't this render fully" goes from
+  // guesswork to inspection.
+  //
+  // Posts to '*' because the iframe is in an opaque origin and we
+  // can't restrict to a specific target; the parent must validate
+  // by message shape + the siteId it issued.
+  const reporter = `<script>(function(){var S=${JSON.stringify(siteId)};` +
+`function send(t,p){try{parent.postMessage(Object.assign({type:t,siteId:S},p),"*");}catch(e){}}` +
+`window.addEventListener("securitypolicyviolation",function(e){` +
+`send("nsite-csp-violation",{blockedURI:String(e.blockedURI||""),` +
+`violatedDirective:String(e.violatedDirective||""),` +
+`effectiveDirective:String(e.effectiveDirective||""),` +
+`disposition:String(e.disposition||""),` +
+`sourceFile:String(e.sourceFile||""),` +
+`lineNumber:e.lineNumber||0});});` +
+`window.addEventListener("error",function(e){` +
+`send("nsite-script-error",{message:String(e.message||""),` +
+`filename:String(e.filename||""),` +
+`lineno:e.lineno||0,colno:e.colno||0});},true);` +
+`window.addEventListener("unhandledrejection",function(e){` +
+`send("nsite-script-error",{message:"unhandledrejection: "+String((e.reason&&(e.reason.message||e.reason))||"")});` +
+`});` +
+`send("nsite-loaded",{href:String(location.href||"")});` +
+`})();</script>`;
+
+  const inject = importMap + fetchShim + reporter;
 
   // Try <head>, then <html>, then prepend.
   let matched = false;

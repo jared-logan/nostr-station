@@ -18484,6 +18484,12 @@ const NsitePanel = (() => {
   // iframe (we need to sync the address bar from iframe.contentWindow's
   // URL). The flag is set when WE drive iframe.src.
   let drivenLoad = false;
+  // Per-siteId report bucket — CSP violations and uncaught script errors
+  // posted up from the iframe via the injected reporter. Diagnostics
+  // pulls from this so the user can see WHY a render is broken (image
+  // blocked by CSP, JS bundle threw, etc.). Cleared on every fresh Go.
+  const reports = { siteId: '', cspViolations: [], scriptErrors: [], loaded: false };
+  let currentBody = null;  // last /api/nsite/resolve response, for Diagnostics re-render
 
   function setStatus(msg, isError = false) {
     if (!els.status) return;
@@ -18504,7 +18510,10 @@ const NsitePanel = (() => {
   // reached the queried set.
   function setDiagnostics(body) {
     if (!els.diag || !els.diagBody) return;
-    if (!body) { els.diag.hidden = true; els.diagBody.innerHTML = ''; return; }
+    if (!body) { els.diag.hidden = true; els.diagBody.innerHTML = ''; currentBody = null; return; }
+    // Stash for re-render when CSP / script-error reports arrive from
+    // the iframe asynchronously after the initial resolve.
+    currentBody = body;
     const fmtAge = (sec) => {
       if (!sec) return 'unknown';
       const diff = Math.max(0, Math.floor(Date.now() / 1000) - sec);
@@ -18561,8 +18570,44 @@ const NsitePanel = (() => {
       ${relayLines('Your read relays',    r.owner)}
       ${relayLines('Author NIP-65 outbox', r.authorOutbox)}
       ${relayLines('Queried (union)',     r.queried)}
+      ${reportsHtml()}
     `;
     els.diag.hidden = false;
+  }
+
+  // Renders the iframe-reported CSP violations and script errors. Empty
+  // string when nothing's been reported yet (page may still be loading,
+  // or the reporter hasn't fired).
+  function reportsHtml() {
+    const cv = reports.cspViolations;
+    const se = reports.scriptErrors;
+    if (cv.length === 0 && se.length === 0) {
+      if (reports.loaded) {
+        return `<div class="nsite-diag-section"><div class="nsite-diag-section-title">Sandbox clean</div><div class="muted" style="font-size:11px">No CSP violations or script errors reported by the iframe — render is unconstrained by the lockdown.</div></div>`;
+      }
+      return '';
+    }
+    const cvHtml = cv.length ? `
+      <div class="nsite-diag-section-title">CSP blocked (${cv.length})</div>
+      <div class="nsite-diag-table" style="grid-template-columns: 110px minmax(0,1fr)">
+        <div class="head">directive</div>
+        <div class="head">resource</div>
+        ${cv.map(v => `
+          <div title="${escapeHtml(v.violatedDirective)}">${escapeHtml(v.effectiveDirective || v.violatedDirective.split(' ')[0] || '?')}</div>
+          <div title="${escapeHtml(v.blockedURI)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(v.blockedURI || '(inline)')}</div>
+        `).join('')}
+      </div>
+      <div class="muted" style="font-size:10px;margin-top:4px">
+        Authors: republish blocked assets through this nsite's Blossom servers and reference them as <code>/path</code>.
+      </div>
+    ` : '';
+    const seHtml = se.length ? `
+      <div class="nsite-diag-section-title" style="margin-top:8px">Script errors (${se.length})</div>
+      <div style="display:flex;flex-direction:column;gap:2px;font-size:10px">
+        ${se.map(e => `<div class="muted" title="${escapeHtml(e.filename)}:${e.lineno}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(e.message)}</div>`).join('')}
+      </div>
+    ` : '';
+    return `<div class="nsite-diag-section">${cvHtml}${seHtml}</div>`;
   }
   function setEmpty(visible) {
     if (els.empty) els.empty.style.display = visible ? '' : 'none';
@@ -18581,6 +18626,13 @@ const NsitePanel = (() => {
     setStatus('Resolving…');
     setMeta('');
     setDiagnostics(null);
+    // Reset the report bucket — leftover CSP violations / script errors
+    // from a previous nsite would be misleading on a fresh resolve.
+    reports.siteId = '';
+    reports.cspViolations = [];
+    reports.scriptErrors = [];
+    reports.loaded = false;
+    currentBody = null;
     try {
       const url = `/api/nsite/resolve?addr=${encodeURIComponent(addr)}`;
       // Bearer header is required: web-server.ts gates all /api/* paths
@@ -18609,6 +18661,9 @@ const NsitePanel = (() => {
       const { siteId, display, fileCount, latestAt, source, entry,
               blossomServers, relays, format } = body;
       const entryPath = entry || 'index.html';
+      // Bind the reporter bucket to the new siteId so postMessage events
+      // from the iframe land in the right channel.
+      reports.siteId = siteId;
       // Push new history entry (trim forward tail on fresh nav).
       if (cursor < history.length - 1) history.splice(cursor + 1);
       history.push({ siteId, display, path: entryPath });
@@ -18700,6 +18755,47 @@ const NsitePanel = (() => {
     drivenLoad = false;
   }
 
+  // Listen for postMessage from the iframe's injected reporter. The
+  // iframe is in an opaque origin so event.origin is "null" — we
+  // authenticate the message by shape + siteId match (the iframe
+  // received the siteId from us when we set its src). Mounted once at
+  // panel-init so it survives multiple Go() navigations.
+  function mountReporterListener() {
+    if (els._reporterMounted) return;
+    els._reporterMounted = true;
+    window.addEventListener('message', (event) => {
+      const m = event.data;
+      if (!m || typeof m !== 'object') return;
+      if (typeof m.type !== 'string' || !m.type.startsWith('nsite-')) return;
+      if (typeof m.siteId !== 'string' || m.siteId !== reports.siteId) return;
+      if (m.type === 'nsite-csp-violation') {
+        // Cap to avoid runaway floods if a page is broken in a way
+        // that fires thousands of violations.
+        if (reports.cspViolations.length < 50) {
+          reports.cspViolations.push({
+            blockedURI:         String(m.blockedURI || ''),
+            violatedDirective:  String(m.violatedDirective || ''),
+            effectiveDirective: String(m.effectiveDirective || ''),
+          });
+        }
+      } else if (m.type === 'nsite-script-error') {
+        if (reports.scriptErrors.length < 30) {
+          reports.scriptErrors.push({
+            message:  String(m.message || ''),
+            filename: String(m.filename || ''),
+            lineno:   m.lineno || 0,
+          });
+        }
+      } else if (m.type === 'nsite-loaded') {
+        reports.loaded = true;
+      } else {
+        return;
+      }
+      // Re-render Diagnostics with the new data attached.
+      if (currentBody) setDiagnostics(currentBody);
+    });
+  }
+
   function init() {
     if (els._wired) return;
     els._wired   = true;
@@ -18737,6 +18833,7 @@ const NsitePanel = (() => {
     // Used by `nostr-station nsite publish` to print a one-click preview
     // link after a successful publish.
     maybeConsumeDeepLink();
+    mountReporterListener();
   }
 
   function maybeConsumeDeepLink() {
