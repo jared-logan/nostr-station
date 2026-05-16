@@ -745,6 +745,15 @@ function currentPanel() {
   return PANELS.includes(hash) ? hash : 'status';
 }
 
+// Parse `#chat/s/<sessionId>` → { sessionId }. Returns null sessionId for
+// the bare `#chat` (= station session). Used by ChatPanel.onEnter() to
+// resolve which session to surface.
+function currentChatSubroute() {
+  const hash = (location.hash || '').slice(1);
+  const m = hash.match(/^chat\/s\/([\w:-]+)$/);
+  return { sessionId: m ? m[1] : null };
+}
+
 function activatePanel(name) {
   $$('.panel').forEach(el => el.classList.toggle('active', el.dataset.panel === name));
   $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.panel === name));
@@ -2863,7 +2872,11 @@ const ChatPanel = (() => {
     b.querySelector('.clear-ctx').onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      setActiveProject(null);
+      // Navigate to bare #chat — the hash router will land us on the
+      // station session via applyRoute(). Keeps URL + active-session
+      // state in sync (vs. setActiveProject(null) leaving #chat/s/<id>).
+      if (location.hash === '#chat') setActiveProject(null);
+      else location.hash = '#chat';
     };
   }
 
@@ -3498,6 +3511,53 @@ const ChatPanel = (() => {
     populateProvider();
   });
 
+  // Resolve the project metadata for a session — preferring the in-memory
+  // ProjectsPanel cache so we don't round-trip the server when switching
+  // between already-loaded projects. Falls back to GET /api/projects/:id
+  // for deep-link landings (`#chat/s/p:<id>` opened in a fresh tab before
+  // the Projects panel has run).
+  async function resolveProjectForSession(session) {
+    if (!session || session.kind !== 'project' || !session.projectId) return null;
+    const cached = Array.isArray(window.__projectsCache)
+      ? window.__projectsCache.find(x => x.id === session.projectId)
+      : null;
+    if (cached) return cached;
+    try {
+      const p = await api(`/api/projects/${session.projectId}`);
+      return p && p.id ? p : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Apply the hash sub-route to the active session. Always rebinds
+  // activeProject + repaints the UI so any drift between the URL and the
+  // panel state self-heals on next entry. setActiveProject is idempotent.
+  async function applyRoute() {
+    const { sessionId } = currentChatSubroute();
+    const session = sessionId ? SessionStore.get(sessionId) : SessionStore.get(SessionStore.STATION_ID);
+    if (!session || session.kind === 'station') {
+      if (sessionId && !session && location.hash !== '#chat') location.hash = '#chat';
+      await setActiveProject(null);
+      return;
+    }
+    const p = await resolveProjectForSession(session);
+    if (!p) {
+      // Project vanished out from under us — close the dead session and
+      // land on station rather than render an empty chat with no context.
+      SessionStore.close(session.id);
+      if (location.hash !== '#chat') location.hash = '#chat';
+      await setActiveProject(null);
+      return;
+    }
+    await setActiveProject({
+      id: p.id,
+      name: p.name,
+      previewable:   !!p.previewable,
+      stacksProject: !!p.stacksProject,
+    });
+  }
+
   let initialized = false;
   return {
     onEnter() {
@@ -3510,11 +3570,85 @@ const ChatPanel = (() => {
         // no setActiveProject() has fired yet.
         renderHistory();
       }
+      applyRoute();
       input.focus();
     },
     setActiveProject,
     getActiveProject() { return activeProject; },
   };
+})();
+
+// ── NavSessions: render open project sessions nested under Projects ─────
+//
+// Subscribes to SessionStore so create / close / setActive triggers a
+// re-render. Each row is a regular <a> with href="#chat/s/<id>" so the
+// existing hashchange router does the navigation; ChatPanel.applyRoute()
+// then resolves the active session. The top-level Chat nav link is
+// un-highlighted whenever a project session is active, so the active
+// indicator only ever points at one row at a time.
+const NavSessions = (() => {
+  const container = document.getElementById('nav-project-sessions');
+  const stationLink = document.querySelector('#nav a[href="#chat"]');
+  if (!container) return { refresh() {} };
+
+  // Derive the visually-active session straight from the hash so the
+  // highlight tracks the URL without waiting for the (async) session
+  // resolve inside ChatPanel.applyRoute(). Off the chat panel, no row
+  // should be highlighted.
+  function activeIdFromHash() {
+    const h = location.hash || '';
+    const m = h.match(/^#chat\/s\/([\w:-]+)$/);
+    if (m) return m[1];
+    if (h === '#chat' || h === '' || h === '#') return SessionStore.STATION_ID;
+    return null;
+  }
+
+  function render() {
+    const sessions = SessionStore.listOpen().filter(s => s.kind === 'project');
+    const activeId = activeIdFromHash();
+    container.innerHTML = '';
+    for (const s of sessions) {
+      const row = document.createElement('a');
+      row.className = 'nav-session' + (s.id === activeId ? ' active' : '');
+      row.href = `#chat/s/${s.id}`;
+      row.title = s.title;
+      const label = document.createElement('span');
+      label.className = 'nav-session-label';
+      label.textContent = s.title;
+      const close = document.createElement('button');
+      close.className = 'nav-session-close';
+      close.type = 'button';
+      close.setAttribute('aria-label', 'Close session');
+      close.textContent = '×';
+      close.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const wasActive = SessionStore.getActiveId() === s.id;
+        SessionStore.close(s.id);
+        if (wasActive) {
+          // Prefer another open project session for the same project,
+          // else fall back to station.
+          const siblings = SessionStore.listOpen().filter(x => x.projectId === s.projectId);
+          location.hash = siblings.length ? `#chat/s/${siblings[0].id}` : '#chat';
+        }
+      });
+      row.appendChild(label);
+      row.appendChild(close);
+      container.appendChild(row);
+    }
+    // Top-level Chat link should only be "active" when the station
+    // session is what's actually showing. Without this it'd light up
+    // alongside any project session row (both live under the same panel).
+    if (stationLink) {
+      const stationActive = activeId === SessionStore.STATION_ID;
+      stationLink.classList.toggle('active', stationActive);
+    }
+  }
+
+  SessionStore.subscribe(render);
+  window.addEventListener('hashchange', render);
+  render();
+  return { refresh: render };
 })();
 
 // ── Panel: Relay ─────────────────────────────────────────────────────────
@@ -5029,6 +5163,11 @@ const ProjectsPanel = (() => {
     } catch {
       projects = [];
     }
+    // Publish the cache so other modules (ChatPanel, NavSessions, ngit
+    // remote helpers) can read project metadata without a re-fetch, and
+    // drop chat sessions whose project no longer exists.
+    window.__projectsCache = projects;
+    try { SessionStore.gcAgainstProjects(projects.map(p => p.id)); } catch {}
     render();
     // Kick off git-state polling now that cards are in the DOM. The
     // helper is idempotent — repeat reloads (Add Project, capability
@@ -10590,24 +10729,19 @@ const ProjectsPanel = (() => {
     });
   }
 
-  async function openInChat(p) {
-    try {
-      await api('/api/chat/context', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId: p.id }),
-      });
-    } catch {}
-    // Pass previewable through so the chat side knows whether to surface
-    // the live-preview pane (the iframe + dev-server button only makes
-    // sense for projects with an `npm run dev` script — Vite/Next/etc.,
-    // including shakespeare.diy clones, not just MKStack stacks projects).
-    ChatPanel.setActiveProject({
-      id: p.id,
-      name: p.name,
-      previewable:   !!p.previewable,
-      stacksProject: !!p.stacksProject,
-    });
-    location.hash = '#chat';
+  function openInChat(p) {
+    // Find or create the project's chat session, then route to it. The hash
+    // router (ChatPanel.applyRoute) resolves the session → setActiveProject,
+    // which handles preview-pane + permissions + the server context POST.
+    const s = SessionStore.ensureProjectSession(p.id, p.name);
+    const target = `#chat/s/${s.id}`;
+    if (location.hash === target) {
+      // Same project, same session — just activate the panel (covers
+      // re-clicking the chat icon on a card from the chat panel itself).
+      activatePanel('chat');
+    } else {
+      location.hash = target;
+    }
   }
 
   // ── Discover ngit repos published under the station owner's npub ─────
