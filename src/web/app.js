@@ -13647,16 +13647,17 @@ const ConfigPanel = (() => {
       </div>`).join('');
 
     // Section order is now driven by usage frequency / conceptual grouping:
-    //   1. Profile      — who you are (most-checked, opens by default)
+    //   1. Profile      — who you are
     //   2. Relay        — your station's relay + read-relay list
     //   3. AI           — providers + Stacks (configure → use)
     //   4. Git          — global git identity + ngit (signer/grasp)
     //   5. Templates    — rarely touched after first run
     //   6. Appearance   — purely cosmetic, pushed last
-    // Each section is a <details> so users can collapse the ones they
-    // don't care about. Frequently-checked sections start expanded.
+    // Each section is a <details> rendered collapsed by default so the
+    // panel opens compact — the summary line carries an at-a-glance
+    // status (name, count, "ok"/"off") so users rarely need to expand.
     container.innerHTML = `
-      <details class="config-section cfg-collapsible" id="cfg-profile-section" open>
+      <details class="config-section cfg-collapsible" id="cfg-profile-section">
         <summary>
           <h3>Profile</h3>
           <span class="cfg-summary-meta" id="cfg-profile-summary-meta">
@@ -13672,7 +13673,7 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
-      <details class="config-section cfg-collapsible" id="cfg-relay-section" open>
+      <details class="config-section cfg-collapsible" id="cfg-relay-section">
         <summary>
           <h3>Relay</h3>
           <span class="cfg-summary-meta">${escapeHtml(rc.name || rc.url || '—')}</span>
@@ -13704,7 +13705,7 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
-      <details class="config-section cfg-collapsible" id="cfg-client-relays-section" open>
+      <details class="config-section cfg-collapsible" id="cfg-client-relays-section">
         <summary>
           <h3>Client Relays</h3>
           <span class="cfg-summary-meta">
@@ -13801,7 +13802,7 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
-      <details class="config-section cfg-collapsible" id="cfg-ai-section" open>
+      <details class="config-section cfg-collapsible" id="cfg-ai-section">
         <summary>
           <h3>AI</h3>
           <span class="cfg-summary-meta">${escapeHtml(summarizeAi(aiList))}</span>
@@ -13974,7 +13975,7 @@ const ConfigPanel = (() => {
       <details class="config-section cfg-collapsible" id="cfg-templates-section">
         <summary>
           <h3>Project Templates</h3>
-          <span class="cfg-summary-meta">scaffolds for new projects</span>
+          <span class="cfg-summary-meta" id="cfg-templates-summary">loading…</span>
         </summary>
         <div class="cfg-section-body">
           <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
@@ -13990,7 +13991,7 @@ const ConfigPanel = (() => {
       <details class="config-section cfg-collapsible" id="cfg-appearance-section">
         <summary>
           <h3>Appearance</h3>
-          <span class="cfg-summary-meta">theme & colors</span>
+          <span class="cfg-summary-meta">${escapeHtml(summarizeTheme())}</span>
         </summary>
         <div class="cfg-section-body">
           <div class="config-row">
@@ -14006,10 +14007,10 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
-      <details class="config-section cfg-collapsible" id="cfg-about-section" open>
+      <details class="config-section cfg-collapsible" id="cfg-about-section">
         <summary>
           <h3>About</h3>
-          <span class="cfg-summary-meta">version &amp; updates</span>
+          <span class="cfg-summary-meta" id="cfg-about-summary">${escapeHtml(summarizeUpdates())}</span>
         </summary>
         <div class="cfg-section-body">
           <div class="config-row">
@@ -14786,6 +14787,38 @@ const ConfigPanel = (() => {
     return `${configured.length} providers`;
   }
 
+  // Current accent theme — shown collapsed so users see at-a-glance which
+  // colorway is active without expanding Appearance. "ditto" reflects a
+  // user-published kind-16767 theme so we surface its title when known.
+  function summarizeTheme() {
+    const id = getTheme();
+    if (id === 'ditto') {
+      const t = getDittoTheme();
+      return t?.title ? `Ditto · ${t.title}` : 'Ditto';
+    }
+    const t = THEMES.find(x => x.id === id);
+    return t ? t.label : id;
+  }
+
+  // About-section at-a-glance: prefers the cached Updates status (already
+  // polled by Updates.init() / the 30-min background tick) so the summary
+  // line shows "up to date" / "N updates available" without forcing a
+  // fresh network round-trip on Config-panel open.
+  function summarizeUpdates() {
+    try {
+      const status = Updates?.lastStatus?.();
+      if (!status) return 'updates · check to see';
+      if (!status.supported) return 'self-update unavailable';
+      if (Updates.anyAvailable(status)) {
+        const n = Updates.totalCount(status);
+        return `${n} update${n === 1 ? '' : 's'} available`;
+      }
+      return 'up to date';
+    } catch {
+      return 'updates · check to see';
+    }
+  }
+
   // Install-command callout for terminal-native AIs. Mirrors the
   // Status panel's claude/opencode rows so users who land on Config
   // first (e.g. through the AI summary chip) hit a one-click Install
@@ -15233,7 +15266,8 @@ const ConfigPanel = (() => {
   // edit + delete; new ones are added via the inline form.
 
   async function refreshTemplates() {
-    const root = $('cfg-templates-list');
+    const root    = $('cfg-templates-list');
+    const summary = $('cfg-templates-summary');
     if (!root) return;
     let templates = [];
     try {
@@ -15241,7 +15275,13 @@ const ConfigPanel = (() => {
       templates = Array.isArray(r?.templates) ? r.templates : [];
     } catch (e) {
       root.innerHTML = `<div style="color:var(--warn);font-size:12px">Failed to load templates: ${escapeHtml(e.message)}</div>`;
+      if (summary) summary.textContent = 'unavailable';
       return;
+    }
+    if (summary) {
+      summary.textContent = templates.length
+        ? `${templates.length} template${templates.length === 1 ? '' : 's'}`
+        : 'none';
     }
     root.innerHTML = renderTemplatesList(templates);
     wireTemplatesList(root, templates);
@@ -15622,6 +15662,16 @@ const ConfigPanel = (() => {
       }
     });
   }
+
+  // Keep the collapsed About-section summary in sync with the latest
+  // Updates poll. Registered once at module load so subsequent panel
+  // re-renders (which only swap `container.innerHTML`) don't leak
+  // listeners. The summary element may not exist yet — we just no-op
+  // when it isn't mounted.
+  document.addEventListener('updates-status-changed', () => {
+    const summary = $('cfg-about-summary');
+    if (summary) summary.textContent = summarizeUpdates();
+  });
 
   return {
     onEnter() { load(); },
@@ -18962,6 +19012,10 @@ const Updates = (() => {
   const RESTART_POLL_MS   = 1000;
   const RESTART_POLL_MAX  = 120; // 2 min ceiling
   let inited = false;
+  // Cached on each refresh() so the Config panel's About-section
+  // collapsed summary can render "up to date" / "N updates available"
+  // without forcing another network round-trip.
+  let lastStatus = null;
 
   function pill() { return document.getElementById(PILL_ID); }
 
@@ -19027,7 +19081,12 @@ const Updates = (() => {
         ...selfStatus,
         toolUpdates: Array.isArray(toolsRes?.tools) ? toolsRes.tools : [],
       };
+      lastStatus = status;
       renderPill(status);
+      // The Config panel's About-section summary listens for this so it
+      // can flip from the initial "check to see" label to a live status
+      // line once the first poll lands, without re-rendering the panel.
+      document.dispatchEvent(new CustomEvent('updates-status-changed', { detail: status }));
       return status;
     } catch {
       // Auth or network — pill stays hidden, no toast (background poll).
@@ -19350,7 +19409,10 @@ const Updates = (() => {
     setInterval(() => { void refresh(false); }, BROWSER_REPOLL_MS);
   }
 
-  return { init, refresh, openModal: openUpdateModal, totalCount, anyAvailable };
+  return {
+    init, refresh, openModal: openUpdateModal, totalCount, anyAvailable,
+    lastStatus: () => lastStatus,
+  };
 })();
 
 // Entry point: /setup launches the first-run wizard; anywhere else
