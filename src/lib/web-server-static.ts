@@ -339,14 +339,46 @@ export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse):
 
 // Inline script injected into every HTML response from the Ditto bundle.
 // Runs synchronously during <head> parsing — i.e. before any of Ditto's
-// <script type="module"> tags (which are deferred by default). Rewrites
-// `location.pathname` from `/ditto[/...]` to the same path at root so
-// Ditto's BrowserRouter matches the intended route on initial mount
-// instead of falling through to its 404 view.
+// <script type="module"> tags (which are deferred by default) AND before
+// Ditto's CSP meta tag is encountered, so the inline `<script>` is not
+// blocked. Two responsibilities:
+//
+//   1. Strip the `/ditto` prefix from `location.pathname` so Ditto's
+//      BrowserRouter (built with `base: '/'`) matches its real routes
+//      on initial mount instead of falling through to the 404 view.
+//
+//   2. Intercept outbound navigations to known public nsite gateways
+//      (the same set the resolver in src/lib/nsite-resolver.ts groks)
+//      and bounce them up to the parent dashboard via postMessage. The
+//      parent's ClientPanel hands the URL to the nsite panel via the
+//      existing `#nsite/<addr>` deep-link, so "Visit" on a Ditto nsite
+//      card opens our embedded browser instead of an external tab.
+//
+// Both window.open and click-on-<a> are intercepted; either is how Ditto
+// might trigger the external navigation in practice.
 const DITTO_PREFIX_STRIP_SCRIPT =
-  '<script>(function(){var p=location.pathname;'
+  '<script>(function(){'
+  // (1) /ditto prefix strip
+  + 'var p=location.pathname;'
   + 'if(p===\'/ditto\'||p===\'/ditto/\'){history.replaceState(null,\'\',\'/\'+location.search+location.hash);}'
   + 'else if(p.indexOf(\'/ditto/\')===0){history.replaceState(null,\'\',p.slice(6)+location.search+location.hash);}'
+  // (2) nsite-gateway intercept — keep this regex aligned with the
+  // gateway alternation in src/lib/nsite-resolver.ts:278.
+  + 'var GW=/^[^.]+\\.(?:nsite\\.lol|nsite\\.run|nsite\\.cloud|nosto\\.re|nwb\\.tf|nostr\\.hu)$/i;'
+  + 'function isNsite(s){if(typeof s!==\'string\')return false;'
+  +   'try{var u=new URL(s,location.href);'
+  +     'return(u.protocol===\'http:\'||u.protocol===\'https:\')&&GW.test(u.hostname);}'
+  +   'catch(_){return false;}}'
+  + 'function notify(u){try{parent.postMessage({type:\'station:open-nsite\',url:String(u)},location.origin);}catch(_){}}'
+  + 'var _open=window.open;'
+  + 'window.open=function(u){if(isNsite(u)){notify(u);return null;}return _open.apply(this,arguments);};'
+  + 'document.addEventListener(\'click\',function(e){'
+  +   'if(e.defaultPrevented)return;'
+  +   'var n=e.target;while(n&&n.nodeType===1&&n.tagName!==\'A\')n=n.parentNode;'
+  +   'if(!n||n.tagName!==\'A\')return;'
+  +   'var h=n.getAttribute(\'href\');if(!isNsite(h))return;'
+  +   'e.preventDefault();e.stopPropagation();notify(h);'
+  + '},true);'
   + '})();</script>';
 
 export function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boolean {
