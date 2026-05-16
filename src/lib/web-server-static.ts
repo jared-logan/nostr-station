@@ -94,11 +94,24 @@ export const HTML_SECURITY_HEADERS: Record<string, string> = {
     "connect-src 'self' ws://127.0.0.1:* ws://localhost:* wss:",
     "img-src 'self' data: https:",
     "font-src 'self' data:",
-    // Loopback only — used by the chat panel's live-preview iframe to embed
-    // a project's local Vite dev server (default :5173). Cross-origin frames
-    // are still rejected. frame-ancestors above keeps the dashboard itself
+    // Loopback only — used by the chat panel's live-preview iframe to
+    // embed a project's local Vite dev server (default :5173) AND by the
+    // nsite panel to embed per-nsite-origin content from
+    // *.nsite.localhost (introduced in PR-B / #121). Two halves of the
+    // same handshake have to agree before an iframe will load:
+    //   - frame-ancestors on the nsite response says "OK to embed me at
+    //     localhost:<port>" (handled in routes/nsite.ts:buildCspForRequest)
+    //   - frame-src on the DASHBOARD page (this directive) says
+    //     "OK to load *.nsite.localhost into one of my iframes"
+    // Without the wildcard-subdomain entry here, the dashboard's CSP
+    // refuses to load any <sid>.nsite.localhost iframe and the browser
+    // shows "This content is blocked. Contact the site owner to fix
+    // the issue." — the failure surfaced after #121 even though
+    // frame-ancestors was correctly granted by the nsite response.
+    // Cross-origin frames OUTSIDE this set are still rejected, and
+    // frame-ancestors 'none' above keeps the dashboard itself
     // un-embeddable.
-    "frame-src 'self' http://127.0.0.1:* http://localhost:*",
+    "frame-src 'self' http://127.0.0.1:* http://localhost:* http://*.nsite.localhost:*",
   ].join('; '),
 };
 
