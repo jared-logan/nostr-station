@@ -31,6 +31,7 @@ import {
   listSessions as listTerminals,
 } from '../terminal.js';
 import { getProject } from '../projects.js';
+import { allocatePort as allocateDevServerPort } from '../dev-server-registry.js';
 import { getSession, localhostExempt } from '../auth.js';
 import { readBody, CLI_SPAWN } from './_shared.js';
 
@@ -87,7 +88,15 @@ export async function handleTerminal(
       if (p.path) cwd = p.path;
       project = p;
     }
-    const r = await createTerminal({ key, cwd, project }, CLI_SPAWN);
+    // Project-bound stacks-dev terminals get a sticky port from the
+    // dev-server registry so the chat panel's preview iframe and the
+    // spawned `npm run dev -- --port N` line up. Allocation is
+    // idempotent — re-spawning the same project's dev server reuses
+    // the port the previous PTY was bound to.
+    const port = (key === 'stacks-dev' && project)
+      ? allocateDevServerPort(project.id)
+      : undefined;
+    const r = await createTerminal({ key, cwd, project, port }, CLI_SPAWN);
     if (!r.ok) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: r.error }));

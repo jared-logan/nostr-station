@@ -33,6 +33,7 @@
  *   GET    /api/projects/:id/git-identity      — resolved repo-local identity + source
  *   PUT    /api/projects/:id/git-identity      — set repo-local override
  *   DELETE /api/projects/:id/git-identity      — clear repo-local override
+ *   GET    /api/projects/:id/dev-server        — allocate-or-read port + running flag
  *   POST   /api/projects/:id/sync              — sync.syncProject
  *   POST   /api/projects/:id/snapshot          — sync.snapshotProject
  *   POST   /api/chat/context                   — set active project
@@ -57,6 +58,11 @@ import {
   writeSystemPromptOverride, writeProjectContextOverlay,
   writeProjectPermissions, writeProjectChatOverride,
 } from '../project-config.js';
+import {
+  allocatePort as allocateDevServerPort,
+  getState as getDevServerState,
+  forgetProject as forgetDevServerProject,
+} from '../dev-server-registry.js';
 import { handleProjectsNgit } from './projects-ngit.js';
 import { handleProjectsGit }  from './projects-git.js';
 import { handleProjectsSync } from './projects-sync.js';
@@ -273,8 +279,38 @@ export async function handleProjects(
     }
     if (tail === '' && method === 'DELETE') {
       const r = deleteProject(id);
+      if (r.ok) forgetDevServerProject(id);
       res.writeHead(r.ok ? 200 : 404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: r.ok }));
+      return true;
+    }
+
+    // Dev server status — what port we'd spawn vite on for this project
+    // and whether a station-managed PTY currently holds it. Allocating on
+    // GET means the iframe URL is ready before the user clicks Start, so
+    // a single fetch can decide what to render (preview vs. empty state).
+    // Returns 200 with `previewable: false` when the project has no
+    // `npm run dev` script — callers should hide the preview pane
+    // entirely in that case rather than offer a Start button that would
+    // immediately fail.
+    if (tail === 'dev-server' && method === 'GET') {
+      const previewable = hasDevScript(project);
+      if (!previewable) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ previewable: false, running: false, port: null, url: null }));
+        return true;
+      }
+      const port = allocateDevServerPort(id);
+      const state = getDevServerState(id);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        previewable: true,
+        running:   state?.running ?? false,
+        port,
+        url:       `http://localhost:${port}`,
+        sessionId: state?.sessionId ?? null,
+        startedAt: state?.startedAt ?? null,
+      }));
       return true;
     }
 
@@ -314,6 +350,7 @@ export async function handleProjects(
         rmError = e?.message || 'rm failed';
       }
       const r = deleteProject(id);
+      if (r.ok) forgetDevServerProject(id);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         ok:          r.ok,
