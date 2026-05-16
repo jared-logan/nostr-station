@@ -582,6 +582,11 @@
         </div>
       </div>
       <div class="panel-body nsite-body">
+        <!-- Tab strip — populated by app.js:renderTabStrip(). Each chip
+             carries a data-tab-id; the trailing "+" is the new-tab
+             button. A single delegated click handler on the strip
+             container handles activate / close / new-tab. -->
+        <div class="nsite-tabs" id="nsite-tabs"></div>
         <div class="nsite-bar">
           <button id="nsite-back"    title="Back"    aria-label="Back"    disabled>&larr;</button>
           <button id="nsite-forward" title="Forward" aria-label="Forward" disabled>&rarr;</button>
@@ -614,25 +619,21 @@
         <div class="nsite-trust-banner" id="nsite-trust-banner" hidden></div>
         <div class="nsite-viewport">
           <!--
-            allow-same-origin is intentional: the iframe loads from
+            Per-tab iframes get appended into this container by
+            app.js:loadIframe (lazy, on first nav for each tab). Only
+            the active tab's iframe is `display:block`; other tabs'
+            iframes stay `display:none` but alive in the DOM so
+            switching tabs is instant — no reload, no scroll-position
+            loss, no SPA re-hydration. Each iframe is sandboxed with
+            allow-scripts/forms/popups/popups-to-escape-sandbox PLUS
+            allow-same-origin (the iframe loads from
             <siteId>.nsite.localhost:<port> which is cross-origin to
-            the dashboard at localhost:<port> (different hostname →
-            distinct origin under SOP). With allow-same-origin the
-            iframe runs in ITS OWN real origin instead of the opaque
-            null-origin, which unblocks crypto.subtle (Secure Context),
-            localStorage / IndexedDB (real per-origin buckets),
-            non-null WebSocket Origin headers, and ES module CORS.
-            SOP still isolates it from the dashboard parent — the
-            subdomain hostname is a different origin, so the iframe
-            can't read parent.document, parent.localStorage, or the
-            session token. The dashboard's /api/* surface is also
-            404'd on this hostname server-side as a belt-and-braces.
+            the dashboard, so SOP still isolates them; allow-same-origin
+            just lets the iframe have its own real origin instead of
+            the opaque null-origin that broke crypto.subtle / localStorage
+            / ES module CORS / WebSocket Origin headers before PR-B).
           -->
-          <iframe id="nsite-frame"
-                  class="nsite-frame"
-                  sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin"
-                  referrerpolicy="no-referrer"
-                  title="nsite content"></iframe>
+          <div class="nsite-frames" id="nsite-frames"></div>
           <div class="nsite-empty" id="nsite-empty">
             <div class="nsite-empty-title">Enter an nsite address to browse</div>
             <div class="muted nsite-empty-intro">

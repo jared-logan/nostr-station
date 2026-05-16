@@ -18531,32 +18531,89 @@ const MailPanel = (() => {
 // once the panel proves out.
 const NsitePanel = (() => {
   const els = {};
-  // History stack: each entry is { siteId, display, path }. The current
-  // index is `cursor`; back/forward move it without truncating, until a
-  // fresh Go() pushes onto cursor+1 and trims the tail.
-  const history = [];
-  let cursor = -1;
+
+  // ── Multi-tab model ────────────────────────────────────────────────────
+  //
+  // Each tab owns its own complete browsing context: address-bar value,
+  // resolve response (`body`), per-iframe CSP-violation / script-error
+  // reports, nav history + cursor, and a dedicated <iframe> DOM element.
+  // The single-tab module-level state (`history`, `cursor`, `reports`,
+  // `currentBody`) became per-Tab fields; functions that previously
+  // touched module state now operate on the result of `activeTab()`.
+  //
+  // Iframe-per-tab is intentional: switching tabs MUST NOT cause a
+  // reload (no scroll-position loss, no re-fetch, no SPA re-hydration)
+  // — that's the whole point of having tabs. The container holds N
+  // iframes; only the active one is `display: block`, others stay
+  // `display: none` and keep their full state.
+  class Tab {
+    constructor(id) {
+      this.id = id;
+      this.addr = '';           // last value typed in the address bar
+      this.display = '';        // canonical display form (post-resolve)
+      this.originalAddr = '';   // raw input for trust-toggle re-resolve
+      this.title = 'New tab';   // shown in the tab strip
+      this.history = [];        // [{ siteId, display, path, originalAddr }]
+      this.cursor = -1;
+      this.body = null;         // last /api/nsite/resolve response
+      // Per-iframe report bucket — keyed by the snapshot's siteId so the
+      // postMessage listener can fan messages back to the right tab even
+      // when several iframes are alive simultaneously.
+      this.reports = { siteId: '', cspViolations: [], scriptErrors: [], loaded: false };
+      this.frameEl = null;      // <iframe> element, lazily created
+      // Cached UI strings so activating a tab can restore exactly what
+      // was on screen when it was last active without re-fetching.
+      this.metaHtml = '';
+      this.statusText = '';
+      this.statusErr = false;
+    }
+  }
+
+  const tabs = [];
+  let activeId = null;
+  let nextTabSeq = 0;
+
+  function activeTab() { return tabs.find(t => t.id === activeId) || null; }
+
   // Track whether the next iframe `load` is from our own navigation (we
   // already updated the address bar) or from a link click inside the
   // iframe (we need to sync the address bar from iframe.contentWindow's
-  // URL). The flag is set when WE drive iframe.src.
+  // URL). Set when WE drive iframe.src. Lives at module scope rather
+  // than per-tab because only the active tab's frame can fire load
+  // events the user sees, and the next set-then-load pair is always
+  // atomic within go() / loadIframe().
   let drivenLoad = false;
-  // Per-siteId report bucket — CSP violations and uncaught script errors
-  // posted up from the iframe via the injected reporter. Diagnostics
-  // pulls from this so the user can see WHY a render is broken (image
-  // blocked by CSP, JS bundle threw, etc.). Cleared on every fresh Go.
-  const reports = { siteId: '', cspViolations: [], scriptErrors: [], loaded: false };
-  let currentBody = null;  // last /api/nsite/resolve response, for Diagnostics re-render
 
   function setStatus(msg, isError = false) {
+    const tab = activeTab();
+    if (tab) {
+      tab.statusText = msg || '';
+      tab.statusErr  = !!isError;
+    }
     if (!els.status) return;
     els.status.textContent = msg || '';
     els.status.classList.toggle('err', !!isError);
   }
   function setMeta(text) {
+    const tab = activeTab();
+    if (tab) { tab.metaContent = text || ''; tab.metaIsHtml = false; }
     if (!els.meta) return;
     if (text) { els.meta.hidden = false; els.meta.textContent = text; }
     else      { els.meta.hidden = true;  els.meta.textContent = ''; }
+  }
+
+  // HTML variant — used when the meta line needs to embed interactive
+  // bits (the inline "trusted · revoke" segment from the PR-1 banner-slim
+  // work). Same shape as setMeta but uses innerHTML; callers that need
+  // HTML must build it themselves with escapeHtml on any non-trusted
+  // input. textContent is the default elsewhere to keep XSS surface
+  // at zero for the common case.
+  function setMetaHtml(html) {
+    const tab = activeTab();
+    if (tab) { tab.metaContent = html || ''; tab.metaIsHtml = true; }
+    if (!els.meta) return;
+    if (html) { els.meta.hidden = false; els.meta.innerHTML = html; }
+    else      { els.meta.hidden = true;  els.meta.innerHTML  = ''; }
   }
 
   // Render the expandable "Diagnostics" block under the meta line. Lets the
@@ -18570,7 +18627,8 @@ const NsitePanel = (() => {
     if (!body) {
       els.diag.hidden = true;
       els.diagBody.innerHTML = '';
-      currentBody = null;
+      const t = activeTab();
+      if (t) t.body = null;
       // Clear the standalone trust banner alongside Diagnostics so a
       // fresh Go() doesn't leave a stale Trust state visible while the
       // new resolve is in flight.
@@ -18579,7 +18637,8 @@ const NsitePanel = (() => {
     }
     // Stash for re-render when CSP / script-error reports arrive from
     // the iframe asynchronously after the initial resolve.
-    currentBody = body;
+    const t = activeTab();
+    if (t) t.body = body;
     const fmtAge = (sec) => {
       if (!sec) return 'unknown';
       const diff = Math.max(0, Math.floor(Date.now() / 1000) - sec);
@@ -18676,25 +18735,24 @@ const NsitePanel = (() => {
   // discover the Trust button at all — invisible UX. The dedicated
   // banner slot is always visible when relevant.
   function trustControlHtml() {
-    if (!currentBody) return '';
-    const pk = String(currentBody.pubkey || '');
+    const tab = activeTab();
+    if (!tab || !tab.body) return '';
+    const pk = String(tab.body.pubkey || '');
     if (!pk) return '';
-    const trusted = !!currentBody.trusted;
-    const hasViolations = reports.cspViolations.length > 0;
-    // Suppress when there's nothing to ask about: untrusted nsite with
-    // no violations is rendering fine under strict mode.
-    if (!trusted && !hasViolations) return '';
+    const trusted = !!tab.body.trusted;
+    const hasViolations = tab.reports.cspViolations.length > 0;
+    // Only the call-to-action case earns the prominent banner now:
+    // untrusted nsite that just got blocked from loading something the
+    // user might want to allow. The trusted-status case moved into the
+    // meta line (built in go() above) so it doesn't claim 40px of
+    // vertical space for an action the user already took. Banner is
+    // suppressed whenever (a) the nsite is already trusted, or (b)
+    // there are no violations yet (untrusted-and-clean is rendering
+    // fine under strict mode).
+    if (trusted || !hasViolations) return '';
     const help = `<span class="nsite-trust-help" title="${escapeHtml(TRUST_TOOLTIP)}" aria-label="What does trust mean?">?</span>`;
-    if (trusted) {
-      return `<div class="nsite-trust nsite-trust-on">
-        <span>External content: <strong>allowed for this nsite</strong></span>
-        <button class="nsite-trust-btn" type="button"
-                data-pk="${escapeHtml(pk)}" data-allow="false">Revoke</button>
-        ${help}
-      </div>`;
-    }
     return `<div class="nsite-trust nsite-trust-off">
-      <span>External content: <strong>strict</strong> · ${reports.cspViolations.length} blocked</span>
+      <span>External content: <strong>strict</strong> · ${tab.reports.cspViolations.length} blocked</span>
       <button class="nsite-trust-btn primary" type="button"
               data-pk="${escapeHtml(pk)}" data-allow="true">Trust this nsite</button>
       ${help}
@@ -18722,10 +18780,12 @@ const NsitePanel = (() => {
   // here — it lives in #nsite-trust-banner via refreshTrustBanner so
   // it's visible without expanding Diagnostics.
   function reportsHtml() {
-    const cv = reports.cspViolations;
-    const se = reports.scriptErrors;
+    const tab = activeTab();
+    if (!tab) return '';
+    const cv = tab.reports.cspViolations;
+    const se = tab.reports.scriptErrors;
     if (cv.length === 0 && se.length === 0) {
-      if (reports.loaded) {
+      if (tab.reports.loaded) {
         return `<div class="nsite-diag-section"><div class="nsite-diag-section-title">Sandbox clean</div><div class="muted" style="font-size:11px">No CSP violations or script errors reported by the iframe — render is unconstrained by the lockdown.</div></div>`;
       }
       return '';
@@ -18753,12 +18813,16 @@ const NsitePanel = (() => {
     return `<div class="nsite-diag-section">${cvHtml}${seHtml}</div>`;
   }
   function setEmpty(visible) {
+    const tab = activeTab();
     if (els.empty) els.empty.style.display = visible ? '' : 'none';
-    if (els.frame) els.frame.style.display = visible ? 'none' : '';
+    if (tab?.frameEl) tab.frameEl.style.display = visible ? 'none' : '';
   }
   function updateNavButtons() {
-    if (els.back)    els.back.disabled    = !(cursor > 0);
-    if (els.forward) els.forward.disabled = !(cursor >= 0 && cursor < history.length - 1);
+    const tab = activeTab();
+    const cur = tab ? tab.cursor : -1;
+    const len = tab ? tab.history.length : 0;
+    if (els.back)    els.back.disabled    = !(cur > 0);
+    if (els.forward) els.forward.disabled = !(cur >= 0 && cur < len - 1);
   }
 
   // Resolve an address through the backend and, on success, load the
@@ -18766,16 +18830,23 @@ const NsitePanel = (() => {
   async function go(rawAddr) {
     const addr = String(rawAddr || '').trim();
     if (!addr) return;
+    // Ensure there's an active tab to write into. (init() should have
+    // primed one already, but defensive.)
+    let tab = activeTab();
+    if (!tab) { tab = freshTab(); activateTab(tab.id); tab = activeTab(); }
+    tab.addr = addr;
     setStatus('Resolving…');
     setMeta('');
     setDiagnostics(null);
-    // Reset the report bucket — leftover CSP violations / script errors
-    // from a previous nsite would be misleading on a fresh resolve.
-    reports.siteId = '';
-    reports.cspViolations = [];
-    reports.scriptErrors = [];
-    reports.loaded = false;
-    currentBody = null;
+    // Reset the report bucket on the ACTIVE tab — leftover CSP
+    // violations / script errors from a previous nsite would be
+    // misleading on a fresh resolve. Other tabs' report buckets are
+    // intentionally untouched so they keep their state intact.
+    tab.reports.siteId = '';
+    tab.reports.cspViolations = [];
+    tab.reports.scriptErrors = [];
+    tab.reports.loaded = false;
+    tab.body = null;
     try {
       const url = `/api/nsite/resolve?addr=${encodeURIComponent(addr)}`;
       // Bearer header is required: web-server.ts gates all /api/* paths
@@ -18806,7 +18877,9 @@ const NsitePanel = (() => {
       const entryPath = entry || 'index.html';
       // Bind the reporter bucket to the new siteId so postMessage events
       // from the iframe land in the right channel.
-      reports.siteId = siteId;
+      tab.reports.siteId = siteId;
+      tab.display = display;
+      tab.originalAddr = addr;
       // Push new history entry (trim forward tail on fresh nav). Keep
       // BOTH the canonical display form (what the address bar shows)
       // AND the original raw input the user typed (`addr`). The original
@@ -18816,9 +18889,12 @@ const NsitePanel = (() => {
       // tries an NSIT lookup that fails ("name not found on indexer
       // relays") for non-Bitcoin names. Re-resolving via the original
       // `addr` always hits the same successful path.
-      if (cursor < history.length - 1) history.splice(cursor + 1);
-      history.push({ siteId, display, path: entryPath, originalAddr: addr });
-      cursor = history.length - 1;
+      if (tab.cursor < tab.history.length - 1) tab.history.splice(tab.cursor + 1);
+      tab.history.push({ siteId, display, path: entryPath, originalAddr: addr });
+      tab.cursor = tab.history.length - 1;
+      // Update the tab strip label with the new display name.
+      tab.title = display || '(loading…)';
+      renderTabStrip();
       setStatus(`✓ ${fileCount} file${fileCount === 1 ? '' : 's'} — ${source}`);
       const ts = latestAt ? new Date(latestAt * 1000).toLocaleString() : '';
       // Build a single-line summary of what was queried where. Counts
@@ -18843,10 +18919,26 @@ const NsitePanel = (() => {
       // with a strict CSP (no external HTTP, only same-origin assets
       // + WSS to Nostr relays). Trust signal: "the page you're about
       // to see can't phone home with your IP via tracking pixels."
-      const sandboxBit = body.sandbox?.csp === 'strict-nsite'
-        ? 'strict sandbox' : '';
-      const bits = [fmtBit, tsBit, ...relayBits, sandboxBit].filter(Boolean);
-      setMeta(bits.join(' · '));
+      //
+      // When the nsite is trusted (user previously clicked Trust on the
+      // banner), inline the trust state + Revoke link here INSTEAD OF
+      // shipping the prominent banner above the viewport. Status without
+      // a call-to-action shouldn't push the iframe down 40px on every
+      // load — the inline form is a single segment in a line the user
+      // already reads, Revoke is one click away, and the banner reappears
+      // automatically if a new violation surfaces.
+      const trusted = !!body.trusted;
+      const sandboxBit = trusted
+        ? `<span class="nsite-meta-trusted">trusted sandbox</span> · <button class="nsite-meta-revoke" type="button" data-pk="${escapeHtml(String(body.pubkey || ''))}">revoke</button>`
+        : (body.sandbox?.csp === 'strict-nsite' ? 'strict sandbox' : '');
+      const bits = [fmtBit, tsBit, ...relayBits].filter(Boolean);
+      // Build the plain-text portion with escapeHtml then append the
+      // sandbox segment (which is the only place we intentionally emit
+      // markup). Avoids any chance of an escaped relay URL or display
+      // string sneaking interactive content into the meta line.
+      const textPart = bits.map(escapeHtml).join(' · ');
+      const metaHtml = sandboxBit ? `${textPart} · ${sandboxBit}` : textPart;
+      setMetaHtml(metaHtml);
       setDiagnostics(body);
       loadIframe(siteId, entryPath, display);
       updateNavButtons();
@@ -18890,49 +18982,72 @@ const NsitePanel = (() => {
   }
 
   function loadIframe(siteId, path, display) {
-    if (!els.frame) return;
+    const tab = activeTab();
+    if (!tab) return;
+    // Lazily create the iframe element on the active tab. Sandbox flags
+    // mirror what we used to hard-code in index.html for the single
+    // #nsite-frame element; per-tab iframes need the same posture.
+    if (!tab.frameEl) {
+      const fr = document.createElement('iframe');
+      fr.className = 'nsite-frame';
+      fr.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin');
+      fr.setAttribute('referrerpolicy', 'no-referrer');
+      fr.title = 'nsite content';
+      fr.dataset.tabId = tab.id;
+      fr.addEventListener('load', onIframeLoad);
+      if (els.frames) els.frames.appendChild(fr);
+      tab.frameEl = fr;
+    }
+    // Make this tab's frame the only visible one in case activation
+    // raced ahead of loadIframe.
+    for (const t of tabs) {
+      if (t.frameEl) t.frameEl.style.display = (t.id === tab.id) ? '' : 'none';
+    }
     setEmpty(false);
     drivenLoad = true;
-    els.frame.src = nsiteFrameUrl(siteId, path);
+    tab.frameEl.src = nsiteFrameUrl(siteId, path);
     if (els.addr) els.addr.value = display || els.addr.value;
   }
 
   function navigate(delta) {
-    const target = cursor + delta;
-    if (target < 0 || target >= history.length) return;
-    cursor = target;
-    const h = history[cursor];
+    const tab = activeTab();
+    if (!tab) return;
+    const target = tab.cursor + delta;
+    if (target < 0 || target >= tab.history.length) return;
+    tab.cursor = target;
+    const h = tab.history[tab.cursor];
     loadIframe(h.siteId, h.path, h.display);
     updateNavButtons();
   }
 
   function reload() {
-    if (cursor < 0 || cursor >= history.length) {
+    const tab = activeTab();
+    if (!tab || tab.cursor < 0 || tab.cursor >= tab.history.length) {
       // Nothing in history yet — re-run the typed address.
       if (els.addr?.value) void go(els.addr.value);
       return;
     }
-    const h = history[cursor];
+    const h = tab.history[tab.cursor];
     loadIframe(h.siteId, h.path, h.display);
   }
 
-  function onIframeLoad() {
-    // When the iframe navigates internally (link click → same-origin
-    // /nsite-content/<siteId>/<path>), update the current history entry's
-    // path so reload/back behave correctly. The frame's location is
-    // readable here because the parent is same-origin with the wrapping
-    // URL even though the sandbox attribute makes the *document* itself
-    // opaque-origin.
+  function onIframeLoad(ev) {
+    // Each tab's iframe gets its own load listener so we know which
+    // tab fired. The internal-nav path update only applies to the
+    // tab that owns the loaded iframe — not unconditionally to the
+    // active tab (a background tab might be navigating without us
+    // having activated it).
+    const fr = ev?.currentTarget;
+    const tabId = fr?.dataset?.tabId;
+    const tab = tabs.find(t => t.id === tabId);
+    if (!tab) { drivenLoad = false; return; }
     try {
-      const href = els.frame?.contentWindow?.location?.href || '';
+      const href = fr.contentWindow?.location?.href || '';
       const m = href.match(/\/nsite-content\/([a-f0-9]{16})\/(.*)$/);
       if (m && !drivenLoad) {
         const [, sid, p] = m;
-        // Only treat as a navigation if it's the same site as the current
-        // entry — cross-site iframe nav would be more invasive and is
-        // out of scope for v1.
-        if (cursor >= 0 && history[cursor].siteId === sid) {
-          history[cursor] = { ...history[cursor], path: p };
+        if (tab.cursor >= 0 && tab.history[tab.cursor]?.siteId === sid) {
+          tab.history[tab.cursor] = { ...tab.history[tab.cursor], path: p };
         }
       }
     } catch { /* sandboxed cross-origin read — ignore */ }
@@ -18966,51 +19081,144 @@ const NsitePanel = (() => {
         try { console.warn('[nsite-report parent] drop: missing siteId', m); } catch (_) {}
         return;
       }
-      if (m.siteId !== reports.siteId) {
-        // Stale message from a previously-loaded iframe whose URL is
-        // still in flight (or a fresh-but-misaligned race). Log so
-        // a repeating mismatch is visible.
-        try { console.info('[nsite-report parent] drop: siteId mismatch', { got: m.siteId, want: reports.siteId, type: m.type }); } catch (_) {}
+      // Find the tab whose snapshot owns this siteId. With multiple tabs
+      // open, the message could be from a background iframe — we need
+      // to route the update to the correct per-tab report bucket, not
+      // unconditionally to the active tab.
+      const tab = tabs.find(t => t.reports.siteId === m.siteId);
+      if (!tab) {
+        try { console.info('[nsite-report parent] drop: no tab for siteId', { got: m.siteId, type: m.type }); } catch (_) {}
         return;
       }
-      try { console.info('[nsite-report parent] accept', m.type, m); } catch (_) {}
+      try { console.info('[nsite-report parent] accept', m.type, m, 'tab', tab.id); } catch (_) {}
       if (m.type === 'nsite-csp-violation') {
         // Cap to avoid runaway floods if a page is broken in a way
         // that fires thousands of violations.
-        if (reports.cspViolations.length < 50) {
-          reports.cspViolations.push({
+        if (tab.reports.cspViolations.length < 50) {
+          tab.reports.cspViolations.push({
             blockedURI:         String(m.blockedURI || ''),
             violatedDirective:  String(m.violatedDirective || ''),
             effectiveDirective: String(m.effectiveDirective || ''),
           });
         }
       } else if (m.type === 'nsite-script-error') {
-        if (reports.scriptErrors.length < 30) {
-          reports.scriptErrors.push({
+        if (tab.reports.scriptErrors.length < 30) {
+          tab.reports.scriptErrors.push({
             message:  String(m.message || ''),
             filename: String(m.filename || ''),
             lineno:   m.lineno || 0,
           });
         }
       } else if (m.type === 'nsite-loaded') {
-        reports.loaded = true;
+        tab.reports.loaded = true;
       } else {
         return;
       }
-      // Re-render Diagnostics with the new data attached.
-      if (currentBody) setDiagnostics(currentBody);
+      // Re-render Diagnostics with the new data attached — but only
+      // if this is the active tab. A background tab's reports stay
+      // cached and get rendered when the user activates it.
+      if (tab.id === activeId && tab.body) setDiagnostics(tab.body);
     });
+  }
+
+  // ── Tab management ─────────────────────────────────────────────────────
+
+  function freshTab() {
+    const id = 't' + (++nextTabSeq);
+    const tab = new Tab(id);
+    tabs.push(tab);
+    return tab;
+  }
+
+  function activateTab(id) {
+    if (id === activeId) return;
+    const tab = tabs.find(t => t.id === id);
+    if (!tab) return;
+    activeId = id;
+    // Swap iframe visibility: only the active tab's frame should paint.
+    for (const t of tabs) {
+      if (t.frameEl) t.frameEl.style.display = (t.id === id) ? '' : 'none';
+    }
+    // Restore the address bar + status + meta + diag + trust banner
+    // from the activated tab's cached state.
+    if (els.addr) els.addr.value = tab.addr || tab.display || '';
+    if (els.status) {
+      els.status.textContent = tab.statusText || '';
+      els.status.classList.toggle('err', !!tab.statusErr);
+    }
+    if (els.meta) {
+      if (tab.metaContent) {
+        els.meta.hidden = false;
+        if (tab.metaIsHtml) els.meta.innerHTML = tab.metaContent;
+        else                els.meta.textContent = tab.metaContent;
+      } else {
+        els.meta.hidden = true;
+        els.meta.textContent = '';
+      }
+    }
+    if (tab.body) {
+      setDiagnostics(tab.body);
+    } else if (els.diag) {
+      els.diag.hidden = true;
+      if (els.diagBody) els.diagBody.innerHTML = '';
+    }
+    refreshTrustBanner();
+    updateNavButtons();
+    // Empty-state visible when this tab has nothing to show yet.
+    setEmpty(!tab.frameEl);
+    renderTabStrip();
+  }
+
+  function closeTab(id) {
+    const idx = tabs.findIndex(t => t.id === id);
+    if (idx < 0) return;
+    const tab = tabs[idx];
+    // Tear down the iframe + its load listener.
+    if (tab.frameEl) tab.frameEl.remove();
+    tabs.splice(idx, 1);
+    if (tabs.length === 0) {
+      // Always keep at least one tab so the user has a place to type.
+      const fresh = freshTab();
+      activeId = null;
+      activateTab(fresh.id);
+      return;
+    }
+    if (activeId === id) {
+      // Activate the neighbor that took the closed tab's slot, or the
+      // one before it if we closed the last.
+      const next = tabs[idx] || tabs[idx - 1];
+      activeId = null;
+      activateTab(next.id);
+    } else {
+      renderTabStrip();
+    }
+  }
+
+  function renderTabStrip() {
+    if (!els.tabs) return;
+    // Build tab chips + the "+" new-tab button. Single innerHTML write
+    // keeps the listener-on-container delegation pattern intact.
+    els.tabs.innerHTML = tabs.map(t => {
+      const cls = 'nsite-tab' + (t.id === activeId ? ' active' : '');
+      const title = t.title || t.display || t.addr || 'New tab';
+      const titleStr = title.length > 28 ? title.slice(0, 27) + '…' : title;
+      return `<div class="${cls}" data-tab-id="${escapeHtml(t.id)}" title="${escapeHtml(title)}">
+        <span class="nsite-tab-title">${escapeHtml(titleStr)}</span>
+        <button class="nsite-tab-close" type="button" data-close-tab="${escapeHtml(t.id)}" aria-label="Close tab" tabindex="-1">&times;</button>
+      </div>`;
+    }).join('') + `<button class="nsite-tab-new" type="button" id="nsite-tab-new" aria-label="New tab" title="New tab">+</button>`;
   }
 
   function init() {
     if (els._wired) return;
     els._wired   = true;
+    els.tabs     = $('nsite-tabs');
+    els.frames   = $('nsite-frames');
     els.addr     = $('nsite-addr');
     els.go       = $('nsite-go');
     els.back     = $('nsite-back');
     els.forward  = $('nsite-forward');
     els.reload   = $('nsite-reload');
-    els.frame    = $('nsite-frame');
     els.status   = $('nsite-status');
     els.meta     = $('nsite-meta');
     els.diag        = $('nsite-diag');
@@ -19027,20 +19235,59 @@ const NsitePanel = (() => {
     els.siteInfoClose  = $('nsite-siteinfo-close');
     if (!els.addr) return;
 
+    // Prime an initial empty tab so the panel always has somewhere to
+    // type, mirroring how a browser opens with a "new tab" page. The
+    // user can open more via the "+" button in the tab strip.
+    if (tabs.length === 0) {
+      const t = freshTab();
+      activeId = t.id;
+    }
+    renderTabStrip();
     setEmpty(true);
+
     els.go?.addEventListener('click', () => void go(els.addr.value));
     els.addr.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); void go(els.addr.value); }
     });
+    // Mirror typed input into the active tab's addr so the value
+    // sticks across tab switches even before Go fires.
+    els.addr.addEventListener('input', () => {
+      const t = activeTab();
+      if (t) t.addr = els.addr.value;
+    });
     els.back?.addEventListener('click',    () => navigate(-1));
     els.forward?.addEventListener('click', () => navigate(+1));
     els.reload?.addEventListener('click',  () => reload());
-    els.frame?.addEventListener('load', onIframeLoad);
     els.pubLink?.addEventListener('click', () => {
       // Light-weight hint — link to the publish-flow docs in the CLI help.
       // The publish surface itself is the CLI (`nostr-station nsite init/publish`),
       // so the dashboard's job here is just to point users at it.
       toast('Publish from a terminal', '`nostr-station nsite init` → build → `nsite publish`.');
+    });
+
+    // Tab strip — single delegated click handler covers tab activation,
+    // close-button clicks, and the new-tab "+" button. Survives
+    // renderTabStrip()'s innerHTML rewrites.
+    els.tabs?.addEventListener('click', (ev) => {
+      const target = ev.target;
+      // New tab button.
+      if (target?.id === 'nsite-tab-new' || target?.closest?.('#nsite-tab-new')) {
+        const t = freshTab();
+        activeId = null;
+        activateTab(t.id);
+        els.addr?.focus();
+        return;
+      }
+      // Close-tab button (inside a chip).
+      const closeBtn = target?.closest?.('[data-close-tab]');
+      if (closeBtn) {
+        ev.stopPropagation();
+        closeTab(closeBtn.getAttribute('data-close-tab') || '');
+        return;
+      }
+      // Tab activation (click anywhere else on the chip).
+      const chip = target?.closest?.('[data-tab-id]');
+      if (chip) activateTab(chip.getAttribute('data-tab-id') || '');
     });
 
     // Trust toggle — delegated click handler on the trust banner so it
@@ -19059,6 +19306,18 @@ const NsitePanel = (() => {
     });
 
     wireMenu();
+
+    // Inline "revoke" link in the meta line — same toggle action as the
+    // banner button, fires when a previously-trusted nsite is loaded.
+    // Delegated on the meta element so it survives setMetaHtml's
+    // repeated innerHTML rewrites.
+    els.meta?.addEventListener('click', (ev) => {
+      const btn = ev.target?.closest?.('.nsite-meta-revoke');
+      if (!btn || btn.disabled) return;
+      const pk = btn.getAttribute('data-pk') || '';
+      if (!/^[0-9a-f]{64}$/i.test(pk)) return;
+      void toggleTrust(btn, pk, /* allow= */ false);
+    });
 
     // Hash deep-link support: `#nsite/<addr>` auto-loads on panel enter.
     // Used by `nostr-station nsite publish` to print a one-click preview
@@ -19290,11 +19549,16 @@ const NsitePanel = (() => {
   // about WHO published the site and WHERE its content lives.
   function renderSiteInfo() {
     if (!els.siteInfoBody) return;
-    if (!currentBody) {
+    // Source-of-truth shifted from a module-level `currentBody` to the
+    // active tab's body when #128 landed multi-tab. Read from the
+    // active tab so the Site Info pane reflects whichever tab the
+    // user is currently looking at.
+    const tab = activeTab();
+    if (!tab || !tab.body) {
       els.siteInfoBody.innerHTML = `<div class="nsite-siteinfo-empty">Browse an nsite to see its info.</div>`;
       return;
     }
-    const b = currentBody;
+    const b = tab.body;
     const pk = String(b.pubkey || '');
     let npub = '';
     try { if (window.NostrTools?.nip19 && pk) npub = window.NostrTools.nip19.npubEncode(pk); } catch {}
@@ -19387,7 +19651,9 @@ const NsitePanel = (() => {
       // round-trip back through the resolver because the name is a
       // subdomain-suffix convention, not an NSIT-registered Bitcoin
       // name. Re-resolving via the original always works.
-      const reResolveAddr = (cursor >= 0 && history[cursor]?.originalAddr)
+      const tab = activeTab();
+      const reResolveAddr = (tab && tab.cursor >= 0 && tab.history[tab.cursor]?.originalAddr)
+        || tab?.originalAddr
         || els.addr?.value
         || '';
       if (reResolveAddr) {
@@ -19406,8 +19672,10 @@ const NsitePanel = (() => {
     if (!m || !els.addr) return;
     const addr = decodeURIComponent(m[1]);
     els.addr.value = addr;
-    // Strip the suffix from the URL so a reload doesn't keep re-loading.
-    history.length = 0; cursor = -1;
+    // Reset the active tab's history so a reload doesn't keep
+    // re-loading the deep-linked address.
+    const tab = activeTab();
+    if (tab) { tab.history.length = 0; tab.cursor = -1; }
     try { location.hash = '#nsite'; } catch {}
     void go(addr);
   }
@@ -19418,7 +19686,15 @@ const NsitePanel = (() => {
       maybeConsumeDeepLink();
     },
     // For tests / dev tools.
-    _state: () => ({ history: history.slice(), cursor }),
+    _state: () => {
+      const t = activeTab();
+      return {
+        tabs:    tabs.length,
+        activeId,
+        history: t ? t.history.slice() : [],
+        cursor:  t ? t.cursor : -1,
+      };
+    },
   };
 })();
 
