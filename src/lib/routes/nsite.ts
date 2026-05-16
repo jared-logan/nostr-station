@@ -404,7 +404,11 @@ export async function handleNsite(
  */
 export const STRICT_NSITE_CSP = [
   "default-src 'self'",
-  "connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:* ws://[::1]:*",
+  // ws://[::1]:* (IPv6 loopback) deliberately omitted — CSP3's source-expression
+  // grammar doesn't accept bracketed IPv6 hosts and Chrome logs the clause as
+  // "invalid source ... will be ignored", silently dropping it. The IPv4 +
+  // localhost forms cover the in-process relay either way.
+  "connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:*",
   "img-src 'self' data: blob:",
   "media-src 'self' data: blob:",
   "font-src 'self' data:",
@@ -423,6 +427,39 @@ async function serveContent(
   siteId: string,
   reqPath: string,
 ) {
+  // Permissive CORS on every /nsite-content/* response.
+  //
+  // The panel renders nsites inside a sandboxed iframe WITHOUT
+  // `allow-same-origin`, so the iframe's effective origin is opaque
+  // (`null`). ES module scripts (`<script type="module" src="/main.js">`,
+  // which Vite/Rollup/Webpack ESM bundles default to) are ALWAYS fetched
+  // with a CORS check, even when the URL is same-host. From the iframe
+  // that check sends `Origin: null`; without ACAO on our response the
+  // browser blocks the load with:
+  //   Access to script at '…/main-Q2GFCNAP.js' from origin 'null' has
+  //   been blocked by CORS policy: No 'Access-Control-Allow-Origin'
+  //   header is present on the requested resource.
+  // The SPA's entry chunk never loads → blank iframe. Identical mechanism
+  // for `<link rel="modulepreload">`, `import()` chunks, web workers
+  // spawned with `{ type: 'module' }`, and async fetch from a Request
+  // built with `mode: 'cors'`.
+  //
+  // Why `*` is safe here despite the strict-everywhere posture elsewhere:
+  //   - The bytes are content-addressed SHA256-verified public Blossom
+  //     data. Anyone can already fetch the same SHAs directly from the
+  //     upstream Blossom servers; ACAO `*` doesn't expose anything that
+  //     wasn't already publicly readable.
+  //   - This endpoint is NOT credentialed — no Bearer token, no cookies
+  //     scoped to `/nsite-content/*`, no session state. With `*` the
+  //     browser refuses to send credentials anyway (Fetch spec rule).
+  //   - We deliberately do NOT add ACAO to `/api/*` — that surface IS
+  //     credentialed and must remain origin-locked.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  // For a preflighted module fetch (rare, but harmless to handle) we
+  // expose the headers the iframe might need to read. Vary on Origin so
+  // a caching proxy doesn't pin the response to one requester.
+  res.setHeader('Vary', 'Origin');
+
   const snap = sites.get(siteId);
   if (!snap) {
     // Snapshot expired or never existed. The panel should re-resolve.
