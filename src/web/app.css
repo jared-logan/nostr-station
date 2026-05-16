@@ -9159,6 +9159,32 @@ a.client-mention {
   font-size: 11px;
   background: var(--bg-elev);
 }
+/* Inline trust state inside the meta line. Used INSTEAD of the prominent
+ * banner when the nsite is already trusted — status without a CTA
+ * doesn't need to claim a row above the iframe. The pill is just a
+ * label color tweak; "revoke" is a borderless link-styled button that
+ * sits next to it. */
+.nsite-meta-trusted {
+  color: rgba(70, 200, 130, 0.95);
+  font-weight: 600;
+}
+.nsite-meta-revoke {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.nsite-meta-revoke:hover:not(:disabled) {
+  color: var(--text, #fff);
+}
+.nsite-meta-revoke:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
 .nsite-diag {
   border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
