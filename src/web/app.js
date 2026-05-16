@@ -18771,7 +18771,26 @@ const NsitePanel = (() => {
   // server-side handler ensures /api/* paths return 404 on these
   // hostnames so a hostile nsite payload can't probe the dashboard API.
   function nsiteFrameUrl(siteId, path) {
-    const safePath = String(path || 'index.html').replace(/^\/+/, '');
+    let safePath = String(path || '').replace(/^\/+/, '');
+    // SPA routers (React Router, Vue Router, Next.js client navigation,
+    // SvelteKit, ...) read `window.location.pathname` and match against
+    // the route table. A bundle entry of `/index.html` resolves to
+    // pathname=`/index.html`, which most route tables treat as a 404 —
+    // visible on Shakespeare-built nsites as "Oops! Page not found"
+    // on first load that only goes away after clicking "Return to Home".
+    //
+    // Strip the trailing `index.html` so the iframe URL is `/` instead.
+    // The SPA router then matches its home route, and the server's
+    // `normalizePath('')` rule maps the empty path back to `index.html`
+    // for the SHA256 lookup, so the file resolution is unchanged. Same
+    // convention nsite.lol / Cloudflare Pages / Netlify static hosting
+    // use; the browser-visible URL gets the canonical trailing slash
+    // while disk-stored content keeps its index.html filename.
+    if (safePath === 'index.html' || safePath === '') {
+      safePath = '';
+    } else if (safePath.endsWith('/index.html')) {
+      safePath = safePath.slice(0, -'index.html'.length);
+    }
     const proto = window.location.protocol;
     const port = window.location.port ? `:${window.location.port}` : '';
     return `${proto}//${siteId}.nsite.localhost${port}/${safePath}`;
