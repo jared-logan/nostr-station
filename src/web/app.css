@@ -8915,7 +8915,8 @@ a.client-mention {
   padding: 6px 10px;
   font-size: 12px;
 }
-.mail-att-icon   { font-size: 14px; }
+.mail-att-icon       { display: inline-flex; color: var(--text-dim); }
+.mail-att-icon svg   { width: 14px; height: 14px; stroke-width: 1.8; }
 .mail-att-name   { color: var(--text-bright); font-weight: 500; }
 .mail-att-size   { color: var(--muted); }
 .mail-att-remove {
@@ -9001,10 +9002,13 @@ a.client-mention {
 
 /* ── Mail · attachment encryption indicator (PR 8) ───────────────────── */
 .mail-att-lock {
-  font-size: 11px;
+  display: inline-flex;
+  vertical-align: -2px;
   margin-left: 4px;
+  color: var(--text-dim);
   opacity: 0.8;
 }
+.mail-att-lock svg { width: 11px; height: 11px; stroke-width: 2; }
 
 /* ── Mail · attachment list within message body (PR 9) ──────────────── */
 .mail-msg-attachments {
@@ -9057,7 +9061,15 @@ a.client-mention {
 }
 .mail-folder-row:hover  { background: var(--card-hover, rgba(255,255,255,0.04)); }
 .mail-folder-row.active { background: var(--accent-soft); color: var(--text-bright); }
-.mail-folder-icon  { font-size: 14px; }
+.mail-folder-icon  {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+.mail-folder-icon svg { width: 16px; height: 16px; stroke-width: 1.8; }
+.mail-folder-row:hover  .mail-folder-icon { color: var(--text-bright); }
+.mail-folder-row.active .mail-folder-icon { color: var(--accent-bright); }
 .mail-folder-label { flex: 1; }
 .mail-folder-unread {
   background: var(--accent); color: var(--bg);

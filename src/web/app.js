@@ -17650,12 +17650,19 @@ const MailPanel = (() => {
     archive: 'Archive',
     trash:   'Trash',
   };
+  // Lucide-style stroke SVGs to match the rest of the dashboard's icon
+  // grammar (nav-icons, terminal bar, etc.). Sized + colored via CSS;
+  // every path uses currentColor so active/hover states inherit naturally.
+  const SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
   const FOLDER_ICONS = {
-    inbox:   '📥',
-    sent:    '📤',
-    archive: '🗄️',
-    trash:   '🗑️',
+    inbox:   `${SVG_OPEN}<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg>`,
+    sent:    `${SVG_OPEN}<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`,
+    archive: `${SVG_OPEN}<rect x="2" y="4" width="20" height="5" rx="1"/><path d="M4 9v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9"/><line x1="10" y1="13" x2="14" y2="13"/></svg>`,
+    trash:   `${SVG_OPEN}<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`,
   };
+  const FOLDER_ICON_DEFAULT = `${SVG_OPEN}<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+  const ICON_PAPERCLIP = `${SVG_OPEN}<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.83l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>`;
+  const ICON_LOCK      = `${SVG_OPEN}<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
   function renderFolders() {
     const el = $('mail-folders');
     if (!el) return;
@@ -17665,7 +17672,7 @@ const MailPanel = (() => {
     el.hidden = false;
     const renderRow = (f, isCustom) => {
       const label = FOLDER_LABELS[f.id] ?? f.id;
-      const icon  = FOLDER_ICONS[f.id]  ?? '📁';
+      const icon  = FOLDER_ICONS[f.id]  ?? FOLDER_ICON_DEFAULT;
       const active = f.id === activeFolder ? ' active' : '';
       const unread = f.unread > 0
         ? `<span class="mail-folder-unread">${f.unread > 99 ? '99+' : f.unread}</span>`
@@ -17967,9 +17974,9 @@ const MailPanel = (() => {
       const name = a.name || (a.blossom?.sha256 || '').slice(0, 12) || 'attachment';
       return `<a class="mail-msg-fileChip" href="${escapeHtml(href)}"
                  ${a.blossom ? 'target="_blank" rel="noopener noreferrer"' : `download="${escapeHtml(name)}"`}>
-        <span class="mail-att-icon">📎</span>
+        <span class="mail-att-icon">${ICON_PAPERCLIP}</span>
         <div class="mail-msg-fileMeta">
-          <div class="mail-msg-fileName">${escapeHtml(name)} <span class="mail-att-lock" title="end-to-end encrypted">🔒</span></div>
+          <div class="mail-msg-fileName">${escapeHtml(name)} <span class="mail-att-lock" title="end-to-end encrypted">${ICON_LOCK}</span></div>
           <div class="mail-msg-fileSub">${escapeHtml(a.mime || 'application/octet-stream')} · ${escapeHtml(fmtSize(a.size || 0))}</div>
         </div>
       </a>`;
@@ -18173,7 +18180,7 @@ const MailPanel = (() => {
       }
       attEl.innerHTML = attachments.map((a, i) => `
         <div class="mail-att-chip" data-i="${i}">
-          <span class="mail-att-icon">📎</span>
+          <span class="mail-att-icon">${ICON_PAPERCLIP}</span>
           <span class="mail-att-name">${escapeHtml(a.name || a.sha256.slice(0, 12))}</span>
           <span class="mail-att-size">${escapeHtml(fmtBytes(a.size))}</span>
           <button class="mail-att-remove" data-i="${i}" aria-label="remove attachment">×</button>
