@@ -733,7 +733,13 @@ function openExecModal({ title, subtitle, endpoint, body }) {
 // ── Router ───────────────────────────────────────────────────────────────
 
 function currentPanel() {
-  const hash = (location.hash || '#status').slice(1);
+  let hash = (location.hash || '#status').slice(1);
+  // Strip any sub-route after the panel name so `#nsite/<addr>` deep-links
+  // (used by the in-Ditto "Visit" handoff and `nostr-station nsite publish`)
+  // still resolve to the nsite panel. Without this the hash falls through
+  // to 'status' and the panel's maybeConsumeDeepLink() never fires.
+  const slash = hash.indexOf('/');
+  if (slash >= 0) hash = hash.slice(0, slash);
   // Old #git bookmarks land on the new Projects panel.
   if (hash === 'git') return 'projects';
   return PANELS.includes(hash) ? hash : 'status';
