@@ -2538,6 +2538,242 @@ $('status-refresh').addEventListener('click', () => {
   StatusPanel.renderDashboardCards();
 });
 
+// ── SessionStore: client-side chat session persistence ──────────────────
+//
+// Owns the list of chat sessions (one fixed 'station' session + many
+// project sessions). Sessions persist to localStorage so an agent's
+// accumulated context survives page reloads. Subscribers (ChatPanel,
+// NavSessions) re-render when sessions change.
+//
+// v1 uses deterministic ids ('station' for the global chat, 'p:<projectId>'
+// for project chats — one per project). Phase 4 will introduce multiple
+// sessions per project via uuid ids; the data shape already supports it
+// (lastOpenByProject + openOrder are arrays/maps, not scalars).
+const SessionStore = (() => {
+  const KEY = 'ns:chat-sessions:v1';
+  const STATION_ID = 'station';
+
+  /** @type {Record<string, ChatSession>} */
+  let sessions = {};
+  /** @type {Record<string, string>} */
+  let lastOpenByProject = {};
+  /** @type {string[]} */
+  let openOrder = [];
+  let activeId = STATION_ID;
+  const subs = new Set();
+  let writeTimer = null;
+  let quotaWarned = false;
+
+  function makeStation() {
+    return {
+      id: STATION_ID,
+      kind: 'station',
+      projectId: null,
+      title: 'Station',
+      history: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      pinned: false,
+      order: 0,
+      providerOverride: null,
+      modelOverride: null,
+      permissionMode: null,
+    };
+  }
+  function makeProject(projectId, projectName) {
+    return {
+      id: 'p:' + projectId,
+      kind: 'project',
+      projectId,
+      title: projectName || 'Project session',
+      history: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      pinned: false,
+      order: 0,
+      providerOverride: null,
+      modelOverride: null,
+      permissionMode: null,
+    };
+  }
+
+  function load() {
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        sessions = parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {};
+        lastOpenByProject = parsed.lastOpenByProject || {};
+        openOrder = Array.isArray(parsed.openOrder) ? parsed.openOrder : [];
+        return true;
+      }
+    } catch { /* corrupt or quota — fall through to fresh state */ }
+    return false;
+  }
+
+  function persist() {
+    if (writeTimer) clearTimeout(writeTimer);
+    writeTimer = setTimeout(() => {
+      writeTimer = null;
+      try {
+        localStorage.setItem(KEY, JSON.stringify({ sessions, lastOpenByProject, openOrder }));
+      } catch (e) {
+        // Quota: trim closed sessions' histories (keep last 4 turns), retry once.
+        if (e && (e.name === 'QuotaExceededError' || /quota/i.test(e.message || ''))) {
+          for (const id of Object.keys(sessions)) {
+            if (openOrder.includes(id) || id === STATION_ID) continue;
+            const s = sessions[id];
+            if (s && Array.isArray(s.history) && s.history.length > 4) {
+              s.history = s.history.slice(-4);
+            }
+          }
+          try {
+            localStorage.setItem(KEY, JSON.stringify({ sessions, lastOpenByProject, openOrder }));
+            return;
+          } catch { /* fall through to RAM-only */ }
+        }
+        if (!quotaWarned) {
+          quotaWarned = true;
+          try { toast('Chat sessions: storage full', 'New messages will not survive reload.', 'warn'); } catch {}
+        }
+      }
+    }, 500);
+  }
+
+  function notify() {
+    for (const fn of subs) {
+      try { fn(); } catch { /* subscriber errors must not break the store */ }
+    }
+  }
+
+  function init() {
+    load();
+    // Always ensure the station session exists. Acts as both default landing
+    // and back-compat for fresh users with no localStorage entry.
+    if (!sessions[STATION_ID]) sessions[STATION_ID] = makeStation();
+    persist();
+  }
+
+  function get(id) { return sessions[id] || null; }
+  function list() { return Object.values(sessions); }
+  function listOpen() {
+    return openOrder.map(id => sessions[id]).filter(Boolean);
+  }
+  function listForProject(projectId) {
+    return Object.values(sessions).filter(s => s.kind === 'project' && s.projectId === projectId);
+  }
+  function getActive() { return sessions[activeId] || sessions[STATION_ID]; }
+  function getActiveId() { return activeId; }
+
+  function setActive(id) {
+    if (!sessions[id]) return;
+    activeId = id;
+    notify();
+  }
+
+  function ensureProjectSession(projectId, projectName) {
+    const existingId = lastOpenByProject[projectId];
+    if (existingId && sessions[existingId]) {
+      // Refresh title if it was a placeholder and we now have a real name.
+      const s = sessions[existingId];
+      if (projectName && s.title === 'Project session') s.title = projectName;
+      if (!openOrder.includes(s.id)) openOrder.push(s.id);
+      persist();
+      return s;
+    }
+    const s = makeProject(projectId, projectName);
+    sessions[s.id] = s;
+    lastOpenByProject[projectId] = s.id;
+    if (!openOrder.includes(s.id)) openOrder.push(s.id);
+    persist();
+    notify();
+    return s;
+  }
+
+  function appendMessage(id, msg) {
+    const s = sessions[id];
+    if (!s) return;
+    s.history.push(msg);
+    s.updatedAt = Date.now();
+    persist();
+    // No notify on every message — chat panel renders incrementally;
+    // nav doesn't need per-token updates. Title-derivation calls notify.
+  }
+
+  function setTitle(id, title) {
+    const s = sessions[id];
+    if (!s) return;
+    s.title = title;
+    s.updatedAt = Date.now();
+    persist();
+    notify();
+  }
+
+  function clearHistory(id) {
+    const s = sessions[id];
+    if (!s) return;
+    s.history = [];
+    s.updatedAt = Date.now();
+    persist();
+  }
+
+  function close(id) {
+    if (id === STATION_ID) return; // station never closes
+    openOrder = openOrder.filter(x => x !== id);
+    persist();
+    notify();
+  }
+
+  // Drop project sessions whose project no longer exists in the resolved
+  // list. Called once the projects cache is known so we don't render dead
+  // entries in the nav.
+  function gcAgainstProjects(projectIds) {
+    const known = new Set(projectIds);
+    let changed = false;
+    for (const id of Object.keys(sessions)) {
+      const s = sessions[id];
+      if (s.kind !== 'project') continue;
+      if (!known.has(s.projectId)) {
+        delete sessions[id];
+        openOrder = openOrder.filter(x => x !== id);
+        for (const pid of Object.keys(lastOpenByProject)) {
+          if (lastOpenByProject[pid] === id) delete lastOpenByProject[pid];
+        }
+        changed = true;
+      }
+    }
+    if (changed) { persist(); notify(); }
+  }
+
+  function subscribe(fn) {
+    subs.add(fn);
+    return () => subs.delete(fn);
+  }
+
+  // Cross-tab sync: storage events fire in OTHER tabs only, so a second tab
+  // re-hydrates when this one writes. Last-writer-wins is fine for chat state.
+  window.addEventListener('storage', (e) => {
+    if (e.key !== KEY) return;
+    load();
+    if (!sessions[STATION_ID]) sessions[STATION_ID] = makeStation();
+    if (!sessions[activeId]) activeId = STATION_ID;
+    notify();
+  });
+
+  init();
+
+  return {
+    STATION_ID,
+    get, list, listOpen, listForProject,
+    getActive, getActiveId, setActive,
+    ensureProjectSession,
+    appendMessage, setTitle, clearHistory, close,
+    gcAgainstProjects,
+    subscribe,
+  };
+})();
+
 // ── Panel: Chat (with provider/model switcher) ───────────────────────────
 
 const ChatPanel = (() => {
@@ -2548,16 +2784,15 @@ const ChatPanel = (() => {
   const modelSel = $('chat-model');
   const warnEl = $('chat-key-warning');
 
-  // Per-project message history. 'global' is the default bucket (no project).
-  const chatHistories = { global: [] };
-  let activeProject = null;         // { id, name } or null
+  // activeProject mirrors the projectId of the currently-active session.
+  // Kept as a separate var so existing call sites (renderBadge, sendMsg,
+  // PreviewPane.sync) can read project metadata without re-resolving from
+  // SessionStore on every access.
+  let activeProject = null;         // { id, name, previewable?, stacksProject? } or null
   let busy = false;
 
-  function activeKey() { return activeProject?.id || 'global'; }
   function currentHistory() {
-    const k = activeKey();
-    if (!chatHistories[k]) chatHistories[k] = [];
-    return chatHistories[k];
+    return SessionStore.getActive().history;
   }
 
   function addMsg(role, text) {
@@ -2571,8 +2806,7 @@ const ChatPanel = (() => {
   }
 
   function clearChat() {
-    const h = currentHistory();
-    h.length = 0;
+    SessionStore.clearHistory(SessionStore.getActiveId());
     const note = activeProject
       ? `Cleared. Project context: ${activeProject.name}.`
       : `Cleared. Start a new conversation — NOSTR_STATION.md still loaded as context.`;
@@ -2635,6 +2869,12 @@ const ChatPanel = (() => {
 
   async function setActiveProject(p) {
     activeProject = p || null;
+    if (p) {
+      const s = SessionStore.ensureProjectSession(p.id, p.name);
+      SessionStore.setActive(s.id);
+    } else {
+      SessionStore.setActive(SessionStore.STATION_ID);
+    }
     try {
       await api('/api/chat/context', {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -2988,8 +3228,12 @@ const ChatPanel = (() => {
     input.style.height = 'auto';
     busy = true; updateSendDisabled();
 
-    const history = currentHistory();
-    history.push({ role: 'user', content: text });
+    // Bind to the session active when the send started so a mid-flight
+    // switch can't append the assistant reply to the wrong bucket.
+    const turnSessionId = SessionStore.getActiveId();
+    const userMsg = { role: 'user', content: text };
+    SessionStore.appendMessage(turnSessionId, userMsg);
+    const history = SessionStore.get(turnSessionId).history.slice();
     addMsg('user', text);
     const bodyEl = addMsg('asst', '');
     // Body is now a fragment sequence: text spans and tool-call blocks
@@ -3242,7 +3486,7 @@ const ChatPanel = (() => {
       bodyEl.parentElement.className = 'msg error';
     }
     cur.remove();
-    if (full) history.push({ role: 'assistant', content: full });
+    if (full) SessionStore.appendMessage(turnSessionId, { role: 'assistant', content: full });
     busy = false; updateSendDisabled();
     input.focus();
   }
@@ -3261,6 +3505,10 @@ const ChatPanel = (() => {
         initialized = true;
         populateProvider();
         renderBadge();
+        // Repaint the persisted history on first entry — covers reloads
+        // where the station session has prior turns in localStorage but
+        // no setActiveProject() has fired yet.
+        renderHistory();
       }
       input.focus();
     },
