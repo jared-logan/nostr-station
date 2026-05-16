@@ -857,12 +857,19 @@ test('serveContent: trusted snapshot adds https: to network-loading directives',
   assert.match(csp, /font-src[^;]*\bhttps:/,    'trusted: font-src must include https: for Google Fonts');
   assert.match(csp, /style-src[^;]*\bhttps:/,   'trusted: style-src must include https: for external stylesheets');
   assert.match(csp, /media-src[^;]*\bhttps:/,   'trusted: media-src must include https: for hosted audio/video');
-  // Critically: trust does NOT loosen the eval-blocking bits. Dynamic
-  // code synthesis (eval / new Function) stays blocked even on trusted
-  // sites — trust is about WHERE code can come from, not what code can
-  // do once it's running.
-  assert.ok(!/\b'unsafe-eval'/.test(csp),
-    "trusted nsites still must NOT get 'unsafe-eval' — trust loosens network surface, not code synthesis");
+  // Trust DOES add 'unsafe-eval' to script-src — required by modern
+  // bundle loaders (Next.js / Turbopack / SWC) that synthesize chunk
+  // loader code at runtime. Field-confirmed against nsite://titan,
+  // whose Turbopack runtime throws `EvalError: Evaluating a string as
+  // JavaScript violates the following Content Security Policy directive`
+  // when 'unsafe-eval' is absent. This isn't a meaningful blast-radius
+  // expansion: 'unsafe-inline' is already granted everywhere, so an
+  // author can already ship arbitrary inline JS in their bundle.
+  assert.match(csp, /script-src[^;]*'unsafe-eval'/,
+    "trusted: script-src must include 'unsafe-eval' for Next.js / Turbopack-style runtime bundle loaders");
+  // What STILL stays blocked even with trust: object-src + frame-ancestors.
+  // Plugins (Flash/etc.) and clickjacking surface are categorically
+  // distinct from "running the author's code in the author's origin."
   assert.match(csp, /object-src 'none'/,
     'trusted: object-src none must remain to keep plugins disabled');
   _internal.sites.delete(sid);
