@@ -554,6 +554,31 @@
         </div>
         <div class="panel-head-actions">
           <button id="nsite-publish-link" title="Publish a site from a project">publish help</button>
+          <!-- Browser-style menu (≡) — opens a small popover with Site Info,
+               Settings, and Dev Tools entries. Mirrors the slimmed-down
+               version of Titan Browser's right-side menu. The popover is
+               anchored to this button via absolute positioning; outside-
+               click handler in app.js closes it. -->
+          <button id="nsite-menu-btn"
+                  class="nsite-menu-btn"
+                  title="Menu"
+                  aria-label="Open menu"
+                  aria-haspopup="menu"
+                  aria-expanded="false">&#x22EE;</button>
+          <div id="nsite-menu" class="nsite-menu" role="menu" hidden>
+            <button class="nsite-menu-item" type="button" role="menuitem" data-menu="siteinfo">
+              <span class="nsite-menu-item-label">Site info</span>
+              <span class="nsite-menu-item-hint">pubkey · author · relays</span>
+            </button>
+            <button class="nsite-menu-item" type="button" role="menuitem" data-menu="settings">
+              <span class="nsite-menu-item-label">Settings</span>
+              <span class="nsite-menu-item-hint">relays · Blossom · indexer</span>
+            </button>
+            <button class="nsite-menu-item" type="button" role="menuitem" data-menu="devtools">
+              <span class="nsite-menu-item-label">Dev tools</span>
+              <span class="nsite-menu-item-hint">files · CSP · errors</span>
+            </button>
+          </div>
         </div>
       </div>
       <div class="panel-body nsite-body">
@@ -657,6 +682,21 @@
               </div>
             </div>
           </div>
+          <!-- Site Info sidebar — slides in from the right when the user
+               picks "Site info" from the panel menu. Becomes a flex sibling
+               to the iframe so the viewport reflows rather than overlaying;
+               width is capped so a small dashboard window still has room
+               to render the iframe content alongside. Closed by default. -->
+          <aside class="nsite-siteinfo" id="nsite-siteinfo" hidden aria-label="Site info">
+            <div class="nsite-siteinfo-head">
+              <div class="nsite-siteinfo-title">Site info</div>
+              <button class="nsite-siteinfo-close"
+                      id="nsite-siteinfo-close"
+                      type="button"
+                      aria-label="Close site info">&times;</button>
+            </div>
+            <div class="nsite-siteinfo-body" id="nsite-siteinfo-body"></div>
+          </aside>
         </div>
       </div>
     </section>

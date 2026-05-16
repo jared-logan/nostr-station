@@ -18643,6 +18643,10 @@ const NsitePanel = (() => {
     // Trust banner lives outside Diagnostics — refresh it in lockstep
     // since both react to the same body/reports state.
     refreshTrustBanner();
+    // Site Info sidebar (PR-3) reads from the same body — keep it in
+    // sync if currently open. Renderer is a no-op when the sidebar is
+    // hidden so the cost is bounded to a single early return.
+    if (els.siteInfo && !els.siteInfo.hidden) renderSiteInfo();
   }
 
   // Tooltip text for the `?` icon next to the trust toggle. Intentionally
@@ -19012,6 +19016,12 @@ const NsitePanel = (() => {
     els.trustBanner = $('nsite-trust-banner');
     els.empty       = $('nsite-empty');
     els.pubLink     = $('nsite-publish-link');
+    // Browser-style menu (≡) — Site Info / Settings / Dev Tools.
+    els.menuBtn        = $('nsite-menu-btn');
+    els.menu           = $('nsite-menu');
+    els.siteInfo       = $('nsite-siteinfo');
+    els.siteInfoBody   = $('nsite-siteinfo-body');
+    els.siteInfoClose  = $('nsite-siteinfo-close');
     if (!els.addr) return;
 
     setEmpty(true);
@@ -19045,11 +19055,178 @@ const NsitePanel = (() => {
       void toggleTrust(btn, pk, allow);
     });
 
+    wireMenu();
+
     // Hash deep-link support: `#nsite/<addr>` auto-loads on panel enter.
     // Used by `nostr-station nsite publish` to print a one-click preview
     // link after a successful publish.
     maybeConsumeDeepLink();
     mountReporterListener();
+  }
+
+  // ── Browser-style menu (Site Info / Settings / Dev Tools) ───────────────
+  //
+  // Slimmed-down version of Titan Browser's right-side menu. We do NOT
+  // duplicate Settings here — the Config panel already has an
+  // nsite-browsing section that mirrors Titan's Settings layout
+  // (relays / discovery / Blossom / indexer pubkey), so the menu item
+  // deep-links there instead. Same for Dev Tools: the existing
+  // Diagnostics block in this panel already covers files / CSP /
+  // script errors / relay tiers, so the menu just opens it.
+  // Site Info IS new — a dedicated sidebar pane showing the
+  // hosting npub + manifest metadata (title / description / source /
+  // published / file count / relays / Blossom servers / trust state).
+  function wireMenu() {
+    if (!els.menuBtn || !els.menu) return;
+    function openMenu()  { els.menu.hidden = false; els.menuBtn.setAttribute('aria-expanded', 'true'); }
+    function closeMenu() { els.menu.hidden = true;  els.menuBtn.setAttribute('aria-expanded', 'false'); }
+    function toggleMenu(){ els.menu.hidden ? openMenu() : closeMenu(); }
+
+    els.menuBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      toggleMenu();
+    });
+    // Outside-click closes the menu. Attached to document so it fires
+    // for clicks anywhere outside the popover. The stopPropagation on
+    // the trigger above prevents this handler from immediately closing
+    // a menu we just opened.
+    document.addEventListener('click', (ev) => {
+      if (els.menu.hidden) return;
+      if (els.menu.contains(ev.target)) return;
+      if (els.menuBtn.contains(ev.target)) return;
+      closeMenu();
+    });
+    // Esc closes when focus is in the panel.
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !els.menu.hidden) closeMenu();
+    });
+
+    // Item dispatch — single delegated click handler.
+    els.menu.addEventListener('click', (ev) => {
+      const item = ev.target?.closest?.('.nsite-menu-item');
+      if (!item) return;
+      closeMenu();
+      const which = item.getAttribute('data-menu');
+      if      (which === 'siteinfo') openSiteInfo();
+      else if (which === 'settings') openSettings();
+      else if (which === 'devtools') openDevTools();
+    });
+
+    els.siteInfoClose?.addEventListener('click', closeSiteInfo);
+  }
+
+  function openSettings() {
+    // Switch to the Config panel and scroll its nsite section into view.
+    // The hash router (activatePanel) handles the panel switch; we
+    // open + scroll on a microtask so the panel is mounted by then.
+    try { location.hash = '#config'; } catch {}
+    setTimeout(() => {
+      const sec = document.getElementById('cfg-nsite-section');
+      if (!sec) return;
+      // <details> open attribute — expand if collapsed so the user
+      // doesn't have to hunt for the section after we scroll there.
+      try { sec.open = true; } catch {}
+      sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 30);
+  }
+
+  function openDevTools() {
+    if (!els.diag) return;
+    // The Diagnostics block is `hidden` until the first resolve. If the
+    // user opens Dev Tools before browsing anything, surface a small
+    // hint via toast rather than expanding an empty pane.
+    if (els.diag.hidden) {
+      toast('Dev tools', 'Browse an nsite first — Diagnostics populates from the first resolve.');
+      return;
+    }
+    try { els.diag.open = true; } catch {}
+    els.diag.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function openSiteInfo() {
+    if (!els.siteInfo || !els.siteInfoBody) return;
+    renderSiteInfo();
+    els.siteInfo.hidden = false;
+  }
+  function closeSiteInfo() {
+    if (els.siteInfo) els.siteInfo.hidden = true;
+  }
+
+  // Render the Site Info sidebar from the active resolve response.
+  // Intentionally brief and information-dense — pubkey, npub, title,
+  // description, source link, published date, file count, format,
+  // relay tiers, Blossom servers, trust state. The full Diagnostics
+  // block stays the source of truth for per-file events; this pane is
+  // about WHO published the site and WHERE its content lives.
+  function renderSiteInfo() {
+    if (!els.siteInfoBody) return;
+    if (!currentBody) {
+      els.siteInfoBody.innerHTML = `<div class="nsite-siteinfo-empty">Browse an nsite to see its info.</div>`;
+      return;
+    }
+    const b = currentBody;
+    const pk = String(b.pubkey || '');
+    let npub = '';
+    try { if (window.NostrTools?.nip19 && pk) npub = window.NostrTools.nip19.npubEncode(pk); } catch {}
+    const fmtDate = (sec) => sec ? new Date(sec * 1000).toLocaleString() : '—';
+    const fmtAge = (sec) => {
+      if (!sec) return '';
+      const diff = Math.max(0, Math.floor(Date.now() / 1000) - sec);
+      if (diff < 60)        return `${diff}s ago`;
+      if (diff < 3600)      return `${Math.floor(diff / 60)}m ago`;
+      if (diff < 86400)     return `${Math.floor(diff / 3600)}h ago`;
+      if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d ago`;
+      return `${Math.floor(diff / 86400 / 7)}w ago`;
+    };
+    const fmt = b.format === 'v2-named' ? 'NIP-5A v2 (named manifest)'
+              : b.format === 'v2-root'  ? 'NIP-5A v2 (root manifest)'
+              : b.format === 'v1'       ? 'NIP-5A v1 (per-file)'
+              : (b.format || 'unknown');
+    const r = b.relays || {};
+    const blossom = b.blossomServers || [];
+    const relayList = (label, arr) => arr && arr.length
+      ? `<div class="nsite-siteinfo-row">
+           <div class="nsite-siteinfo-key">${escapeHtml(label)} (${arr.length})</div>
+           <div class="nsite-siteinfo-list">${arr.map(u => escapeHtml(u)).join('<br>')}</div>
+         </div>`
+      : '';
+    const trustState = b.trusted
+      ? `<span style="color: rgba(70, 200, 130, 0.95); font-weight: 600">allowed for this nsite</span>`
+      : `<span>strict (default)</span>`;
+    els.siteInfoBody.innerHTML = `
+      <div class="nsite-siteinfo-row">
+        <div class="nsite-siteinfo-key">Display</div>
+        <div class="nsite-siteinfo-val proseval">${escapeHtml(b.display || '—')}</div>
+      </div>
+      <div class="nsite-siteinfo-row">
+        <div class="nsite-siteinfo-key">Manifest</div>
+        <div class="nsite-siteinfo-val proseval">${escapeHtml(fmt)}</div>
+      </div>
+      <div class="nsite-siteinfo-row">
+        <div class="nsite-siteinfo-key">Author npub</div>
+        <div class="nsite-siteinfo-val long">${escapeHtml(npub || '—')}</div>
+      </div>
+      <div class="nsite-siteinfo-row">
+        <div class="nsite-siteinfo-key">Author pubkey</div>
+        <div class="nsite-siteinfo-val long">${escapeHtml(pk || '—')}</div>
+      </div>
+      <div class="nsite-siteinfo-row">
+        <div class="nsite-siteinfo-key">Published</div>
+        <div class="nsite-siteinfo-val proseval">${escapeHtml(fmtDate(b.latestAt))} ${b.latestAt ? `(${escapeHtml(fmtAge(b.latestAt))})` : ''}</div>
+      </div>
+      <div class="nsite-siteinfo-row">
+        <div class="nsite-siteinfo-key">Files</div>
+        <div class="nsite-siteinfo-val proseval">${escapeHtml(String(b.fileCount ?? '—'))} file${b.fileCount === 1 ? '' : 's'}</div>
+      </div>
+      <div class="nsite-siteinfo-row">
+        <div class="nsite-siteinfo-key">External content</div>
+        <div class="nsite-siteinfo-val proseval">${trustState}</div>
+      </div>
+      ${relayList('Author NIP-65 outbox', r.authorOutbox)}
+      ${relayList('Manifest relay tags',  r.manifest)}
+      ${relayList('Queried (union)',      r.queried)}
+      ${relayList('Blossom servers',      blossom)}
+    `;
   }
 
   async function toggleTrust(btn, pubkey, allow) {
