@@ -228,16 +228,24 @@ export async function proxyChat(
   cfg: ProviderConfig,
 ): Promise<void> {
   let messages: Msg[];
+  let bodyProjectId: string | null = null;
   try {
     const body = await readBody(req);
-    ({ messages } = JSON.parse(body));
+    const parsed = JSON.parse(body);
+    messages = parsed.messages;
+    if (typeof parsed.projectId === 'string' && parsed.projectId) {
+      bodyProjectId = parsed.projectId;
+    }
   } catch {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Invalid request body' }));
     return;
   }
 
-  const activeProjectId = getActiveChatProjectId();
+  // Per-request projectId wins. Singleton fallback keeps older clients
+  // (which set context via POST /api/chat/context) working until they
+  // migrate to passing projectId in the body — same shape as /api/ai/chat.
+  const activeProjectId = bodyProjectId ?? getActiveChatProjectId();
   const activeProject = activeProjectId ? getProject(activeProjectId) : null;
   const system = activeProjectId
     ? resolveProjectContext(activeProject).content
