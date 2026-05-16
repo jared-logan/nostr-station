@@ -3714,7 +3714,23 @@ const ChatPanel = (() => {
 const NavSessions = (() => {
   const container = document.getElementById('nav-project-sessions');
   const stationLink = document.querySelector('#nav a[href="#chat"]');
+  const group = document.getElementById('nav-projects-group');
+  const toggleBtn = document.getElementById('nav-projects-toggle');
   if (!container) return { refresh() {} };
+
+  const COLLAPSE_KEY = 'ns:nav-projects:collapsed';
+
+  // Track the row whose ⋯ menu is currently open. Only one at a time —
+  // opening another or clicking outside / pressing Escape closes it.
+  let openMenuRow = null;
+
+  function closeOpenMenu() {
+    if (!openMenuRow) return;
+    const menu = openMenuRow.querySelector('.nav-session-menu');
+    if (menu) menu.remove();
+    openMenuRow.classList.remove('menu-open');
+    openMenuRow = null;
+  }
 
   // Derive the visually-active session straight from the hash so the
   // highlight tracks the URL without waiting for the (async) session
@@ -3728,9 +3744,68 @@ const NavSessions = (() => {
     return null;
   }
 
+  function openMenu(row, session) {
+    closeOpenMenu();
+    const menu = document.createElement('div');
+    menu.className = 'nav-session-menu';
+    // Keep clicks inside the menu from bubbling up to the row's <a>
+    // (which would otherwise navigate) or the document outside-click
+    // listener (which would otherwise close us immediately).
+    menu.addEventListener('click', (e) => e.stopPropagation());
+
+    function mkItem(label, action, danger) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      if (danger) b.className = 'danger';
+      b.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeOpenMenu();
+        action();
+      });
+      return b;
+    }
+
+    menu.appendChild(mkItem(session.pinned ? 'Unpin' : 'Pin', () => {
+      SessionStore.setPinned(session.id, !session.pinned);
+    }));
+    menu.appendChild(mkItem('Rename', () => {
+      const next = window.prompt('Rename session', session.title);
+      if (next == null) return;
+      const trimmed = next.trim();
+      if (!trimmed) return;
+      SessionStore.setTitle(session.id, trimmed.slice(0, 80));
+    }));
+    menu.appendChild(mkItem('Close', () => {
+      const wasActive = SessionStore.getActiveId() === session.id;
+      SessionStore.close(session.id);
+      if (wasActive) {
+        // Prefer another session still visible in the nav for the same
+        // project, else fall back to station. Pins keep showing after
+        // close, so this can land on a pinned-but-closed sibling — fine,
+        // tapping it re-activates the conversation.
+        const siblings = SessionStore.listForNav().filter(x => x.projectId === session.projectId && x.id !== session.id);
+        location.hash = siblings.length ? `#chat/s/${siblings[0].id}` : '#chat';
+      }
+    }, true));
+
+    row.appendChild(menu);
+    row.classList.add('menu-open');
+    openMenuRow = row;
+  }
+
+  function applyCollapsedPref() {
+    if (!group) return;
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(COLLAPSE_KEY) === '1'; } catch {}
+    group.classList.toggle('collapsed', collapsed);
+  }
+
   function render() {
     const sessions = SessionStore.listForNav();
     const activeId = activeIdFromHash();
+    closeOpenMenu();
     container.innerHTML = '';
     for (const s of sessions) {
       const row = document.createElement('a');
@@ -3739,60 +3814,38 @@ const NavSessions = (() => {
       if (s.pinned) cls.push('pinned');
       row.className = cls.join(' ');
       row.href = `#chat/s/${s.id}`;
-      row.title = `${s.title}\nDouble-click to rename`;
+      row.title = s.title;
       const label = document.createElement('span');
       label.className = 'nav-session-label';
       label.textContent = s.title;
-      // Pin toggle — pinned sessions stay in the nav after close. Hover-
-      // revealed alongside ×, matching the close button's affordance.
-      const pin = document.createElement('button');
-      pin.className = 'nav-session-pin' + (s.pinned ? ' on' : '');
-      pin.type = 'button';
-      pin.setAttribute('aria-label', s.pinned ? 'Unpin session' : 'Pin session');
-      pin.title = s.pinned ? 'Unpin session' : 'Pin session';
-      pin.innerHTML = `<svg viewBox="0 0 24 24" width="11" height="11" fill="${s.pinned ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M9 17h6l1-7 3-3-1-2-2 1-7 3-1 2 3 3z"/></svg>`;
-      pin.addEventListener('click', (e) => {
+      // Three-dot action menu — replaces the prior hover pin / × pair so
+      // the row stays uncluttered and we have room to add future actions
+      // (clear history, duplicate, etc.) without redesigning the row.
+      const menuBtn = document.createElement('button');
+      menuBtn.className = 'nav-session-menu-btn';
+      menuBtn.type = 'button';
+      menuBtn.setAttribute('aria-label', 'Session actions');
+      menuBtn.title = 'Session actions';
+      menuBtn.textContent = '⋯';
+      menuBtn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        SessionStore.setPinned(s.id, !s.pinned);
-      });
-      const close = document.createElement('button');
-      close.className = 'nav-session-close';
-      close.type = 'button';
-      close.setAttribute('aria-label', 'Close session');
-      close.title = 'Close session';
-      close.textContent = '×';
-      close.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const wasActive = SessionStore.getActiveId() === s.id;
-        SessionStore.close(s.id);
-        if (wasActive) {
-          // Prefer another session still visible in the nav for the same
-          // project, else fall back to station. Pins keep showing after
-          // close, so this can land on a pinned-but-closed sibling — fine,
-          // tapping it re-activates the conversation.
-          const siblings = SessionStore.listForNav().filter(x => x.projectId === s.projectId && x.id !== s.id);
-          location.hash = siblings.length ? `#chat/s/${siblings[0].id}` : '#chat';
+        if (openMenuRow === row) {
+          closeOpenMenu();
+        } else {
+          openMenu(row, s);
         }
       });
-      // Double-click to rename — prompt() is intentionally simple for v1;
-      // inline edit can come later if it proves friction. Stops the dblclick
-      // from also navigating the <a>.
-      row.addEventListener('dblclick', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const next = window.prompt('Rename session', s.title);
-        if (next == null) return;
-        const trimmed = next.trim();
-        if (!trimmed) return;
-        SessionStore.setTitle(s.id, trimmed.slice(0, 80));
-      });
       row.appendChild(label);
-      row.appendChild(pin);
-      row.appendChild(close);
+      row.appendChild(menuBtn);
       container.appendChild(row);
     }
+    // Toggle chevron visibility — there's no value in offering a
+    // collapse on an empty list. Also reset collapsed when the list
+    // empties out so the next session creation doesn't appear hidden.
+    if (toggleBtn) toggleBtn.hidden = sessions.length === 0;
+    if (group && sessions.length === 0) group.classList.remove('collapsed');
+
     // Top-level Chat link should only be "active" when the station
     // session is what's actually showing. Without this it'd light up
     // alongside any project session row (both live under the same panel).
@@ -3802,6 +3855,33 @@ const NavSessions = (() => {
     }
   }
 
+  // Collapse toggle — flips the wrapping group's class + persists. The
+  // chevron's rotation + the session-list visibility are CSS-driven.
+  if (toggleBtn && group) {
+    toggleBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const next = !group.classList.contains('collapsed');
+      group.classList.toggle('collapsed', next);
+      try { localStorage.setItem(COLLAPSE_KEY, next ? '1' : '0'); } catch {}
+      toggleBtn.setAttribute('aria-label', next ? 'Expand project sessions' : 'Collapse project sessions');
+      closeOpenMenu();
+    });
+  }
+
+  // Outside-click + Escape close the open menu. We listen on document
+  // capture so we beat the row's <a> click handler (which would otherwise
+  // navigate before we got a chance to close).
+  document.addEventListener('click', (e) => {
+    if (!openMenuRow) return;
+    if (openMenuRow.contains(e.target)) return;
+    closeOpenMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeOpenMenu();
+  });
+
+  applyCollapsedPref();
   SessionStore.subscribe(render);
   window.addEventListener('hashchange', render);
   render();
