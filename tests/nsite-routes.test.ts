@@ -307,9 +307,35 @@ test('reporter: forwards securitypolicyviolation + error events', () => {
 
 test('reporter: postMessage payload includes type + siteId', () => {
   const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
-  // Reporter executes `parent.postMessage(Object.assign({type:t,siteId:S},p),"*")`
-  // — verify both type and siteId appear in the assignment.
-  assert.match(out, /parent\.postMessage\(Object\.assign\(\{type:t,siteId:S/);
+  // Reporter builds the payload as `Object.assign({type:t,siteId:S},p)` and
+  // hands it to `window.parent.postMessage(msg,"*")`. Verify both halves
+  // of the contract — the payload assembly and the delivery target.
+  assert.match(out, /Object\.assign\(\{type:t,siteId:S\}/);
+  assert.match(out, /window\.parent\.postMessage\(msg,"\*"\)/);
+});
+
+test('reporter: logs a boot line at script entry (silent-failure diagnostic)', () => {
+  // The boot line is the canary: a single console.info at the very top
+  // of the IIFE. If a future inline-script CSP-block / injection regex
+  // miss takes the reporter out, the absence of this line in an
+  // iframe-context devtools is the smoking gun. Wrapped in its own
+  // try/catch so the script keeps running even if console is null.
+  const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
+  assert.match(out, /console\.info\("\[nsite-report\] boot",S\)/);
+});
+
+test('reporter: dual-path delivery (window.parent + window.top fallback)', () => {
+  // The previous reporter used a bare `parent.postMessage` wrapped in a
+  // silent try/catch. Field repro across three nsites showed the panel
+  // never receiving any messages — the catch swallowed the failure path.
+  // Now we attempt window.parent AND window.top, and log a console.warn
+  // if either throws + if neither delivers anything. The test confirms
+  // both paths exist in the emitted script.
+  const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
+  assert.match(out, /window\.parent\.postMessage\(msg,"\*"\)/, 'parent path must remain');
+  assert.match(out, /window\.top\.postMessage\(msg,"\*"\)/,    'top fallback path must be present');
+  assert.match(out, /parent\.postMessage threw/,    'parent failure path must log');
+  assert.match(out, /top\.postMessage threw/,       'top failure path must log');
 });
 
 test('reporter: behaves correctly when run against a fake window', () => {
@@ -320,28 +346,39 @@ test('reporter: behaves correctly when run against a fake window', () => {
   assert.ok(reporter, 'reporter block must be present');
   const body = reporter!.replace(/^<script>/, '').replace(/<\/script>$/, '');
 
-  // Run the reporter in a sandboxed window. Capture postMessage calls
-  // and the registered listeners so we can simulate events.
+  // Run the reporter in a sandboxed window. The reporter now references
+  // `window.parent` / `window.top` (not bare `parent` / `top`), so the
+  // fake window object must expose both. parent === top here mirrors a
+  // single-level iframe (no nesting); the reporter handles that
+  // explicitly (`window.top !== window.parent` check) so we expect
+  // only one delivery per message.
   const listeners: Record<string, Function[]> = {};
   const posted: any[] = [];
+  const postFn = (msg: any) => { posted.push(msg); };
   const fakeWindow: any = {
     addEventListener: (name: string, fn: Function) => {
       (listeners[name] ||= []).push(fn);
     },
   };
-  const fakeParent: any = {
-    postMessage: (msg: any) => { posted.push(msg); },
-  };
+  fakeWindow.parent = { postMessage: postFn };
+  fakeWindow.top    = fakeWindow.parent;        // typical iframe shape
   // The reporter reads `location.href` once at boot for the "loaded"
   // payload. Stub it so the script doesn't ReferenceError under Node.
   const fakeLocation: any = { href: `http://127.0.0.1:3000/nsite-content/${SID}/index.html` };
-  new Function('window', 'parent', 'location', body)(fakeWindow, fakeParent, fakeLocation);
+  // Silence the console.info / console.warn lines the reporter emits at
+  // boot; failures get re-raised so a regression is loud, not silent.
+  const fakeConsole: any = { info: () => {}, warn: () => {} };
+  new Function('window', 'location', 'console', body)(fakeWindow, fakeLocation, fakeConsole);
 
   // The reporter immediately sends a "loaded" message so the panel
   // knows the iframe successfully booted.
   const loaded = posted.find((p) => p.type === 'nsite-loaded');
   assert.ok(loaded, 'should immediately post nsite-loaded');
   assert.equal(loaded.siteId, SID, 'loaded message carries siteId');
+  // parent === top in the fake → only one delivery (top branch's
+  // `window.top !== window.parent` guard skips the dup).
+  assert.equal(posted.filter(p => p.type === 'nsite-loaded').length, 1,
+    'duplicate-target dedup: top falls back only when distinct from parent');
 
   // Simulate a CSP violation event.
   const cspListener = (listeners['securitypolicyviolation'] || [])[0];
@@ -369,6 +406,66 @@ test('reporter: behaves correctly when run against a fake window', () => {
   assert.equal(err.message, 'TypeError: bad');
   assert.equal(err.filename, 'main.js');
   assert.equal(err.lineno, 42);
+});
+
+test('reporter: parent.postMessage throwing does not skip top fallback', () => {
+  // The previous shape wrapped one combined try/catch around the whole
+  // send. If parent.postMessage threw, top never got a chance. The new
+  // shape uses two separate try/catch blocks so a parent failure still
+  // tries top — and logs the failure to the iframe console.
+  const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
+  const blocks = out.match(/<script>\(function\(\)\{[\s\S]*?\}\)\(\);<\/script>/g) ?? [];
+  const reporter = blocks.find(b => b.includes('var S='));
+  const body = reporter!.replace(/^<script>/, '').replace(/<\/script>$/, '');
+
+  const posted: any[] = [];
+  const fakeWindow: any = { addEventListener: () => {} };
+  // Parent throws; top is distinct and succeeds.
+  fakeWindow.parent = { postMessage: () => { throw new Error('parent blocked'); } };
+  fakeWindow.top    = { postMessage: (msg: any) => { posted.push(msg); } };
+  const fakeLocation: any = { href: 'http://test/' };
+  const warnings: any[] = [];
+  const fakeConsole: any = {
+    info: () => {},
+    warn: (...args: any[]) => { warnings.push(args); },
+  };
+  new Function('window', 'location', 'console', body)(fakeWindow, fakeLocation, fakeConsole);
+
+  // The "loaded" message was delivered via the top fallback even though
+  // parent.postMessage threw.
+  assert.equal(posted.length, 1, 'top should still receive the message when parent throws');
+  assert.equal(posted[0].type, 'nsite-loaded');
+  // And the parent failure was logged to the iframe console (not
+  // silently swallowed) so a "still silent" debug is a one-line read.
+  assert.ok(warnings.some(w => String(w[0]).includes('parent.postMessage threw')),
+    'parent failure must surface as a console.warn');
+});
+
+test('reporter: zero-delivery (no parent, no top) logs but does not throw', () => {
+  // Edge case: a top-level (non-iframed) document somehow served from
+  // /nsite-content/* — `window.parent === window` and `window.top ===
+  // window` so neither send path delivers. The reporter must not throw
+  // (otherwise it tanks the page), and it must log the no-delivery
+  // case so it doesn't look identical to "everything worked silently".
+  const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
+  const blocks = out.match(/<script>\(function\(\)\{[\s\S]*?\}\)\(\);<\/script>/g) ?? [];
+  const reporter = blocks.find(b => b.includes('var S='));
+  const body = reporter!.replace(/^<script>/, '').replace(/<\/script>$/, '');
+
+  const warnings: any[] = [];
+  const fakeWindow: any = { addEventListener: () => {} };
+  fakeWindow.parent = fakeWindow;   // === window → branch skipped
+  fakeWindow.top    = fakeWindow;   // === window → branch skipped
+  const fakeLocation: any = { href: 'http://test/' };
+  const fakeConsole: any = {
+    info: () => {},
+    warn: (...args: any[]) => { warnings.push(args); },
+  };
+  assert.doesNotThrow(() => {
+    new Function('window', 'location', 'console', body)(fakeWindow, fakeLocation, fakeConsole);
+  });
+  assert.ok(warnings.some(w => String(w[0]).includes('no parent/top reachable')),
+    'no-delivery case must log so absence-of-Diagnostics is diagnosable');
 });
 
 // ── CORS on /nsite-content/* ──────────────────────────────────────────────

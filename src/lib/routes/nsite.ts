@@ -676,22 +676,68 @@ function injectRuntimeShim(html: string, prefix: string, siteId: string): string
   // Posts to '*' because the iframe is in an opaque origin and we
   // can't restrict to a specific target; the parent must validate
   // by message shape + the siteId it issued.
+  //
+  // Why the multi-path delivery (parent + top) and explicit console
+  // logging: the previous reporter (shipped in #115) wrapped the entire
+  // `parent.postMessage(...)` call in a `try/catch{}` that swallowed
+  // every error silently. Field reports across three test nsites
+  // (jaredlogan / titan / nostr-station) showed the panel's Diagnostics
+  // block NEVER rendering a "Sandbox clean" or "CSP blocked" section,
+  // even when the browser's own DevTools console logged matching
+  // securitypolicyviolation events. With the failure path silent we
+  // couldn't tell whether (a) the script never ran, (b) postMessage
+  // threw, or (c) the parent's listener filtered the message out.
+  //
+  // The new shape:
+  //   - logs a single `[nsite-report] boot {siteId}` line at script
+  //     entry, so an iframe-context devtools tells us at a glance
+  //     whether the inline script even executed (i.e. CSP didn't
+  //     block the inline reporter itself)
+  //   - tries `window.parent.postMessage` AND `window.top.postMessage`
+  //     (in a nested-iframe scenario these can differ; harmless
+  //     otherwise — postMessage to the same window is a no-op for the
+  //     parent listener's siteId filter)
+  //   - logs the actual thrown error if either path fails, so a future
+  //     "still silent" bug is one console line away from a diagnosis
+  //   - the IIFE itself is wrapped in a top-level try/catch that
+  //     console-logs setup failures (e.g. addEventListener throwing
+  //     in some exotic configuration), since silent listener-setup
+  //     failure would mask CSP / error reporting for the rest of the
+  //     iframe's lifetime
+  //
+  // The siteId is baked into the script at HTML-rewrite time via
+  // JSON.stringify, so each iframe load gets its own copy and the
+  // parent listener can validate messages against the siteId it
+  // issued at /api/nsite/resolve time.
   const reporter = `<script>(function(){var S=${JSON.stringify(siteId)};` +
-`function send(t,p){try{parent.postMessage(Object.assign({type:t,siteId:S},p),"*");}catch(e){}}` +
-`window.addEventListener("securitypolicyviolation",function(e){` +
-`send("nsite-csp-violation",{blockedURI:String(e.blockedURI||""),` +
-`violatedDirective:String(e.violatedDirective||""),` +
-`effectiveDirective:String(e.effectiveDirective||""),` +
-`disposition:String(e.disposition||""),` +
-`sourceFile:String(e.sourceFile||""),` +
-`lineNumber:e.lineNumber||0});});` +
-`window.addEventListener("error",function(e){` +
-`send("nsite-script-error",{message:String(e.message||""),` +
-`filename:String(e.filename||""),` +
-`lineno:e.lineno||0,colno:e.colno||0});},true);` +
-`window.addEventListener("unhandledrejection",function(e){` +
-`send("nsite-script-error",{message:"unhandledrejection: "+String((e.reason&&(e.reason.message||e.reason))||"")});` +
-`});` +
+`try{console.info("[nsite-report] boot",S);}catch(_){}` +
+`function send(t,p){` +
+  `var msg=Object.assign({type:t,siteId:S},p);` +
+  `var delivered=0;` +
+  `try{if(window.parent&&window.parent!==window){window.parent.postMessage(msg,"*");delivered++;}}` +
+  `catch(e){try{console.warn("[nsite-report] parent.postMessage threw",e);}catch(_){}}` +
+  `try{if(window.top&&window.top!==window&&window.top!==window.parent){window.top.postMessage(msg,"*");delivered++;}}` +
+  `catch(e){try{console.warn("[nsite-report] top.postMessage threw",e);}catch(_){}}` +
+  `try{if(!delivered)console.warn("[nsite-report] no parent/top reachable for",t);}catch(_){}` +
+`}` +
+`try{` +
+  `window.addEventListener("securitypolicyviolation",function(e){` +
+    `send("nsite-csp-violation",{blockedURI:String(e.blockedURI||""),` +
+    `violatedDirective:String(e.violatedDirective||""),` +
+    `effectiveDirective:String(e.effectiveDirective||""),` +
+    `disposition:String(e.disposition||""),` +
+    `sourceFile:String(e.sourceFile||""),` +
+    `lineNumber:e.lineNumber||0});` +
+  `});` +
+  `window.addEventListener("error",function(e){` +
+    `send("nsite-script-error",{message:String(e.message||""),` +
+    `filename:String(e.filename||""),` +
+    `lineno:e.lineno||0,colno:e.colno||0});` +
+  `},true);` +
+  `window.addEventListener("unhandledrejection",function(e){` +
+    `send("nsite-script-error",{message:"unhandledrejection: "+String((e.reason&&(e.reason.message||e.reason))||"")});` +
+  `});` +
+`}catch(e){try{console.warn("[nsite-report] listener setup threw",e);}catch(_){}}` +
 `send("nsite-loaded",{href:String(location.href||"")});` +
 `})();</script>`;
 
