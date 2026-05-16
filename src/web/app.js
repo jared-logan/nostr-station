@@ -745,6 +745,15 @@ function currentPanel() {
   return PANELS.includes(hash) ? hash : 'status';
 }
 
+// Parse `#chat/s/<sessionId>` → { sessionId }. Returns null sessionId for
+// the bare `#chat` (= station session). Used by ChatPanel.onEnter() to
+// resolve which session to surface.
+function currentChatSubroute() {
+  const hash = (location.hash || '').slice(1);
+  const m = hash.match(/^chat\/s\/([\w:-]+)$/);
+  return { sessionId: m ? m[1] : null };
+}
+
 function activatePanel(name) {
   $$('.panel').forEach(el => el.classList.toggle('active', el.dataset.panel === name));
   $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.panel === name));
@@ -2538,6 +2547,268 @@ $('status-refresh').addEventListener('click', () => {
   StatusPanel.renderDashboardCards();
 });
 
+// ── SessionStore: client-side chat session persistence ──────────────────
+//
+// Owns the list of chat sessions (one fixed 'station' session + many
+// project sessions). Sessions persist to localStorage so an agent's
+// accumulated context survives page reloads. Subscribers (ChatPanel,
+// NavSessions) re-render when sessions change.
+//
+// v1 uses deterministic ids ('station' for the global chat, 'p:<projectId>'
+// for project chats — one per project). Phase 4 will introduce multiple
+// sessions per project via uuid ids; the data shape already supports it
+// (lastOpenByProject + openOrder are arrays/maps, not scalars).
+const SessionStore = (() => {
+  const KEY = 'ns:chat-sessions:v1';
+  const STATION_ID = 'station';
+
+  /** @type {Record<string, ChatSession>} */
+  let sessions = {};
+  /** @type {Record<string, string>} */
+  let lastOpenByProject = {};
+  /** @type {string[]} */
+  let openOrder = [];
+  let activeId = STATION_ID;
+  const subs = new Set();
+  let writeTimer = null;
+  let quotaWarned = false;
+
+  function makeStation() {
+    return {
+      id: STATION_ID,
+      kind: 'station',
+      projectId: null,
+      title: 'Station',
+      history: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      pinned: false,
+      order: 0,
+      providerOverride: null,
+      modelOverride: null,
+      permissionMode: null,
+    };
+  }
+  function newSessionId() {
+    // crypto.randomUUID is available in all browsers we target; fall back
+    // to a timestamp + random tail just in case (e.g. very old WebView).
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return 'cs_' + crypto.randomUUID();
+    }
+    return 'cs_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+  }
+
+  function makeProject(projectId, projectName, id) {
+    return {
+      id: id || newSessionId(),
+      kind: 'project',
+      projectId,
+      title: projectName || 'Project session',
+      history: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      pinned: false,
+      order: 0,
+      providerOverride: null,
+      modelOverride: null,
+      permissionMode: null,
+    };
+  }
+
+  function load() {
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        sessions = parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {};
+        lastOpenByProject = parsed.lastOpenByProject || {};
+        openOrder = Array.isArray(parsed.openOrder) ? parsed.openOrder : [];
+        return true;
+      }
+    } catch { /* corrupt or quota — fall through to fresh state */ }
+    return false;
+  }
+
+  function persist() {
+    if (writeTimer) clearTimeout(writeTimer);
+    writeTimer = setTimeout(() => {
+      writeTimer = null;
+      try {
+        localStorage.setItem(KEY, JSON.stringify({ sessions, lastOpenByProject, openOrder }));
+      } catch (e) {
+        // Quota: trim closed sessions' histories (keep last 4 turns), retry once.
+        if (e && (e.name === 'QuotaExceededError' || /quota/i.test(e.message || ''))) {
+          for (const id of Object.keys(sessions)) {
+            if (openOrder.includes(id) || id === STATION_ID) continue;
+            const s = sessions[id];
+            if (s && Array.isArray(s.history) && s.history.length > 4) {
+              s.history = s.history.slice(-4);
+            }
+          }
+          try {
+            localStorage.setItem(KEY, JSON.stringify({ sessions, lastOpenByProject, openOrder }));
+            return;
+          } catch { /* fall through to RAM-only */ }
+        }
+        if (!quotaWarned) {
+          quotaWarned = true;
+          try { toast('Chat sessions: storage full', 'New messages will not survive reload.', 'warn'); } catch {}
+        }
+      }
+    }, 500);
+  }
+
+  function notify() {
+    for (const fn of subs) {
+      try { fn(); } catch { /* subscriber errors must not break the store */ }
+    }
+  }
+
+  function init() {
+    load();
+    // Always ensure the station session exists. Acts as both default landing
+    // and back-compat for fresh users with no localStorage entry.
+    if (!sessions[STATION_ID]) sessions[STATION_ID] = makeStation();
+    persist();
+  }
+
+  function get(id) { return sessions[id] || null; }
+  function list() { return Object.values(sessions); }
+  function listOpen() {
+    return openOrder.map(id => sessions[id]).filter(Boolean);
+  }
+  function listForProject(projectId) {
+    return Object.values(sessions).filter(s => s.kind === 'project' && s.projectId === projectId);
+  }
+  function getActive() { return sessions[activeId] || sessions[STATION_ID]; }
+  function getActiveId() { return activeId; }
+
+  function setActive(id) {
+    if (!sessions[id]) return;
+    activeId = id;
+    notify();
+  }
+
+  function ensureProjectSession(projectId, projectName) {
+    const existingId = lastOpenByProject[projectId];
+    if (existingId && sessions[existingId]) {
+      // Refresh title if it was a placeholder and we now have a real name.
+      const s = sessions[existingId];
+      if (projectName && s.title === 'Project session') s.title = projectName;
+      if (!openOrder.includes(s.id)) openOrder.push(s.id);
+      persist();
+      return s;
+    }
+    // First-ever session for this project — keep the legacy deterministic
+    // id so resumes from older builds (which used 'p:<projectId>') still
+    // line up. createForProject() uses UUIDs for genuine multi-session.
+    const s = makeProject(projectId, projectName, 'p:' + projectId);
+    sessions[s.id] = s;
+    lastOpenByProject[projectId] = s.id;
+    if (!openOrder.includes(s.id)) openOrder.push(s.id);
+    persist();
+    notify();
+    return s;
+  }
+
+  function createForProject(projectId, projectName) {
+    // Always-fresh session, even if the project already has one open.
+    // Updates lastOpenByProject so the project card's "Open in chat" icon
+    // resumes the newest session next time (matches user intent: the
+    // most recent thread is what they were last working in).
+    const s = makeProject(projectId, projectName);
+    sessions[s.id] = s;
+    lastOpenByProject[projectId] = s.id;
+    openOrder.push(s.id);
+    persist();
+    notify();
+    return s;
+  }
+
+  function appendMessage(id, msg) {
+    const s = sessions[id];
+    if (!s) return;
+    s.history.push(msg);
+    s.updatedAt = Date.now();
+    persist();
+    // No notify on every message — chat panel renders incrementally;
+    // nav doesn't need per-token updates. Title-derivation calls notify.
+  }
+
+  function setTitle(id, title) {
+    const s = sessions[id];
+    if (!s) return;
+    s.title = title;
+    s.updatedAt = Date.now();
+    persist();
+    notify();
+  }
+
+  function clearHistory(id) {
+    const s = sessions[id];
+    if (!s) return;
+    s.history = [];
+    s.updatedAt = Date.now();
+    persist();
+  }
+
+  function close(id) {
+    if (id === STATION_ID) return; // station never closes
+    openOrder = openOrder.filter(x => x !== id);
+    persist();
+    notify();
+  }
+
+  // Drop project sessions whose project no longer exists in the resolved
+  // list. Called once the projects cache is known so we don't render dead
+  // entries in the nav.
+  function gcAgainstProjects(projectIds) {
+    const known = new Set(projectIds);
+    let changed = false;
+    for (const id of Object.keys(sessions)) {
+      const s = sessions[id];
+      if (s.kind !== 'project') continue;
+      if (!known.has(s.projectId)) {
+        delete sessions[id];
+        openOrder = openOrder.filter(x => x !== id);
+        for (const pid of Object.keys(lastOpenByProject)) {
+          if (lastOpenByProject[pid] === id) delete lastOpenByProject[pid];
+        }
+        changed = true;
+      }
+    }
+    if (changed) { persist(); notify(); }
+  }
+
+  function subscribe(fn) {
+    subs.add(fn);
+    return () => subs.delete(fn);
+  }
+
+  // Cross-tab sync: storage events fire in OTHER tabs only, so a second tab
+  // re-hydrates when this one writes. Last-writer-wins is fine for chat state.
+  window.addEventListener('storage', (e) => {
+    if (e.key !== KEY) return;
+    load();
+    if (!sessions[STATION_ID]) sessions[STATION_ID] = makeStation();
+    if (!sessions[activeId]) activeId = STATION_ID;
+    notify();
+  });
+
+  init();
+
+  return {
+    STATION_ID,
+    get, list, listOpen, listForProject,
+    getActive, getActiveId, setActive,
+    ensureProjectSession, createForProject,
+    appendMessage, setTitle, clearHistory, close,
+    gcAgainstProjects,
+    subscribe,
+  };
+})();
+
 // ── Panel: Chat (with provider/model switcher) ───────────────────────────
 
 const ChatPanel = (() => {
@@ -2548,16 +2819,15 @@ const ChatPanel = (() => {
   const modelSel = $('chat-model');
   const warnEl = $('chat-key-warning');
 
-  // Per-project message history. 'global' is the default bucket (no project).
-  const chatHistories = { global: [] };
-  let activeProject = null;         // { id, name } or null
+  // activeProject mirrors the projectId of the currently-active session.
+  // Kept as a separate var so existing call sites (renderBadge, sendMsg,
+  // PreviewPane.sync) can read project metadata without re-resolving from
+  // SessionStore on every access.
+  let activeProject = null;         // { id, name, previewable?, stacksProject? } or null
   let busy = false;
 
-  function activeKey() { return activeProject?.id || 'global'; }
   function currentHistory() {
-    const k = activeKey();
-    if (!chatHistories[k]) chatHistories[k] = [];
-    return chatHistories[k];
+    return SessionStore.getActive().history;
   }
 
   function addMsg(role, text) {
@@ -2571,8 +2841,7 @@ const ChatPanel = (() => {
   }
 
   function clearChat() {
-    const h = currentHistory();
-    h.length = 0;
+    SessionStore.clearHistory(SessionStore.getActiveId());
     const note = activeProject
       ? `Cleared. Project context: ${activeProject.name}.`
       : `Cleared. Start a new conversation — NOSTR_STATION.md still loaded as context.`;
@@ -2629,12 +2898,22 @@ const ChatPanel = (() => {
     b.querySelector('.clear-ctx').onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      setActiveProject(null);
+      // Navigate to bare #chat — the hash router will land us on the
+      // station session via applyRoute(). Keeps URL + active-session
+      // state in sync (vs. setActiveProject(null) leaving #chat/s/<id>).
+      if (location.hash === '#chat') setActiveProject(null);
+      else location.hash = '#chat';
     };
   }
 
   async function setActiveProject(p) {
     activeProject = p || null;
+    if (p) {
+      const s = SessionStore.ensureProjectSession(p.id, p.name);
+      SessionStore.setActive(s.id);
+    } else {
+      SessionStore.setActive(SessionStore.STATION_ID);
+    }
     try {
       await api('/api/chat/context', {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -2988,8 +3267,22 @@ const ChatPanel = (() => {
     input.style.height = 'auto';
     busy = true; updateSendDisabled();
 
-    const history = currentHistory();
-    history.push({ role: 'user', content: text });
+    // Bind to the session active when the send started so a mid-flight
+    // switch can't append the assistant reply to the wrong bucket.
+    const turnSessionId = SessionStore.getActiveId();
+    const userMsg = { role: 'user', content: text };
+    SessionStore.appendMessage(turnSessionId, userMsg);
+    const turnSession = SessionStore.get(turnSessionId);
+    // Auto-title: the first user message becomes the session title, so
+    // project sessions in the nav read like "Add the X feature" rather
+    // than "Project session". Only fires on the first turn; rename via
+    // double-click on the nav row still wins from then on.
+    if (turnSession && turnSession.kind === 'project' && turnSession.history.length === 1) {
+      const stripped = text.replace(/\s+/g, ' ').trim();
+      const newTitle = stripped.length > 40 ? stripped.slice(0, 40) + '…' : stripped;
+      if (newTitle) SessionStore.setTitle(turnSessionId, newTitle);
+    }
+    const history = turnSession.history.slice();
     addMsg('user', text);
     const bodyEl = addMsg('asst', '');
     // Body is now a fragment sequence: text spans and tool-call blocks
@@ -3242,7 +3535,7 @@ const ChatPanel = (() => {
       bodyEl.parentElement.className = 'msg error';
     }
     cur.remove();
-    if (full) history.push({ role: 'assistant', content: full });
+    if (full) SessionStore.appendMessage(turnSessionId, { role: 'assistant', content: full });
     busy = false; updateSendDisabled();
     input.focus();
   }
@@ -3254,6 +3547,53 @@ const ChatPanel = (() => {
     populateProvider();
   });
 
+  // Resolve the project metadata for a session — preferring the in-memory
+  // ProjectsPanel cache so we don't round-trip the server when switching
+  // between already-loaded projects. Falls back to GET /api/projects/:id
+  // for deep-link landings (`#chat/s/p:<id>` opened in a fresh tab before
+  // the Projects panel has run).
+  async function resolveProjectForSession(session) {
+    if (!session || session.kind !== 'project' || !session.projectId) return null;
+    const cached = Array.isArray(window.__projectsCache)
+      ? window.__projectsCache.find(x => x.id === session.projectId)
+      : null;
+    if (cached) return cached;
+    try {
+      const p = await api(`/api/projects/${session.projectId}`);
+      return p && p.id ? p : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Apply the hash sub-route to the active session. Always rebinds
+  // activeProject + repaints the UI so any drift between the URL and the
+  // panel state self-heals on next entry. setActiveProject is idempotent.
+  async function applyRoute() {
+    const { sessionId } = currentChatSubroute();
+    const session = sessionId ? SessionStore.get(sessionId) : SessionStore.get(SessionStore.STATION_ID);
+    if (!session || session.kind === 'station') {
+      if (sessionId && !session && location.hash !== '#chat') location.hash = '#chat';
+      await setActiveProject(null);
+      return;
+    }
+    const p = await resolveProjectForSession(session);
+    if (!p) {
+      // Project vanished out from under us — close the dead session and
+      // land on station rather than render an empty chat with no context.
+      SessionStore.close(session.id);
+      if (location.hash !== '#chat') location.hash = '#chat';
+      await setActiveProject(null);
+      return;
+    }
+    await setActiveProject({
+      id: p.id,
+      name: p.name,
+      previewable:   !!p.previewable,
+      stacksProject: !!p.stacksProject,
+    });
+  }
+
   let initialized = false;
   return {
     onEnter() {
@@ -3261,12 +3601,102 @@ const ChatPanel = (() => {
         initialized = true;
         populateProvider();
         renderBadge();
+        // Repaint the persisted history on first entry — covers reloads
+        // where the station session has prior turns in localStorage but
+        // no setActiveProject() has fired yet.
+        renderHistory();
       }
+      applyRoute();
       input.focus();
     },
     setActiveProject,
     getActiveProject() { return activeProject; },
   };
+})();
+
+// ── NavSessions: render open project sessions nested under Projects ─────
+//
+// Subscribes to SessionStore so create / close / setActive triggers a
+// re-render. Each row is a regular <a> with href="#chat/s/<id>" so the
+// existing hashchange router does the navigation; ChatPanel.applyRoute()
+// then resolves the active session. The top-level Chat nav link is
+// un-highlighted whenever a project session is active, so the active
+// indicator only ever points at one row at a time.
+const NavSessions = (() => {
+  const container = document.getElementById('nav-project-sessions');
+  const stationLink = document.querySelector('#nav a[href="#chat"]');
+  if (!container) return { refresh() {} };
+
+  // Derive the visually-active session straight from the hash so the
+  // highlight tracks the URL without waiting for the (async) session
+  // resolve inside ChatPanel.applyRoute(). Off the chat panel, no row
+  // should be highlighted.
+  function activeIdFromHash() {
+    const h = location.hash || '';
+    const m = h.match(/^#chat\/s\/([\w:-]+)$/);
+    if (m) return m[1];
+    if (h === '#chat' || h === '' || h === '#') return SessionStore.STATION_ID;
+    return null;
+  }
+
+  function render() {
+    const sessions = SessionStore.listOpen().filter(s => s.kind === 'project');
+    const activeId = activeIdFromHash();
+    container.innerHTML = '';
+    for (const s of sessions) {
+      const row = document.createElement('a');
+      row.className = 'nav-session' + (s.id === activeId ? ' active' : '');
+      row.href = `#chat/s/${s.id}`;
+      row.title = `${s.title}\nDouble-click to rename`;
+      const label = document.createElement('span');
+      label.className = 'nav-session-label';
+      label.textContent = s.title;
+      const close = document.createElement('button');
+      close.className = 'nav-session-close';
+      close.type = 'button';
+      close.setAttribute('aria-label', 'Close session');
+      close.textContent = '×';
+      close.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const wasActive = SessionStore.getActiveId() === s.id;
+        SessionStore.close(s.id);
+        if (wasActive) {
+          // Prefer another open project session for the same project,
+          // else fall back to station.
+          const siblings = SessionStore.listOpen().filter(x => x.projectId === s.projectId);
+          location.hash = siblings.length ? `#chat/s/${siblings[0].id}` : '#chat';
+        }
+      });
+      // Double-click to rename — prompt() is intentionally simple for v1;
+      // inline edit can come later if it proves friction. Stops the dblclick
+      // from also navigating the <a>.
+      row.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const next = window.prompt('Rename session', s.title);
+        if (next == null) return;
+        const trimmed = next.trim();
+        if (!trimmed) return;
+        SessionStore.setTitle(s.id, trimmed.slice(0, 80));
+      });
+      row.appendChild(label);
+      row.appendChild(close);
+      container.appendChild(row);
+    }
+    // Top-level Chat link should only be "active" when the station
+    // session is what's actually showing. Without this it'd light up
+    // alongside any project session row (both live under the same panel).
+    if (stationLink) {
+      const stationActive = activeId === SessionStore.STATION_ID;
+      stationLink.classList.toggle('active', stationActive);
+    }
+  }
+
+  SessionStore.subscribe(render);
+  window.addEventListener('hashchange', render);
+  render();
+  return { refresh: render };
 })();
 
 // ── Panel: Relay ─────────────────────────────────────────────────────────
@@ -4781,6 +5211,11 @@ const ProjectsPanel = (() => {
     } catch {
       projects = [];
     }
+    // Publish the cache so other modules (ChatPanel, NavSessions, ngit
+    // remote helpers) can read project metadata without a re-fetch, and
+    // drop chat sessions whose project no longer exists.
+    window.__projectsCache = projects;
+    try { SessionStore.gcAgainstProjects(projects.map(p => p.id)); } catch {}
     render();
     // Kick off git-state polling now that cards are in the DOM. The
     // helper is idempotent — repeat reloads (Add Project, capability
@@ -4978,6 +5413,19 @@ const ProjectsPanel = (() => {
       `<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/></svg>`);
     chatBtn.addEventListener('click', (e) => { e.stopPropagation(); openInChat(p); });
     actionsEl.appendChild(chatBtn);
+
+    // "+" — always-fresh chat session for this project. Distinct from the
+    // chat icon (which resumes the most-recent session) so users can keep
+    // independent threads of work going on the same project without
+    // losing the prior context.
+    const newChatBtn = iconBtn('chat-new', 'New chat session',
+      `<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/><line x1="12" y1="8" x2="12" y2="14"/><line x1="9" y1="11" x2="15" y2="11"/></svg>`);
+    newChatBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const s = SessionStore.createForProject(p.id, p.name);
+      location.hash = `#chat/s/${s.id}`;
+    });
+    actionsEl.appendChild(newChatBtn);
 
     // "Open in <Terminal AI>" — spawns the configured terminal-native
     // provider (Claude Code, OpenCode, …) in a terminal tab with cwd
@@ -10342,24 +10790,19 @@ const ProjectsPanel = (() => {
     });
   }
 
-  async function openInChat(p) {
-    try {
-      await api('/api/chat/context', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId: p.id }),
-      });
-    } catch {}
-    // Pass previewable through so the chat side knows whether to surface
-    // the live-preview pane (the iframe + dev-server button only makes
-    // sense for projects with an `npm run dev` script — Vite/Next/etc.,
-    // including shakespeare.diy clones, not just MKStack stacks projects).
-    ChatPanel.setActiveProject({
-      id: p.id,
-      name: p.name,
-      previewable:   !!p.previewable,
-      stacksProject: !!p.stacksProject,
-    });
-    location.hash = '#chat';
+  function openInChat(p) {
+    // Find or create the project's chat session, then route to it. The hash
+    // router (ChatPanel.applyRoute) resolves the session → setActiveProject,
+    // which handles preview-pane + permissions + the server context POST.
+    const s = SessionStore.ensureProjectSession(p.id, p.name);
+    const target = `#chat/s/${s.id}`;
+    if (location.hash === target) {
+      // Same project, same session — just activate the panel (covers
+      // re-clicking the chat icon on a card from the chat panel itself).
+      activatePanel('chat');
+    } else {
+      location.hash = target;
+    }
   }
 
   // ── Discover ngit repos published under the station owner's npub ─────

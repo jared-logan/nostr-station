@@ -163,6 +163,10 @@
             <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 7.5V18a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-8l-2-2.5H5a2 2 0 0 0-2 2Z"/></svg></span>
             Projects
           </a>
+          <!-- Open project chat sessions render here, indented under the
+               Projects link. Managed by NavSessions in app.js — subscribes
+               to SessionStore and rerenders on create/close/switch. -->
+          <div class="nav-project-sessions" id="nav-project-sessions"></div>
           <a href="#nsite" data-panel="nsite">
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg></span>
             nsite
