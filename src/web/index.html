@@ -159,14 +159,24 @@
             Mail
             <span class="badge" id="mail-badge" style="display:none">0</span>
           </a>
-          <a href="#projects" data-panel="projects">
-            <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 7.5V18a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-8l-2-2.5H5a2 2 0 0 0-2 2Z"/></svg></span>
-            Projects
-          </a>
-          <!-- Open project chat sessions render here, indented under the
-               Projects link. Managed by NavSessions in app.js — subscribes
-               to SessionStore and rerenders on create/close/switch. -->
-          <div class="nav-project-sessions" id="nav-project-sessions"></div>
+          <!-- Projects + nested chat sessions. The chevron toggle is
+               surfaced by NavSessions only when at least one session
+               exists; otherwise we don't add visual chrome for a
+               collapsible that has nothing to collapse. Open/closed
+               state persists to localStorage just like sidebar-group. -->
+          <div class="nav-projects-group" id="nav-projects-group">
+            <div class="nav-projects-row">
+              <a href="#projects" data-panel="projects" class="nav-projects-link">
+                <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 7.5V18a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-8l-2-2.5H5a2 2 0 0 0-2 2Z"/></svg></span>
+                Projects
+              </a>
+              <button class="nav-subgroup-toggle" id="nav-projects-toggle"
+                      type="button" aria-label="Collapse project sessions" hidden>
+                <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+            </div>
+            <div class="nav-project-sessions" id="nav-project-sessions"></div>
+          </div>
           <a href="#nsite" data-panel="nsite">
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg></span>
             nsite

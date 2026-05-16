@@ -259,9 +259,35 @@ input:focus, textarea:focus, select:focus {
 .sidebar-group[open] > summary::after { transform: rotate(90deg); }
 .nav > .sidebar-group { margin-top: 10px; }
 
+/* Projects nav block — wraps the Projects link, the collapse chevron,
+   and the nested session list so all three share a single collapsible
+   container. The chevron is hidden by NavSessions when there are no
+   sessions, so a project-less install sees the plain Projects link
+   exactly as before. */
+.nav-projects-group { display: flex; flex-direction: column; }
+.nav-projects-row { display: flex; align-items: center; gap: 2px; }
+.nav-projects-row > .nav-projects-link { flex: 1; }
+.nav-subgroup-toggle {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 4px 6px;
+  margin-right: 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 100ms, background 100ms, transform 140ms ease;
+}
+.nav-subgroup-toggle:hover { color: var(--text-bright); background: var(--bg-hover); }
+.nav-projects-group.collapsed .nav-subgroup-toggle { transform: rotate(-90deg); }
+.nav-projects-group.collapsed .nav-project-sessions { display: none; }
+
 /* Nested project chat sessions, rendered under the Projects nav link by
    NavSessions. Each .nav-session row mirrors .nav a styling but smaller +
-   indented, and reveals a × close button on hover. */
+   indented, and reveals a ⋯ menu button on hover. */
 .nav-project-sessions { display: flex; flex-direction: column; gap: 1px; padding-left: 16px; }
 .nav-project-sessions:empty { display: none; }
 .nav-session {
@@ -278,14 +304,26 @@ input:focus, textarea:focus, select:focus {
 }
 .nav-session:hover { background: var(--bg-hover); color: var(--text-bright); text-decoration: none; }
 .nav-session.active { background: var(--accent-soft); color: var(--accent-bright); }
+/* Pinned sessions show a subtle accent dot at rest so the user can tell
+   which rows will stick around after close even without opening the menu. */
+.nav-session.pinned .nav-session-label::before {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-bright, var(--accent));
+  margin-right: 6px;
+  vertical-align: middle;
+  opacity: 0.7;
+}
 .nav-session-label {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.nav-session-close,
-.nav-session-pin {
+.nav-session-menu-btn {
   appearance: none;
   background: transparent;
   border: 0;
@@ -298,18 +336,46 @@ input:focus, textarea:focus, select:focus {
   transition: opacity 100ms, background 100ms, color 100ms;
   display: inline-flex;
   align-items: center;
+  font-size: 14px;
+  letter-spacing: 1px;
 }
-.nav-session-close { font-size: 14px; }
-.nav-session:hover .nav-session-close,
-.nav-session.active .nav-session-close,
-.nav-session:hover .nav-session-pin,
-.nav-session.active .nav-session-pin { opacity: 1; }
-.nav-session-close:hover,
-.nav-session-pin:hover { background: var(--bg-hover-strong, rgba(255,255,255,0.08)); color: var(--text-bright); }
-/* Pinned sessions advertise their pin even at rest — otherwise the user
-   can't tell which rows will stick around after close. */
-.nav-session-pin.on { opacity: 0.75; color: var(--accent-bright, var(--accent)); }
-.nav-session-pin.on:hover { opacity: 1; }
+.nav-session:hover .nav-session-menu-btn,
+.nav-session.menu-open .nav-session-menu-btn { opacity: 1; }
+.nav-session-menu-btn:hover,
+.nav-session.menu-open .nav-session-menu-btn { background: var(--bg-hover-strong, rgba(255,255,255,0.08)); color: var(--text-bright); }
+/* Floating menu — anchored to the row, opens downward and right-aligned
+   so it doesn't push the sidebar wider. One menu open at a time; click
+   outside or Escape closes. */
+.nav-session-menu {
+  position: absolute;
+  top: 100%;
+  right: 4px;
+  margin-top: 2px;
+  background: var(--bg-elevated, var(--bg-panel, var(--bg)));
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  border-radius: var(--r-sm);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+  padding: 4px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  min-width: 130px;
+}
+.nav-session-menu button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 10px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.nav-session-menu button:hover { background: var(--bg-hover); color: var(--text-bright); }
+.nav-session-menu button.danger { color: var(--err, #ff7a7a); }
+.nav-session-menu button.danger:hover { background: rgba(255, 90, 90, 0.12); }
 
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav a {
