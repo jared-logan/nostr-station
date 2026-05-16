@@ -172,17 +172,26 @@ test('shim: fetch patch wraps strings, Requests, and same-origin already-prefixe
   // running it in a Function() scope with a fake window. The shim is
   // small enough that this is straightforward.
   const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
-  // Capture the full `(function(){...})();` IIFE body to run in a sandbox.
-  const m = out.match(/<script>([\s\S]*?)<\/script>/g);
-  assert.ok(m, 'shim <script> blocks should be present');
-  // The shim script is the second <script> in head (after the importmap).
-  const shimBlock = m![m!.length - 1].replace(/^<script>/, '').replace(/<\/script>$/, '');
+  // Find the fetch shim specifically — head now contains importmap +
+  // fetch shim + reporter, in that order. The fetch shim is the one
+  // whose body declares `var P=` (the prefix constant); the reporter
+  // declares `var S=` (the siteId). Pick by content rather than
+  // position so test stays robust to ordering changes.
+  const blocks = out.match(/<script>\(function\(\)\{[\s\S]*?\}\)\(\);<\/script>/g) ?? [];
+  const fetchScript = blocks.find(b => b.includes('var P='));
+  assert.ok(fetchScript, 'fetch shim should be present');
+  const shimBlock = fetchScript!.replace(/^<script>/, '').replace(/<\/script>$/, '');
 
   type Capture = { url: string };
   const captured: Capture[] = [];
   const fakeWindow: any = {
     fetch: (u: any) => { captured.push({ url: typeof u === 'string' ? u : u.url }); return Promise.resolve(); },
     EventSource: undefined,
+    // The reporter (separate script block) calls addEventListener for
+    // securitypolicyviolation / error / unhandledrejection. The fetch
+    // shim itself doesn't, but the same fake window is reused if a
+    // future test runs both blocks together — provide a stub.
+    addEventListener: () => {},
   };
   const fakeXHR: any = function () {};
   fakeXHR.prototype = { open: function (_m: string, u: string) { captured.push({ url: u }); } };
@@ -263,4 +272,89 @@ test('CSP: inline scripts/styles allowed (covers runtime shim + bundled HTML)', 
   assert.match(STRICT_NSITE_CSP, /style-src[^;]*'unsafe-inline'/);
   assert.ok(!STRICT_NSITE_CSP.includes("'unsafe-eval'"),
     'CSP must not allow unsafe-eval — blocks dynamic code synthesis');
+});
+
+// ── CSP-violation reporter shim ───────────────────────────────────────────
+
+test('reporter: injected into <head> alongside the fetch shim', () => {
+  const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
+  // The reporter shim is the one whose body declares `var S=` (the
+  // siteId) — the fetch shim uses `var P=` (the prefix).
+  assert.match(out, /var S=/, 'reporter script should be present');
+  assert.match(out, /var P=/, 'fetch shim should still be present');
+});
+
+test('reporter: forwards securitypolicyviolation + error events', () => {
+  const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
+  assert.match(out, /securitypolicyviolation/);
+  assert.match(out, /unhandledrejection/);
+  // The reporter calls window.addEventListener with three event names.
+  // Spot-check that "error" is one of them (we add it with capture phase).
+  assert.match(out, /addEventListener\("error",/);
+});
+
+test('reporter: postMessage payload includes type + siteId', () => {
+  const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
+  // Reporter executes `parent.postMessage(Object.assign({type:t,siteId:S},p),"*")`
+  // — verify both type and siteId appear in the assignment.
+  assert.match(out, /parent\.postMessage\(Object\.assign\(\{type:t,siteId:S/);
+});
+
+test('reporter: behaves correctly when run against a fake window', () => {
+  const out = dec(rewriteHtmlAbsolutePaths(enc(`<html><head></head></html>`), SID));
+  // Pick the reporter (var S=...) not the fetch shim (var P=...).
+  const blocks = out.match(/<script>\(function\(\)\{[\s\S]*?\}\)\(\);<\/script>/g) ?? [];
+  const reporter = blocks.find(b => b.includes('var S='));
+  assert.ok(reporter, 'reporter block must be present');
+  const body = reporter!.replace(/^<script>/, '').replace(/<\/script>$/, '');
+
+  // Run the reporter in a sandboxed window. Capture postMessage calls
+  // and the registered listeners so we can simulate events.
+  const listeners: Record<string, Function[]> = {};
+  const posted: any[] = [];
+  const fakeWindow: any = {
+    addEventListener: (name: string, fn: Function) => {
+      (listeners[name] ||= []).push(fn);
+    },
+  };
+  const fakeParent: any = {
+    postMessage: (msg: any) => { posted.push(msg); },
+  };
+  // The reporter reads `location.href` once at boot for the "loaded"
+  // payload. Stub it so the script doesn't ReferenceError under Node.
+  const fakeLocation: any = { href: `http://127.0.0.1:3000/nsite-content/${SID}/index.html` };
+  new Function('window', 'parent', 'location', body)(fakeWindow, fakeParent, fakeLocation);
+
+  // The reporter immediately sends a "loaded" message so the panel
+  // knows the iframe successfully booted.
+  const loaded = posted.find((p) => p.type === 'nsite-loaded');
+  assert.ok(loaded, 'should immediately post nsite-loaded');
+  assert.equal(loaded.siteId, SID, 'loaded message carries siteId');
+
+  // Simulate a CSP violation event.
+  const cspListener = (listeners['securitypolicyviolation'] || [])[0];
+  assert.ok(cspListener, 'CSP listener should be registered');
+  cspListener({
+    blockedURI:        'https://image.nostr.build/foo.jpg',
+    violatedDirective: 'img-src',
+    effectiveDirective:'img-src',
+    disposition:       'enforce',
+    sourceFile:        '',
+    lineNumber:        0,
+  });
+  const csp = posted.find((p) => p.type === 'nsite-csp-violation');
+  assert.ok(csp, 'CSP violation should be posted');
+  assert.equal(csp.blockedURI, 'https://image.nostr.build/foo.jpg');
+  assert.equal(csp.effectiveDirective, 'img-src');
+  assert.equal(csp.siteId, SID);
+
+  // Simulate an uncaught script error.
+  const errListener = (listeners['error'] || [])[0];
+  assert.ok(errListener, 'error listener should be registered');
+  errListener({ message: 'TypeError: bad', filename: 'main.js', lineno: 42, colno: 10 });
+  const err = posted.find((p) => p.type === 'nsite-script-error');
+  assert.ok(err, 'script error should be posted');
+  assert.equal(err.message, 'TypeError: bad');
+  assert.equal(err.filename, 'main.js');
+  assert.equal(err.lineno, 42);
 });
