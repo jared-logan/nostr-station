@@ -9116,6 +9116,109 @@ a.client-mention {
   flex-direction: column;
   min-height: 0;
 }
+/* Tab strip — populated by app.js:renderTabStrip. Sits above the
+ * address bar. Each chip is { title span, close button }, followed
+ * by a trailing "+" new-tab button. Horizontal flex with overflow
+ * scroll so a long string of tabs doesn't blow the panel width. */
+.nsite-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 6px 8px 0 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.nsite-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 5px 10px;
+  font-size: 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 5px 5px 0 0;
+  cursor: pointer;
+  user-select: none;
+  max-width: 200px;
+  min-width: 80px;
+  position: relative;
+  top: 1px; /* tuck into the panel-body border */
+  color: var(--muted);
+  white-space: nowrap;
+}
+.nsite-tab:hover {
+  color: var(--text, #fff);
+  background: var(--bg-elev-2, rgba(255,255,255,0.04));
+}
+.nsite-tab.active {
+  color: var(--text, #fff);
+  background: var(--bg);
+  border-bottom: 1px solid var(--bg);
+  font-weight: 600;
+}
+.nsite-tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nsite-tab-close {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  color: inherit;
+  opacity: 0.5;
+  cursor: pointer;
+}
+.nsite-tab-close:hover {
+  opacity: 1;
+  background: rgba(255,255,255,0.1);
+}
+.nsite-tab-new {
+  background: none;
+  border: 1px dashed transparent;
+  border-bottom: none;
+  padding: 5px 10px;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 5px 5px 0 0;
+  position: relative;
+  top: 1px;
+}
+.nsite-tab-new:hover {
+  color: var(--text, #fff);
+  background: var(--bg-elev);
+  border-color: var(--border);
+  border-bottom-color: var(--bg-elev);
+}
+
+/* Frame container — holds the per-tab iframes. Only the active tab's
+ * iframe is display:block; non-active are display:none but stay in
+ * the DOM so tab switching is instant. */
+.nsite-frames {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+.nsite-frames > .nsite-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--bg);
+}
+
 .nsite-bar {
   display: flex;
   align-items: center;
