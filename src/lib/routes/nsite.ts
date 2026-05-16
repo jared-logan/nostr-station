@@ -616,9 +616,29 @@ async function serveContent(
 
   const path = normalizePath(decodeURIComponent(reqPath));
   let sha = snap.index.files.get(path);
-  // SPA-friendly fallback: if the path doesn't exist as a file, but
-  // index.html does, serve that. Matches the behavior of nsite.lol and
-  // most static-site CDNs.
+  // Directory-index fallback: if `path` doesn't exist as a file, try
+  // `<path>/index.html` before falling through to the SPA root index.
+  // This is what static-site CDNs (nsite.lol, Cloudflare Pages,
+  // Netlify) do for clean URLs without trailing slashes.
+  //
+  // Concretely: a Next.js / Astro / Hugo statically-exported site
+  // with files like /browse/index.html + /register/index.html
+  // navigates via `<a href="/browse">` (no trailing slash, Next.js
+  // default `trailingSlash: false`). Without this fallback we'd serve
+  // the SITE's root index.html for /browse instead of the per-route
+  // page, and the framework's client-side router would hydrate with
+  // wrong-page context — clicks appear to silently do nothing
+  // (URL changes but content stays). Field-confirmed on nsite://titan:
+  // INDEX data loads fine, but clicking Browse / Register / My Names /
+  // Guide doesn't change the rendered page until this fallback lands.
+  if (!sha && !looksLikeAsset(path)) {
+    sha = snap.index.files.get(`${path}/index.html`);
+  }
+  // SPA-friendly fallback: if neither the path nor its directory-index
+  // exists, but the root index.html does, serve that. Lets pure SPAs
+  // (Vite/Rollup output where the router handles every route from one
+  // entry HTML) render arbitrary client-side routes the user paste-
+  // navigates to. Same behavior as nsite.lol's catch-all.
   if (!sha) {
     const indexSha = snap.index.files.get('index.html');
     if (indexSha && !looksLikeAsset(path)) {
