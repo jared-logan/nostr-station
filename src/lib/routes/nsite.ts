@@ -96,6 +96,10 @@ function getSettings() {
     discoveryRelays:   file.discoveryRelays,
     blossomFallback:   file.blossomServers,
     cacheCapBytes:     (Number.isFinite(cap) && cap > 0 ? cap : 200) * 1024 * 1024,
+    // Snapshot of the trusted-pubkey allowlist for this request. Built
+    // into a Set for O(1) lookup at resolve time. Lowercased for the
+    // case-insensitive match against the resolved pubkey.
+    trustedPubkeys:    new Set(file.trustedExternalNsites.map(p => p.toLowerCase())),
   };
 }
 
@@ -107,6 +111,12 @@ interface SiteSnapshot {
   index: SiteIndex;
   blossomServers: string[];
   createdAt: number;
+  /** Whether the user has explicitly added this pubkey to nsite.json's
+   *  trustedExternalNsites list. Frozen at resolve time so the CSP
+   *  posture for a given iframe load doesn't shift mid-session if the
+   *  user toggles trust elsewhere — the panel always re-resolves after
+   *  a trust change to pick up the new posture. */
+  trusted: boolean;
 }
 
 const sites = new Map<string, SiteSnapshot>();
@@ -177,7 +187,7 @@ export async function handleNsite(
   if (path === '/api/nsite/resolve' && method === 'GET') {
     const addr = (u.searchParams.get('addr') || '').trim();
     if (!addr) { json(res, 400, { error: 'addr required' }); return true; }
-    const { nsitConfig, contentFallback, discoveryRelays, blossomFallback } = getSettings();
+    const { nsitConfig, contentFallback, discoveryRelays, blossomFallback, trustedPubkeys } = getSettings();
     try {
       const ownerRelays = pickRelays();
       const resolved = await resolveAddress(addr, nsitConfig);
@@ -255,12 +265,14 @@ export async function handleNsite(
         : authorBlossomServers;
       gcSites();
       const id = shortId();
+      const trusted = trustedPubkeys.has(resolved.pubkey.toLowerCase());
       sites.set(id, {
         pubkey: resolved.pubkey,
         display: resolved.display,
         index,
         blossomServers,
         createdAt: Date.now(),
+        trusted,
       });
       json(res, 200, {
         siteId: id,
@@ -272,9 +284,15 @@ export async function handleNsite(
         oldestAt: index.oldestAt,
         totalEventsSeen: index.totalEventsSeen,
         format: index.format,
+        // Whether this author's pubkey is on the user's trustedExternalNsites
+        // list. Surfaced so the panel can render "Trust this nsite" vs
+        // "Trusted ✓ (revoke)" in the Diagnostics block.
+        trusted,
         // Sandbox / CSP posture of the iframe — surfaced to the panel
         // so users can see "no external HTTP, WSS allowed" at a glance.
-        sandbox: { csp: 'strict-nsite' },
+        // When `trusted` is true the served CSP gets `https:` added to
+        // most -src directives; otherwise it stays strict.
+        sandbox: { csp: trusted ? 'trusted-nsite' : 'strict-nsite' },
         // Per-file event details for the diagnostics panel — paths,
         // sha256, eventId, timestamp. Sorted by path. Capped at 50 to
         // bound the payload; nobody publishes 50+ files in v1 nsites
@@ -349,6 +367,43 @@ export async function handleNsite(
       // edit on the next resolve.
       sites.clear();
       json(res, 200, { config: merged });
+    } catch (e: any) {
+      json(res, 400, { error: 'invalid_field', message: String(e?.message || e) });
+    }
+    return true;
+  }
+
+  // Per-site trust toggle — adds or removes an author pubkey from
+  // nsite.json's trustedExternalNsites list. Trusted nsites get a
+  // relaxed CSP that allows external HTTPS resources (script/img/connect/
+  // font/style/media). The blast radius is still contained by the
+  // per-origin iframe model: each nsite runs in its own
+  // <siteId>.nsite.localhost:<port> origin, can't reach the dashboard's
+  // session token, and can't probe /api/* (404'd on the nsite host).
+  // So "trust" here is fingerprinting + supply-chain risk for the user
+  // viewing the site, NOT station-compromise risk.
+  //
+  // Body: { pubkey: <64-hex>, allow: <bool> }. Clears the sites cache
+  // on success so a subsequent resolve picks up the new CSP posture
+  // (the snapshot's `trusted` flag is frozen at resolve time, so the
+  // panel always re-resolves after a toggle).
+  if (path === '/api/nsite/trust' && method === 'POST') {
+    let payload: any;
+    try { payload = JSON.parse(await readBody(req) || '{}'); }
+    catch { json(res, 400, { error: 'invalid_json' }); return true; }
+    const pubkey = String(payload?.pubkey || '').trim().toLowerCase();
+    const allow  = !!payload?.allow;
+    if (!/^[0-9a-f]{64}$/.test(pubkey)) {
+      json(res, 400, { error: 'invalid_pubkey', message: 'pubkey must be 64-hex' });
+      return true;
+    }
+    try {
+      const current = readNsiteConfig();
+      const set = new Set(current.trustedExternalNsites.map(p => p.toLowerCase()));
+      if (allow) set.add(pubkey); else set.delete(pubkey);
+      const merged = writeNsiteConfig({ trustedExternalNsites: [...set] });
+      sites.clear();
+      json(res, 200, { pubkey, trusted: allow, trustedExternalNsites: merged.trustedExternalNsites });
     } catch (e: any) {
       json(res, 400, { error: 'invalid_field', message: String(e?.message || e) });
     }
@@ -636,7 +691,7 @@ async function serveContent(
     // the session. The URL incorporates a session-scoped siteId, so a
     // republish gets a fresh siteId and bypasses the browser cache.
     'Cache-Control':   'private, max-age=300',
-    'Content-Security-Policy': buildCspForRequest(req, opts.mode),
+    'Content-Security-Policy': buildCspForRequest(req, opts.mode, snap.trusted),
   };
   if (opts.mode === 'path-prefix') {
     headers['X-Frame-Options'] = 'SAMEORIGIN';
@@ -652,12 +707,36 @@ async function serveContent(
  * needs to vary because the dashboard parent is same-origin in
  * path-prefix mode and cross-origin in subdomain mode.
  *
+ * When `trusted` is true (the author's pubkey is on the user's
+ * trustedExternalNsites list), `https:` is appended to script/img/
+ * connect/font/style/media-src so the nsite can load esm.sh modules,
+ * nostr.build images, Google Fonts, etc. — the things strict-mode
+ * blocks. `'unsafe-eval'` stays blocked (still no eval/new Function),
+ * `object-src 'none'` stays, `frame-ancestors` stays loopback-only.
+ * The blast radius is contained by the per-origin iframe model: a
+ * trusted nsite can phone home with the user's IP and pull in a
+ * compromised CDN's payload, but it cannot reach the dashboard or
+ * any other nsite's origin.
+ *
  * We derive the dashboard port from the request's Host header so we
  * don't need to thread the listening port through every call site.
  * The host is already validated by web-server.ts before we get here.
  */
-function buildCspForRequest(req: http.IncomingMessage, mode: ServeMode): string {
-  if (mode === 'path-prefix') return STRICT_NSITE_CSP;
+function buildCspForRequest(req: http.IncomingMessage, mode: ServeMode, trusted: boolean = false): string {
+  let policy = STRICT_NSITE_CSP;
+  if (trusted) {
+    // Append `https:` to the network-loading directives. We DON'T touch
+    // script-src's `'unsafe-eval'` (still blocked) — trust loosens the
+    // network surface, not the dynamic-code-synthesis ones.
+    policy = policy
+      .replace(/(script-src [^;]*)/,  '$1 https:')
+      .replace(/(img-src [^;]*)/,     '$1 https:')
+      .replace(/(connect-src [^;]*)/, '$1 https:')
+      .replace(/(font-src [^;]*)/,    '$1 https:')
+      .replace(/(style-src [^;]*)/,   '$1 https:')
+      .replace(/(media-src [^;]*)/,   '$1 https:');
+  }
+  if (mode === 'path-prefix') return policy;
   // Subdomain mode: substitute frame-ancestors to allow the loopback
   // dashboard origins. Port comes from the Host header (already
   // shaped <siteId>.nsite.localhost:<port>).
@@ -684,7 +763,7 @@ function buildCspForRequest(req: http.IncomingMessage, mode: ServeMode): string 
   const ancestors = port
     ? `http://localhost:${port} http://127.0.0.1:${port}`
     : "http://localhost http://127.0.0.1";
-  return STRICT_NSITE_CSP.replace(
+  return policy.replace(
     "frame-ancestors 'self'",
     `frame-ancestors ${ancestors}`,
   );

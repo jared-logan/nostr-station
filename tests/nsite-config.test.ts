@@ -138,3 +138,85 @@ test('writeNsiteConfig: empty pubkey accepted (re-enables default)', () => {
 test('nsiteConfigPath: lives under ~/.config/nostr-station', () => {
   assert.equal(nsiteConfigPath(), CFG_FILE);
 });
+
+// ── trustedExternalNsites ───────────────────────────────────────────────
+//
+// Per-pubkey allowlist for relaxing the iframe CSP so external HTTPS
+// loads (esm.sh modules, nostr.build images, fonts, etc.) work for
+// nsites the user has explicitly opted into. Lives alongside the relay/
+// blossom config since it's the same nsite.json file and the same
+// "things the user decides about how nsite browsing works" surface.
+
+test('readNsiteConfig: trustedExternalNsites defaults to [] when missing', () => {
+  rmCfg();
+  const r = readNsiteConfig();
+  assert.deepEqual(r.trustedExternalNsites, []);
+});
+
+test('readNsiteConfig: trustedExternalNsites accepts well-formed 64-hex pubkeys', () => {
+  rmCfg();
+  const pk = 'a'.repeat(64);
+  fs.mkdirSync(path.dirname(CFG_FILE), { recursive: true });
+  fs.writeFileSync(CFG_FILE, JSON.stringify({ trustedExternalNsites: [pk] }));
+  const r = readNsiteConfig();
+  assert.deepEqual(r.trustedExternalNsites, [pk]);
+});
+
+test('readNsiteConfig: trustedExternalNsites lowercases + dedupes + drops malformed rows', () => {
+  rmCfg();
+  const pkA = 'a'.repeat(64);
+  const pkB = 'b'.repeat(64);
+  fs.mkdirSync(path.dirname(CFG_FILE), { recursive: true });
+  fs.writeFileSync(CFG_FILE, JSON.stringify({
+    trustedExternalNsites: [
+      pkA.toUpperCase(),  // upper-case → lowercased
+      pkA,                // duplicate → dropped
+      'not-hex',          // malformed → dropped
+      pkB,                // valid → kept
+      '',                 // empty → dropped
+    ],
+  }));
+  const r = readNsiteConfig();
+  assert.deepEqual(r.trustedExternalNsites, [pkA, pkB],
+    'output is lowercased, deduplicated, with malformed rows silently dropped');
+});
+
+test('writeNsiteConfig: trustedExternalNsites round-trips through the file', () => {
+  rmCfg();
+  const pk = 'c'.repeat(64);
+  const w = writeNsiteConfig({ trustedExternalNsites: [pk] });
+  assert.deepEqual(w.trustedExternalNsites, [pk]);
+  const r = readNsiteConfig();
+  assert.deepEqual(r.trustedExternalNsites, [pk]);
+});
+
+test('writeNsiteConfig: trustedExternalNsites drops malformed rows like other arrays', () => {
+  // Same shape as the relay rows — we forgive bad input rather than
+  // throwing on the array as a whole, so the user doesn't lose every
+  // good entry just because one is malformed.
+  rmCfg();
+  const pk = 'd'.repeat(64);
+  const w = writeNsiteConfig({
+    trustedExternalNsites: ['nope', pk, 123 as any, ''],
+  });
+  assert.deepEqual(w.trustedExternalNsites, [pk]);
+});
+
+test('writeNsiteConfig: empty trustedExternalNsites array CLEARS the list', () => {
+  rmCfg();
+  const pk = 'e'.repeat(64);
+  writeNsiteConfig({ trustedExternalNsites: [pk] });
+  const cleared = writeNsiteConfig({ trustedExternalNsites: [] });
+  assert.deepEqual(cleared.trustedExternalNsites, [],
+    'passing an empty array must be how a user revokes all trust at once');
+});
+
+test('writeNsiteConfig: omitting trustedExternalNsites preserves the existing list', () => {
+  // Same shape as the other fields: undefined = leave alone, array = replace.
+  rmCfg();
+  const pk = 'f'.repeat(64);
+  writeNsiteConfig({ trustedExternalNsites: [pk] });
+  const r = writeNsiteConfig({ contentRelays: ['wss://example/'] });
+  assert.deepEqual(r.trustedExternalNsites, [pk],
+    'editing a different field must not clear the trust list');
+});
