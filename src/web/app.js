@@ -18604,8 +18604,10 @@ const NsitePanel = (() => {
 
   // HTML variant — used when the meta line needs to embed interactive
   // bits (the inline "trusted · revoke" segment from the PR-1 banner-slim
-  // work). Same shape as setMeta but uses innerHTML; callers are
-  // responsible for escapeHtml on any non-trusted input.
+  // work). Same shape as setMeta but uses innerHTML; callers that need
+  // HTML must build it themselves with escapeHtml on any non-trusted
+  // input. textContent is the default elsewhere to keep XSS surface
+  // at zero for the common case.
   function setMetaHtml(html) {
     const tab = activeTab();
     if (tab) { tab.metaContent = html || ''; tab.metaIsHtml = true; }
@@ -18733,18 +18735,16 @@ const NsitePanel = (() => {
     if (!pk) return '';
     const trusted = !!tab.body.trusted;
     const hasViolations = tab.reports.cspViolations.length > 0;
-    // Suppress when there's nothing to ask about: untrusted nsite with
-    // no violations is rendering fine under strict mode.
-    if (!trusted && !hasViolations) return '';
+    // Only the call-to-action case earns the prominent banner now:
+    // untrusted nsite that just got blocked from loading something the
+    // user might want to allow. The trusted-status case moved into the
+    // meta line (built in go() above) so it doesn't claim 40px of
+    // vertical space for an action the user already took. Banner is
+    // suppressed whenever (a) the nsite is already trusted, or (b)
+    // there are no violations yet (untrusted-and-clean is rendering
+    // fine under strict mode).
+    if (trusted || !hasViolations) return '';
     const help = `<span class="nsite-trust-help" title="${escapeHtml(TRUST_TOOLTIP)}" aria-label="What does trust mean?">?</span>`;
-    if (trusted) {
-      return `<div class="nsite-trust nsite-trust-on">
-        <span>External content: <strong>allowed for this nsite</strong></span>
-        <button class="nsite-trust-btn" type="button"
-                data-pk="${escapeHtml(pk)}" data-allow="false">Revoke</button>
-        ${help}
-      </div>`;
-    }
     return `<div class="nsite-trust nsite-trust-off">
       <span>External content: <strong>strict</strong> · ${tab.reports.cspViolations.length} blocked</span>
       <button class="nsite-trust-btn primary" type="button"
@@ -18913,10 +18913,26 @@ const NsitePanel = (() => {
       // with a strict CSP (no external HTTP, only same-origin assets
       // + WSS to Nostr relays). Trust signal: "the page you're about
       // to see can't phone home with your IP via tracking pixels."
-      const sandboxBit = body.sandbox?.csp === 'strict-nsite'
-        ? 'strict sandbox' : '';
-      const bits = [fmtBit, tsBit, ...relayBits, sandboxBit].filter(Boolean);
-      setMeta(bits.join(' · '));
+      //
+      // When the nsite is trusted (user previously clicked Trust on the
+      // banner), inline the trust state + Revoke link here INSTEAD OF
+      // shipping the prominent banner above the viewport. Status without
+      // a call-to-action shouldn't push the iframe down 40px on every
+      // load — the inline form is a single segment in a line the user
+      // already reads, Revoke is one click away, and the banner reappears
+      // automatically if a new violation surfaces.
+      const trusted = !!body.trusted;
+      const sandboxBit = trusted
+        ? `<span class="nsite-meta-trusted">trusted sandbox</span> · <button class="nsite-meta-revoke" type="button" data-pk="${escapeHtml(String(body.pubkey || ''))}">revoke</button>`
+        : (body.sandbox?.csp === 'strict-nsite' ? 'strict sandbox' : '');
+      const bits = [fmtBit, tsBit, ...relayBits].filter(Boolean);
+      // Build the plain-text portion with escapeHtml then append the
+      // sandbox segment (which is the only place we intentionally emit
+      // markup). Avoids any chance of an escaped relay URL or display
+      // string sneaking interactive content into the meta line.
+      const textPart = bits.map(escapeHtml).join(' · ');
+      const metaHtml = sandboxBit ? `${textPart} · ${sandboxBit}` : textPart;
+      setMetaHtml(metaHtml);
       setDiagnostics(body);
       loadIframe(siteId, entryPath, display);
       updateNavButtons();
@@ -19274,6 +19290,18 @@ const NsitePanel = (() => {
       const allow = btn.getAttribute('data-allow') === 'true';
       if (!/^[0-9a-f]{64}$/i.test(pk)) return;
       void toggleTrust(btn, pk, allow);
+    });
+
+    // Inline "revoke" link in the meta line — same toggle action as the
+    // banner button, fires when a previously-trusted nsite is loaded.
+    // Delegated on the meta element so it survives setMetaHtml's
+    // repeated innerHTML rewrites.
+    els.meta?.addEventListener('click', (ev) => {
+      const btn = ev.target?.closest?.('.nsite-meta-revoke');
+      if (!btn || btn.disabled) return;
+      const pk = btn.getAttribute('data-pk') || '';
+      if (!/^[0-9a-f]{64}$/i.test(pk)) return;
+      void toggleTrust(btn, pk, /* allow= */ false);
     });
 
     // Hash deep-link support: `#nsite/<addr>` auto-loads on panel enter.
