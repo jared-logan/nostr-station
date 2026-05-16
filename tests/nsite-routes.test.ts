@@ -13,7 +13,7 @@ useTempHome();
 const mod = await import('../src/lib/routes/nsite.ts');
 const {
   rewriteHtmlAbsolutePaths, rewriteCssAbsoluteUrls, STRICT_NSITE_CSP,
-  handleNsite, _internal,
+  injectReporterOnly, handleNsite, handleNsiteSubdomain, _internal,
 } = mod;
 
 const dec = (b: Uint8Array) => new TextDecoder('utf-8').decode(b);
@@ -580,4 +580,184 @@ test('serveContent: 404 (file missing inside an existing snapshot) also carries 
   assert.equal(res.statusCode, 404);
   assert.equal(res.headers['access-control-allow-origin'], '*');
   _internal.sites.delete(sid);
+});
+
+// ── injectReporterOnly (subdomain mode) ───────────────────────────────────
+//
+// In subdomain mode the per-nsite origin makes <img src="/foo"> resolve
+// natively — no static rewriter needed, no importmap needed, no
+// fetch/XHR/EventSource shim needed. We still want the diagnostic
+// reporter for the panel's Diagnostics block, so a separate inject path
+// drops just that one <script> in.
+
+test('injectReporterOnly: reporter <script> is the ONLY thing injected', () => {
+  const out = dec(injectReporterOnly(enc(`<html><head></head><body></body></html>`), SID));
+  // The reporter is identifiable by `var S=` (the siteId-baked block).
+  assert.match(out, /<script>\(function\(\)\{var S=/, 'reporter must be present');
+  // The full-shim hallmarks must NOT be present.
+  assert.ok(!out.includes('importmap'), 'importmap must be skipped in subdomain mode');
+  assert.ok(!out.includes('var P='),    'fetch shim (var P=...) must be skipped — paths resolve natively');
+  assert.ok(!out.includes('XMLHttpRequest.prototype.open'),
+    'XHR patch must be skipped in subdomain mode');
+});
+
+test('injectReporterOnly: lands right after <head> opening tag', () => {
+  const out = dec(injectReporterOnly(enc(
+    `<html><head><title>x</title></head><body>hi</body></html>`,
+  ), SID));
+  const headIdx     = out.indexOf('<head>');
+  const reporterIdx = out.indexOf('<script>(function()');
+  const titleIdx    = out.indexOf('<title>');
+  assert.ok(headIdx >= 0 && reporterIdx > headIdx && reporterIdx < titleIdx,
+    'reporter must come right after <head> and before any user content');
+});
+
+test('injectReporterOnly: falls back to <html> when <head> missing', () => {
+  const out = dec(injectReporterOnly(enc(`<html><body>hi</body></html>`), SID));
+  assert.ok(out.indexOf('<script>') > out.indexOf('<html>'),
+    'reporter must follow <html> opening tag when <head> is absent');
+});
+
+test('injectReporterOnly: prepended when neither <head> nor <html> exist', () => {
+  const out = dec(injectReporterOnly(enc(`<p>fragment</p>`), SID));
+  assert.ok(out.startsWith('<script>(function()'),
+    'reporter must be the first content for fragment HTML');
+});
+
+test('injectReporterOnly: does not double-rewrite absolute paths (subdomain mode == natural resolution)', () => {
+  // Critical contract: in subdomain mode, <img src="/foo.jpg"> must reach
+  // the browser UNCHANGED — the per-nsite origin resolves it naturally.
+  // If we accidentally rewrite to /nsite-content/<sid>/foo.jpg, the
+  // subdomain handler tries to look up "nsite-content/<sid>/foo.jpg"
+  // inside the manifest, which doesn't exist, and the asset 404s.
+  const html = `<html><head></head><body><img src="/img/avatar.jpg"><script src="/main.js"></script></body></html>`;
+  const out  = dec(injectReporterOnly(enc(html), SID));
+  assert.ok(out.includes('src="/img/avatar.jpg"'), 'absolute img src must NOT be rewritten');
+  assert.ok(out.includes('src="/main.js"'),        'absolute script src must NOT be rewritten');
+  assert.ok(!out.includes(`/nsite-content/${SID}/`),
+    'subdomain mode must NEVER emit a /nsite-content/<sid>/ path');
+});
+
+// ── handleNsiteSubdomain (per-origin entry point) ─────────────────────────
+
+test('handleNsiteSubdomain: serves index.html with no path rewriting, no X-Frame-Options', async () => {
+  const sid = '0000000000000010';
+  const sha = '7'.repeat(64);
+  _internal.sites.set(sid, {
+    pubkey: '8'.repeat(64), display: 'mock',
+    index: {
+      files: new Map([['index.html', sha]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v2-named', manifestServers: [],
+    },
+    blossomServers: [], createdAt: Date.now(),
+  });
+  _internal.blobs.set(sha, {
+    bytes: new TextEncoder().encode(`<html><head></head><body><img src="/logo.png"></body></html>`),
+    mime:  'text/html; charset=utf-8',
+  });
+  const res = makeMockRes();
+  const req = { method: 'GET', headers: { host: `${sid}.nsite.localhost:3000` } } as any;
+  await handleNsiteSubdomain(req, res, sid, '/');
+
+  assert.equal(res.statusCode, 200);
+  // X-Frame-Options must be ABSENT in subdomain mode (would block the
+  // cross-origin dashboard from embedding via SAMEORIGIN).
+  assert.equal(res.headers['x-frame-options'], undefined,
+    'subdomain mode must omit X-Frame-Options — frame-ancestors handles embedding');
+  // CSP must allow the dashboard origin as a frame-ancestor.
+  const csp = String(res.headers['content-security-policy'] || '');
+  assert.match(csp, /frame-ancestors http:\/\/localhost:3000/,
+    'CSP frame-ancestors must grant the dashboard loopback origin');
+  assert.match(csp, /http:\/\/127\.0\.0\.1:3000/,
+    'CSP frame-ancestors must grant 127.0.0.1 dashboard origin');
+  // Body must contain the original /logo.png reference unchanged.
+  // res.body is a Uint8Array — decode before string-matching.
+  const body = res.body instanceof Uint8Array
+    ? new TextDecoder('utf-8').decode(res.body)
+    : String(res.body);
+  assert.ok(body.includes('src="/logo.png"'),
+    'absolute paths must reach the browser unchanged in subdomain mode');
+  assert.ok(!body.includes(`/nsite-content/${sid}/`),
+    'no /nsite-content/<sid>/ prefix should leak into the served HTML');
+  // ACAO + Vary unchanged from path-prefix mode.
+  assert.equal(res.headers['access-control-allow-origin'], '*');
+  _internal.sites.delete(sid);
+  _internal.blobs.delete(sha);
+});
+
+test('handleNsiteSubdomain: rejects non-GET/HEAD with 405', async () => {
+  const sid = '0000000000000011';
+  const res = makeMockRes();
+  const req = { method: 'POST', headers: { host: `${sid}.nsite.localhost:3000` } } as any;
+  await handleNsiteSubdomain(req, res, sid, '/');
+  assert.equal(res.statusCode, 405);
+});
+
+test('handleNsiteSubdomain: strips query and hash from path lookup', async () => {
+  // Manifest paths are content-addressed — no query / hash semantics.
+  // The lookup must therefore strip them, otherwise legitimate paths
+  // with a cache-busting `?v=...` (which some SPAs append) would 404.
+  const sid = '0000000000000012';
+  const sha = '9'.repeat(64);
+  _internal.sites.set(sid, {
+    pubkey: 'a'.repeat(64), display: 'mock',
+    index: {
+      files: new Map([['style.css', sha]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v2-named', manifestServers: [],
+    },
+    blossomServers: [], createdAt: Date.now(),
+  });
+  _internal.blobs.set(sha, {
+    bytes: new TextEncoder().encode('body{color:red}'),
+    mime:  'text/css; charset=utf-8',
+  });
+  const res = makeMockRes();
+  const req = { method: 'GET', headers: { host: `${sid}.nsite.localhost:3000` } } as any;
+  await handleNsiteSubdomain(req, res, sid, '/style.css?v=abc123#frag');
+  assert.equal(res.statusCode, 200);
+  assert.match(String(res.headers['content-type']), /text\/css/);
+  _internal.sites.delete(sid);
+  _internal.blobs.delete(sha);
+});
+
+test('handleNsiteSubdomain: 410 when snapshot is expired/missing', async () => {
+  const sid = '0000000000000013';
+  _internal.sites.delete(sid);
+  const res = makeMockRes();
+  const req = { method: 'GET', headers: { host: `${sid}.nsite.localhost:3000` } } as any;
+  await handleNsiteSubdomain(req, res, sid, '/index.html');
+  assert.equal(res.statusCode, 410);
+  assert.equal(res.headers['access-control-allow-origin'], '*');
+});
+
+test('handleNsiteSubdomain: 200-response CSP does NOT contain the path-prefix \'self\' frame-ancestors literal', async () => {
+  // Regression guard for the CSP rewrite. If the substitution misfires
+  // and we ship STRICT_NSITE_CSP verbatim on a subdomain 200, the
+  // dashboard (cross-origin parent) cannot embed the iframe — silent
+  // black box from the user's perspective. This catches that early.
+  const sid = '0000000000000014';
+  const sha = 'b'.repeat(64);
+  _internal.sites.set(sid, {
+    pubkey: 'c'.repeat(64), display: 'mock',
+    index: {
+      files: new Map([['index.html', sha]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v2-named', manifestServers: [],
+    },
+    blossomServers: [], createdAt: Date.now(),
+  });
+  _internal.blobs.set(sha, {
+    bytes: new TextEncoder().encode('<html><head></head><body></body></html>'),
+    mime:  'text/html; charset=utf-8',
+  });
+  const res = makeMockRes();
+  const req = { method: 'GET', headers: { host: `${sid}.nsite.localhost:3000` } } as any;
+  await handleNsiteSubdomain(req, res, sid, '/');
+  const csp = String(res.headers['content-security-policy'] || '');
+  assert.ok(!/frame-ancestors 'self'/.test(csp),
+    "subdomain mode must replace 'self' in frame-ancestors with explicit loopback origins");
+  _internal.sites.delete(sid);
+  _internal.blobs.delete(sha);
 });

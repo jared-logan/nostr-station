@@ -141,3 +141,83 @@ test('web-server: /api/status returns the expected schema (cached path)', async 
     assert.equal(typeof row.kind,  'string');
   }
 });
+
+// ── Nsite per-origin subdomain dispatch ────────────────────────────────────
+//
+// *.nsite.localhost subdomains resolve to 127.0.0.1 client-side (RFC 6761)
+// and reach our loopback socket the same as `localhost`. The dispatcher
+// recognizes them as the per-nsite origin model from PR-B, routes them to
+// the nsite content handler, and refuses any /api/* path on that host so
+// a hostile nsite payload (rendered in a sibling browser context) can't
+// probe the dashboard's private surface.
+
+test('web-server: accepts <16hex>.nsite.localhost:<port> Host with 410 (unknown sid)', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Random sid that was never resolved → snapshot not in the cache →
+  // 410 from serveContent. The point is the Host gate ACCEPTS this
+  // hostname instead of returning the 400 "bad host" we'd get for
+  // evil.example.com.
+  const r = await rawRequest({
+    port,
+    path:       '/index.html',
+    hostHeader: `aabbccddeeff0011.nsite.localhost:${port}`,
+  });
+  assert.equal(r.status, 410, 'unknown sid should fall through to serveContent and 410');
+  assert.match(r.body, /session expired/);
+});
+
+test('web-server: refuses /api/* paths on nsite subdomains with 404', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Even if a hostile nsite payload tries to fetch the dashboard API
+  // by way of its own origin (e.g. `fetch('/api/status')` from inside
+  // the iframe), the dispatcher must 404 on the nsite subdomain. This
+  // is belt-and-braces — the auth gate would refuse anyway, but the
+  // 404 keeps the existence of the API surface invisible from the
+  // iframe origin.
+  const r = await rawRequest({
+    port,
+    path:       '/api/status',
+    hostHeader: `00112233aabbccdd.nsite.localhost:${port}`,
+  });
+  assert.equal(r.status, 404);
+  assert.match(r.body, /not exposed on nsite subdomain/);
+});
+
+test('web-server: nsite host with malformed sid (not 16 hex) → bad host', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // The regex only matches exactly 16 lowercase hex chars. Anything else
+  // falls through to the regular allowedHosts gate → 400 "bad host".
+  // Without this guard a DNS-rebinding attacker could pick a hostname
+  // that LOOKS gateway-shaped but doesn't decode to a snapshot, and use
+  // it as a probe vector. We just refuse.
+  const r = await rawRequest({
+    port,
+    path:       '/index.html',
+    hostHeader: `not-hex.nsite.localhost:${port}`,
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body.trim(), /bad host/);
+});
+
+test('web-server: nsite host with wrong port → bad host', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Belt-and-braces: even if the hostname is shaped right, the port
+  // must match the listening port. Otherwise a Host header forged
+  // with the wrong port would bypass intent.
+  const wrongPort = port === 1 ? 2 : port - 1;
+  const r = await rawRequest({
+    port,
+    path:       '/index.html',
+    hostHeader: `aabbccddeeff0011.nsite.localhost:${wrongPort}`,
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body.trim(), /bad host/);
+});

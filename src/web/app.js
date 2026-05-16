@@ -18761,12 +18761,26 @@ const NsitePanel = (() => {
     }
   }
 
+  // Build the per-nsite subdomain URL. Each siteId gets its own
+  // <siteId>.nsite.localhost:<port> origin (server-side handler in
+  // routes/nsite.ts:handleNsiteSubdomain). Browsers resolve *.localhost
+  // to 127.0.0.1 per RFC 6761, treat it as Secure Context, and SOP
+  // isolates it from the dashboard root via the subdomain. Net effect:
+  // real localStorage / crypto.subtle / `Origin:` on WebSocket. The
+  // server-side handler ensures /api/* paths return 404 on these
+  // hostnames so a hostile nsite payload can't probe the dashboard API.
+  function nsiteFrameUrl(siteId, path) {
+    const safePath = String(path || 'index.html').replace(/^\/+/, '');
+    const proto = window.location.protocol;
+    const port = window.location.port ? `:${window.location.port}` : '';
+    return `${proto}//${siteId}.nsite.localhost${port}/${safePath}`;
+  }
+
   function loadIframe(siteId, path, display) {
     if (!els.frame) return;
     setEmpty(false);
-    const safePath = String(path || 'index.html').replace(/^\/+/, '');
     drivenLoad = true;
-    els.frame.src = `/nsite-content/${siteId}/${safePath}`;
+    els.frame.src = nsiteFrameUrl(siteId, path);
     if (els.addr) els.addr.value = display || els.addr.value;
   }
 

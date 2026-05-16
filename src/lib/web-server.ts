@@ -104,7 +104,7 @@ import { handleNvpn } from './routes/nvpn.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
 import { getInboxWorker } from './mail/inbox.js';
-import { handleNsite } from './routes/nsite.js';
+import { handleNsite, handleNsiteSubdomain } from './routes/nsite.js';
 
 // Static-asset + vendor + security-headers wiring lives in
 // ./web-server-static.ts. We re-import the four names the orchestrator
@@ -511,6 +511,41 @@ export async function startWebServer(port: number): Promise<http.Server> {
       return h === '127.0.0.1' || h === 'localhost' || h === '[::1]' || h === '::1';
     } catch { return false; }
   };
+  // Per-nsite-origin host pattern: <16hex>.nsite.localhost:<port>.
+  //
+  // Why this exists: nsites used to render inside an iframe served from the
+  // dashboard's same origin under /nsite-content/<siteId>/ + a sandbox
+  // without `allow-same-origin`. That gave the iframe an opaque (`null`)
+  // origin, which broke:
+  //   - ES module CORS (fixed in #118 with ACAO `*`)
+  //   - `crypto.subtle` (secure-context-only → bundles fell back to esm.sh)
+  //   - localStorage / IndexedDB (throw in null origin)
+  //   - WebSocket `Origin: null` (some relays reject)
+  //   - cross-frame navigation back to the same URL (SOP blocks "null →
+  //     localhost" loads even though the URLs are identical)
+  //
+  // Titan Browser sidesteps all of these by giving each nsite its OWN
+  // origin via a custom `nsite-content://` scheme. We approximate it on
+  // the web by serving each nsite from its own *.nsite.localhost
+  // subdomain. Browsers resolve *.localhost to 127.0.0.1 per RFC 6761
+  // and treat it as a Secure Context, so:
+  //   - Each siteId is a real, distinct browser origin.
+  //   - `crypto.subtle` is defined → bundles don't fall back to esm.sh.
+  //   - `localStorage` / IDB have their own per-origin bucket.
+  //   - WebSocket sends `Origin: http://<siteId>.nsite.localhost:<port>`
+  //     (a real origin, not `null`).
+  //   - The iframe can keep `allow-same-origin` in its sandbox because
+  //     SOP still isolates it from the dashboard (subdomain ≠ root).
+  //
+  // The Host header is required to match this regex exactly — siteIds
+  // are 16 hex chars (8 bytes from randomBytes), the literal
+  // `nsite.localhost` suffix, and the same port we listen on. Anything
+  // else falls through to the regular allowedHosts gate.
+  const NSITE_HOST = new RegExp(`^([0-9a-f]{16})\\.nsite\\.localhost:${port}$`);
+  const parseNsiteHost = (host: string): string | null => {
+    const m = host.match(NSITE_HOST);
+    return m ? m[1] : null;
+  };
 
   return new Promise<http.Server>((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
@@ -534,6 +569,39 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // listens on loopback, any other Host value is either a
       // misconfiguration or an attack — either way, refuse.
       const hostHeader = String(req.headers['host'] || '').toLowerCase();
+
+      // ── H1a: Nsite per-origin subdomain dispatch ──────────────────────
+      // *.nsite.localhost subdomains resolve to 127.0.0.1 client-side
+      // (RFC 6761) and reach our loopback socket the same as `localhost`,
+      // so they're loopback-safe. They get a deliberately narrow surface:
+      // ONLY nsite content paths are served (file lookup against the
+      // siteId frozen in the Host header). The dashboard API (`/api/*`),
+      // auth endpoints, terminal/WS upgrade, project tooling, etc. are
+      // 404'd on this origin so a compromised or hostile nsite payload
+      // (rendered in a sibling browser context) can't probe them.
+      //
+      // The Bearer auth gate also doesn't apply here — the nsite origin
+      // has its own (empty) localStorage and never has the dashboard's
+      // session token. Permissive on read is intentional: blobs are
+      // content-addressed Blossom bytes anyone can already fetch from
+      // upstream.
+      const nsiteSid = parseNsiteHost(hostHeader);
+      if (nsiteSid) {
+        // Refuse anything that looks like a probe of the dashboard's
+        // private surface from the nsite origin.
+        if (url.startsWith('/api/') ||
+            url.startsWith('/.well-known/') ||
+            url === '/__terminal' ||
+            url.startsWith('/__')) {
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          res.end('not exposed on nsite subdomain');
+          return;
+        }
+        // Path-only URL → file lookup inside the snapshot keyed by sid.
+        await handleNsiteSubdomain(req, res, nsiteSid, url);
+        return;
+      }
+
       if (!allowedHosts.has(hostHeader)) {
         res.writeHead(400, { 'Content-Type': 'text/plain' });
         res.end('bad host');

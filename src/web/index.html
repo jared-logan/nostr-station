@@ -576,9 +576,24 @@
           <div class="nsite-diag-body" id="nsite-diag-body"></div>
         </details>
         <div class="nsite-viewport">
+          <!--
+            allow-same-origin is intentional: the iframe loads from
+            <siteId>.nsite.localhost:<port> which is cross-origin to
+            the dashboard at localhost:<port> (different hostname →
+            distinct origin under SOP). With allow-same-origin the
+            iframe runs in ITS OWN real origin instead of the opaque
+            null-origin, which unblocks crypto.subtle (Secure Context),
+            localStorage / IndexedDB (real per-origin buckets),
+            non-null WebSocket Origin headers, and ES module CORS.
+            SOP still isolates it from the dashboard parent — the
+            subdomain hostname is a different origin, so the iframe
+            can't read parent.document, parent.localStorage, or the
+            session token. The dashboard's /api/* surface is also
+            404'd on this hostname server-side as a belt-and-braces.
+          -->
           <iframe id="nsite-frame"
                   class="nsite-frame"
-                  sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
+                  sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin"
                   referrerpolicy="no-referrer"
                   title="nsite content"></iframe>
           <div class="nsite-empty" id="nsite-empty">
