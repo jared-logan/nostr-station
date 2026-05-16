@@ -11,7 +11,10 @@ useTempHome();
 
 // @ts-expect-error — runtime .ts import
 const mod = await import('../src/lib/routes/nsite.ts');
-const { rewriteHtmlAbsolutePaths, rewriteCssAbsoluteUrls, STRICT_NSITE_CSP } = mod;
+const {
+  rewriteHtmlAbsolutePaths, rewriteCssAbsoluteUrls, STRICT_NSITE_CSP,
+  handleNsite, _internal,
+} = mod;
 
 const dec = (b: Uint8Array) => new TextDecoder('utf-8').decode(b);
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -237,6 +240,15 @@ test('CSP: WebSocket connect allowed (Nostr relays need wss)', () => {
     'loopback ws should be allowed for the in-process relay');
 });
 
+test('CSP: bracketed-IPv6 source dropped (Chrome rejects ws://[::1]:* as invalid)', () => {
+  // The CSP3 source-expression grammar doesn't accept bracketed IPv6 hosts;
+  // browsers log "invalid source ... will be ignored" 15+ times per page if
+  // we ship it. The IPv4 and `localhost` forms already cover the in-process
+  // relay, so the IPv6 line just produced noise — removed.
+  assert.ok(!STRICT_NSITE_CSP.includes('[::1]'),
+    'CSP must not contain bracketed-IPv6 host (parser-invalid in all major browsers)');
+});
+
 test('CSP: external HTTPS images are NOT allowed (no `https:` in img-src)', () => {
   const imgSrc = STRICT_NSITE_CSP.match(/img-src ([^;]+)/)?.[1] ?? '';
   assert.ok(imgSrc.includes("'self'"),  'img-src must allow self');
@@ -357,4 +369,118 @@ test('reporter: behaves correctly when run against a fake window', () => {
   assert.equal(err.message, 'TypeError: bad');
   assert.equal(err.filename, 'main.js');
   assert.equal(err.lineno, 42);
+});
+
+// ── CORS on /nsite-content/* ──────────────────────────────────────────────
+// Module-script loads (`<script type="module" src="/main.js">`, common in
+// Vite/Rollup/Webpack ESM output) always trigger a CORS check, even when
+// same-host. The panel's iframe sandbox produces an opaque (`null`) origin,
+// so without `Access-Control-Allow-Origin` the browser blocks the load with
+// "from origin 'null' has been blocked by CORS policy" — Shakespeare-style
+// SPAs then never boot. ACAO `*` is safe because /nsite-content/* is
+// content-addressed, public, and uncredentialed.
+
+function makeMockRes() {
+  const headers: Record<string, string> = {};
+  let statusCode = 0;
+  let body: string | Uint8Array = '';
+  let ended = false;
+  return {
+    setHeader(k: string, v: string) { headers[k.toLowerCase()] = v; },
+    getHeader(k: string)            { return headers[k.toLowerCase()]; },
+    writeHead(code: number, h?: Record<string, string>) {
+      statusCode = code;
+      if (h) for (const k of Object.keys(h)) headers[k.toLowerCase()] = h[k];
+    },
+    end(chunk?: any) { if (chunk != null) body = chunk; ended = true; },
+    get headers()    { return headers; },
+    get statusCode() { return statusCode; },
+    get body()       { return body; },
+    get ended()      { return ended; },
+  };
+}
+
+test('serveContent: ACAO `*` on 410 (snapshot missing) so the iframe can read the error', async () => {
+  const sid = '0000000000000001';
+  // Ensure nothing is in the snapshot map for this sid.
+  _internal.sites.delete(sid);
+  const res = makeMockRes();
+  const handled = await handleNsite(
+    {} as any,
+    res as any,
+    `/nsite-content/${sid}/index.html`,
+    'GET',
+  );
+  assert.equal(handled, true);
+  assert.equal(res.statusCode, 410);
+  assert.equal(res.headers['access-control-allow-origin'], '*',
+    'ACAO must be set even on error responses — otherwise the browser surfaces a generic CORS error instead of the actual 410');
+});
+
+test('serveContent: ACAO `*` on 200 success (the actual fix for module-script loads)', async () => {
+  const sid = '0000000000000002';
+  const sha = 'a'.repeat(64);
+  // Prime the cache: a snapshot that knows about main.js, and the blob
+  // bytes so the handler doesn't try to fetch from Blossom.
+  _internal.sites.set(sid, {
+    pubkey:  'b'.repeat(64),
+    display: 'mock',
+    index: {
+      files: new Map([['main.js', sha]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v1', manifestServers: [],
+    },
+    blossomServers: [],
+    createdAt: Date.now(),
+  });
+  _internal.blobs.set(sha, {
+    bytes: new TextEncoder().encode('console.log("hi");'),
+    mime:  'application/javascript; charset=utf-8',
+  });
+  const res = makeMockRes();
+  const handled = await handleNsite(
+    { method: 'GET' } as any,
+    res as any,
+    `/nsite-content/${sid}/main.js`,
+    'GET',
+  );
+  assert.equal(handled, true);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['access-control-allow-origin'], '*');
+  assert.equal(res.headers['vary'], 'Origin',
+    'Vary: Origin lets caching proxies serve different responses to different origins safely');
+  // The original Content-Type is preserved (CSP fix above didn't accidentally
+  // strip it).
+  assert.match(String(res.headers['content-type']), /application\/javascript/);
+  // Cleanup so the snapshot doesn't leak into other tests.
+  _internal.sites.delete(sid);
+  _internal.blobs.delete(sha);
+});
+
+test('serveContent: 404 (file missing inside an existing snapshot) also carries ACAO', async () => {
+  const sid = '0000000000000003';
+  _internal.sites.set(sid, {
+    pubkey:  'c'.repeat(64),
+    display: 'mock',
+    // Note: NO index.html — and the requested path is a .bin (asset
+    // extension), so the SPA-fallback to index.html is skipped and we
+    // get a real 404 instead.
+    index: {
+      files: new Map([['other.txt', 'd'.repeat(64)]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v1', manifestServers: [],
+    },
+    blossomServers: [],
+    createdAt: Date.now(),
+  });
+  const res = makeMockRes();
+  await handleNsite(
+    { method: 'GET' } as any,
+    res as any,
+    `/nsite-content/${sid}/missing.bin`,
+    'GET',
+  );
+  assert.equal(res.statusCode, 404);
+  assert.equal(res.headers['access-control-allow-origin'], '*');
+  _internal.sites.delete(sid);
 });
