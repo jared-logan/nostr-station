@@ -37,6 +37,7 @@ import { execa } from 'execa';
 import type { WebSocket } from 'ws';
 import { findBin } from './detect.js';
 import { projectEnvContract, type Project } from './projects.js';
+import { bindSession as bindDevServerSession, releaseSession as releaseDevServerSession } from './dev-server-registry.js';
 
 // Bridge to require() from within an ESM module — needed to call
 // require.resolve('node-pty/package.json') without triggering the native
@@ -186,6 +187,11 @@ export interface CreateOpts {
   // Set for project-bound terminals (the dashboard's "open terminal in
   // project X" path) and unset for the bare shell tab.
   project?: Project;
+  // When the key is `stacks-dev`, callers pass the port allocated by
+  // dev-server-registry so the vite command line matches the iframe URL
+  // the chat preview pane will load. Falls back to 5173 (the dashboard's
+  // historical default) when absent.
+  port?: number;
 }
 
 // How to invoke our own CLI (node dist/cli.js / tsx src/cli.tsx).
@@ -307,16 +313,19 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
     case 'stacks-agent':
       return { cmd: 'stacks', args: ['agent'], cwd, label: cwd ? `dork · ${path.basename(cwd)}` : 'dork' };
 
-    // Vite dev server for mkstack projects. We force --port 5173 so it
-    // doesn't collide with the relay on :8080 (mkstack templates ship
-    // with vite.config setting port to 8080, which conflicts on every
-    // nostr-station install). The leading -- separates npm script args
-    // from npm's own args.
-    case 'stacks-dev':
+    // Vite dev server for mkstack projects. The leading -- separates npm
+    // script args from npm's own args. Port comes from dev-server-registry
+    // when the caller is project-bound (each project gets a sticky port so
+    // multi-project preview iframes can render simultaneously); the 5173
+    // fallback preserves the historical default for callers that didn't
+    // allocate (e.g. bare-key invocations from the CLI).
+    case 'stacks-dev': {
+      const port = opts.port ?? 5173;
       return {
-        cmd: 'npm', args: ['run', 'dev', '--', '--port', '5173'], cwd,
-        label: cwd ? `dev · ${path.basename(cwd)}` : 'dev',
+        cmd: 'npm', args: ['run', 'dev', '--', '--port', String(port)], cwd,
+        label: cwd ? `dev :${port} · ${path.basename(cwd)}` : `dev :${port}`,
       };
+    }
 
     // Stacks's own AI provider config flow — interactive picker for
     // OpenRouter / Routstr / PayPerQ + key/Cashu/Lightning setup. Writes
@@ -472,6 +481,15 @@ export async function createSession(
   };
   sessions.set(id, sess);
 
+  // Bind project-scoped dev servers into the registry so the chat
+  // preview pane can find the right port and "running" flag for each
+  // project. Limited to stacks-dev (the dashboard's npm-run-dev launcher)
+  // because that's the one preview is wired to surface; other recipes
+  // run-and-exit and don't have a long-lived URL worth tracking.
+  if (opts.key === 'stacks-dev' && opts.project) {
+    bindDevServerSession(opts.project.id, id);
+  }
+
   child.onData((data) => {
     appendBuffer(sess, data);
     for (const ws of sess.clients) {
@@ -486,6 +504,9 @@ export async function createSession(
   child.onExit(({ exitCode, signal }) => {
     sess.exited = true;
     sess.exitCode = exitCode ?? (signal ? -signal : null);
+    // Mirror bind from above — releaseSession is idempotent for sessions
+    // the registry doesn't know about, so it's safe to call unconditionally.
+    releaseDevServerSession(id);
     // Emit a trailing control frame so clients can render "[process exited]".
     const msg = JSON.stringify({ type: 'exit', exitCode: sess.exitCode });
     for (const ws of sess.clients) {
@@ -562,6 +583,9 @@ export function destroySession(id: string, reason: string): boolean {
   const sess = sessions.get(id);
   if (!sess) return false;
   sessions.delete(id);
+  // Belt-and-suspenders: onExit also releases, but it's not guaranteed to
+  // fire if the PTY's already-dead path is hit. Idempotent in the registry.
+  releaseDevServerSession(id);
   if (sess.graceTimer) clearTimeout(sess.graceTimer);
   // Notify any still-attached client with a final control frame before we
   // tear down — some clients see the WS close handler before the onExit

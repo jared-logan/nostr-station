@@ -2973,19 +2973,25 @@ const ChatPanel = (() => {
 
   // ── Live-preview pane ────────────────────────────────────────────────
   // Shakespeare.diy-style side-by-side: chat on the left, an iframe of the
-  // project's running dev server on the right. v1 limitations:
-  //   - Port 5173 is hardcoded (matches the existing `stacks-dev` PTY
-  //     recipe in src/lib/terminal.ts). Two stacks projects can't preview
-  //     simultaneously.
-  //   - Dev server lives in the terminal panel; closing the terminal tab
-  //     kills it. Reopen via the "Start dev server" button.
-  //   - Visibility is gated on activeProject + stacksProject. Generalising
-  //     to "any project with a `dev` npm script" is a future relax.
+  // project's running dev server on the right. Each project gets a sticky
+  // port from the server-side dev-server-registry, so switching between
+  // two project sessions in the nav surfaces two distinct previews. Dev
+  // server lives in the terminal panel; closing the terminal tab kills
+  // it (the server registry's onExit hook flips `running` back to false).
   const PreviewPane = (() => {
-    const PREVIEW_URL  = 'http://localhost:5173';
     const COLLAPSE_KEY = 'ns:chat-preview:collapsed';
     let split, frame, empty, urlEl, startBtn, reloadBtn, collapseBtn, showBtn;
     let initialized = false;
+    // Current per-project URL (e.g. http://localhost:5174). Re-fetched
+    // from /api/projects/:id/dev-server on each sync(). Buttons read this
+    // closed-over value so a click after a project-switch lands on the
+    // right port.
+    let currentUrl = null;
+    let currentProjectId = null;
+    // Monotonic counter — increments per sync() call so a stale fetch
+    // arriving after a faster project-switch can detect it lost the race
+    // and bail out before clobbering the iframe.
+    let syncToken = 0;
 
     function init() {
       if (initialized) return;
@@ -3000,15 +3006,14 @@ const ChatPanel = (() => {
       if (!split) return;
       initialized = true;
 
-      urlEl.textContent = PREVIEW_URL;
-
       reloadBtn.addEventListener('click', () => {
+        if (!currentUrl) return;
         // Cache-bust by re-assigning src; iframe reloads from the dev server.
         // If the server isn't up, the load fails silently (browser shows its
         // own error page inside the iframe).
         frame.hidden = false;
         empty.style.display = 'none';
-        frame.src = PREVIEW_URL + '?_t=' + Date.now();
+        frame.src = currentUrl + '?_t=' + Date.now();
       });
 
       collapseBtn.addEventListener('click', () => setCollapsed(true));
@@ -3028,18 +3033,25 @@ const ChatPanel = (() => {
 
       startBtn.addEventListener('click', () => {
         const p = activeProject;
-        if (!p) return;
+        if (!p || !currentUrl) return;
         if (!window.NSTerminal?.isAvailable?.()) {
           alert('Terminal panel is not available — cannot spawn dev server.');
           return;
         }
+        // Server allocates / re-uses the project's port (sticky), so the
+        // PTY's `npm run dev -- --port N` and our iframe URL stay in lock-
+        // step without the client having to ferry the number through.
         window.NSTerminal.open('stacks-dev', { projectId: p.id });
         // Kick the iframe ~2.5s later — Vite's first paint typically lands
         // within 1–3s after `npm run dev`. The reload button is the manual
         // fallback if it's still warming up.
         frame.hidden = false;
         empty.style.display = 'none';
-        setTimeout(() => { frame.src = PREVIEW_URL + '?_t=' + Date.now(); }, 2500);
+        const startUrl = currentUrl;
+        setTimeout(() => {
+          // Don't load if the user has switched projects in the meantime.
+          if (currentUrl === startUrl) frame.src = currentUrl + '?_t=' + Date.now();
+        }, 2500);
       });
     }
 
@@ -3071,14 +3083,17 @@ const ChatPanel = (() => {
       try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch { return false; }
     }
 
-    function sync(project) {
+    async function sync(project) {
       init();
       if (!split) return;
+      const myToken = ++syncToken;
       // `previewable` is the package.json-has-dev-script gate (works for
       // any Vite/Next/etc. project). Older callers may still set only
       // `stacksProject`, so accept either as a back-compat fallback.
       const applicable = !!(project && (project.previewable || project.stacksProject));
       if (!applicable) {
+        currentUrl = null;
+        currentProjectId = null;
         split.dataset.preview = 'hidden';
         showBtn.hidden = true;
         // Park the iframe so we don't keep loading the previous URL.
@@ -3087,13 +3102,42 @@ const ChatPanel = (() => {
         if (empty) empty.style.display = '';
         return;
       }
+
+      // Resolve the per-project URL before flipping the pane visible so
+      // the URL label and any pending iframe load use the correct port.
+      // Failures fall back to the registry's allocation base port — better
+      // to show *something* than block the pane on a network blip.
+      let info = null;
+      try { info = await api(`/api/projects/${project.id}/dev-server`); } catch {}
+      if (myToken !== syncToken) return; // stale — newer sync() in flight
+
+      const nextUrl = info?.url || 'http://localhost:5173';
+      const nextRunning = !!info?.running;
+      const switchedProject = currentProjectId !== project.id;
+      currentUrl = nextUrl;
+      currentProjectId = project.id;
+      if (urlEl) urlEl.textContent = nextUrl;
+
       const collapsed = isCollapsedPref();
       split.dataset.preview = collapsed ? 'collapsed' : 'open';
       showBtn.hidden = !collapsed;
       syncTabState(collapsed);
-      // Don't auto-load the iframe — the dev server probably isn't running
-      // yet, and a failed iframe load doesn't auto-recover. Empty state +
-      // explicit "Start dev server" button is clearer than a blank frame.
+
+      if (switchedProject) {
+        // Park the previous project's iframe so the user doesn't briefly
+        // see the wrong project's UI while the new src loads. Auto-reload
+        // when the server reports a running dev server — saves the user a
+        // Reload click in the common case of toggling between two active
+        // project sessions.
+        if (frame && frame.src && frame.src !== 'about:blank') frame.src = 'about:blank';
+        if (nextRunning) {
+          if (frame) { frame.hidden = false; frame.src = nextUrl + '?_t=' + Date.now(); }
+          if (empty) empty.style.display = 'none';
+        } else {
+          if (frame) frame.hidden = true;
+          if (empty) empty.style.display = '';
+        }
+      }
     }
 
     return { sync, setCollapsed };
@@ -5555,7 +5599,7 @@ const ProjectsPanel = (() => {
       });
       actionsEl.appendChild(dorkBtn);
 
-      const devBtn = iconBtn('stacks-dev', 'Run dev server (localhost:5173)',
+      const devBtn = iconBtn('stacks-dev', 'Run dev server (per-project port)',
         `<svg viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg>`);
       devBtn.addEventListener('click', (e) => {
         e.stopPropagation();
