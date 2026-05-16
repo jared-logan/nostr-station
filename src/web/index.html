@@ -575,6 +575,18 @@
           <summary>Diagnostics</summary>
           <div class="nsite-diag-body" id="nsite-diag-body"></div>
         </details>
+        <!-- Trust banner — surfaces between Diagnostics and the iframe
+             whenever the loaded nsite either has CSP violations (offering
+             the user a way to allow external content) OR has already
+             been trusted (offering revoke). Stays hidden for clean
+             strict-mode renders so it doesn't clutter the panel for the
+             majority of nsites that don't need it.
+
+             Lives at the top of the viewport area (NOT buried inside the
+             collapsed Diagnostics block) because the prior placement
+             made the "Trust this nsite" action invisible to users who
+             didn't already know to expand Diagnostics. -->
+        <div class="nsite-trust-banner" id="nsite-trust-banner" hidden></div>
         <div class="nsite-viewport">
           <!--
             allow-same-origin is intentional: the iframe loads from

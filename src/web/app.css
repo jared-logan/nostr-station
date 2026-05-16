@@ -9189,19 +9189,26 @@ a.client-mention {
   margin-bottom: 8px;
 }
 
-/* Per-site trust toggle — appears in the Diagnostics block when an
- * nsite has CSP violations (offering to trust) OR is already trusted
- * (offering to revoke). Compact horizontal row: state text, action
- * button, `?` help. See app.js:trustControlHtml. */
+/* Per-site trust toggle — surfaces in its own #nsite-trust-banner slot
+ * (between the Diagnostics twirly and the iframe viewport) whenever the
+ * loaded nsite has CSP violations OR is already trusted. The banner is
+ * hidden by default (`[hidden]` attribute toggled from app.js) so it
+ * doesn't take vertical space on the clean strict-render path that
+ * applies to Ditto / Nostrord / jaredlogan / etc. */
+#nsite-trust-banner {
+  margin: 8px 0;
+}
+#nsite-trust-banner[hidden] {
+  display: none;
+}
 .nsite-trust {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 10px 14px;
   border: 1px solid var(--border, rgba(255,255,255,0.08));
   border-radius: 6px;
-  font-size: 12px;
-  margin-top: 8px;
+  font-size: 13px;
 }
 .nsite-trust.nsite-trust-off {
   background: rgba(255, 180, 70, 0.06);
