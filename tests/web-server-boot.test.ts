@@ -221,3 +221,36 @@ test('web-server: nsite host with wrong port → bad host', async (t) => {
   assert.equal(r.status, 400);
   assert.match(r.body.trim(), /bad host/);
 });
+
+// ── Dashboard CSP frame-src grants *.nsite.localhost subdomains ──────────
+//
+// The two halves of an iframe-embedding handshake:
+//   1. The IFRAME RESPONSE's CSP frame-ancestors says "OK to embed me
+//      here" (handled in routes/nsite.ts:buildCspForRequest).
+//   2. The PARENT PAGE's CSP frame-src says "OK to load that URL into
+//      one of my iframes" (handled by HTML_SECURITY_HEADERS in
+//      web-server-static.ts).
+//
+// Both must agree. Forgetting half is exactly what shipped in PR-B and
+// surfaced as "This content is blocked" on every iframe load — the
+// dashboard CSP's frame-src didn't include *.nsite.localhost, so the
+// dashboard refused to load any nsite-content URL into its iframe even
+// though the nsite response correctly granted localhost as an ancestor.
+
+test('web-server: HTML_SECURITY_HEADERS frame-src includes the nsite wildcard', async () => {
+  // Direct unit assertion against the exported constant so a future
+  // refactor can't silently drop the wildcard.
+  const mod = await import('../src/lib/web-server-static.js');
+  const csp = mod.HTML_SECURITY_HEADERS['Content-Security-Policy'] || '';
+  const m = csp.match(/frame-src ([^;]+)/);
+  assert.ok(m, 'CSP must declare a frame-src directive');
+  const frameSrc = m![1];
+  assert.ok(frameSrc.includes('http://*.nsite.localhost:*'),
+    'frame-src must include http://*.nsite.localhost:* so the dashboard can embed per-nsite-origin iframes from PR-B');
+  // Belt-and-braces: the existing entries from the Vite preview pane must
+  // still be there (regression guard against drift).
+  assert.ok(frameSrc.includes('http://127.0.0.1:*'),
+    "frame-src must keep http://127.0.0.1:* for the chat panel's live-preview iframe");
+  assert.ok(frameSrc.includes('http://localhost:*'),
+    "frame-src must keep http://localhost:* for the chat panel's live-preview iframe");
+});
