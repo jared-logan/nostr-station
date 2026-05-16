@@ -484,7 +484,7 @@ const TEXT_ENCODER = new TextEncoder();
 export function rewriteHtmlAbsolutePaths(bytes: Uint8Array, siteId: string): Uint8Array {
   const html = TEXT_DECODER.decode(bytes);
   const prefix = `/nsite-content/${siteId}`;
-  const rewritten = html
+  const staticRewritten = html
     // src="/..." and href="/..." — the bulk of <img>, <script>, <link>, <a>.
     .replace(/\b(src|href)\s*=\s*"\/(?!\/)([^"]*)"/gi,
              (_, attr, p) => `${attr}="${prefix}/${p}"`)
@@ -503,7 +503,82 @@ export function rewriteHtmlAbsolutePaths(bytes: Uint8Array, siteId: string): Uin
              (_, p) => `url("${prefix}/${p}")`)
     .replace(/url\(\s*'\/(?!\/)([^')]+)'\s*\)/gi,
              (_, p) => `url('${prefix}/${p}')`);
-  return TEXT_ENCODER.encode(rewritten);
+  return TEXT_ENCODER.encode(injectRuntimeShim(staticRewritten, prefix));
+}
+
+/**
+ * Inject a tiny inline `<script>` (and `<script type="importmap">`) at the
+ * top of the `<head>` to rewrite absolute paths at RUNTIME — covers the
+ * cases the static rewrite can't reach:
+ *
+ *   - `fetch('/api/x')` from JS bundles
+ *   - `new XMLHttpRequest(); xhr.open('GET', '/data.json')`
+ *   - ES module `import '/chunks/foo.js'` (via import map)
+ *
+ * Without this, SPA bundles built with `publicPath: '/'` (the Vite /
+ * webpack default for "root-deployed" sites) fail their data + chunk
+ * loads when rendered under our `/nsite-content/<siteId>/…` prefix — the
+ * exact failure mode where the TITAN landing page renders the static
+ * shell but every "Loading…" never resolves.
+ *
+ * Insertion point: first `<head>` tag found (case-insensitive). Falls
+ * back to first `<html>` tag, then prepending. The shim is the FIRST
+ * thing in <head> so it monkey-patches `window.fetch` before any other
+ * `<script>` runs.
+ *
+ * Behavior of the shim:
+ *   - URLs starting with `/` but NOT `//` and NOT already under the
+ *     site prefix → prepend the prefix
+ *   - Cross-origin (`http://...`, `wss://...`) and protocol-relative
+ *     (`//host/...`) → untouched
+ *   - Relative (`./foo`, `foo`) → untouched
+ *
+ * Tradeoffs: cannot intercept `<link rel="modulepreload">` (browser
+ * managed before any script runs), so the import map is the only
+ * coverage for that. Cannot intercept Worker constructors fully —
+ * `new Worker('/foo.js')` is patched, `new Worker('/foo.js', { type:
+ * 'module' })` too, but blob: workers spawned by JS are out of reach.
+ * Good enough for nsite-shaped content; not enough for arbitrary apps.
+ */
+function injectRuntimeShim(html: string, prefix: string): string {
+  // The import map maps absolute-path specifiers under `/` to our prefix.
+  // Per the WHATWG import-maps spec, a key ending in `/` is a prefix
+  // mapping, so `import '/foo.js'` → `${prefix}/foo.js`.
+  const importMap = `<script type="importmap">${JSON.stringify({
+    imports: { '/': `${prefix}/` },
+  })}</script>`;
+
+  const fetchShim = `<script>(function(){var P=${JSON.stringify(prefix)};` +
+`function rw(u){if(typeof u!=="string")return u;` +
+`if(u.charCodeAt(0)!==47)return u;` +     // not starting with '/'
+`if(u.charCodeAt(1)===47)return u;` +     // protocol-relative '//'
+`if(u.indexOf(P+"/")===0)return u;` +     // already prefixed
+`return P+u;}` +
+`var of=window.fetch;` +
+`if(of){window.fetch=function(input,init){` +
+`if(typeof input==="string"){return of.call(this,rw(input),init);}` +
+`if(input&&typeof input==="object"&&"url" in input){` +
+`var n=rw(input.url);` +
+`if(n!==input.url){try{return of.call(this,new Request(n,input),init);}catch(e){}}` +
+`}return of.call(this,input,init);};}` +
+`var oo=XMLHttpRequest.prototype.open;` +
+`XMLHttpRequest.prototype.open=function(m,u){` +
+`var a=Array.prototype.slice.call(arguments);` +
+`a[1]=rw(u);return oo.apply(this,a);};` +
+`if(window.EventSource){var oES=window.EventSource;` +
+`window.EventSource=function(u,c){return new oES(rw(u),c);};` +
+`window.EventSource.prototype=oES.prototype;}` +
+`})();</script>`;
+
+  const inject = importMap + fetchShim;
+
+  // Try <head>, then <html>, then prepend.
+  let matched = false;
+  let out = html.replace(/<head\b[^>]*>/i, (m) => { matched = true; return m + inject; });
+  if (matched) return out;
+  out = html.replace(/<html\b[^>]*>/i, (m) => { matched = true; return m + inject; });
+  if (matched) return out;
+  return inject + html;
 }
 
 function rewriteSrcsetList(list: string, prefix: string): string {

@@ -275,9 +275,22 @@ export async function resolveAddress(
 
   s = s.replace(/\/+$/, '');
 
+  // Display form for the address bar. When the input was a gateway URL
+  // with a name suffix (e.g. `<base36-pubkey>nostr-station.nsite.lol`),
+  // show the effective `nsite://<name>` form rather than the bare npub.
+  // Otherwise the address bar reads as "we threw away the suffix" when in
+  // fact we used it for the v2-named manifest lookup. Mirrors Titan
+  // Browser's address-bar UX.
+  const npubDisplay = (npub: string) => gatewayName ? `nsite://${gatewayName}` : npub;
+
   // Bare hex pubkey
   if (HEX64.test(s)) {
-    return { pubkey: s.toLowerCase(), source: 'hex', display: s.toLowerCase(), name: gatewayName };
+    return {
+      pubkey:  s.toLowerCase(),
+      source:  'hex',
+      display: gatewayName ? `nsite://${gatewayName}` : s.toLowerCase(),
+      name:    gatewayName,
+    };
   }
 
   // bech32 npub
@@ -285,7 +298,12 @@ export async function resolveAddress(
     try {
       const dec = nip19.decode(s);
       if (dec.type !== 'npub') throw new NsiteError('bad_address', `expected npub, got ${dec.type}`);
-      return { pubkey: dec.data as string, source: 'npub', display: s, name: gatewayName };
+      return {
+        pubkey:  dec.data as string,
+        source:  'npub',
+        display: npubDisplay(s),
+        name:    gatewayName,
+      };
     } catch (e: any) {
       if (e instanceof NsiteError) throw e;
       throw new NsiteError('bad_address', `invalid npub: ${e?.message || e}`);
