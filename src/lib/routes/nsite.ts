@@ -708,15 +708,33 @@ async function serveContent(
  * path-prefix mode and cross-origin in subdomain mode.
  *
  * When `trusted` is true (the author's pubkey is on the user's
- * trustedExternalNsites list), `https:` is appended to script/img/
- * connect/font/style/media-src so the nsite can load esm.sh modules,
- * nostr.build images, Google Fonts, etc. — the things strict-mode
- * blocks. `'unsafe-eval'` stays blocked (still no eval/new Function),
- * `object-src 'none'` stays, `frame-ancestors` stays loopback-only.
- * The blast radius is contained by the per-origin iframe model: a
- * trusted nsite can phone home with the user's IP and pull in a
- * compromised CDN's payload, but it cannot reach the dashboard or
- * any other nsite's origin.
+ * trustedExternalNsites list), we apply two relaxations together:
+ *
+ *   1. `https:` is appended to script/img/connect/font/style/media-src
+ *      so the nsite can load esm.sh modules, nostr.build images,
+ *      Google Fonts, etc. — the things strict-mode blocks for the
+ *      privacy / supply-chain reasons documented above.
+ *   2. `'unsafe-eval'` is added to script-src so modern bundle loaders
+ *      that synthesize code at runtime (Next.js / Turbopack / SWC /
+ *      esbuild's eval-based chunk loader) can run. Without it, those
+ *      apps die-on-arrival with `EvalError: Evaluating a string as
+ *      JavaScript violates the following CSP directive`. Field
+ *      confirmed against `nsite://titan` (Next.js + Turbopack); its
+ *      _next/static chunks throw EvalError at line 1 col 4193
+ *      (Turbopack's runtime module loader).
+ *
+ * Why `'unsafe-eval'` in trusted mode is consistent with the security
+ * stance: `'unsafe-inline'` is ALREADY granted everywhere (including
+ * strict mode), so a malicious author can already ship arbitrary JS
+ * that executes inside the iframe's origin. Adding `'unsafe-eval'`
+ * doesn't expand what they can do — it just enables the loader code
+ * to do its job. The blast radius (this nsite's per-origin subdomain,
+ * isolated from the dashboard) is unchanged.
+ *
+ * What stays blocked even in trusted mode: `object-src 'none'`
+ * (no plugins), `frame-ancestors` (no clickjacking surface). Trust is
+ * "give this nsite browser-tab-like permissions for its own origin",
+ * not "let it embed itself anywhere or load plugins."
  *
  * We derive the dashboard port from the request's Host header so we
  * don't need to thread the listening port through every call site.
@@ -725,11 +743,14 @@ async function serveContent(
 function buildCspForRequest(req: http.IncomingMessage, mode: ServeMode, trusted: boolean = false): string {
   let policy = STRICT_NSITE_CSP;
   if (trusted) {
-    // Append `https:` to the network-loading directives. We DON'T touch
-    // script-src's `'unsafe-eval'` (still blocked) — trust loosens the
-    // network surface, not the dynamic-code-synthesis ones.
+    // Append `https:` to the network-loading directives + `'unsafe-eval'`
+    // to script-src. See the function comment above for the rationale —
+    // 'unsafe-eval' is required to render Next.js / Turbopack bundles
+    // (TITAN being the canonical case), and it doesn't widen the blast
+    // radius beyond what 'unsafe-inline' (granted everywhere) already
+    // allows. object-src 'none' and frame-ancestors stay strict.
     policy = policy
-      .replace(/(script-src [^;]*)/,  '$1 https:')
+      .replace(/(script-src [^;]*)/,  "$1 'unsafe-eval' https:")
       .replace(/(img-src [^;]*)/,     '$1 https:')
       .replace(/(connect-src [^;]*)/, '$1 https:')
       .replace(/(font-src [^;]*)/,    '$1 https:')
