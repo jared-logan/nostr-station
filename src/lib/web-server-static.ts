@@ -287,30 +287,67 @@ export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse):
 
   const ext = path.extname(target).toLowerCase();
   const mime = DITTO_MIME[ext] ?? 'application/octet-stream';
+  const isHtml = ext === '.html' || isSpaFallback;
   const headers: Record<string, string> = {
     'Content-Type': mime,
     // Fingerprinted assets in /ditto/assets/* are safe to cache forever.
     // index.html (and the SPA fallback) stays no-cache so app-shell
     // updates land on the next reload after `npm run update-ditto`.
-    'Cache-Control': (ext === '.html' || isSpaFallback)
-      ? 'no-cache'
-      : 'public, max-age=86400',
+    'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=86400',
   };
+  // HTML responses get an inline script injected right after <head>.
+  // Ditto's bundle is built with `base: '/'`, so its React Router only
+  // knows about root paths (`/`, `/feed`, `/notifications`, …). When the
+  // iframe mounts at `/ditto/` the router sees `/ditto/`, finds no match,
+  // and renders its catch-all 404 — even though the rest of Ditto's
+  // shell is fine. Stripping the `/ditto` prefix with `replaceState`
+  // BEFORE the deferred module bundle executes lets the router pick up
+  // the real route on first paint. Internal navigation (`<Link>` →
+  // pushState) already operates at root, so this only matters for the
+  // initial load and any SPA-fallback deep-link.
+  const method = (req.method || 'GET').toUpperCase();
+  let body: Buffer | null = null;
+  if (isHtml) {
+    let html: string;
+    try { html = fs.readFileSync(target, 'utf8'); }
+    catch { res.writeHead(500); res.end(); return true; }
+    html = html.replace(/<head(\s[^>]*)?>/i, (m) => m + DITTO_PREFIX_STRIP_SCRIPT);
+    body = Buffer.from(html, 'utf8');
+    headers['Content-Length'] = String(body.length);
+  }
   // HEAD responses get headers + Content-Length but no body. The Client
   // panel's bundle-presence probe uses HEAD; without this branch the
   // probe falls through to a 404 default and the panel falsely shows
   // the "Ditto not installed" state even when the bundle is there.
-  const method = (req.method || 'GET').toUpperCase();
   if (method === 'HEAD') {
-    try { headers['Content-Length'] = String(fs.statSync(target).size); } catch {}
+    if (!isHtml) {
+      try { headers['Content-Length'] = String(fs.statSync(target).size); } catch {}
+    }
     res.writeHead(200, headers);
     res.end();
+    return true;
+  }
+  if (body) {
+    res.writeHead(200, headers);
+    res.end(body);
     return true;
   }
   res.writeHead(200, headers);
   fs.createReadStream(target).pipe(res);
   return true;
 }
+
+// Inline script injected into every HTML response from the Ditto bundle.
+// Runs synchronously during <head> parsing — i.e. before any of Ditto's
+// <script type="module"> tags (which are deferred by default). Rewrites
+// `location.pathname` from `/ditto[/...]` to the same path at root so
+// Ditto's BrowserRouter matches the intended route on initial mount
+// instead of falling through to its 404 view.
+const DITTO_PREFIX_STRIP_SCRIPT =
+  '<script>(function(){var p=location.pathname;'
+  + 'if(p===\'/ditto\'||p===\'/ditto/\'){history.replaceState(null,\'\',\'/\'+location.search+location.hash);}'
+  + 'else if(p.indexOf(\'/ditto/\')===0){history.replaceState(null,\'\',p.slice(6)+location.search+location.hash);}'
+  + '})();</script>';
 
 export function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const urlPath = (req.url || '/').split('?')[0];
