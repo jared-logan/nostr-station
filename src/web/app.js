@@ -18817,6 +18817,15 @@ const NsitePanel = (() => {
   // authenticate the message by shape + siteId match (the iframe
   // received the siteId from us when we set its src). Mounted once at
   // panel-init so it survives multiple Go() navigations.
+  //
+  // Each filter rejection logs WHY in the top-context console (visible
+  // without switching frames in devtools) so a "Diagnostics never
+  // shows Sandbox clean" symptom can be diagnosed end-to-end without
+  // hunting through iframe-context consoles. The reporter on the
+  // iframe side does the same: one `[nsite-report] boot` line at
+  // script entry → if it's missing, the script never ran (CSP block,
+  // injection miss); if it's present, the panel-side log tells us
+  // whether the message arrived and matched the active siteId.
   function mountReporterListener() {
     if (els._reporterMounted) return;
     els._reporterMounted = true;
@@ -18824,7 +18833,20 @@ const NsitePanel = (() => {
       const m = event.data;
       if (!m || typeof m !== 'object') return;
       if (typeof m.type !== 'string' || !m.type.startsWith('nsite-')) return;
-      if (typeof m.siteId !== 'string' || m.siteId !== reports.siteId) return;
+      // From here on the message is shaped like one of ours — worth
+      // logging whether the siteId matches the active resolve.
+      if (typeof m.siteId !== 'string') {
+        try { console.warn('[nsite-report parent] drop: missing siteId', m); } catch (_) {}
+        return;
+      }
+      if (m.siteId !== reports.siteId) {
+        // Stale message from a previously-loaded iframe whose URL is
+        // still in flight (or a fresh-but-misaligned race). Log so
+        // a repeating mismatch is visible.
+        try { console.info('[nsite-report parent] drop: siteId mismatch', { got: m.siteId, want: reports.siteId, type: m.type }); } catch (_) {}
+        return;
+      }
+      try { console.info('[nsite-report parent] accept', m.type, m); } catch (_) {}
       if (m.type === 'nsite-csp-violation') {
         // Cap to avoid runaway floods if a page is broken in a way
         // that fires thousands of violations.
