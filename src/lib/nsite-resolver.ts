@@ -67,6 +67,15 @@ export interface SiteIndex {
    *  these over kind:10063 when present — they're the canonical
    *  declaration for the specific publish. */
   manifestServers: string[];
+  /** Relays announced in a v2 manifest's `relay` tags. Empty for v1.
+   *  Per NIP-5A v2, these are the relays the author considers
+   *  authoritative for THIS publish. The route layer unions them with
+   *  the rest of the content-relay tiers (owner reads, NIP-65 outbox,
+   *  configured fallback) so a later re-resolve of the same nsite
+   *  hits the relays the publisher actually points at. Visible on
+   *  nsite.info's debug dump as the `relay` tags inside the manifest
+   *  JSON. */
+  manifestRelays: string[];
 }
 
 export interface SiteIndexEntry {
@@ -226,10 +235,12 @@ export type QueryFn = (opts: RelayQueryOptions) => Promise<RelayQueryResult>;
  *   - `user@host`                         → NIP-05 lookup
  *   - `user.tld` (no `@`, has a dot)      → NIP-05 `_@<host>` fallback
  *   - `nsite://<x>`                       → strip scheme, re-dispatch
- *   - `https://<x>.nsite.lol/...` or
- *     `https://<x>.nostr.hu/...`          → recognize as gateway URL,
+ *   - `https://<x>.<gateway>/...`         → recognize as gateway URL,
  *                                            extract the npub-encoded
- *                                            subdomain, re-dispatch
+ *                                            subdomain, re-dispatch.
+ *                                            Gateways recognized: nsite.lol,
+ *                                            nsite.run, nsite.cloud,
+ *                                            nosto.re, nwb.tf, nostr.hu
  *   - bare NSIT name (a-z0-9-, 1–41ch)    → indexer lookup via kind:35129
  *
  * `nsitConfig === null` disables NSIT lookups; bare names then throw
@@ -249,16 +260,22 @@ export async function resolveAddress(
   let s = trimmed;
   if (s.startsWith('nsite://')) s = s.slice('nsite://'.length);
 
-  // Gateway URLs paste-in fix: `https://<encoded>.nsite.lol/path` and
-  // `https://<encoded>.nostr.hu/path` both encode the author's npub in the
-  // leftmost subdomain. Two encodings observed in the wild:
-  //   1. `<bech32-npub>.nsite.lol`         — full or hrp-stripped bech32
-  //   2. `<base36-pubkey><project-name>.nsite.lol` — nsyte's nsite.lol
-  //      gateway, pubkey base36-encoded then project name appended
-  //      (verified empirically: nostr-station's own published nsite).
+  // Gateway URLs paste-in fix: many public nsite gateways encode the
+  // author's npub in the leftmost subdomain. Two encodings observed in
+  // the wild:
+  //   1. `<bech32-npub>.<gateway>`             — full or hrp-stripped bech32
+  //   2. `<base36-pubkey><project-name>.<gateway>` — nsyte's URL pattern,
+  //      pubkey base36-encoded then project name appended (verified
+  //      empirically against nostr-station's own published nsite).
+  //
   // Strip everything else and re-dispatch through the normal pubkey path.
+  // Gateway list mirrors the "CANONICAL" set shown on nsite.info's debug
+  // page (the community-maintained gateway directory): nsite.lol /
+  // nsite.run / nsite.cloud / nosto.re / nwb.tf, plus nostr.hu which
+  // we've supported since v1. All of them share the same subdomain
+  // encoding scheme, so one regex with an alternation covers them.
   let gatewayName: string | undefined;
-  const gwMatch = s.match(/^https?:\/\/([^./]+)\.(?:nsite\.lol|nostr\.hu)(?::\d+)?(?:\/.*)?$/i);
+  const gwMatch = s.match(/^https?:\/\/([^./]+)\.(?:nsite\.lol|nsite\.run|nsite\.cloud|nosto\.re|nwb\.tf|nostr\.hu)(?::\d+)?(?:\/.*)?$/i);
   if (gwMatch) {
     const sub = gwMatch[1];
     const fromGateway = decodeGatewaySubdomain(sub);
@@ -341,7 +358,8 @@ export async function resolveAddress(
 
 /**
  * Try to extract a 32-byte hex pubkey from a gateway subdomain. Handles
- * three shapes seen in the wild on nsite.lol / nostr.hu:
+ * three shapes seen in the wild on the canonical nsite gateways
+ * (nsite.lol, nsite.run, nsite.cloud, nosto.re, nwb.tf, nostr.hu):
  *
  *   - bare bech32 npub:           `npub1<58chars>`         (full)
  *   - hrp-stripped bech32:        `<58chars>`              (no `npub1`)
@@ -590,13 +608,22 @@ function parseV2Manifest(
   format: 'v2-named' | 'v2-root',
   totalEventsSeen: number,
 ): SiteIndex | null {
-  // Tag schema (verified against btcjt/titan crates/titan-resolver/src/manifest.rs):
-  //   ["path", "<path>", "<sha256-hex>"]    one per file
-  //   ["server", "<https-url>"]             one per Blossom server
-  //   ["d", "<name>"]                       present on kind:35128 only
+  // Tag schema (verified against btcjt/titan crates/titan-resolver/src/manifest.rs
+  // AND nsite.info's debug-page manifest dump):
+  //   ["path",   "<path>", "<sha256-hex>"]    one per file
+  //   ["server", "<https-url>"]               one per Blossom server
+  //   ["relay",  "<wss-url>"]                 one per authoritative relay
+  //   ["d",      "<name>"]                    present on kind:35128 only
+  //   ["title",  "<text>"]                    optional UI metadata
+  //   ["description", "<text>"]               optional UI metadata
+  //   ["source", "<nostr-uri>"]               optional source-repo pointer
+  // We extract paths/servers/relays here. title/description/source are
+  // surfaced through the unmodified event for the route layer's future
+  // Site-Info pane (the SiteIndex stays the rendering-facing shape).
   const files   = new Map<string, string>();
   const entries: SiteIndexEntry[] = [];
   const servers: string[] = [];
+  const relays:  string[] = [];
   for (const tag of event.tags) {
     if (!Array.isArray(tag) || tag.length < 2) continue;
     if (tag[0] === 'path' && tag.length >= 3 && typeof tag[1] === 'string' && typeof tag[2] === 'string' && HEX64.test(tag[2])) {
@@ -607,6 +634,13 @@ function parseV2Manifest(
     } else if (tag[0] === 'server' && typeof tag[1] === 'string') {
       const url = safeHttpUrl(tag[1]);
       if (url) servers.push(url.replace(/\/+$/, ''));
+    } else if (tag[0] === 'relay' && typeof tag[1] === 'string') {
+      // Accept only wss://… (or ws:// on a loopback, but the manifest
+      // is for public consumption — those wouldn't be authoritative for
+      // anyone else). Strip trailing slash for dedupe-friendliness; the
+      // route layer's unionRelays() already handles case/path dedup.
+      const url = tag[1].trim();
+      if (/^wss?:\/\/\S+$/i.test(url)) relays.push(url.replace(/\/+$/, ''));
     }
   }
   if (files.size === 0) return null;
@@ -619,6 +653,7 @@ function parseV2Manifest(
     totalEventsSeen,
     format,
     manifestServers: servers,
+    manifestRelays:  relays,
   };
 }
 
@@ -688,6 +723,7 @@ async function fetchV1FileEvents(
     totalEventsSeen: events.length,
     format:          'v1',
     manifestServers: [],
+    manifestRelays:  [],
   };
 }
 

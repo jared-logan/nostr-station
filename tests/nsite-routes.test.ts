@@ -282,8 +282,25 @@ test('CSP: inline scripts/styles allowed (covers runtime shim + bundled HTML)', 
   // 'unsafe-eval' (no `eval()`/`new Function()` from inside the nsite).
   assert.match(STRICT_NSITE_CSP, /script-src[^;]*'unsafe-inline'/);
   assert.match(STRICT_NSITE_CSP, /style-src[^;]*'unsafe-inline'/);
-  assert.ok(!STRICT_NSITE_CSP.includes("'unsafe-eval'"),
-    'CSP must not allow unsafe-eval — blocks dynamic code synthesis');
+  // 'unsafe-eval' on its own must remain blocked.
+  assert.ok(!/\b'unsafe-eval'/.test(STRICT_NSITE_CSP),
+    "CSP must not allow 'unsafe-eval' on its own — blocks dynamic code synthesis");
+});
+
+test('CSP: WebAssembly compilation allowed via wasm-unsafe-eval', () => {
+  // CSP3 gates WebAssembly.compile / .instantiate / .compileStreaming /
+  // .instantiateStreaming behind script-src 'wasm-unsafe-eval'. Without
+  // it, WASM-shipping nsites (e.g. Nostrord, which publishes 6+ MB of
+  // .wasm + .wasm.br + .wasm.gz alongside its JS shell) hang on their
+  // loading splash forever — the instantiation call throws CompileError
+  // synchronously and the bundle's load-promise never resolves.
+  //
+  // 'wasm-unsafe-eval' is strictly narrower than 'unsafe-eval': it
+  // allows WASM only, NOT arbitrary eval() / new Function(). Those
+  // still need 'unsafe-eval' which we deliberately don't grant. So
+  // adding this token unblocks WASM nsites without weakening the JS
+  // dynamic-code-synthesis lockdown.
+  assert.match(STRICT_NSITE_CSP, /script-src[^;]*'wasm-unsafe-eval'/);
 });
 
 // ── CSP-violation reporter shim ───────────────────────────────────────────
