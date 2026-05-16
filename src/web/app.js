@@ -18626,6 +18626,7 @@ const NsitePanel = (() => {
       </div>
       ${relayLines('Your read relays',    r.owner)}
       ${relayLines('Author NIP-65 outbox', r.authorOutbox)}
+      ${relayLines('Manifest relay tags', r.manifest)}
       ${relayLines('Queried (union)',     r.queried)}
       ${reportsHtml()}
     `;

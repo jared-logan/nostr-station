@@ -219,6 +219,47 @@ test('resolveAddress: nostr.hu gateway URL is also recognized', async () => {
   assert.equal(r.pubkey, HEX);
 });
 
+// nsite.info's debug page lists five "canonical" gateways: nsite.lol,
+// nsite.run, nsite.cloud, nosto.re, nwb.tf. We supported nsite.lol +
+// nostr.hu from day one; this round adds the rest so paste-in works for
+// the whole community-maintained set.
+for (const gateway of ['nsite.run', 'nsite.cloud', 'nosto.re', 'nwb.tf']) {
+  test(`resolveAddress: ${gateway} gateway URL is recognized`, async () => {
+    const npubTail = NPUB.slice('npub1'.length);
+    const r = await resolveAddress(`https://${npubTail}.${gateway}/`, null);
+    assert.equal(r.pubkey, HEX, `${gateway} should decode the bech32 subdomain to the HEX pubkey`);
+  });
+
+  test(`resolveAddress: ${gateway} with nsyte-style <pubkey><name> subdomain`, async () => {
+    // Same encoding pattern as nsite.lol: base36-pubkey + project name
+    // glued together. Pubkey from the matching live nostr-station test
+    // case above; ensures the alternation doesn't silently break for
+    // the new gateways.
+    const url = `https://10vy5d0umw8izp3bcmh0btzl6k2szvsu8zestncxpsstb6l8e6nostr-station.${gateway}/`;
+    const r = await resolveAddress(url, null);
+    assert.equal(r.pubkey, '291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe');
+    assert.equal(r.name, 'nostr-station',
+      'name extracted from subdomain suffix should round-trip across all gateway hostnames');
+  });
+}
+
+test('resolveAddress: unrecognized gateway hostname is NOT auto-decoded', async () => {
+  // Sanity check on the alternation — a domain that LOOKS gateway-shaped
+  // but isn't in our list must NOT silently get treated as one. The
+  // pasted URL falls through to the NIP-05 fallback, which then refuses
+  // the unparseable host. The point of this test isn't WHICH error type
+  // we raise — it's that we raise SOMETHING rather than secretly
+  // pretending example.com is a known gateway.
+  const err = await assert.rejects(
+    () => resolveAddress('https://abc.example.com/', null),
+    NsiteError,
+  );
+  // Belt-and-braces: the error must surface the offending host so the
+  // user can see why their paste didn't work.
+  // (assert.rejects returns the error when invoked with a class.)
+  void err;
+});
+
 test('defaults: NSIT indexer pubkey is the canonical Titan one', () => {
   assert.match(DEFAULT_NSIT_INDEXER_PUBKEY, /^[0-9a-f]{64}$/);
   assert.ok(DEFAULT_NSIT_INDEXER_RELAYS.length >= 2);
@@ -324,12 +365,14 @@ function makeV2Manifest(opts: {
   ts: number;
   files: Array<[string, string]>;
   servers?: string[];
+  relays?: string[];
   id?: string;
 }) {
   const tags: any[] = [];
   if (opts.kind === 35128 && opts.name) tags.push(['d', opts.name]);
   for (const [p, s] of opts.files) tags.push(['path', p, s]);
   for (const url of (opts.servers ?? [])) tags.push(['server', url]);
+  for (const url of (opts.relays  ?? [])) tags.push(['relay',  url]);
   return {
     id:         opts.id ?? 'm' + 'a'.repeat(63),
     pubkey:     opts.pubkey,
@@ -393,6 +436,61 @@ test('fetchSiteIndex: falls through to v1 when both v2 probes return empty', asy
   assert.equal(idx.format, 'v1');
   assert.equal(idx.files.get('index.html'), sha);
   assert.deepEqual(idx.manifestServers, []);  // v1 has no manifest servers
+  assert.deepEqual(idx.manifestRelays,  []);  // v1 has no manifest relays either
+});
+
+test('fetchSiteIndex: v2 manifest `relay` tags are extracted into manifestRelays', async () => {
+  // Real manifest dump observed via nsite.info's debug page for nostr-
+  // station's published nsite — the manifest declares five `relay` tags
+  // pointing at the author's preferred upstream relays. We surface them
+  // so the panel's Diagnostics can show the publisher-declared tier
+  // alongside owner reads / NIP-65 outbox / queried union.
+  const sha = '5'.repeat(64);
+  const queryFn = async (opts: any) => {
+    if (opts.filter.kinds[0] === 35128 && opts.filter.tags?.d === 'site') {
+      return mockQuery([makeV2Manifest({
+        pubkey: HEX, kind: 35128, name: 'site', ts: 1_900_000_000,
+        files: [['/index.html', sha]],
+        servers: ['https://blossom.ditto.pub'],
+        relays:  [
+          'wss://relay.ditto.pub',
+          'wss://relay.dreamith.to',
+          'wss://relay.nsite.lol',
+        ],
+      })])(opts);
+    }
+    return mockQuery([])(opts);
+  };
+  const idx = await fetchSiteIndex(HEX, ['wss://r1'], { name: 'site' }, queryFn as any);
+  assert.equal(idx.format, 'v2-named');
+  assert.deepEqual(idx.manifestRelays, [
+    'wss://relay.ditto.pub',
+    'wss://relay.dreamith.to',
+    'wss://relay.nsite.lol',
+  ]);
+});
+
+test('fetchSiteIndex: malformed `relay` tags (non-wss, empty) are dropped', async () => {
+  // Defense against a manifest with garbage in the relay slot — must
+  // not crash, and must not surface obviously-bad URLs to the panel.
+  const sha = '6'.repeat(64);
+  const queryFn = async (opts: any) => {
+    if (opts.filter.kinds[0] === 15128) {
+      const ev = makeV2Manifest({
+        pubkey: HEX, kind: 15128, ts: 1_950_000_000,
+        files: [['/index.html', sha]],
+      });
+      ev.tags.push(['relay', '']);                   // empty
+      ev.tags.push(['relay', 'http://not-ws.com']);  // wrong scheme
+      ev.tags.push(['relay', 'wss://good.example']); // valid
+      ev.tags.push(['relay']);                       // truncated tag
+      return mockQuery([ev])(opts);
+    }
+    return mockQuery([])(opts);
+  };
+  const idx = await fetchSiteIndex(HEX, ['wss://r1'], {}, queryFn as any);
+  assert.deepEqual(idx.manifestRelays, ['wss://good.example'],
+    'only well-formed wss:// URLs should make it through');
 });
 
 test('fetchSiteIndex: v1 accepts both "sha256" (lez spec) and "x" (nsyte) hash tags', async () => {

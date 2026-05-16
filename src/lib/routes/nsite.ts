@@ -288,6 +288,12 @@ export async function handleNsite(
           contentFallback,
           queried:      contentRelays,
           nsitIndexer:  nsitConfig?.relays ?? [],
+          // Relays declared inside the v2 manifest itself. Empty for v1
+          // and for v2 manifests without `relay` tags. Surfaced in the
+          // panel's Diagnostics so a publisher can confirm we picked
+          // them up; future cache-miss re-resolves can union them into
+          // the content-relay set.
+          manifest:     index.manifestRelays,
         },
         entry: pickEntryPath(index),
       });
@@ -413,7 +419,20 @@ export const STRICT_NSITE_CSP = [
   "media-src 'self' data: blob:",
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline'",
-  "script-src 'self' 'unsafe-inline'",
+  // 'wasm-unsafe-eval' lets the iframe call WebAssembly.compile /
+  // .instantiate / .compileStreaming / .instantiateStreaming. It is a
+  // CSP3-only token specifically narrowed to WASM — does NOT enable
+  // arbitrary eval() / new Function() (those would still need
+  // 'unsafe-eval', which we deliberately don't grant). Without this,
+  // WASM-shipping nsites (e.g. Nostrord, which publishes ~6 MB of
+  // .wasm + .wasm.br + .wasm.gz alongside its JS shell) hang on
+  // their loading splash forever — the instantiation call throws
+  // CompileError synchronously, the bundle's load-promise never
+  // resolves, and the user sees an eternal spinner with no visible
+  // error. Browsers that pre-date CSP3 (Safari <16) ignore unknown
+  // source-expressions and fall back to allowing WASM-by-default,
+  // so adding the token is forward-safe.
+  "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
   "frame-src 'self'",
   "frame-ancestors 'self'",
   "base-uri 'self'",
