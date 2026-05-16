@@ -284,22 +284,32 @@ input:focus, textarea:focus, select:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.nav-session-close {
+.nav-session-close,
+.nav-session-pin {
   appearance: none;
   background: transparent;
   border: 0;
   color: var(--muted);
-  font-size: 14px;
   line-height: 1;
   padding: 2px 4px;
   border-radius: 3px;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 100ms, background 100ms;
+  transition: opacity 100ms, background 100ms, color 100ms;
+  display: inline-flex;
+  align-items: center;
 }
+.nav-session-close { font-size: 14px; }
 .nav-session:hover .nav-session-close,
-.nav-session.active .nav-session-close { opacity: 1; }
-.nav-session-close:hover { background: var(--bg-hover-strong, rgba(255,255,255,0.08)); color: var(--text-bright); }
+.nav-session.active .nav-session-close,
+.nav-session:hover .nav-session-pin,
+.nav-session.active .nav-session-pin { opacity: 1; }
+.nav-session-close:hover,
+.nav-session-pin:hover { background: var(--bg-hover-strong, rgba(255,255,255,0.08)); color: var(--text-bright); }
+/* Pinned sessions advertise their pin even at rest — otherwise the user
+   can't tell which rows will stick around after close. */
+.nav-session-pin.on { opacity: 0.75; color: var(--accent-bright, var(--accent)); }
+.nav-session-pin.on:hover { opacity: 1; }
 
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav a {

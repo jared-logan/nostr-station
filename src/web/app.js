@@ -2753,16 +2753,61 @@ const SessionStore = (() => {
     persist();
   }
 
-  function close(id) {
-    if (id === STATION_ID) return; // station never closes
-    openOrder = openOrder.filter(x => x !== id);
+  function setPinned(id, pinned) {
+    const s = sessions[id];
+    if (!s || s.kind !== 'project') return;
+    s.pinned = !!pinned;
+    s.updatedAt = Date.now();
     persist();
     notify();
   }
 
+  function close(id) {
+    if (id === STATION_ID) return; // station never closes
+    const s = sessions[id];
+    if (!s) return;
+    openOrder = openOrder.filter(x => x !== id);
+    // Pinned sessions stay in the nav after close — that's the whole point
+    // of pinning. Unpinned sessions are unreachable from the UI once closed
+    // (the project card only spawns new sessions), so drop their data to
+    // keep localStorage tidy.
+    if (!s.pinned) {
+      delete sessions[id];
+      for (const pid of Object.keys(lastOpenByProject)) {
+        if (lastOpenByProject[pid] === id) delete lastOpenByProject[pid];
+      }
+    }
+    persist();
+    notify();
+  }
+
+  // Sessions to surface in the sidebar — anything currently open, plus
+  // any pinned project session even if it's been closed. Pinned-first,
+  // then in open-order to keep the active set visually stable.
+  function listForNav() {
+    const seen = new Set();
+    const out = [];
+    for (const s of Object.values(sessions)) {
+      if (s.kind === 'project' && s.pinned) {
+        out.push(s);
+        seen.add(s.id);
+      }
+    }
+    for (const id of openOrder) {
+      if (seen.has(id)) continue;
+      const s = sessions[id];
+      if (s && s.kind === 'project') {
+        out.push(s);
+        seen.add(id);
+      }
+    }
+    return out;
+  }
+
   // Drop project sessions whose project no longer exists in the resolved
   // list. Called once the projects cache is known so we don't render dead
-  // entries in the nav.
+  // entries in the nav. Pins on dead projects are dropped too — there's
+  // nowhere meaningful to land if you click them.
   function gcAgainstProjects(projectIds) {
     const known = new Set(projectIds);
     let changed = false;
@@ -2800,10 +2845,10 @@ const SessionStore = (() => {
 
   return {
     STATION_ID,
-    get, list, listOpen, listForProject,
+    get, list, listOpen, listForProject, listForNav,
     getActive, getActiveId, setActive,
     ensureProjectSession, createForProject,
-    appendMessage, setTitle, clearHistory, close,
+    appendMessage, setTitle, clearHistory, close, setPinned,
     gcAgainstProjects,
     subscribe,
   };
@@ -3640,21 +3685,38 @@ const NavSessions = (() => {
   }
 
   function render() {
-    const sessions = SessionStore.listOpen().filter(s => s.kind === 'project');
+    const sessions = SessionStore.listForNav();
     const activeId = activeIdFromHash();
     container.innerHTML = '';
     for (const s of sessions) {
       const row = document.createElement('a');
-      row.className = 'nav-session' + (s.id === activeId ? ' active' : '');
+      const cls = ['nav-session'];
+      if (s.id === activeId) cls.push('active');
+      if (s.pinned) cls.push('pinned');
+      row.className = cls.join(' ');
       row.href = `#chat/s/${s.id}`;
       row.title = `${s.title}\nDouble-click to rename`;
       const label = document.createElement('span');
       label.className = 'nav-session-label';
       label.textContent = s.title;
+      // Pin toggle — pinned sessions stay in the nav after close. Hover-
+      // revealed alongside ×, matching the close button's affordance.
+      const pin = document.createElement('button');
+      pin.className = 'nav-session-pin' + (s.pinned ? ' on' : '');
+      pin.type = 'button';
+      pin.setAttribute('aria-label', s.pinned ? 'Unpin session' : 'Pin session');
+      pin.title = s.pinned ? 'Unpin session' : 'Pin session';
+      pin.innerHTML = `<svg viewBox="0 0 24 24" width="11" height="11" fill="${s.pinned ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M9 17h6l1-7 3-3-1-2-2 1-7 3-1 2 3 3z"/></svg>`;
+      pin.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        SessionStore.setPinned(s.id, !s.pinned);
+      });
       const close = document.createElement('button');
       close.className = 'nav-session-close';
       close.type = 'button';
       close.setAttribute('aria-label', 'Close session');
+      close.title = 'Close session';
       close.textContent = '×';
       close.addEventListener('click', (e) => {
         e.preventDefault();
@@ -3662,9 +3724,11 @@ const NavSessions = (() => {
         const wasActive = SessionStore.getActiveId() === s.id;
         SessionStore.close(s.id);
         if (wasActive) {
-          // Prefer another open project session for the same project,
-          // else fall back to station.
-          const siblings = SessionStore.listOpen().filter(x => x.projectId === s.projectId);
+          // Prefer another session still visible in the nav for the same
+          // project, else fall back to station. Pins keep showing after
+          // close, so this can land on a pinned-but-closed sibling — fine,
+          // tapping it re-activates the conversation.
+          const siblings = SessionStore.listForNav().filter(x => x.projectId === s.projectId && x.id !== s.id);
           location.hash = siblings.length ? `#chat/s/${siblings[0].id}` : '#chat';
         }
       });
@@ -3681,6 +3745,7 @@ const NavSessions = (() => {
         SessionStore.setTitle(s.id, trimmed.slice(0, 80));
       });
       row.appendChild(label);
+      row.appendChild(pin);
       row.appendChild(close);
       container.appendChild(row);
     }
@@ -5407,17 +5472,10 @@ const ProjectsPanel = (() => {
       <div class="pc-banner" hidden></div>
     `;
 
-    // Quick action icons
+    // Quick action icons — "new chat session" only. Resuming an existing
+    // session happens via the nested nav under Projects, so the card
+    // button is unambiguously "start a fresh thread for this project".
     const actionsEl = card.querySelector('.pc-actions');
-    const chatBtn = iconBtn('chat', 'Open in chat',
-      `<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/></svg>`);
-    chatBtn.addEventListener('click', (e) => { e.stopPropagation(); openInChat(p); });
-    actionsEl.appendChild(chatBtn);
-
-    // "+" — always-fresh chat session for this project. Distinct from the
-    // chat icon (which resumes the most-recent session) so users can keep
-    // independent threads of work going on the same project without
-    // losing the prior context.
     const newChatBtn = iconBtn('chat-new', 'New chat session',
       `<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/><line x1="12" y1="8" x2="12" y2="14"/><line x1="9" y1="11" x2="15" y2="11"/></svg>`);
     newChatBtn.addEventListener('click', (e) => {
