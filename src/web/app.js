@@ -18633,17 +18633,61 @@ const NsitePanel = (() => {
     els.diag.hidden = false;
   }
 
+  // Tooltip text for the `?` icon next to the trust toggle. Intentionally
+  // brief — three short sentences covering "what changes", "where it's
+  // stored", and "why it's safe". Hover-only, no popover JS needed.
+  const TRUST_TOOLTIP = (
+    'Allow this nsite to fetch resources from any HTTPS URL ' +
+    '(esm.sh modules, nostr.build images, Google Fonts, etc.). ' +
+    'Saved per-author in nsite.json — once per nsite, ever. ' +
+    'The station itself stays isolated either way: each nsite runs in ' +
+    'its own browser origin and cannot reach the dashboard or your session.'
+  );
+
+  // Render the per-site trust control. Surfaces only when there's a
+  // reason to show it — either the iframe reported a CSP violation that
+  // the user could resolve by trusting, or the nsite is already trusted
+  // (so the user can revoke). Otherwise we keep the block silent to
+  // avoid cluttering happy-path Diagnostics on the many nsites that
+  // never need it (Ditto, Nostrord, jaredlogan, etc.).
+  function trustControlHtml() {
+    if (!currentBody) return '';
+    const pk = String(currentBody.pubkey || '');
+    if (!pk) return '';
+    const trusted = !!currentBody.trusted;
+    const hasViolations = reports.cspViolations.length > 0;
+    // Suppress when there's nothing to ask about: untrusted nsite with
+    // no violations is rendering fine under strict mode.
+    if (!trusted && !hasViolations) return '';
+    const help = `<span class="nsite-trust-help" title="${escapeHtml(TRUST_TOOLTIP)}" aria-label="What does trust mean?">?</span>`;
+    if (trusted) {
+      return `<div class="nsite-diag-section nsite-trust nsite-trust-on">
+        <span>External content: <strong>allowed for this nsite</strong></span>
+        <button class="nsite-trust-btn" type="button"
+                data-pk="${escapeHtml(pk)}" data-allow="false">Revoke</button>
+        ${help}
+      </div>`;
+    }
+    return `<div class="nsite-diag-section nsite-trust nsite-trust-off">
+      <span>External content: <strong>strict</strong> · ${reports.cspViolations.length} blocked</span>
+      <button class="nsite-trust-btn primary" type="button"
+              data-pk="${escapeHtml(pk)}" data-allow="true">Trust this nsite</button>
+      ${help}
+    </div>`;
+  }
+
   // Renders the iframe-reported CSP violations and script errors. Empty
   // string when nothing's been reported yet (page may still be loading,
   // or the reporter hasn't fired).
   function reportsHtml() {
     const cv = reports.cspViolations;
     const se = reports.scriptErrors;
+    const trustHtml = trustControlHtml();
     if (cv.length === 0 && se.length === 0) {
       if (reports.loaded) {
-        return `<div class="nsite-diag-section"><div class="nsite-diag-section-title">Sandbox clean</div><div class="muted" style="font-size:11px">No CSP violations or script errors reported by the iframe — render is unconstrained by the lockdown.</div></div>`;
+        return `<div class="nsite-diag-section"><div class="nsite-diag-section-title">Sandbox clean</div><div class="muted" style="font-size:11px">No CSP violations or script errors reported by the iframe — render is unconstrained by the lockdown.</div></div>${trustHtml}`;
       }
-      return '';
+      return trustHtml;
     }
     const cvHtml = cv.length ? `
       <div class="nsite-diag-section-title">CSP blocked (${cv.length})</div>
@@ -18665,7 +18709,7 @@ const NsitePanel = (() => {
         ${se.map(e => `<div class="muted" title="${escapeHtml(e.filename)}:${e.lineno}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(e.message)}</div>`).join('')}
       </div>
     ` : '';
-    return `<div class="nsite-diag-section">${cvHtml}${seHtml}</div>`;
+    return `<div class="nsite-diag-section">${cvHtml}${seHtml}</div>${trustHtml}`;
   }
   function setEmpty(visible) {
     if (els.empty) els.empty.style.display = visible ? '' : 'none';
@@ -18942,11 +18986,56 @@ const NsitePanel = (() => {
       toast('Publish from a terminal', '`nostr-station nsite init` → build → `nsite publish`.');
     });
 
+    // Trust toggle — delegated click handler on the Diagnostics body so
+    // it survives the repeated innerHTML re-renders that setDiagnostics
+    // does. The button carries the target pubkey + desired allow state
+    // as data attributes; the handler POSTs to /api/nsite/trust and
+    // re-resolves the current address so the new CSP posture takes
+    // effect for the iframe load.
+    els.diagBody?.addEventListener('click', (ev) => {
+      const btn = ev.target?.closest?.('.nsite-trust-btn');
+      if (!btn || btn.disabled) return;
+      const pk = btn.getAttribute('data-pk') || '';
+      const allow = btn.getAttribute('data-allow') === 'true';
+      if (!/^[0-9a-f]{64}$/i.test(pk)) return;
+      void toggleTrust(btn, pk, allow);
+    });
+
     // Hash deep-link support: `#nsite/<addr>` auto-loads on panel enter.
     // Used by `nostr-station nsite publish` to print a one-click preview
     // link after a successful publish.
     maybeConsumeDeepLink();
     mountReporterListener();
+  }
+
+  async function toggleTrust(btn, pubkey, allow) {
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = allow ? 'Trusting…' : 'Revoking…';
+    try {
+      const token = getSessionToken();
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch('/api/nsite/trust', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ pubkey, allow }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.message || body?.error || `HTTP ${res.status}`);
+      }
+      // Re-resolve so the iframe reloads with the new CSP posture. The
+      // server clears the snapshot cache on a successful trust write,
+      // so this re-resolve hits fresh state.
+      if (els.addr?.value) {
+        await go(els.addr.value);
+      }
+    } catch (e) {
+      toast('Trust update failed', String(e?.message || e));
+      btn.disabled = false;
+      btn.textContent = original;
+    }
   }
 
   function maybeConsumeDeepLink() {

@@ -38,6 +38,17 @@ export interface NsiteConfig {
   nsitIndexerPubkey:    string;
   /** Relays the NSIT indexer publishes to. */
   nsitIndexerRelays:    string[];
+  /** Author pubkeys (64-hex) the user has explicitly allowed to load external
+   *  HTTPS resources (esm.sh modules, nostr.build images, fonts, fetch
+   *  endpoints). When an nsite's resolved pubkey is in this list, the
+   *  served-content CSP gets `https:` added to script/img/connect/font/
+   *  style/media-src directives. Other nsites stay strict-by-default.
+   *  Persisted to nsite.json so the choice is once-per-nsite-ever.
+   *  The blast radius of a trusted nsite is still contained by the
+   *  per-origin iframe model (subdomain ≠ dashboard, SOP isolates) — see
+   *  routes/nsite.ts:handleNsiteSubdomain for the host gate that keeps
+   *  the dashboard /api/* surface invisible from nsite origins. */
+  trustedExternalNsites: string[];
 }
 
 function configDir(): string {
@@ -51,11 +62,12 @@ const HEX64 = /^[0-9a-f]{64}$/i;
 
 export function defaultNsiteConfig(): NsiteConfig {
   return {
-    contentRelays:     DEFAULT_CONTENT_RELAYS.slice(),
-    discoveryRelays:   PROFILE_DISCOVERY_RELAYS.slice(),
-    blossomServers:    DEFAULT_BLOSSOM_SERVERS.slice(),
-    nsitIndexerPubkey: DEFAULT_NSIT_INDEXER_PUBKEY,
-    nsitIndexerRelays: DEFAULT_NSIT_INDEXER_RELAYS.slice(),
+    contentRelays:         DEFAULT_CONTENT_RELAYS.slice(),
+    discoveryRelays:       PROFILE_DISCOVERY_RELAYS.slice(),
+    blossomServers:        DEFAULT_BLOSSOM_SERVERS.slice(),
+    nsitIndexerPubkey:     DEFAULT_NSIT_INDEXER_PUBKEY,
+    nsitIndexerRelays:     DEFAULT_NSIT_INDEXER_RELAYS.slice(),
+    trustedExternalNsites: [],
   };
 }
 
@@ -80,12 +92,23 @@ export function readNsiteConfig(): NsiteConfig {
   const pk    = typeof raw.nsitIndexerPubkey === 'string' && HEX64.test(raw.nsitIndexerPubkey.trim())
               ? raw.nsitIndexerPubkey.trim().toLowerCase()
               : fallback.nsitIndexerPubkey;
+  // Trusted-pubkey list: filter to valid 64-hex entries (lowercased,
+  // deduplicated). Forgive bad rows — a typo shouldn't lock the user
+  // out of every other allowed nsite.
+  const trustedSeen = new Set<string>();
+  const trusted: string[] = Array.isArray(raw.trustedExternalNsites)
+    ? raw.trustedExternalNsites
+        .filter((s: any): s is string => typeof s === 'string' && HEX64.test(s.trim()))
+        .map((s: string) => s.trim().toLowerCase())
+        .filter((s: string) => trustedSeen.has(s) ? false : (trustedSeen.add(s), true))
+    : [];
   return {
-    contentRelays:     wss.length   ? wss   : fallback.contentRelays,
-    discoveryRelays:   disc.length  ? disc  : fallback.discoveryRelays,
-    blossomServers:    blobs.length ? blobs : fallback.blossomServers,
-    nsitIndexerPubkey: pk,
-    nsitIndexerRelays: nsit.length  ? nsit  : fallback.nsitIndexerRelays,
+    contentRelays:         wss.length   ? wss   : fallback.contentRelays,
+    discoveryRelays:       disc.length  ? disc  : fallback.discoveryRelays,
+    blossomServers:        blobs.length ? blobs : fallback.blossomServers,
+    nsitIndexerPubkey:     pk,
+    nsitIndexerRelays:     nsit.length  ? nsit  : fallback.nsitIndexerRelays,
+    trustedExternalNsites: trusted,
   };
 }
 
@@ -121,6 +144,17 @@ export function writeNsiteConfig(input: Partial<NsiteConfig>): NsiteConfig {
     } else {
       throw new Error(`indexer pubkey must be 64-hex, empty, or "disabled" — got ${JSON.stringify(v).slice(0, 80)}`);
     }
+  }
+
+  if (Array.isArray(input.trustedExternalNsites)) {
+    // Same posture as readNsiteConfig: drop bad rows, dedup, lowercase.
+    // Throwing on the array as a whole would lock the user out of saving
+    // good entries just because one is malformed.
+    const seen = new Set<string>();
+    merged.trustedExternalNsites = input.trustedExternalNsites
+      .filter((s: any): s is string => typeof s === 'string' && HEX64.test(s.trim()))
+      .map((s: string) => s.trim().toLowerCase())
+      .filter((s: string) => seen.has(s) ? false : (seen.add(s), true));
   }
 
   fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 });

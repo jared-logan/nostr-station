@@ -9188,6 +9188,74 @@ a.client-mention {
 .nsite-diag-section {
   margin-bottom: 8px;
 }
+
+/* Per-site trust toggle — appears in the Diagnostics block when an
+ * nsite has CSP violations (offering to trust) OR is already trusted
+ * (offering to revoke). Compact horizontal row: state text, action
+ * button, `?` help. See app.js:trustControlHtml. */
+.nsite-trust {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 6px;
+  font-size: 12px;
+  margin-top: 8px;
+}
+.nsite-trust.nsite-trust-off {
+  background: rgba(255, 180, 70, 0.06);
+  border-color: rgba(255, 180, 70, 0.18);
+}
+.nsite-trust.nsite-trust-on {
+  background: rgba(70, 200, 130, 0.06);
+  border-color: rgba(70, 200, 130, 0.18);
+}
+.nsite-trust > span:first-child {
+  flex: 1;
+  min-width: 0;
+}
+.nsite-trust-btn {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--border, rgba(255,255,255,0.18));
+}
+.nsite-trust-btn:hover:not(:disabled) {
+  background: rgba(255,255,255,0.06);
+}
+.nsite-trust-btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+.nsite-trust-btn.primary {
+  border-color: rgba(255, 180, 70, 0.45);
+  color: rgba(255, 200, 120, 0.95);
+}
+.nsite-trust-btn.primary:hover:not(:disabled) {
+  background: rgba(255, 180, 70, 0.12);
+}
+.nsite-trust-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border, rgba(255,255,255,0.18));
+  font-size: 10px;
+  color: var(--muted);
+  cursor: help;
+  user-select: none;
+}
+.nsite-trust-help:hover {
+  color: var(--text, #fff);
+  border-color: var(--border-strong, rgba(255,255,255,0.3));
+}
 .nsite-diag-section-title {
   font-size: 10px;
   text-transform: uppercase;

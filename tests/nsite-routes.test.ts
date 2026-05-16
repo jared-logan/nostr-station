@@ -789,3 +789,187 @@ test('handleNsiteSubdomain: 200-response CSP does NOT contain the path-prefix \'
   _internal.sites.delete(sid);
   _internal.blobs.delete(sha);
 });
+
+// ── Per-site trust toggle ──────────────────────────────────────────────
+//
+// nsite.json's trustedExternalNsites list lets the user grant a single
+// nsite the ability to load external HTTPS resources (esm.sh modules,
+// nostr.build images, fonts, etc.) without loosening the strict CSP
+// for everyone else. The route layer reads the list at resolve time
+// and freezes a per-snapshot `trusted` flag; the served CSP gets
+// `https:` added to the network-loading directives when that flag is
+// set.
+
+test('serveContent: untrusted snapshot keeps strict CSP (no https: in script-src)', async () => {
+  const sid = '0000000000000020';
+  const sha = '1'.repeat(64);
+  _internal.sites.set(sid, {
+    pubkey: '2'.repeat(64), display: 'mock',
+    index: {
+      files: new Map([['index.html', sha]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v2-named', manifestServers: [],
+    },
+    blossomServers: [], createdAt: Date.now(),
+    trusted: false,
+  });
+  _internal.blobs.set(sha, {
+    bytes: new TextEncoder().encode('<html><head></head><body></body></html>'),
+    mime:  'text/html; charset=utf-8',
+  });
+  const res = makeMockRes();
+  const req = { method: 'GET', headers: { host: `${sid}.nsite.localhost:3000` } } as any;
+  await handleNsiteSubdomain(req, res, sid, '/');
+  const csp = String(res.headers['content-security-policy'] || '');
+  // No `https:` token added to any -src directive.
+  assert.ok(!/script-src[^;]*\bhttps:/.test(csp),  'untrusted: script-src must NOT contain https:');
+  assert.ok(!/img-src[^;]*\bhttps:/.test(csp),    'untrusted: img-src must NOT contain https:');
+  assert.ok(!/connect-src[^;]*\bhttps:/.test(csp), 'untrusted: connect-src must NOT contain https:');
+  _internal.sites.delete(sid);
+  _internal.blobs.delete(sha);
+});
+
+test('serveContent: trusted snapshot adds https: to network-loading directives', async () => {
+  const sid = '0000000000000021';
+  const sha = '3'.repeat(64);
+  _internal.sites.set(sid, {
+    pubkey: '4'.repeat(64), display: 'mock',
+    index: {
+      files: new Map([['index.html', sha]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v2-named', manifestServers: [],
+    },
+    blossomServers: [], createdAt: Date.now(),
+    trusted: true,
+  });
+  _internal.blobs.set(sha, {
+    bytes: new TextEncoder().encode('<html><head></head><body></body></html>'),
+    mime:  'text/html; charset=utf-8',
+  });
+  const res = makeMockRes();
+  const req = { method: 'GET', headers: { host: `${sid}.nsite.localhost:3000` } } as any;
+  await handleNsiteSubdomain(req, res, sid, '/');
+  const csp = String(res.headers['content-security-policy'] || '');
+  // Each network-loading directive must now carry `https:`.
+  assert.match(csp, /script-src[^;]*\bhttps:/,  'trusted: script-src must include https: so esm.sh modules load');
+  assert.match(csp, /img-src[^;]*\bhttps:/,     'trusted: img-src must include https: for nostr.build images etc.');
+  assert.match(csp, /connect-src[^;]*\bhttps:/, 'trusted: connect-src must include https: for fetch/XHR');
+  assert.match(csp, /font-src[^;]*\bhttps:/,    'trusted: font-src must include https: for Google Fonts');
+  assert.match(csp, /style-src[^;]*\bhttps:/,   'trusted: style-src must include https: for external stylesheets');
+  assert.match(csp, /media-src[^;]*\bhttps:/,   'trusted: media-src must include https: for hosted audio/video');
+  // Critically: trust does NOT loosen the eval-blocking bits. Dynamic
+  // code synthesis (eval / new Function) stays blocked even on trusted
+  // sites — trust is about WHERE code can come from, not what code can
+  // do once it's running.
+  assert.ok(!/\b'unsafe-eval'/.test(csp),
+    "trusted nsites still must NOT get 'unsafe-eval' — trust loosens network surface, not code synthesis");
+  assert.match(csp, /object-src 'none'/,
+    'trusted: object-src none must remain to keep plugins disabled');
+  _internal.sites.delete(sid);
+  _internal.blobs.delete(sha);
+});
+
+test('POST /api/nsite/trust: adds a pubkey to the allowlist', async () => {
+  const pk = '5'.repeat(64);
+  const res = makeMockRes();
+  const req = {
+    method: 'POST',
+    headers: { host: 'localhost:3000', 'content-type': 'application/json' },
+    // Mock the readBody stream: return a JSON body when readBody pulls it.
+    on: (event: string, cb: any) => {
+      if (event === 'data') cb(Buffer.from(JSON.stringify({ pubkey: pk, allow: true })));
+      if (event === 'end')  cb();
+      return req;
+    },
+  } as any;
+  const handled = await handleNsite(req, res, '/api/nsite/trust', 'POST');
+  assert.equal(handled, true);
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(String(res.body));
+  assert.equal(body.pubkey, pk);
+  assert.equal(body.trusted, true);
+  assert.ok(body.trustedExternalNsites.includes(pk),
+    'response must list the trusted pubkey for the panel to update from');
+});
+
+test('POST /api/nsite/trust: removes a pubkey when allow=false', async () => {
+  const pk = '6'.repeat(64);
+  // First add it via the same endpoint so we don't depend on test order.
+  let res = makeMockRes();
+  let req = {
+    method: 'POST',
+    headers: { host: 'localhost:3000', 'content-type': 'application/json' },
+    on: (event: string, cb: any) => {
+      if (event === 'data') cb(Buffer.from(JSON.stringify({ pubkey: pk, allow: true })));
+      if (event === 'end')  cb();
+      return req;
+    },
+  } as any;
+  await handleNsite(req, res, '/api/nsite/trust', 'POST');
+  // Now remove.
+  res = makeMockRes();
+  req = {
+    method: 'POST',
+    headers: { host: 'localhost:3000', 'content-type': 'application/json' },
+    on: (event: string, cb: any) => {
+      if (event === 'data') cb(Buffer.from(JSON.stringify({ pubkey: pk, allow: false })));
+      if (event === 'end')  cb();
+      return req;
+    },
+  } as any;
+  await handleNsite(req, res, '/api/nsite/trust', 'POST');
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(String(res.body));
+  assert.equal(body.trusted, false);
+  assert.ok(!body.trustedExternalNsites.includes(pk),
+    'revoking must remove the pubkey from the list');
+});
+
+test('POST /api/nsite/trust: rejects malformed pubkey with 400', async () => {
+  const res = makeMockRes();
+  const req = {
+    method: 'POST',
+    headers: { host: 'localhost:3000', 'content-type': 'application/json' },
+    on: (event: string, cb: any) => {
+      if (event === 'data') cb(Buffer.from(JSON.stringify({ pubkey: 'not-hex', allow: true })));
+      if (event === 'end')  cb();
+      return req;
+    },
+  } as any;
+  await handleNsite(req, res, '/api/nsite/trust', 'POST');
+  assert.equal(res.statusCode, 400);
+  const body = JSON.parse(String(res.body));
+  assert.equal(body.error, 'invalid_pubkey');
+});
+
+test('POST /api/nsite/trust: clears snapshot cache so re-resolve gets new posture', async () => {
+  // Add a fake snapshot to the cache, call trust, verify cache is cleared.
+  // Important so the panel's re-resolve-after-toggle reflects the new
+  // posture instead of returning a cached snapshot with the old `trusted`
+  // flag.
+  const pk = '7'.repeat(64);
+  _internal.sites.set('cachedsid0000001', {
+    pubkey: 'd'.repeat(64), display: 'mock',
+    index: {
+      files: new Map([['index.html', 'e'.repeat(64)]]),
+      latestAt: 0, oldestAt: 0, entries: [],
+      totalEventsSeen: 0, format: 'v2-named', manifestServers: [],
+    },
+    blossomServers: [], createdAt: Date.now(),
+    trusted: false,
+  });
+  assert.ok(_internal.sites.has('cachedsid0000001'));
+  const res = makeMockRes();
+  const req = {
+    method: 'POST',
+    headers: { host: 'localhost:3000', 'content-type': 'application/json' },
+    on: (event: string, cb: any) => {
+      if (event === 'data') cb(Buffer.from(JSON.stringify({ pubkey: pk, allow: true })));
+      if (event === 'end')  cb();
+      return req;
+    },
+  } as any;
+  await handleNsite(req, res, '/api/nsite/trust', 'POST');
+  assert.equal(_internal.sites.size, 0,
+    'trust write must clear the snapshot cache so re-resolve sees the new posture');
+});
