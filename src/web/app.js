@@ -18567,7 +18567,16 @@ const NsitePanel = (() => {
   // reached the queried set.
   function setDiagnostics(body) {
     if (!els.diag || !els.diagBody) return;
-    if (!body) { els.diag.hidden = true; els.diagBody.innerHTML = ''; currentBody = null; return; }
+    if (!body) {
+      els.diag.hidden = true;
+      els.diagBody.innerHTML = '';
+      currentBody = null;
+      // Clear the standalone trust banner alongside Diagnostics so a
+      // fresh Go() doesn't leave a stale Trust state visible while the
+      // new resolve is in flight.
+      refreshTrustBanner();
+      return;
+    }
     // Stash for re-render when CSP / script-error reports arrive from
     // the iframe asynchronously after the initial resolve.
     currentBody = body;
@@ -18631,6 +18640,9 @@ const NsitePanel = (() => {
       ${reportsHtml()}
     `;
     els.diag.hidden = false;
+    // Trust banner lives outside Diagnostics — refresh it in lockstep
+    // since both react to the same body/reports state.
+    refreshTrustBanner();
   }
 
   // Tooltip text for the `?` icon next to the trust toggle. Intentionally
@@ -18648,8 +18660,15 @@ const NsitePanel = (() => {
   // reason to show it — either the iframe reported a CSP violation that
   // the user could resolve by trusting, or the nsite is already trusted
   // (so the user can revoke). Otherwise we keep the block silent to
-  // avoid cluttering happy-path Diagnostics on the many nsites that
-  // never need it (Ditto, Nostrord, jaredlogan, etc.).
+  // avoid cluttering the panel on the many nsites that never need it
+  // (Ditto, Nostrord, jaredlogan, etc.).
+  //
+  // The output is rendered into #nsite-trust-banner (a dedicated slot
+  // between Diagnostics and the iframe viewport), NOT into the
+  // Diagnostics block itself. Prior placement at the bottom of
+  // Diagnostics meant users had to expand the collapsed twirly to
+  // discover the Trust button at all — invisible UX. The dedicated
+  // banner slot is always visible when relevant.
   function trustControlHtml() {
     if (!currentBody) return '';
     const pk = String(currentBody.pubkey || '');
@@ -18661,14 +18680,14 @@ const NsitePanel = (() => {
     if (!trusted && !hasViolations) return '';
     const help = `<span class="nsite-trust-help" title="${escapeHtml(TRUST_TOOLTIP)}" aria-label="What does trust mean?">?</span>`;
     if (trusted) {
-      return `<div class="nsite-diag-section nsite-trust nsite-trust-on">
+      return `<div class="nsite-trust nsite-trust-on">
         <span>External content: <strong>allowed for this nsite</strong></span>
         <button class="nsite-trust-btn" type="button"
                 data-pk="${escapeHtml(pk)}" data-allow="false">Revoke</button>
         ${help}
       </div>`;
     }
-    return `<div class="nsite-diag-section nsite-trust nsite-trust-off">
+    return `<div class="nsite-trust nsite-trust-off">
       <span>External content: <strong>strict</strong> · ${reports.cspViolations.length} blocked</span>
       <button class="nsite-trust-btn primary" type="button"
               data-pk="${escapeHtml(pk)}" data-allow="true">Trust this nsite</button>
@@ -18676,18 +18695,34 @@ const NsitePanel = (() => {
     </div>`;
   }
 
+  // Render the trust control into its dedicated banner slot, OR hide
+  // the slot entirely if there's nothing to surface. Called from
+  // setDiagnostics + the message-listener re-render paths.
+  function refreshTrustBanner() {
+    if (!els.trustBanner) return;
+    const html = trustControlHtml();
+    if (html) {
+      els.trustBanner.innerHTML = html;
+      els.trustBanner.hidden = false;
+    } else {
+      els.trustBanner.innerHTML = '';
+      els.trustBanner.hidden = true;
+    }
+  }
+
   // Renders the iframe-reported CSP violations and script errors. Empty
   // string when nothing's been reported yet (page may still be loading,
-  // or the reporter hasn't fired).
+  // or the reporter hasn't fired). The trust toggle is NOT rendered
+  // here — it lives in #nsite-trust-banner via refreshTrustBanner so
+  // it's visible without expanding Diagnostics.
   function reportsHtml() {
     const cv = reports.cspViolations;
     const se = reports.scriptErrors;
-    const trustHtml = trustControlHtml();
     if (cv.length === 0 && se.length === 0) {
       if (reports.loaded) {
-        return `<div class="nsite-diag-section"><div class="nsite-diag-section-title">Sandbox clean</div><div class="muted" style="font-size:11px">No CSP violations or script errors reported by the iframe — render is unconstrained by the lockdown.</div></div>${trustHtml}`;
+        return `<div class="nsite-diag-section"><div class="nsite-diag-section-title">Sandbox clean</div><div class="muted" style="font-size:11px">No CSP violations or script errors reported by the iframe — render is unconstrained by the lockdown.</div></div>`;
       }
-      return trustHtml;
+      return '';
     }
     const cvHtml = cv.length ? `
       <div class="nsite-diag-section-title">CSP blocked (${cv.length})</div>
@@ -18709,7 +18744,7 @@ const NsitePanel = (() => {
         ${se.map(e => `<div class="muted" title="${escapeHtml(e.filename)}:${e.lineno}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(e.message)}</div>`).join('')}
       </div>
     ` : '';
-    return `<div class="nsite-diag-section">${cvHtml}${seHtml}</div>${trustHtml}`;
+    return `<div class="nsite-diag-section">${cvHtml}${seHtml}</div>`;
   }
   function setEmpty(visible) {
     if (els.empty) els.empty.style.display = visible ? '' : 'none';
@@ -18766,9 +18801,17 @@ const NsitePanel = (() => {
       // Bind the reporter bucket to the new siteId so postMessage events
       // from the iframe land in the right channel.
       reports.siteId = siteId;
-      // Push new history entry (trim forward tail on fresh nav).
+      // Push new history entry (trim forward tail on fresh nav). Keep
+      // BOTH the canonical display form (what the address bar shows)
+      // AND the original raw input the user typed (`addr`). The original
+      // matters for the trust-toggle re-resolve path: a gateway URL like
+      // `https://<pubkey-base36><name>.nsite.lol/` decodes to display
+      // `nsite://<name>`, but feeding that display back into the resolver
+      // tries an NSIT lookup that fails ("name not found on indexer
+      // relays") for non-Bitcoin names. Re-resolving via the original
+      // `addr` always hits the same successful path.
       if (cursor < history.length - 1) history.splice(cursor + 1);
-      history.push({ siteId, display, path: entryPath });
+      history.push({ siteId, display, path: entryPath, originalAddr: addr });
       cursor = history.length - 1;
       setStatus(`✓ ${fileCount} file${fileCount === 1 ? '' : 's'} — ${source}`);
       const ts = latestAt ? new Date(latestAt * 1000).toLocaleString() : '';
@@ -18964,10 +19007,11 @@ const NsitePanel = (() => {
     els.frame    = $('nsite-frame');
     els.status   = $('nsite-status');
     els.meta     = $('nsite-meta');
-    els.diag     = $('nsite-diag');
-    els.diagBody = $('nsite-diag-body');
-    els.empty    = $('nsite-empty');
-    els.pubLink  = $('nsite-publish-link');
+    els.diag        = $('nsite-diag');
+    els.diagBody    = $('nsite-diag-body');
+    els.trustBanner = $('nsite-trust-banner');
+    els.empty       = $('nsite-empty');
+    els.pubLink     = $('nsite-publish-link');
     if (!els.addr) return;
 
     setEmpty(true);
@@ -18986,13 +19030,13 @@ const NsitePanel = (() => {
       toast('Publish from a terminal', '`nostr-station nsite init` → build → `nsite publish`.');
     });
 
-    // Trust toggle — delegated click handler on the Diagnostics body so
-    // it survives the repeated innerHTML re-renders that setDiagnostics
+    // Trust toggle — delegated click handler on the trust banner so it
+    // survives the repeated innerHTML re-renders that refreshTrustBanner
     // does. The button carries the target pubkey + desired allow state
     // as data attributes; the handler POSTs to /api/nsite/trust and
     // re-resolves the current address so the new CSP posture takes
     // effect for the iframe load.
-    els.diagBody?.addEventListener('click', (ev) => {
+    els.trustBanner?.addEventListener('click', (ev) => {
       const btn = ev.target?.closest?.('.nsite-trust-btn');
       if (!btn || btn.disabled) return;
       const pk = btn.getAttribute('data-pk') || '';
@@ -19028,8 +19072,19 @@ const NsitePanel = (() => {
       // Re-resolve so the iframe reloads with the new CSP posture. The
       // server clears the snapshot cache on a successful trust write,
       // so this re-resolve hits fresh state.
-      if (els.addr?.value) {
-        await go(els.addr.value);
+      //
+      // Use the ORIGINAL input the user typed (stored on the history
+      // entry), not whatever the address bar currently shows. The
+      // address bar holds the canonical display form, which for some
+      // inputs (gateway URLs decoded to `nsite://<name>`) doesn't
+      // round-trip back through the resolver because the name is a
+      // subdomain-suffix convention, not an NSIT-registered Bitcoin
+      // name. Re-resolving via the original always works.
+      const reResolveAddr = (cursor >= 0 && history[cursor]?.originalAddr)
+        || els.addr?.value
+        || '';
+      if (reResolveAddr) {
+        await go(reResolveAddr);
       }
     } catch (e) {
       toast('Trust update failed', String(e?.message || e));
