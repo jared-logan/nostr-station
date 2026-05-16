@@ -229,6 +229,36 @@ input:focus, textarea:focus, select:focus {
   color: var(--muted);
   padding: 0 10px 8px;
 }
+
+/* Collapsible sidebar groups (Operations, Infrastructure, Services).
+   Summary mirrors .section-title styling but is clickable, with a
+   rotating chevron — same disclosure pattern as details.dashboard-health
+   and .events-collapse elsewhere in the app. */
+.sidebar-group > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+  font-size: 10px;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0 10px 8px;
+}
+.sidebar-group > summary::-webkit-details-marker { display: none; }
+.sidebar-group > summary::marker { content: ''; }
+.sidebar-group > summary:hover { color: var(--text-bright); }
+.sidebar-group > summary::after {
+  content: '▸';
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--muted);
+  transition: transform 140ms ease;
+}
+.sidebar-group[open] > summary::after { transform: rotate(90deg); }
+.nav > .sidebar-group { margin-top: 10px; }
+
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav a {
   display: flex;
