@@ -19299,23 +19299,39 @@ const NsitePanel = (() => {
   // but the panel shows stale content" debugging, since you can spot a
   // year-old event lingering on one relay while your fresh publish never
   // reached the queried set.
+  // setDiagnostics — used to drive an inline <details id="nsite-diag">
+  // block at the top of the panel; that block was removed when the
+  // unified side pane absorbed Dev tools as one of its stepper modes.
+  // The function now just stashes the resolve response on the active
+  // tab so it's available for whichever pane mode renders it, plus
+  // refreshes the trust banner + any open body-dependent pane mode
+  // (Site info or Dev tools). Settings doesn't depend on body so it's
+  // not refreshed here.
   function setDiagnostics(body) {
-    if (!els.diag || !els.diagBody) return;
+    const t = activeTab();
+    if (t) t.body = body || null;
+    refreshTrustBanner();
+    if (els.siteInfo && !els.siteInfo.hidden) {
+      if      (paneMode === 'siteinfo') renderSiteInfo();
+      else if (paneMode === 'devtools') renderDevToolsPane();
+    }
+  }
+
+  // Render the Dev tools mode of the side pane — files, relay tiers,
+  // CSP violations, script errors. Same content the inline Diagnostics
+  // block used to show, just relocated into the unified pane so it
+  // shares a stepper with Site info and Settings (mirrors Titan
+  // Browser's right-side menu shape). Reads from the active tab's
+  // body + reports — re-render is cheap, called on every resolve and
+  // every postMessage from the iframe reporter while the pane is open.
+  function renderDevToolsPane() {
+    if (!els.siteInfoBody) return;
+    const tab = activeTab();
+    const body = tab?.body;
     if (!body) {
-      els.diag.hidden = true;
-      els.diagBody.innerHTML = '';
-      const t = activeTab();
-      if (t) t.body = null;
-      // Clear the standalone trust banner alongside Diagnostics so a
-      // fresh Go() doesn't leave a stale Trust state visible while the
-      // new resolve is in flight.
-      refreshTrustBanner();
+      els.siteInfoBody.innerHTML = `<div class="nsite-siteinfo-empty">Browse an nsite — Dev tools populates from the first resolve.</div>`;
       return;
     }
-    // Stash for re-render when CSP / script-error reports arrive from
-    // the iframe asynchronously after the initial resolve.
-    const t = activeTab();
-    if (t) t.body = body;
     const fmtAge = (sec) => {
       if (!sec) return 'unknown';
       const diff = Math.max(0, Math.floor(Date.now() / 1000) - sec);
@@ -19325,9 +19341,7 @@ const NsitePanel = (() => {
       if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d ago`;
       return `${Math.floor(diff / 86400 / 7)}w ago`;
     };
-    const fmtDate = (sec) =>
-      sec ? new Date(sec * 1000).toLocaleString() : '—';
-
+    const fmtDate = (sec) => sec ? new Date(sec * 1000).toLocaleString() : '—';
     const entries = body.entries || [];
     const eventsHtml = entries.length
       ? `<div class="nsite-diag-table">
@@ -19341,7 +19355,6 @@ const NsitePanel = (() => {
            `).join('')}
          </div>`
       : '<div class="muted">No kind:34128 events found.</div>';
-
     const relayLines = (label, arr) => arr && arr.length
       ? `<div class="nsite-diag-section">
            <div class="nsite-diag-section-title">${escapeHtml(label)} (${arr.length})</div>
@@ -19354,16 +19367,10 @@ const NsitePanel = (() => {
     const stale = (body.oldestAt && body.latestAt && body.oldestAt !== body.latestAt)
       ? `<div class="muted" style="margin-top:6px">Oldest event ${fmtAge(body.oldestAt)}, newest ${fmtAge(body.latestAt)} — multiple publishes detected.</div>`
       : '';
-
-    // Kind shown in the diag counter depends on which probe served the
-    // result: v2-named manifest is kind:35128, v2-root is kind:15128,
-    // v1 per-file is kind:34128. Without this hint the user sees the
-    // wrong kind number in the diagnostic — confusing when comparing
-    // against `nak` output for the same author.
     const kindLabel = body.format === 'v2-named' ? 'kind:35128'
                     : body.format === 'v2-root'  ? 'kind:15128'
                     : 'kind:34128';
-    els.diagBody.innerHTML = `
+    els.siteInfoBody.innerHTML = `
       <div class="nsite-diag-section">
         <div class="nsite-diag-section-title">Files (${entries.length} of ${body.totalEventsSeen || entries.length} ${kindLabel} seen)</div>
         ${eventsHtml}
@@ -19375,16 +19382,6 @@ const NsitePanel = (() => {
       ${relayLines('Queried (union)',     r.queried)}
       ${reportsHtml()}
     `;
-    els.diag.hidden = false;
-    // Trust banner lives outside Diagnostics — refresh it in lockstep
-    // since both react to the same body/reports state.
-    refreshTrustBanner();
-    // Site Info sidebar (PR-3) reads from the same body — keep it in
-    // sync if currently open AND showing siteinfo (not settings; we
-    // don't want a fresh resolve to clobber a half-edited form).
-    if (els.siteInfo && !els.siteInfo.hidden && paneMode === 'siteinfo') {
-      renderSiteInfo();
-    }
   }
 
   // Tooltip text for the `?` icon next to the trust toggle. Intentionally
@@ -19833,12 +19830,10 @@ const NsitePanel = (() => {
         els.meta.textContent = '';
       }
     }
-    if (tab.body) {
-      setDiagnostics(tab.body);
-    } else if (els.diag) {
-      els.diag.hidden = true;
-      if (els.diagBody) els.diagBody.innerHTML = '';
-    }
+    // Stash this tab's body so the pane (if open) re-renders for it.
+    // The old inline Diagnostics block is gone; the pane handles
+    // re-render via setDiagnostics → renderDevToolsPane / renderSiteInfo.
+    if (tab.body) setDiagnostics(tab.body);
     refreshTrustBanner();
     updateNavButtons();
     // Empty-state visible when this tab has nothing to show yet.
@@ -19898,16 +19893,15 @@ const NsitePanel = (() => {
     els.reload   = $('nsite-reload');
     els.status   = $('nsite-status');
     els.meta     = $('nsite-meta');
-    els.diag        = $('nsite-diag');
-    els.diagBody    = $('nsite-diag-body');
     els.trustBanner = $('nsite-trust-banner');
     els.empty       = $('nsite-empty');
-    els.pubLink     = $('nsite-publish-link');
-    // Browser-style menu (≡) — Site Info / Settings / Dev Tools.
+    // Browser-style menu (⋮) anchored to the address bar — opens the
+    // side pane in Site Info / Settings / Dev Tools mode. The pane has
+    // its own stepper at the top so the user can also swap modes
+    // without re-opening the menu.
     els.menuBtn        = $('nsite-menu-btn');
     els.menu           = $('nsite-menu');
     els.siteInfo       = $('nsite-siteinfo');
-    els.siteInfoTitle  = $('nsite-siteinfo-title');
     els.siteInfoBody   = $('nsite-siteinfo-body');
     els.siteInfoClose  = $('nsite-siteinfo-close');
     if (!els.addr) return;
@@ -19935,12 +19929,21 @@ const NsitePanel = (() => {
     els.back?.addEventListener('click',    () => navigate(-1));
     els.forward?.addEventListener('click', () => navigate(+1));
     els.reload?.addEventListener('click',  () => reload());
-    els.pubLink?.addEventListener('click', () => {
-      // Light-weight hint — link to the publish-flow docs in the CLI help.
-      // The publish surface itself is the CLI (`nostr-station nsite init/publish`),
-      // so the dashboard's job here is just to point users at it.
-      toast('Publish from a terminal', '`nostr-station nsite init` → build → `nsite publish`.');
-    });
+
+    // Side-pane stepper — delegated click handler routes the user's
+    // tab choice to the matching open* function. Survives every
+    // body-innerHTML rewrite that the mode renderers do because the
+    // stepper itself lives in the pane HEAD (sibling of the body), not
+    // inside the swappable content.
+    els.siteInfo?.querySelector('.nsite-siteinfo-stepper')
+      ?.addEventListener('click', (ev) => {
+        const step = ev.target?.closest?.('.nsite-siteinfo-step');
+        if (!step) return;
+        const which = step.getAttribute('data-step');
+        if      (which === 'siteinfo') openSiteInfo();
+        else if (which === 'settings') openSettings();
+        else if (which === 'devtools') openDevTools();
+      });
 
     // Tab strip — single delegated click handler covers tab activation,
     // close-button clicks, and the new-tab "+" button. Survives
@@ -20068,7 +20071,7 @@ const NsitePanel = (() => {
     // the "Open in Config panel" footer link), but the essentials are
     // here.
     paneMode = 'settings';
-    if (els.siteInfoTitle) els.siteInfoTitle.textContent = 'Settings';
+    updateStepper();
     if (els.siteInfo) els.siteInfo.hidden = false;
     void renderSettings();
   }
@@ -20194,28 +20197,36 @@ const NsitePanel = (() => {
   }
 
   function openDevTools() {
-    if (!els.diag) return;
-    // The Diagnostics block is `hidden` until the first resolve. If the
-    // user opens Dev Tools before browsing anything, surface a small
-    // hint via toast rather than expanding an empty pane.
-    if (els.diag.hidden) {
-      toast('Dev tools', 'Browse an nsite first — Diagnostics populates from the first resolve.');
-      return;
-    }
-    try { els.diag.open = true; } catch {}
-    els.diag.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    paneMode = 'devtools';
+    updateStepper();
+    renderDevToolsPane();
+    if (els.siteInfo) els.siteInfo.hidden = false;
   }
 
   function openSiteInfo() {
     if (!els.siteInfo || !els.siteInfoBody) return;
     paneMode = 'siteinfo';
-    if (els.siteInfoTitle) els.siteInfoTitle.textContent = 'Site info';
+    updateStepper();
     renderSiteInfo();
     els.siteInfo.hidden = false;
   }
   function closeSiteInfo() {
     if (els.siteInfo) els.siteInfo.hidden = true;
     paneMode = null;
+  }
+
+  // Sync the stepper's aria-selected state to the current paneMode so
+  // the active tab visually highlights. Idempotent + safe to call on
+  // every mode transition; the stepper DOM lives inside the pane
+  // header and survives the body-innerHTML rewrites that each mode
+  // renderer does.
+  function updateStepper() {
+    if (!els.siteInfo) return;
+    const tabs = els.siteInfo.querySelectorAll('.nsite-siteinfo-step');
+    for (const t of tabs) {
+      const isActive = t.getAttribute('data-step') === paneMode;
+      t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    }
   }
 
   // Render the Site Info sidebar from the active resolve response.
