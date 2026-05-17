@@ -15520,6 +15520,111 @@ const ConfigPanel = (() => {
     `;
   }
 
+  // Routstr key-prefix sniff (mirror of detectRoutstrKeyType in
+  // src/lib/routes/ai.ts). Used for instant client-side UI feedback as
+  // the user pastes — server still re-detects on save, so this is purely
+  // cosmetic. sk- → managed (node tracks balance); else → cashu token.
+  function routstrKeyTypeFromKey(key) {
+    return /^sk-/i.test((key || '').trim()) ? 'sk' : 'cashu';
+  }
+
+  // Calls POST /api/ai/providers/routstr/check. Returns the parsed JSON
+  // ({ ok, keyType, balanceSats?, error? }) or { ok:false, error } on
+  // network failure. Never throws — callers branch on .ok.
+  async function checkRoutstrKey({ key, baseUrl } = {}) {
+    try {
+      return await api('/api/ai/providers/routstr/check', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ key, baseUrl }),
+      });
+    } catch (e) {
+      return { ok: false, error: e?.message || 'request failed' };
+    }
+  }
+
+  // HTML fragment swapped in when user picks "Routstr ⚡" from the add
+  // dropdown. Mirrors the customRow / keyrow structure already in the
+  // config panel so styling carries over. Validation status div is the
+  // mount point for the inline "✓ 487 sats" / "key rejected" line that
+  // the paste handler writes into.
+  function renderRoutstrAddBlock(defaultBaseUrl) {
+    return `
+      <div id="ai-add-routstrrow" class="ai-add-routstr" style="display:none;margin-top:8px">
+        <div class="np-hint" style="margin-bottom:8px">
+          Routstr is a federation of nodes that resell AI inference paid in sats. Pick the node you have a key for.
+        </div>
+        <label class="field-label">Node URL</label>
+        <input id="ai-add-routstr-baseurl" type="text" autocomplete="off"
+               placeholder="https://api.routstr.com/v1" value="${escapeHtml(defaultBaseUrl || 'https://api.routstr.com/v1')}">
+        <div class="np-hint" style="margin-top:8px">
+          Paste an <code>sk-…</code> key or a <code>cashuA…</code> token. Get one from your cashu wallet or the node's web UI.
+        </div>
+        <div id="ai-add-routstr-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+      </div>
+    `;
+  }
+
+  // Configured-Routstr row — replaces renderAiRow for p.id === 'routstr'.
+  // Adds: node-URL subtitle with inline pencil edit, managed/cashu badge,
+  // Check balance button (sk- only), balance read-out slot.
+  function renderRoutstrRow(p) {
+    const isChatDef = !!p.isDefault?.chat;
+    const keyType = p.keyType; // 'sk' | 'cashu' | null
+    const baseUrl = p.baseUrl || 'https://api.routstr.com/v1';
+
+    const badges = [
+      `<span class="ai-badge type-api">api</span>`,
+      p.hasKey
+        ? `<span class="ai-badge status-ok">✓ key set</span>`
+        : `<span class="ai-badge">needs key</span>`,
+    ];
+    if (keyType === 'sk')    badges.push(`<span class="ai-badge">managed</span>`);
+    if (keyType === 'cashu') badges.push(`<span class="ai-badge">cashu</span>`);
+    if (isChatDef) badges.push(`<span class="ai-badge default">chat default</span>`);
+
+    const actions = [];
+    // Check balance: sk- only. cashu tokens have no balance API; the
+    // node's wallet/info call for a fresh cashu would either 401 or
+    // create a session — neither is a meaningful "balance" to surface.
+    if (keyType === 'sk') {
+      actions.push(`<button class="ai-routstr-check-balance" data-id="routstr">Check balance</button>`);
+    }
+    actions.push(`<button class="ai-fetch-models" data-id="routstr">Fetch models</button>`);
+    if (!isChatDef) {
+      actions.push(`<button class="ai-set-default" data-kind="chat" data-id="routstr">Use for Chat</button>`);
+    }
+    actions.push(`<button class="danger ai-remove" data-id="routstr">Remove</button>`);
+
+    const model = p.model ? `<span class="ai-model" style="margin-left:8px">${escapeHtml(p.model)}</span>` : '';
+
+    return `
+      <div class="ai-provider-row" data-id="routstr" data-type="api">
+        <div class="ai-provider-head">
+          <span class="ai-provider-name">${escapeHtml(p.displayName)}</span>
+          ${badges.join('')}
+        </div>
+        <div class="ai-provider-meta">
+          <span class="ai-routstr-url-view">
+            <span class="muted">node:</span>
+            <code class="ai-routstr-url-text">${escapeHtml(baseUrl)}</code>
+            <button class="ai-routstr-url-edit" type="button" data-id="routstr" title="Change node URL"
+              style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px">✎ edit</button>
+          </span>
+          <span class="ai-routstr-url-edit-row" style="display:none">
+            <input class="ai-routstr-url-input" type="text" value="${escapeHtml(baseUrl)}"
+              style="min-width:280px">
+            <button class="ai-routstr-url-save"   type="button" data-id="routstr">save</button>
+            <button class="ai-routstr-url-cancel" type="button" data-id="routstr">cancel</button>
+          </span>
+          ${model}
+          <span class="ai-routstr-balance muted" style="font-size:11px;margin-left:8px"></span>
+        </div>
+        <div class="ai-provider-actions">${actions.join('')}</div>
+      </div>
+    `;
+  }
+
   function renderAiProviders(aiList) {
     if (!aiList || !Array.isArray(aiList.providers)) {
       return `<div style="color:var(--warn);font-size:12px">AI provider list unavailable — server may be pre-Step-4.</div>`;
@@ -15560,6 +15665,7 @@ const ConfigPanel = (() => {
           <label class="field-label">Default model id</label>
           <input id="ai-add-model" type="text" autocomplete="off" placeholder="gpt-4o-mini, llama3.2, etc.">
         </div>
+        ${renderRoutstrAddBlock()}
         <div id="ai-add-keyrow" class="keyrow" style="margin-top:8px;display:none">
           <div class="keyfield">
             <input id="ai-add-key" type="password" autocomplete="off" placeholder="paste provider key (sk-…)">
@@ -15583,6 +15689,11 @@ const ConfigPanel = (() => {
   }
 
   function renderAiRow(p) {
+    // Routstr gets a richer row (node URL with inline edit, key-type
+    // badge, Check balance button). Everything else uses the generic
+    // shape below.
+    if (p.id === 'routstr') return renderRoutstrRow(p);
+
     const typeLabel  = p.type === 'terminal-native' ? 'terminal' : 'api';
     const typeClass  = p.type === 'terminal-native' ? 'term' : 'api';
     const isChatDef  = !!p.isDefault?.chat;
@@ -15721,6 +15832,66 @@ const ConfigPanel = (() => {
           await fetchModelsForProvider(id, btn);
           return;
         }
+        // Routstr row: inline node-URL edit + Check balance.
+        if (id === 'routstr') {
+          const row = btn.closest('.ai-provider-row');
+          if (!row) return;
+          if (btn.classList.contains('ai-routstr-url-edit')) {
+            row.querySelector('.ai-routstr-url-view').style.display = 'none';
+            row.querySelector('.ai-routstr-url-edit-row').style.display = '';
+            row.querySelector('.ai-routstr-url-input').focus();
+            return;
+          }
+          if (btn.classList.contains('ai-routstr-url-cancel')) {
+            row.querySelector('.ai-routstr-url-edit-row').style.display = 'none';
+            row.querySelector('.ai-routstr-url-view').style.display = '';
+            row.querySelector('.ai-routstr-url-input').value =
+              row.querySelector('.ai-routstr-url-text').textContent || '';
+            return;
+          }
+          if (btn.classList.contains('ai-routstr-url-save')) {
+            const next = (row.querySelector('.ai-routstr-url-input').value || '').trim();
+            if (!/^https?:\/\//i.test(next)) {
+              toast('Bad node URL', 'Must start with http:// or https://', 'warn');
+              return;
+            }
+            btn.disabled = true;
+            try {
+              await api('/api/ai/config', {
+                method:  'POST',
+                headers: { 'content-type': 'application/json' },
+                body:    JSON.stringify({ providers: { routstr: { baseUrl: next } } }),
+              });
+              toast('Node URL updated', next, 'ok');
+              load();
+            } catch (e) {
+              toast('Update failed', e.message, 'err');
+            } finally {
+              btn.disabled = false;
+            }
+            return;
+          }
+          if (btn.classList.contains('ai-routstr-check-balance')) {
+            const slot = row.querySelector('.ai-routstr-balance');
+            if (slot) slot.innerHTML = `<span class="muted">checking…</span>`;
+            btn.disabled = true;
+            try {
+              const r = await checkRoutstrKey({});
+              if (slot) {
+                if (r.ok && typeof r.balanceSats === 'number') {
+                  slot.innerHTML = `<span style="color:var(--success)">${r.balanceSats.toLocaleString()} sats available</span>`;
+                } else if (r.ok) {
+                  slot.innerHTML = `<span style="color:var(--success)">node reachable</span>`;
+                } else {
+                  slot.innerHTML = `<span style="color:var(--warn)">${escapeHtml(r.error || 'check failed')}</span>`;
+                }
+              }
+            } finally {
+              btn.disabled = false;
+            }
+            return;
+          }
+        }
       });
     }
 
@@ -15738,11 +15909,18 @@ const ConfigPanel = (() => {
     const modelInp    = $('ai-add-model');
     const saveBtn     = $('ai-add-save');
     const cancelBtn   = $('ai-add-cancel');
+    // Routstr-specific add-block elements. Same scope as the others so
+    // hideAdd / save / cancel can reach them without a second lookup.
+    const routstrRow      = $('ai-add-routstrrow');
+    const routstrBaseUrl  = $('ai-add-routstr-baseurl');
+    const routstrStatus   = $('ai-add-routstr-status');
 
     function hideAdd() {
       keyRow.style.display = 'none';
-      if (customRow) customRow.style.display = 'none';
-      if (keyHint)   keyHint.style.display   = 'none';
+      if (customRow)   customRow.style.display   = 'none';
+      if (keyHint)     keyHint.style.display     = 'none';
+      if (routstrRow)  routstrRow.style.display  = 'none';
+      if (routstrStatus) routstrStatus.innerHTML = '';
     }
     hideAdd();
 
@@ -15775,17 +15953,59 @@ const ConfigPanel = (() => {
           // Custom Provider needs baseUrl + model id alongside the key.
           // Pre-fill from the registry default if any (empty for custom).
           customRow.style.display = '';
+          if (routstrRow) routstrRow.style.display = 'none';
           baseUrlInp.value = chosen.baseUrl || '';
           modelInp.value   = chosen.model   || '';
           if (keyHint) keyHint.style.display = '';
           baseUrlInp.focus();
+        } else if (id === 'routstr') {
+          // Routstr — node URL + a richer key field with live validation.
+          // Pre-fill baseUrl with whatever the server reports (registry
+          // default or user override from a previous add).
+          if (customRow) customRow.style.display = 'none';
+          routstrRow.style.display = '';
+          routstrBaseUrl.value = chosen.baseUrl || 'https://api.routstr.com/v1';
+          routstrStatus.innerHTML = '';
+          if (keyHint) keyHint.style.display = 'none';
+          routstrBaseUrl.focus();
         } else {
           customRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
           if (keyHint) keyHint.style.display = 'none';
           keyInput.focus();
         }
       }
     });
+
+    // Routstr live validation: when both URL + key are present, call the
+    // server's /check endpoint and surface "✓ 487 sats" / "key rejected"
+    // inline. sk- keys validate against /v1/wallet/info; cashu tokens skip
+    // the round-trip (no meaningful balance to display).
+    if (keyInput && routstrBaseUrl && routstrStatus) {
+      const renderStatus = (html) => { routstrStatus.innerHTML = html; };
+      const validate = async () => {
+        if (sel.value !== 'routstr') return;
+        const key = keyInput.value.trim();
+        const baseUrl = routstrBaseUrl.value.trim();
+        if (!key || !baseUrl) { renderStatus(''); return; }
+        const kt = routstrKeyTypeFromKey(key);
+        if (kt === 'cashu') {
+          renderStatus(`<span style="color:var(--success)">✓ cashu token — one-shot prepaid</span>`);
+          return;
+        }
+        renderStatus(`<span class="muted">checking…</span>`);
+        const r = await checkRoutstrKey({ key, baseUrl });
+        if (r.ok && typeof r.balanceSats === 'number') {
+          renderStatus(`<span style="color:var(--success)">✓ managed key — ${r.balanceSats.toLocaleString()} sats available</span>`);
+        } else if (r.ok) {
+          renderStatus(`<span style="color:var(--success)">✓ managed key — node reachable</span>`);
+        } else {
+          renderStatus(`<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`);
+        }
+      };
+      keyInput.addEventListener('blur', validate);
+      routstrBaseUrl.addEventListener('blur', validate);
+    }
 
     keyEye?.addEventListener('click', () => {
       keyInput.type = keyInput.type === 'password' ? 'text' : 'password';
@@ -15810,6 +16030,19 @@ const ConfigPanel = (() => {
           return;
         }
       }
+      // Routstr: baseUrl is required (curated default seeds the field so
+      // a fresh user can just click save). Same http(s) sanity check.
+      if (id === 'routstr') {
+        const baseUrl = (routstrBaseUrl?.value || '').trim();
+        if (!baseUrl) {
+          toast('Node URL required', 'Paste the Routstr node URL.', 'warn');
+          return;
+        }
+        if (!/^https?:\/\//i.test(baseUrl)) {
+          toast('Bad node URL', 'Must start with http:// or https://', 'warn');
+          return;
+        }
+      }
 
       saveBtn.disabled = true;
       try {
@@ -15828,10 +16061,17 @@ const ConfigPanel = (() => {
             }),
           });
         }
+        // Routstr: send baseUrl in the same /key POST. The server
+        // persists it alongside the keyRef and auto-detects keyType
+        // from the key prefix. One round-trip, no separate /api/ai/config
+        // call needed.
+        const keyBody = id === 'routstr'
+          ? { key, baseUrl: routstrBaseUrl.value.trim() }
+          : { key };
         const r = await api(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ key }),
+          body: JSON.stringify(keyBody),
         });
         if (!r.ok) throw new Error(r.error || 'save failed');
         toast('Provider added', id, 'ok');
@@ -15861,8 +16101,9 @@ const ConfigPanel = (() => {
       hideAdd();
       sel.value = '';
       keyInput.value = '';
-      if (baseUrlInp) baseUrlInp.value = '';
-      if (modelInp)   modelInp.value   = '';
+      if (baseUrlInp)     baseUrlInp.value     = '';
+      if (modelInp)       modelInp.value       = '';
+      if (routstrBaseUrl) routstrBaseUrl.value = '';
     });
   }
 
@@ -17497,6 +17738,18 @@ const SetupWizard = (() => {
               ${termOpts ? `<optgroup label="Terminal-native">${termOpts}</optgroup>` : ''}
               ${apiOpts  ? `<optgroup label="API">${apiOpts}</optgroup>` : ''}
             </select>
+            <div id="setup-ai-routstrrow" style="display:none;margin-top:8px">
+              <div class="np-hint" style="margin-bottom:8px">
+                Routstr is a federation of nodes that resell AI inference paid in sats. Pick the node you have a key for.
+              </div>
+              <label class="field-label">Node URL</label>
+              <input id="setup-ai-routstr-baseurl" type="text" autocomplete="off"
+                     placeholder="https://api.routstr.com/v1" value="https://api.routstr.com/v1">
+              <div class="np-hint" style="margin-top:8px">
+                Paste an <code>sk-…</code> key or a <code>cashuA…</code> token. Get one from your cashu wallet or the node's web UI.
+              </div>
+              <div id="setup-ai-routstr-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+            </div>
             <div id="setup-ai-keyrow" style="margin-top:8px;display:none">
               <div class="keyrow">
                 <div class="keyfield">
@@ -17554,6 +17807,9 @@ const SetupWizard = (() => {
       const keyInput = $('setup-ai-key');
       const saveBtn = $('setup-ai-save');
       const cancelBtn = $('setup-ai-cancel');
+      const routstrRow     = $('setup-ai-routstrrow');
+      const routstrBaseUrl = $('setup-ai-routstr-baseurl');
+      const routstrStatus  = $('setup-ai-routstr-status');
 
       // bareKey providers don't need an API key — derived from the
       // /api/ai/providers payload (`chosen.bareKey`). The curated
@@ -17562,7 +17818,11 @@ const SetupWizard = (() => {
 
       sel.addEventListener('change', async () => {
         const id = sel.value;
-        if (!id) { keyRow.style.display = 'none'; return; }
+        if (!id) {
+          keyRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
+          return;
+        }
         const chosen = list.providers.find(p => p.id === id);
         if (!chosen) return;
         if (chosen.type === 'terminal-native') {
@@ -17585,23 +17845,78 @@ const SetupWizard = (() => {
         }
         keyRow.style.display = '';
         keyInput.value = '';
-        keyInput.focus();
+        // Routstr: surface the node-URL field above the key input so
+        // users can choose a node other than api.routstr.com without
+        // dropping back to "Custom Provider" (the upstream workaround
+        // the tester resorted to in pre-wizard testing).
+        if (id === 'routstr' && routstrRow) {
+          routstrRow.style.display = '';
+          routstrBaseUrl.value = chosen.baseUrl || 'https://api.routstr.com/v1';
+          routstrStatus.innerHTML = '';
+          routstrBaseUrl.focus();
+        } else {
+          if (routstrRow) routstrRow.style.display = 'none';
+          keyInput.focus();
+        }
       });
+
+      // Live validation for Routstr — same UX as the Config panel's
+      // add form. sk- keys hit /v1/wallet/info via the server proxy;
+      // cashu tokens skip the round-trip (no balance API).
+      if (keyInput && routstrBaseUrl && routstrStatus) {
+        const renderStatus = (html) => { routstrStatus.innerHTML = html; };
+        const validate = async () => {
+          if (sel.value !== 'routstr') return;
+          const key = keyInput.value.trim();
+          const baseUrl = routstrBaseUrl.value.trim();
+          if (!key || !baseUrl) { renderStatus(''); return; }
+          const kt = routstrKeyTypeFromKey(key);
+          if (kt === 'cashu') {
+            renderStatus(`<span style="color:var(--success)">✓ cashu token — one-shot prepaid</span>`);
+            return;
+          }
+          renderStatus(`<span class="muted">checking…</span>`);
+          const r = await checkRoutstrKey({ key, baseUrl });
+          if (r.ok && typeof r.balanceSats === 'number') {
+            renderStatus(`<span style="color:var(--success)">✓ managed key — ${r.balanceSats.toLocaleString()} sats available</span>`);
+          } else if (r.ok) {
+            renderStatus(`<span style="color:var(--success)">✓ managed key — node reachable</span>`);
+          } else {
+            renderStatus(`<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`);
+          }
+        };
+        keyInput.addEventListener('blur', validate);
+        routstrBaseUrl.addEventListener('blur', validate);
+      }
 
       saveBtn?.addEventListener('click', async () => {
         const id  = sel.value;
         const key = keyInput.value;
         if (!id || !key) return;
+        // Routstr: validate node URL before save. Empty falls back to
+        // the registry default; non-empty must be http(s).
+        let routstrBaseUrlVal = '';
+        if (id === 'routstr') {
+          routstrBaseUrlVal = (routstrBaseUrl?.value || '').trim();
+          if (routstrBaseUrlVal && !/^https?:\/\//i.test(routstrBaseUrlVal)) {
+            toast('Bad node URL', 'Must start with http:// or https://', 'warn');
+            return;
+          }
+        }
         saveBtn.disabled = true;
         try {
+          const body = id === 'routstr' && routstrBaseUrlVal
+            ? { key, baseUrl: routstrBaseUrlVal }
+            : { key };
           await fetch(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ key }),
+            body: JSON.stringify(body),
           });
           toast(`Added ${id}`, '', 'ok');
           sel.value = '';
           keyRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
           paint();
         } catch (e) {
           toast('Add failed', e.message, 'err');
@@ -17612,6 +17927,7 @@ const SetupWizard = (() => {
       cancelBtn?.addEventListener('click', () => {
         sel.value = '';
         keyRow.style.display = 'none';
+        if (routstrRow) routstrRow.style.display = 'none';
       });
     };
     paint();
