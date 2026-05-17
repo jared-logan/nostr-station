@@ -562,6 +562,63 @@ export async function handleAi(
     return true;
   }
 
+  // POST /api/ai/providers/payperq/check — validate a PPQ key by listing
+  // models via GET https://api.ppq.ai/v1/models. We reuse the existing
+  // OpenAI-compat /models adapter so the wire details (header shape,
+  // empty-list rejection) stay consistent with the row's Fetch Models
+  // button.
+  //
+  // PPQ has no Bearer-authed balance endpoint we can call from a pasted
+  // key (the documented /credits/balance takes a credit-id UUID, not an
+  // API key), so this is purely "does the key work?" — no balance, no
+  // keyType. The configured row links users to ppq.ai/account-activity
+  // to check balance / top up out-of-band.
+  //
+  // Body: { key?: string }   ← absent → resolve from keychain ai:payperq
+  // Response: { ok, modelCount?, error? }
+  if (url === '/api/ai/providers/payperq/check' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+
+    let key = typeof parsed.key === 'string' ? parsed.key.trim() : '';
+    if (!key) {
+      try {
+        key = (await getKeychain().retrieve(keychainAccountFor('payperq'))) ?? '';
+      } catch { key = ''; }
+    }
+    if (!key) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'no key provided and none stored' }));
+      return true;
+    }
+    if (isNsec(key)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'nsec detected — paste your ppq.ai key instead' }));
+      return true;
+    }
+    const provider = getProvider('payperq');
+    if (!provider || provider.type !== 'api') {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'payperq missing from registry' }));
+      return true;
+    }
+    try {
+      const models = await fetchOpenAICompatModels(
+        key, (provider as ApiProvider).baseUrl, false,
+      );
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, modelCount: models.length }));
+    } catch (e: any) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: false,
+        error: String(e.message || e).slice(0, 140),
+      }));
+    }
+    return true;
+  }
+
   if (aiKeyMatch && method === 'DELETE') {
     const id = aiKeyMatch[1];
     const provider = getProvider(id);

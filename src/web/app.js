@@ -15543,6 +15543,38 @@ const ConfigPanel = (() => {
     }
   }
 
+  // PPQ counterpart — calls POST /api/ai/providers/payperq/check which
+  // proxies GET https://api.ppq.ai/v1/models. PPQ has no Bearer-authed
+  // balance endpoint, so this only confirms "key works" + returns the
+  // count of models the user is entitled to. Same never-throw contract.
+  async function checkPayperqKey({ key } = {}) {
+    try {
+      return await api('/api/ai/providers/payperq/check', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ key }),
+      });
+    } catch (e) {
+      return { ok: false, error: e?.message || 'request failed' };
+    }
+  }
+
+  // HTML fragment swapped in when user picks "PayPerQ ⚡" from the add
+  // dropdown. Smaller surface than the Routstr block — single endpoint,
+  // single key format, no balance API. Just a deep-link to the key-mint
+  // page + a validation status slot.
+  function renderPayperqAddBlock() {
+    return `
+      <div id="ai-add-payperqrow" class="ai-add-payperq" style="display:none;margin-top:8px">
+        <div class="np-hint" style="margin-bottom:8px">
+          PayPerQ is a pay-per-prompt AI service funded via Lightning, crypto, or card.
+          <a href="https://ppq.ai/api-docs" target="_blank" rel="noopener">Create a key at ppq.ai →</a>
+        </div>
+        <div id="ai-add-payperq-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+      </div>
+    `;
+  }
+
   // HTML fragment swapped in when user picks "Routstr ⚡" from the add
   // dropdown. Mirrors the customRow / keyrow structure already in the
   // config panel so styling carries over. Validation status div is the
@@ -15666,6 +15698,7 @@ const ConfigPanel = (() => {
           <input id="ai-add-model" type="text" autocomplete="off" placeholder="gpt-4o-mini, llama3.2, etc.">
         </div>
         ${renderRoutstrAddBlock()}
+        ${renderPayperqAddBlock()}
         <div id="ai-add-keyrow" class="keyrow" style="margin-top:8px;display:none">
           <div class="keyfield">
             <input id="ai-add-key" type="password" autocomplete="off" placeholder="paste provider key (sk-…)">
@@ -15712,6 +15745,13 @@ const ConfigPanel = (() => {
     }
     if (p.type === 'terminal-native' && !isTermDef) {
       actions.push(`<button class="ai-set-default" data-kind="terminal" data-id="${escapeHtml(p.id)}">Use for Terminal</button>`);
+    }
+    // PPQ-specific deep-link: nostr-station has no balance API for PPQ
+    // (only a credit-id endpoint), so users check balance / top up at
+    // ppq.ai itself. Render an off-site link styled as a button instead
+    // of trying to embed wallet UX in-app.
+    if (p.id === 'payperq') {
+      actions.push(`<a class="ai-manage-link" href="https://ppq.ai/account-activity" target="_blank" rel="noopener">Manage on ppq.ai ↗</a>`);
     }
     actions.push(`<button class="danger ai-remove" data-id="${escapeHtml(p.id)}">Remove</button>`);
 
@@ -15914,13 +15954,19 @@ const ConfigPanel = (() => {
     const routstrRow      = $('ai-add-routstrrow');
     const routstrBaseUrl  = $('ai-add-routstr-baseurl');
     const routstrStatus   = $('ai-add-routstr-status');
+    // PPQ — smaller surface (no baseUrl field), just the info block +
+    // a status slot for the on-blur "✓ key works" validation line.
+    const payperqRow    = $('ai-add-payperqrow');
+    const payperqStatus = $('ai-add-payperq-status');
 
     function hideAdd() {
       keyRow.style.display = 'none';
-      if (customRow)   customRow.style.display   = 'none';
-      if (keyHint)     keyHint.style.display     = 'none';
-      if (routstrRow)  routstrRow.style.display  = 'none';
-      if (routstrStatus) routstrStatus.innerHTML = '';
+      if (customRow)     customRow.style.display    = 'none';
+      if (keyHint)       keyHint.style.display      = 'none';
+      if (routstrRow)    routstrRow.style.display   = 'none';
+      if (routstrStatus) routstrStatus.innerHTML    = '';
+      if (payperqRow)    payperqRow.style.display   = 'none';
+      if (payperqStatus) payperqStatus.innerHTML    = '';
     }
     hideAdd();
 
@@ -15963,14 +16009,26 @@ const ConfigPanel = (() => {
           // Pre-fill baseUrl with whatever the server reports (registry
           // default or user override from a previous add).
           if (customRow) customRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
           routstrRow.style.display = '';
           routstrBaseUrl.value = chosen.baseUrl || 'https://api.routstr.com/v1';
           routstrStatus.innerHTML = '';
           if (keyHint) keyHint.style.display = 'none';
           routstrBaseUrl.focus();
+        } else if (id === 'payperq') {
+          // PPQ — single endpoint, single key format. Just surface the
+          // "Create a key at ppq.ai" hint above the field; on-blur
+          // validation lights up the status slot below.
+          if (customRow) customRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = '';
+          if (payperqStatus) payperqStatus.innerHTML = '';
+          if (keyHint) keyHint.style.display = 'none';
+          keyInput.focus();
         } else {
           customRow.style.display = 'none';
           if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
           if (keyHint) keyHint.style.display = 'none';
           keyInput.focus();
         }
@@ -16005,6 +16063,27 @@ const ConfigPanel = (() => {
       };
       keyInput.addEventListener('blur', validate);
       routstrBaseUrl.addEventListener('blur', validate);
+    }
+
+    // PPQ live validation: same shape as Routstr but simpler — no
+    // baseUrl field, no balance, no key-type. Just "does this key
+    // unlock /v1/models?" and reflect the answer inline.
+    if (keyInput && payperqStatus) {
+      const validatePayperq = async () => {
+        if (sel.value !== 'payperq') return;
+        const key = keyInput.value.trim();
+        if (!key) { payperqStatus.innerHTML = ''; return; }
+        payperqStatus.innerHTML = `<span class="muted">checking…</span>`;
+        const r = await checkPayperqKey({ key });
+        if (r.ok && typeof r.modelCount === 'number') {
+          payperqStatus.innerHTML = `<span style="color:var(--success)">✓ key works — ${r.modelCount} models available</span>`;
+        } else if (r.ok) {
+          payperqStatus.innerHTML = `<span style="color:var(--success)">✓ key works</span>`;
+        } else {
+          payperqStatus.innerHTML = `<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`;
+        }
+      };
+      keyInput.addEventListener('blur', validatePayperq);
     }
 
     keyEye?.addEventListener('click', () => {
@@ -17750,6 +17829,13 @@ const SetupWizard = (() => {
               </div>
               <div id="setup-ai-routstr-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
             </div>
+            <div id="setup-ai-payperqrow" style="display:none;margin-top:8px">
+              <div class="np-hint" style="margin-bottom:8px">
+                PayPerQ is a pay-per-prompt AI service funded via Lightning, crypto, or card.
+                <a href="https://ppq.ai/api-docs" target="_blank" rel="noopener">Create a key at ppq.ai →</a>
+              </div>
+              <div id="setup-ai-payperq-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+            </div>
             <div id="setup-ai-keyrow" style="margin-top:8px;display:none">
               <div class="keyrow">
                 <div class="keyfield">
@@ -17810,6 +17896,8 @@ const SetupWizard = (() => {
       const routstrRow     = $('setup-ai-routstrrow');
       const routstrBaseUrl = $('setup-ai-routstr-baseurl');
       const routstrStatus  = $('setup-ai-routstr-status');
+      const payperqRow     = $('setup-ai-payperqrow');
+      const payperqStatus  = $('setup-ai-payperq-status');
 
       // bareKey providers don't need an API key — derived from the
       // /api/ai/providers payload (`chosen.bareKey`). The curated
@@ -17821,6 +17909,7 @@ const SetupWizard = (() => {
         if (!id) {
           keyRow.style.display = 'none';
           if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
           return;
         }
         const chosen = list.providers.find(p => p.id === id);
@@ -17845,17 +17934,23 @@ const SetupWizard = (() => {
         }
         keyRow.style.display = '';
         keyInput.value = '';
-        // Routstr: surface the node-URL field above the key input so
-        // users can choose a node other than api.routstr.com without
-        // dropping back to "Custom Provider" (the upstream workaround
-        // the tester resorted to in pre-wizard testing).
+        // Provider-specific add hints: Routstr gets the node-URL field
+        // (federation), PPQ gets a deep-link to ppq.ai's key-mint page
+        // (single endpoint, just needs the user pointed at the right URL).
         if (id === 'routstr' && routstrRow) {
           routstrRow.style.display = '';
+          if (payperqRow) payperqRow.style.display = 'none';
           routstrBaseUrl.value = chosen.baseUrl || 'https://api.routstr.com/v1';
           routstrStatus.innerHTML = '';
           routstrBaseUrl.focus();
+        } else if (id === 'payperq' && payperqRow) {
+          if (routstrRow) routstrRow.style.display = 'none';
+          payperqRow.style.display = '';
+          payperqStatus.innerHTML = '';
+          keyInput.focus();
         } else {
           if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
           keyInput.focus();
         }
       });
@@ -17889,6 +17984,26 @@ const SetupWizard = (() => {
         routstrBaseUrl.addEventListener('blur', validate);
       }
 
+      // PPQ wizard validation — same shape as Config panel: blur on the
+      // key field hits the server proxy, status slot mirrors the result.
+      if (keyInput && payperqStatus) {
+        const validatePayperq = async () => {
+          if (sel.value !== 'payperq') return;
+          const key = keyInput.value.trim();
+          if (!key) { payperqStatus.innerHTML = ''; return; }
+          payperqStatus.innerHTML = `<span class="muted">checking…</span>`;
+          const r = await checkPayperqKey({ key });
+          if (r.ok && typeof r.modelCount === 'number') {
+            payperqStatus.innerHTML = `<span style="color:var(--success)">✓ key works — ${r.modelCount} models available</span>`;
+          } else if (r.ok) {
+            payperqStatus.innerHTML = `<span style="color:var(--success)">✓ key works</span>`;
+          } else {
+            payperqStatus.innerHTML = `<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`;
+          }
+        };
+        keyInput.addEventListener('blur', validatePayperq);
+      }
+
       saveBtn?.addEventListener('click', async () => {
         const id  = sel.value;
         const key = keyInput.value;
@@ -17917,6 +18032,7 @@ const SetupWizard = (() => {
           sel.value = '';
           keyRow.style.display = 'none';
           if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
           paint();
         } catch (e) {
           toast('Add failed', e.message, 'err');
@@ -17928,6 +18044,7 @@ const SetupWizard = (() => {
         sel.value = '';
         keyRow.style.display = 'none';
         if (routstrRow) routstrRow.style.display = 'none';
+        if (payperqRow) payperqRow.style.display = 'none';
       });
     };
     paint();
