@@ -615,6 +615,19 @@ async function serveContent(
   snap.createdAt = Date.now();
 
   const path = normalizePath(decodeURIComponent(reqPath));
+  // Track which manifest entry actually resolved the request so MIME
+  // detection (a few lines down) reads the right file extension. The
+  // request path (`browse`) and the resolved path (`browse/index.html`)
+  // differ for the directory-index + SPA-root fallbacks below; without
+  // tracking this separately, mimeForPath('browse', ...) returns the
+  // fallback `application/octet-stream`, and Chrome's "this response
+  // looks like a download" classifier kicks in. In a sandboxed iframe
+  // without `allow-downloads`, the navigation is then BLOCKED entirely
+  // with `Download is disallowed. The frame initiating or instantiating
+  // the download is sandboxed`. Field-confirmed on nsite://titan: every
+  // Browse / Register / My Names / Guide click was producing this
+  // exact diagnostic.
+  let resolvedPath = path;
   let sha = snap.index.files.get(path);
   // Directory-index fallback: if `path` doesn't exist as a file, try
   // `<path>/index.html` before falling through to the SPA root index.
@@ -627,12 +640,14 @@ async function serveContent(
   // default `trailingSlash: false`). Without this fallback we'd serve
   // the SITE's root index.html for /browse instead of the per-route
   // page, and the framework's client-side router would hydrate with
-  // wrong-page context — clicks appear to silently do nothing
-  // (URL changes but content stays). Field-confirmed on nsite://titan:
-  // INDEX data loads fine, but clicking Browse / Register / My Names /
-  // Guide doesn't change the rendered page until this fallback lands.
+  // wrong-page context.
   if (!sha && !looksLikeAsset(path)) {
-    sha = snap.index.files.get(`${path}/index.html`);
+    const dirIndex = `${path}/index.html`;
+    const dirSha = snap.index.files.get(dirIndex);
+    if (dirSha) {
+      sha = dirSha;
+      resolvedPath = dirIndex;
+    }
   }
   // SPA-friendly fallback: if neither the path nor its directory-index
   // exists, but the root index.html does, serve that. Lets pure SPAs
@@ -643,6 +658,7 @@ async function serveContent(
     const indexSha = snap.index.files.get('index.html');
     if (indexSha && !looksLikeAsset(path)) {
       sha = indexSha;
+      resolvedPath = 'index.html';
     }
   }
   if (!sha) {
@@ -662,10 +678,15 @@ async function serveContent(
   } else {
     try {
       const got = await fetchBlob(sha, snap.blossomServers);
-      // Re-derive content type from the requested path's extension
-      // (Blossom servers commonly mis-label). Fall back to the
-      // response's content-type if the path has no useful extension.
-      const mime = mimeForPath(path, got.contentType || 'application/octet-stream');
+      // Re-derive content type from the resolved file's extension, not
+      // the request path's. For directory-index / SPA-root fallback
+      // resolutions the request path has no useful extension (e.g.
+      // `/browse`), and the fallback `application/octet-stream` would
+      // trigger Chrome's sandboxed-download block. The resolved path
+      // (`browse/index.html` or `index.html`) gives us the correct
+      // `text/html; charset=utf-8`. Blossom servers commonly mis-label
+      // their own content-type header, hence not just trusting that.
+      const mime = mimeForPath(resolvedPath, got.contentType || 'application/octet-stream');
       entry = { bytes: got.bytes, mime };
       rememberBlob(sha, entry.bytes, entry.mime, cacheCapBytes);
     } catch (e: any) {
