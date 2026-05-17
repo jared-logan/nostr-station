@@ -220,7 +220,6 @@ input:focus, textarea:focus, select:focus {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 24px;
 }
 .sidebar .section-title {
   font-size: 10px;
@@ -249,14 +248,14 @@ input:focus, textarea:focus, select:focus {
 .sidebar-group > summary::-webkit-details-marker { display: none; }
 .sidebar-group > summary::marker { content: ''; }
 .sidebar-group > summary:hover { color: var(--text-bright); }
-.sidebar-group > summary::after {
-  content: '▸';
+.sidebar-group-chevron {
   margin-left: auto;
-  font-size: 9px;
   color: var(--muted);
+  transform: rotate(-90deg);
   transition: transform 140ms ease;
 }
-.sidebar-group[open] > summary::after { transform: rotate(90deg); }
+.sidebar-group[open] > summary .sidebar-group-chevron { transform: none; }
+.sidebar-group > summary:hover .sidebar-group-chevron { color: var(--text-bright); }
 .nav > .sidebar-group { margin-top: 10px; }
 
 /* Projects nav block — wraps the Projects link, the collapse chevron,
@@ -282,6 +281,7 @@ input:focus, textarea:focus, select:focus {
   transition: color 100ms, background 100ms, transform 140ms ease;
 }
 .nav-subgroup-toggle:hover { color: var(--text-bright); background: var(--bg-hover); }
+.nav-subgroup-toggle[hidden] { display: none; }
 .nav-projects-group.collapsed .nav-subgroup-toggle { transform: rotate(-90deg); }
 .nav-projects-group.collapsed .nav-project-sessions { display: none; }
 
