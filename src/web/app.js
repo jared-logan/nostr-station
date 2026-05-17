@@ -15520,6 +15520,52 @@ const ConfigPanel = (() => {
     `;
   }
 
+  // ── Collapsed row state — provider rows are <details> elements ──────
+  //
+  // The Config panel's AI list grew enough actions per row (Fetch models
+  // / Use for Chat / Remove plus provider-specific affordances like
+  // Routstr's Check balance and PPQ's Manage-on-ppq) that 3+ configured
+  // providers turned the section into a wall of buttons. Each row now
+  // collapses to badges-only; users expand the ones they're actively
+  // managing.
+  //
+  // Open/closed state persists in localStorage so a row I expanded
+  // doesn't snap shut when renderAiProviders re-runs (which happens
+  // after every action). Broken rows (API provider configured without
+  // a key) always render open — those need eyeballs, not a chevron.
+
+  // "Broken" = configured but missing the key it needs. The only
+  // production-likely case today; expand the predicate later if other
+  // provider-shaped failures need surfacing the same way.
+  function isAiRowBroken(p) {
+    return p.type === 'api' && p.configured && !p.hasKey && !p.bareKey;
+  }
+
+  function aiRowStorageKey(id) { return `ns:ai-row-open:${id}`; }
+
+  function isAiRowOpenInitially(p) {
+    if (isAiRowBroken(p)) return true;
+    try { return localStorage.getItem(aiRowStorageKey(p.id)) === '1'; }
+    catch { return false; }
+  }
+
+  // Persist on user toggle. <details>'s `toggle` event doesn't bubble,
+  // so we wire each row directly via querySelectorAll rather than
+  // relying on event delegation off the list container.
+  function wireAiRowTogglePersistence(listEl) {
+    if (!listEl) return;
+    listEl.querySelectorAll('details.ai-provider-row').forEach(det => {
+      det.addEventListener('toggle', () => {
+        const id = det.dataset.id;
+        if (!id) return;
+        try {
+          if (det.open) localStorage.setItem(aiRowStorageKey(id), '1');
+          else          localStorage.removeItem(aiRowStorageKey(id));
+        } catch {}
+      });
+    });
+  }
+
   // Routstr key-prefix sniff (mirror of detectRoutstrKeyType in
   // src/lib/routes/ai.ts). Used for instant client-side UI feedback as
   // the user pastes — server still re-detects on save, so this is purely
@@ -15604,6 +15650,7 @@ const ConfigPanel = (() => {
     const isChatDef = !!p.isDefault?.chat;
     const keyType = p.keyType; // 'sk' | 'cashu' | null
     const baseUrl = p.baseUrl || 'https://api.routstr.com/v1';
+    const open = isAiRowOpenInitially(p);
 
     const badges = [
       `<span class="ai-badge type-api">api</span>`,
@@ -15631,29 +15678,31 @@ const ConfigPanel = (() => {
     const model = p.model ? `<span class="ai-model" style="margin-left:8px">${escapeHtml(p.model)}</span>` : '';
 
     return `
-      <div class="ai-provider-row" data-id="routstr" data-type="api">
-        <div class="ai-provider-head">
+      <details class="ai-provider-row" data-id="routstr" data-type="api"${open ? ' open' : ''}>
+        <summary class="ai-provider-summary">
           <span class="ai-provider-name">${escapeHtml(p.displayName)}</span>
           ${badges.join('')}
+        </summary>
+        <div class="ai-provider-body">
+          <div class="ai-provider-meta">
+            <span class="ai-routstr-url-view">
+              <span class="muted">node:</span>
+              <code class="ai-routstr-url-text">${escapeHtml(baseUrl)}</code>
+              <button class="ai-routstr-url-edit" type="button" data-id="routstr" title="Change node URL"
+                style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px">✎ edit</button>
+            </span>
+            <span class="ai-routstr-url-edit-row" style="display:none">
+              <input class="ai-routstr-url-input" type="text" value="${escapeHtml(baseUrl)}"
+                style="min-width:280px">
+              <button class="ai-routstr-url-save"   type="button" data-id="routstr">save</button>
+              <button class="ai-routstr-url-cancel" type="button" data-id="routstr">cancel</button>
+            </span>
+            ${model}
+            <span class="ai-routstr-balance muted" style="font-size:11px;margin-left:8px"></span>
+          </div>
+          <div class="ai-provider-actions">${actions.join('')}</div>
         </div>
-        <div class="ai-provider-meta">
-          <span class="ai-routstr-url-view">
-            <span class="muted">node:</span>
-            <code class="ai-routstr-url-text">${escapeHtml(baseUrl)}</code>
-            <button class="ai-routstr-url-edit" type="button" data-id="routstr" title="Change node URL"
-              style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px">✎ edit</button>
-          </span>
-          <span class="ai-routstr-url-edit-row" style="display:none">
-            <input class="ai-routstr-url-input" type="text" value="${escapeHtml(baseUrl)}"
-              style="min-width:280px">
-            <button class="ai-routstr-url-save"   type="button" data-id="routstr">save</button>
-            <button class="ai-routstr-url-cancel" type="button" data-id="routstr">cancel</button>
-          </span>
-          ${model}
-          <span class="ai-routstr-balance muted" style="font-size:11px;margin-left:8px"></span>
-        </div>
-        <div class="ai-provider-actions">${actions.join('')}</div>
-      </div>
+      </details>
     `;
   }
 
@@ -15729,6 +15778,7 @@ const ConfigPanel = (() => {
 
     const typeLabel  = p.type === 'terminal-native' ? 'terminal' : 'api';
     const typeClass  = p.type === 'terminal-native' ? 'term' : 'api';
+    const open = isAiRowOpenInitially(p);
     const isChatDef  = !!p.isDefault?.chat;
     const isTermDef  = !!p.isDefault?.terminal;
     // Action buttons — only show "set default" when it's not already set
@@ -15780,14 +15830,16 @@ const ConfigPanel = (() => {
     const model = p.model ? `<span class="ai-model">${escapeHtml(p.model)}</span>` : '';
 
     return `
-      <div class="ai-provider-row" data-id="${escapeHtml(p.id)}" data-type="${typeClass}">
-        <div class="ai-provider-head">
+      <details class="ai-provider-row" data-id="${escapeHtml(p.id)}" data-type="${typeClass}"${open ? ' open' : ''}>
+        <summary class="ai-provider-summary">
           <span class="ai-provider-name">${escapeHtml(p.displayName)}</span>
           ${badges.join('')}
+        </summary>
+        <div class="ai-provider-body">
+          ${model ? `<div class="ai-provider-meta">${model}</div>` : ''}
+          <div class="ai-provider-actions">${actions.join('')}</div>
         </div>
-        ${model ? `<div class="ai-provider-meta">${model}</div>` : ''}
-        <div class="ai-provider-actions">${actions.join('')}</div>
-      </div>
+      </details>
     `;
   }
 
@@ -15848,6 +15900,9 @@ const ConfigPanel = (() => {
     // renderAiProviders re-renders the whole list on every change, so
     // keeping listeners on the container dodges the re-bind dance.
     const list = $('ai-providers-list');
+    // Persist open/closed state per row. `toggle` doesn't bubble, so
+    // wire each <details> directly (the helper handles the loop).
+    wireAiRowTogglePersistence(list);
     if (list) {
       list.addEventListener('click', async (e) => {
         const btn = e.target.closest('button');
