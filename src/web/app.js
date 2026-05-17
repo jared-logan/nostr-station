@@ -17831,8 +17831,7 @@ const SetupWizard = (() => {
             </div>
             <div id="setup-ai-payperqrow" style="display:none;margin-top:8px">
               <div class="np-hint" style="margin-bottom:8px">
-                PayPerQ is a pay-per-prompt AI service funded via Lightning, crypto, or card.
-                <a href="https://ppq.ai/api-docs" target="_blank" rel="noopener">Create a key at ppq.ai →</a>
+                PayPerQ is a pay-per-prompt AI service funded via Lightning, crypto, or card. Paste an existing key, or Skip and add one later from Config.
               </div>
               <div id="setup-ai-payperq-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
             </div>
