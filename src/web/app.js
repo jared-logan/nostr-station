@@ -20592,13 +20592,12 @@ const Updates = (() => {
     statusPill.textContent = 'idle';
 
     const foot = document.createElement('div');
-    foot.style.display = 'flex'; foot.style.alignItems = 'center'; foot.style.width = '100%';
+    foot.style.display = 'flex'; foot.style.alignItems = 'center'; foot.style.gap = '8px'; foot.style.width = '100%';
     const statusWrap = document.createElement('div'); statusWrap.style.flex = '1';
     statusWrap.appendChild(statusPill);
     const installBtn = document.createElement('button');
     installBtn.textContent = 'Install update'; installBtn.className = 'primary';
     const closeBtn = document.createElement('button'); closeBtn.textContent = 'close';
-    closeBtn.style.marginLeft = '8px';
     foot.appendChild(statusWrap); foot.appendChild(closeBtn); foot.appendChild(installBtn);
 
     // Subtitle summarises everything the Install button will do, in

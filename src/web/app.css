@@ -8166,6 +8166,9 @@ input.csm-target:focus { border-color: var(--accent); outline: none; }
   margin: 0;
   font-size: 12px;
   color: var(--text);
+  max-height: 110px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .upd-commit-list li {
   padding: 2px 0;
