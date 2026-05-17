@@ -571,34 +571,13 @@
           <div class="title">nsite</div>
           <div class="subtitle">Browse decentralized sites — Nostr addressing, Blossom-hosted bytes, SHA256-verified.</div>
         </div>
-        <div class="panel-head-actions">
-          <button id="nsite-publish-link" title="Publish a site from a project">publish help</button>
-          <!-- Browser-style menu (≡) — opens a small popover with Site Info,
-               Settings, and Dev Tools entries. Mirrors the slimmed-down
-               version of Titan Browser's right-side menu. The popover is
-               anchored to this button via absolute positioning; outside-
-               click handler in app.js closes it. -->
-          <button id="nsite-menu-btn"
-                  class="nsite-menu-btn"
-                  title="Menu"
-                  aria-label="Open menu"
-                  aria-haspopup="menu"
-                  aria-expanded="false">&#x22EE;</button>
-          <div id="nsite-menu" class="nsite-menu" role="menu" hidden>
-            <button class="nsite-menu-item" type="button" role="menuitem" data-menu="siteinfo">
-              <span class="nsite-menu-item-label">Site info</span>
-              <span class="nsite-menu-item-hint">pubkey · author · relays</span>
-            </button>
-            <button class="nsite-menu-item" type="button" role="menuitem" data-menu="settings">
-              <span class="nsite-menu-item-label">Settings</span>
-              <span class="nsite-menu-item-hint">relays · Blossom · indexer</span>
-            </button>
-            <button class="nsite-menu-item" type="button" role="menuitem" data-menu="devtools">
-              <span class="nsite-menu-item-label">Dev tools</span>
-              <span class="nsite-menu-item-hint">files · CSP · errors</span>
-            </button>
-          </div>
-        </div>
+        <!-- panel-head-actions is intentionally empty for the nsite panel
+             now — the publish-help shortcut moved out (CLI is the
+             publish surface) and the browser-style menu moved INTO the
+             address bar where browsers conventionally put it. Kept the
+             empty container so the header layout stays consistent with
+             other panels. -->
+        <div class="panel-head-actions"></div>
       </div>
       <div class="panel-body nsite-body">
         <!-- Tab strip — populated by app.js:renderTabStrip(). Each chip
@@ -618,23 +597,67 @@
                  class="nsite-addr-input" />
           <button id="nsite-go" class="primary">Go</button>
           <span id="nsite-status" class="nsite-status muted" aria-live="polite"></span>
+          <!-- Bookmark icon — toggles current site in/out of the user's
+               nsite.json bookmarks list. Outlined when not bookmarked,
+               filled when bookmarked. Disabled when there's no resolved
+               site on the active tab (a fresh empty tab can't be
+               bookmarked). Click hits /api/nsite/bookmarks; the
+               Bookmarks pane (4th stepper mode) renders the saved
+               list with click-to-open. -->
+          <button id="nsite-bookmark-btn"
+                  class="nsite-bookmark-btn"
+                  type="button"
+                  title="Bookmark this nsite"
+                  aria-label="Bookmark this nsite"
+                  aria-pressed="false"
+                  disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path class="bm-outline" d="M6 3h12v18l-6-4-6 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+              <path class="bm-fill"    d="M6 3h12v18l-6-4-6 4z" fill="currentColor"/>
+            </svg>
+          </button>
+          <!-- Browser-style menu (⋮) anchored to the address bar so it
+               lives where users conventionally find it in Chrome /
+               Brave / Titan Browser. The popover opens below this
+               button; outside-click handler in app.js closes it. The
+               menu items mirror the stepper tabs inside the side pane
+               (clicking either opens the pane in the matching mode). -->
+          <div class="nsite-menu-wrap">
+            <button id="nsite-menu-btn"
+                    class="nsite-menu-btn"
+                    title="Menu"
+                    aria-label="Open menu"
+                    aria-haspopup="menu"
+                    aria-expanded="false">&#x22EE;</button>
+            <div id="nsite-menu" class="nsite-menu" role="menu" hidden>
+              <button class="nsite-menu-item" type="button" role="menuitem" data-menu="bookmarks">
+                <span class="nsite-menu-item-label">Bookmarks</span>
+                <span class="nsite-menu-item-hint">saved nsites</span>
+              </button>
+              <button class="nsite-menu-item" type="button" role="menuitem" data-menu="siteinfo">
+                <span class="nsite-menu-item-label">Site info</span>
+                <span class="nsite-menu-item-hint">pubkey · author · relays</span>
+              </button>
+              <button class="nsite-menu-item" type="button" role="menuitem" data-menu="settings">
+                <span class="nsite-menu-item-label">Settings</span>
+                <span class="nsite-menu-item-hint">relays · Blossom · indexer</span>
+              </button>
+              <button class="nsite-menu-item" type="button" role="menuitem" data-menu="devtools">
+                <span class="nsite-menu-item-label">Dev tools</span>
+                <span class="nsite-menu-item-hint">files · CSP · errors</span>
+              </button>
+            </div>
+          </div>
         </div>
         <div class="nsite-meta muted" id="nsite-meta" hidden></div>
-        <details class="nsite-diag" id="nsite-diag" hidden>
-          <summary>Diagnostics</summary>
-          <div class="nsite-diag-body" id="nsite-diag-body"></div>
-        </details>
-        <!-- Trust banner — surfaces between Diagnostics and the iframe
-             whenever the loaded nsite either has CSP violations (offering
-             the user a way to allow external content) OR has already
-             been trusted (offering revoke). Stays hidden for clean
-             strict-mode renders so it doesn't clutter the panel for the
-             majority of nsites that don't need it.
-
-             Lives at the top of the viewport area (NOT buried inside the
-             collapsed Diagnostics block) because the prior placement
-             made the "Trust this nsite" action invisible to users who
-             didn't already know to expand Diagnostics. -->
+        <!-- Trust banner — surfaces above the iframe area whenever the
+             loaded nsite has CSP violations (offering "Trust this nsite"
+             as a call to action). The trusted-status case is inlined in
+             the meta line above (#127) so the banner only appears when
+             there's an actionable CTA. Diagnostics (file list, relay
+             tiers, CSP violation details) now lives INSIDE the side
+             pane under the Dev tools tab, NOT as a separate inline
+             twirly — see app.js:renderDevToolsPane. -->
         <div class="nsite-trust-banner" id="nsite-trust-banner" hidden></div>
         <div class="nsite-viewport">
           <!--
@@ -703,15 +726,25 @@
             </div>
           </div>
           <!-- Side pane — slides in from the right when the user picks
-               "Site info" or "Settings" from the panel menu. Becomes a
-               flex sibling to the iframe so the viewport reflows rather
-               than overlaying; width is capped so a small dashboard
-               window still has room to render the iframe content
-               alongside. The body swaps between modes (siteinfo |
-               settings) so a single element handles both panes. -->
+               an item from the panel menu. Flex sibling to the iframe
+               container so the viewport reflows rather than overlaying;
+               width is capped so a small dashboard window still has
+               room to render the iframe content alongside. A horizontal
+               stepper at the top lets the user swap between Site info /
+               Settings / Dev tools without going back to the menu
+               (faster than re-clicking the ⋮ for power users). -->
           <aside class="nsite-siteinfo" id="nsite-siteinfo" hidden aria-label="Side pane">
             <div class="nsite-siteinfo-head">
-              <div class="nsite-siteinfo-title" id="nsite-siteinfo-title">Site info</div>
+              <div class="nsite-siteinfo-stepper" role="tablist" aria-label="Pane mode">
+                <button class="nsite-siteinfo-step" type="button" role="tab"
+                        data-step="bookmarks" aria-selected="false">Bookmarks</button>
+                <button class="nsite-siteinfo-step" type="button" role="tab"
+                        data-step="siteinfo" aria-selected="true">Site info</button>
+                <button class="nsite-siteinfo-step" type="button" role="tab"
+                        data-step="settings" aria-selected="false">Settings</button>
+                <button class="nsite-siteinfo-step" type="button" role="tab"
+                        data-step="devtools" aria-selected="false">Dev tools</button>
+              </div>
               <button class="nsite-siteinfo-close"
                       id="nsite-siteinfo-close"
                       type="button"

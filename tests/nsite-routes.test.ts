@@ -1103,3 +1103,111 @@ test('POST /api/nsite/trust: clears snapshot cache so re-resolve gets new postur
   assert.equal(_internal.sites.size, 0,
     'trust write must clear the snapshot cache so re-resolve sees the new posture');
 });
+
+// ── Bookmark endpoints ────────────────────────────────────────────────────
+
+function mockJsonReq(body: any) {
+  const req: any = {
+    method: 'POST',
+    headers: { host: 'localhost:3000', 'content-type': 'application/json' },
+    on: (event: string, cb: any) => {
+      if (event === 'data') cb(Buffer.from(JSON.stringify(body)));
+      if (event === 'end')  cb();
+      return req;
+    },
+  };
+  return req;
+}
+
+test('POST /api/nsite/bookmarks: adds a bookmark with allow=true', async () => {
+  const pk = 'a'.repeat(64);
+  const res = makeMockRes();
+  await handleNsite(
+    mockJsonReq({ pubkey: pk, name: 'titan', addr: 'nsite://titan', display: 'nsite://titan', allow: true }),
+    res, '/api/nsite/bookmarks', 'POST',
+  );
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(String(res.body));
+  assert.equal(body.pubkey, pk);
+  assert.equal(body.bookmarked, true);
+  assert.ok(body.bookmarks.some((b: any) => b.pubkey === pk && b.name === 'titan'),
+    'response must list the added bookmark');
+});
+
+test('POST /api/nsite/bookmarks: toggles when `allow` is omitted', async () => {
+  const pk = 'b'.repeat(64);
+  // Add via toggle (initial state: absent → add).
+  let res = makeMockRes();
+  await handleNsite(
+    mockJsonReq({ pubkey: pk, name: '', addr: 'nsite://x', display: 'x' }),
+    res, '/api/nsite/bookmarks', 'POST',
+  );
+  assert.equal(JSON.parse(String(res.body)).bookmarked, true);
+  // Toggle again → remove.
+  res = makeMockRes();
+  await handleNsite(
+    mockJsonReq({ pubkey: pk, name: '', addr: 'nsite://x', display: 'x' }),
+    res, '/api/nsite/bookmarks', 'POST',
+  );
+  assert.equal(JSON.parse(String(res.body)).bookmarked, false);
+});
+
+test('POST /api/nsite/bookmarks: dedupes on pubkey+name (different name → distinct)', async () => {
+  const pk = 'c'.repeat(64);
+  // Add two bookmarks at the same pubkey with different names.
+  let res = makeMockRes();
+  await handleNsite(
+    mockJsonReq({ pubkey: pk, name: 'a', addr: 'nsite://a', display: 'A', allow: true }),
+    res, '/api/nsite/bookmarks', 'POST',
+  );
+  res = makeMockRes();
+  await handleNsite(
+    mockJsonReq({ pubkey: pk, name: 'b', addr: 'nsite://b', display: 'B', allow: true }),
+    res, '/api/nsite/bookmarks', 'POST',
+  );
+  const body = JSON.parse(String(res.body));
+  // Both should be present.
+  const matching = body.bookmarks.filter((b: any) => b.pubkey === pk);
+  assert.equal(matching.length, 2, 'same pubkey + different names stay distinct');
+});
+
+test('POST /api/nsite/bookmarks: rejects malformed pubkey with 400', async () => {
+  const res = makeMockRes();
+  await handleNsite(
+    mockJsonReq({ pubkey: 'nope', name: '', addr: 'nsite://x', allow: true }),
+    res, '/api/nsite/bookmarks', 'POST',
+  );
+  assert.equal(res.statusCode, 400);
+  assert.equal(JSON.parse(String(res.body)).error, 'invalid_pubkey');
+});
+
+test('POST /api/nsite/bookmarks: requires addr when adding', async () => {
+  const pk = 'd'.repeat(64);
+  const res = makeMockRes();
+  await handleNsite(
+    mockJsonReq({ pubkey: pk, name: 'x', allow: true }),  // no addr
+    res, '/api/nsite/bookmarks', 'POST',
+  );
+  assert.equal(res.statusCode, 400);
+  assert.equal(JSON.parse(String(res.body)).error, 'addr_required');
+});
+
+test('GET /api/nsite/bookmarks: returns the current list', async () => {
+  // Add one bookmark first.
+  const pk = 'e'.repeat(64);
+  let res = makeMockRes();
+  await handleNsite(
+    mockJsonReq({ pubkey: pk, name: 'list', addr: 'nsite://list', display: 'list', allow: true }),
+    res, '/api/nsite/bookmarks', 'POST',
+  );
+  // Now GET.
+  res = makeMockRes();
+  await handleNsite(
+    { method: 'GET', headers: { host: 'localhost:3000' } } as any,
+    res, '/api/nsite/bookmarks', 'GET',
+  );
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(String(res.body));
+  assert.ok(Array.isArray(body.bookmarks));
+  assert.ok(body.bookmarks.some((b: any) => b.pubkey === pk && b.name === 'list'));
+});

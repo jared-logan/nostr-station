@@ -266,6 +266,17 @@ export async function handleNsite(
       gcSites();
       const id = shortId();
       const trusted = trustedPubkeys.has(resolved.pubkey.toLowerCase());
+      // Bookmark presence — match by pubkey + name (same dedup key
+      // nsite-config.ts uses) so v2-named manifests at a shared author
+      // are tracked independently from the root manifest. Read live
+      // from nsite.json on every resolve; the file is tiny so the IO
+      // cost is negligible and the panel's bookmark icon stays in sync
+      // even when the user toggles bookmarks via the API directly.
+      const bmName = resolved.name || '';
+      const bookmarks = readNsiteConfig().bookmarks;
+      const bookmarked = bookmarks.some(
+        (b: any) => b.pubkey === resolved.pubkey.toLowerCase() && b.name === bmName,
+      );
       sites.set(id, {
         pubkey: resolved.pubkey,
         display: resolved.display,
@@ -288,6 +299,14 @@ export async function handleNsite(
         // list. Surfaced so the panel can render "Trust this nsite" vs
         // "Trusted ✓ (revoke)" in the Diagnostics block.
         trusted,
+        // Whether this exact (pubkey, name) pair is in the user's
+        // bookmarks list. Drives the address-bar bookmark icon's
+        // filled/outlined state.
+        bookmarked,
+        // The v2-named manifest name (empty for root manifests / v1).
+        // Surfaced so the panel can include `name` when POSTing to
+        // /api/nsite/bookmarks — the dedupe key needs it.
+        name: bmName,
         // Sandbox / CSP posture of the iframe — surfaced to the panel
         // so users can see "no external HTTP, WSS allowed" at a glance.
         // When `trusted` is true the served CSP gets `https:` added to
@@ -404,6 +423,66 @@ export async function handleNsite(
       const merged = writeNsiteConfig({ trustedExternalNsites: [...set] });
       sites.clear();
       json(res, 200, { pubkey, trusted: allow, trustedExternalNsites: merged.trustedExternalNsites });
+    } catch (e: any) {
+      json(res, 400, { error: 'invalid_field', message: String(e?.message || e) });
+    }
+    return true;
+  }
+
+  // ── Bookmarks ───────────────────────────────────────────────────────────
+  //
+  // Browser-style bookmark list persisted to nsite.json. The panel's
+  // bookmark icon on the address bar toggles the current site in/out
+  // of this list; the Bookmarks pane (4th stepper mode) renders the
+  // list with click-to-open. Dedupe key is pubkey + name so two
+  // bookmarks at the same author but different v2-named manifests
+  // stay distinct.
+  if (path === '/api/nsite/bookmarks' && method === 'GET') {
+    const cfg = readNsiteConfig();
+    json(res, 200, { bookmarks: cfg.bookmarks });
+    return true;
+  }
+  if (path === '/api/nsite/bookmarks' && method === 'POST') {
+    // Body shape: { pubkey, name?, addr, display?, allow? }
+    //   - allow=true  → add the bookmark (idempotent — same pubkey+name
+    //                   replaces the existing entry's metadata/timestamp)
+    //   - allow=false → remove the bookmark by pubkey+name
+    //   - allow undefined → toggle (add if absent, remove if present)
+    let payload: any;
+    try { payload = JSON.parse(await readBody(req) || '{}'); }
+    catch { json(res, 400, { error: 'invalid_json' }); return true; }
+    const pubkey = String(payload?.pubkey || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(pubkey)) {
+      json(res, 400, { error: 'invalid_pubkey', message: 'pubkey must be 64-hex' });
+      return true;
+    }
+    const name = typeof payload?.name === 'string' ? payload.name.trim() : '';
+    const addr = typeof payload?.addr === 'string' ? payload.addr.trim() : '';
+    const display = typeof payload?.display === 'string' && payload.display.trim()
+      ? payload.display.trim() : addr;
+    const explicitAllow = typeof payload?.allow === 'boolean' ? payload.allow : null;
+    try {
+      const current = readNsiteConfig();
+      const key = `${pubkey}|${name}`;
+      const existsIdx = current.bookmarks.findIndex(
+        (b: any) => `${b.pubkey}|${b.name}` === key,
+      );
+      const exists = existsIdx >= 0;
+      const shouldAdd = explicitAllow === null ? !exists : explicitAllow;
+      let next = current.bookmarks.slice();
+      if (shouldAdd) {
+        if (!addr) {
+          json(res, 400, { error: 'addr_required', message: 'addr is required when adding a bookmark' });
+          return true;
+        }
+        const entry = { pubkey, name, addr, display, addedAt: Math.floor(Date.now() / 1000) };
+        if (exists) next.splice(existsIdx, 1);
+        next.unshift(entry);
+      } else if (exists) {
+        next.splice(existsIdx, 1);
+      }
+      const merged = writeNsiteConfig({ bookmarks: next });
+      json(res, 200, { pubkey, name, bookmarked: shouldAdd, bookmarks: merged.bookmarks });
     } catch (e: any) {
       json(res, 400, { error: 'invalid_field', message: String(e?.message || e) });
     }

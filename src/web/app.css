@@ -9267,16 +9267,46 @@ a.client-mention {
   flex-direction: column;
   min-height: 0;
 }
-/* Browser-style menu (≡) — opens a small popover with Site Info,
+/* Browser-style menu (⋮) — opens a small popover with Site Info,
  * Settings, and Dev Tools entries. Mirrors the slimmed-down version of
- * Titan Browser's menu (no signer / no check-for-updates / no
- * bookmarks for now). The popover anchors to the button via absolute
- * positioning; outside-click handler in app.js closes it. */
-.panel-head-actions { position: relative; }
+ * Titan Browser's menu. The button lives on the address bar (right end,
+ * after the status pill) so it's where Chrome / Brave / Titan
+ * conventionally put it. The popover anchors to the wrapper via
+ * absolute positioning; outside-click handler in app.js closes it. */
+/* Bookmark icon on the address bar — outlined when not bookmarked,
+ * filled when bookmarked, disabled when the active tab has no
+ * resolved site. The two SVG paths overlay; we toggle which is
+ * visible via the aria-pressed state on the button. */
+.nsite-bookmark-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.nsite-bookmark-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-elev);
+}
+.nsite-bookmark-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.nsite-bookmark-btn .bm-fill    { display: none; }
+.nsite-bookmark-btn .bm-outline { display: inline; }
+.nsite-bookmark-btn[aria-pressed="true"]            { color: var(--accent); border-color: var(--accent); }
+.nsite-bookmark-btn[aria-pressed="true"] .bm-fill   { display: inline; }
+.nsite-bookmark-btn[aria-pressed="true"] .bm-outline{ display: none; }
+
+.nsite-menu-wrap { position: relative; display: inline-flex; }
 .nsite-menu-btn {
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1;
-  padding: 4px 10px;
+  padding: 4px 8px;
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -9337,16 +9367,50 @@ a.client-mention {
 .nsite-siteinfo[hidden] { display: none; }
 .nsite-siteinfo-head {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 0;
   border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+}
+/* Horizontal stepper at the top of the side pane. Tabs for Site info /
+ * Settings / Dev tools — active state highlighted, click switches the
+ * pane body content without going back to the ⋮ menu. The stepper is
+ * the only mode indicator inside the pane (we removed the previous
+ * single "Site info"/"Settings" title) since the active tab itself
+ * IS the label. */
+.nsite-siteinfo-stepper {
+  display: flex;
+  gap: 0;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.nsite-siteinfo-stepper::-webkit-scrollbar { display: none; }
+.nsite-siteinfo-step {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 10px 8px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  font: inherit;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
 }
-.nsite-siteinfo-title { font-weight: 600; }
+.nsite-siteinfo-step:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+.nsite-siteinfo-step[aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.nsite-siteinfo-title { font-weight: 600; padding: 10px 12px; }
 .nsite-siteinfo-close {
   background: none;
   border: none;
@@ -9354,7 +9418,7 @@ a.client-mention {
   line-height: 1;
   cursor: pointer;
   color: var(--muted);
-  padding: 0 4px;
+  padding: 0 12px;
 }
 .nsite-siteinfo-close:hover { color: var(--text); }
 .nsite-siteinfo-body {
@@ -9400,6 +9464,65 @@ a.client-mention {
   font-size: 11px;
   color: var(--muted);
   font-style: italic;
+}
+
+/* Bookmarks list — rendered into the side pane in 'bookmarks' mode.
+ * Each row is a clickable entry that opens the bookmarked nsite in
+ * the active tab; the trash icon removes the bookmark. */
+.nsite-bookmark-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.nsite-bookmark-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  cursor: pointer;
+}
+.nsite-bookmark-row:hover {
+  background: var(--bg-elev);
+  border-color: var(--border-strong, rgba(255,255,255,0.18));
+}
+.nsite-bookmark-row .body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nsite-bookmark-row .display {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nsite-bookmark-row .sub {
+  font-size: 10px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nsite-bookmark-row .remove {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 6px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.nsite-bookmark-row .remove:hover {
+  color: var(--danger, #ff6e6e);
+  background: rgba(255,255,255,0.06);
 }
 
 /* Inline settings form rendered into the side pane in 'settings' mode.
@@ -9567,10 +9690,19 @@ a.client-mention {
 /* Frame container — holds the per-tab iframes. Only the active tab's
  * iframe is display:block; non-active are display:none but stay in
  * the DOM so tab switching is instant. */
+/* Frames container is a flex child of .nsite-viewport, sized to fill
+ * the available width left over by the side pane (when open). Was
+ * `position: absolute; inset: 0` before — but that pulled it out of
+ * flex flow and made it cover the .nsite-siteinfo sibling, so opening
+ * the pane appeared to do nothing (it rendered, but was hidden behind
+ * the absolutely-positioned frames container). The frames themselves
+ * inside still need absolute positioning so multiple stacked iframes
+ * share the same area, with only the active one display:block. */
 .nsite-frames {
-  position: absolute;
-  inset: 0;
-  display: block;
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
 }
 .nsite-frames > .nsite-frame {
   position: absolute;
