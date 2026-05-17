@@ -620,9 +620,10 @@ export async function handleAi(
   }
 
   // POST /api/ai/providers/maple/check — validate a Maple AI key by
-  // hitting GET {baseUrl}/models on the local proxy. Same shape as the
-  // PPQ check but with an editable baseUrl since the Maple desktop app
-  // lets users change the proxy port. No balance — Maple is
+  // hitting GET {baseUrl}/models. baseUrl can be the cloud enclave
+  // (default — enclave.trymaple.ai/v1) or the Maple desktop app's
+  // localhost proxy; same wire format either way. Same shape as the
+  // PPQ check, plus an editable baseUrl. No balance — Maple is
   // subscription-based, no credits API.
   //
   // Body: { key?: string, baseUrl?: string }
@@ -663,7 +664,7 @@ export async function handleAi(
     }
     if (!/^https?:\/\//i.test(baseUrl)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'invalid proxy URL' }));
+      res.end(JSON.stringify({ ok: false, error: 'invalid endpoint URL' }));
       return true;
     }
     try {

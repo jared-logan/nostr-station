@@ -31,11 +31,13 @@
  *                         format as Zen; users hit Fetch Models to pick.
  *   - PayPerQ ⚡        — Lightning-paid relay for Claude/GPT.
  *   - Routstr ⚡        — Cashu-paid relay for Claude/GPT/Llama.
- *   - Maple AI          — TEE-encrypted private LLM service. The Maple
- *                         desktop app runs a local OpenAI-compat proxy
- *                         at http://localhost:8080/v1 that handles
- *                         attestation + E2E encryption against the
- *                         remote enclave.
+ *   - Maple AI          — TEE-encrypted private LLM service. Default
+ *                         baseUrl is the public enclave endpoint
+ *                         https://enclave.trymaple.ai/v1 (works with
+ *                         any OpenAI client + Bearer auth). Users who
+ *                         run the Maple desktop app can switch to its
+ *                         local proxy at http://localhost:8080/v1 via
+ *                         the Config panel's inline URL edit.
  *   - Custom            — user-supplied baseUrl + key, OpenAI-compat
  *                         shape. Escape hatch for anyone who wants
  *                         OpenAI / OpenRouter / Groq / Gemini / Ollama /
@@ -165,18 +167,20 @@ export const PROVIDERS: Record<string, Provider> = {
     flavor: 'openai-compat',
   },
 
-  // TEE-encrypted private LLM service. Users install the Maple desktop
-  // app, which mints an API key and starts a local proxy at
-  // http://localhost:8080/v1 (configurable port). The proxy handles
-  // attestation + E2E encryption against enclave.trymaple.ai
-  // transparently, so we just talk to it like any other OpenAI-compat
-  // endpoint. Default model is left empty — Maple's roster is curated
-  // (llama-3.3-70b etc.) and users hit Fetch Models to pick.
+  // TEE-encrypted private LLM service. Two valid endpoints, same
+  // wire format (OpenAI-compat + Bearer auth):
+  //   - https://enclave.trymaple.ai/v1   (cloud — default, no setup)
+  //   - http://localhost:8080/v1         (Maple desktop app's local
+  //                                       proxy — convenience layer,
+  //                                       not required for encryption)
+  // TEE attestation happens server-side at the enclave regardless of
+  // which URL is used. Default model is left empty — Maple's roster
+  // is curated (llama-3.3-70b etc.); users hit Fetch Models to pick.
   'maple': {
     id: 'maple',
     displayName: 'Maple AI',
     type: 'api',
-    baseUrl: 'http://localhost:8080/v1',
+    baseUrl: 'https://enclave.trymaple.ai/v1',
     defaultModel: '',
     flavor: 'openai-compat',
   },
@@ -243,10 +247,9 @@ export function inferIdFromBaseUrl(baseUrl: string): string {
   if (url.includes('opencode.ai'))        return 'opencode-zen';
   if (url.includes('routstr'))      return 'routstr';
   if (url.includes('ppq.ai'))       return 'payperq';
+  if (url.includes('trymaple.ai'))  return 'maple';
   // Everything else (openai/openrouter/groq/mistral/gemini/ollama/lmstudio
   // /self-hosted) → Custom Provider. The user's existing baseUrl
-  // and keychain entry survive intact under the 'custom' id. Maple's
-  // legacy localhost:8080 baseUrl also falls through here — users who
-  // want the new curated 'maple' entry can re-add via Config.
+  // and keychain entry survive intact under the 'custom' id.
   return 'custom';
 }
