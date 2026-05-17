@@ -19311,9 +19311,11 @@ const NsitePanel = (() => {
     const t = activeTab();
     if (t) t.body = body || null;
     refreshTrustBanner();
+    refreshBookmarkButton();
     if (els.siteInfo && !els.siteInfo.hidden) {
-      if      (paneMode === 'siteinfo') renderSiteInfo();
-      else if (paneMode === 'devtools') renderDevToolsPane();
+      if      (paneMode === 'siteinfo')  renderSiteInfo();
+      else if (paneMode === 'devtools')  renderDevToolsPane();
+      else if (paneMode === 'bookmarks') void renderBookmarks();
     }
   }
 
@@ -19835,6 +19837,7 @@ const NsitePanel = (() => {
     // re-render via setDiagnostics → renderDevToolsPane / renderSiteInfo.
     if (tab.body) setDiagnostics(tab.body);
     refreshTrustBanner();
+    refreshBookmarkButton();
     updateNavButtons();
     // Empty-state visible when this tab has nothing to show yet.
     setEmpty(!tab.frameEl);
@@ -19901,6 +19904,7 @@ const NsitePanel = (() => {
     // without re-opening the menu.
     els.menuBtn        = $('nsite-menu-btn');
     els.menu           = $('nsite-menu');
+    els.bookmarkBtn    = $('nsite-bookmark-btn');
     els.siteInfo       = $('nsite-siteinfo');
     els.siteInfoBody   = $('nsite-siteinfo-body');
     els.siteInfoClose  = $('nsite-siteinfo-close');
@@ -19940,9 +19944,10 @@ const NsitePanel = (() => {
         const step = ev.target?.closest?.('.nsite-siteinfo-step');
         if (!step) return;
         const which = step.getAttribute('data-step');
-        if      (which === 'siteinfo') openSiteInfo();
-        else if (which === 'settings') openSettings();
-        else if (which === 'devtools') openDevTools();
+        if      (which === 'bookmarks') openBookmarks();
+        else if (which === 'siteinfo')  openSiteInfo();
+        else if (which === 'settings')  openSettings();
+        else if (which === 'devtools')  openDevTools();
       });
 
     // Tab strip — single delegated click handler covers tab activation,
@@ -20049,12 +20054,19 @@ const NsitePanel = (() => {
       if (!item) return;
       closeMenu();
       const which = item.getAttribute('data-menu');
-      if      (which === 'siteinfo') openSiteInfo();
-      else if (which === 'settings') openSettings();
-      else if (which === 'devtools') openDevTools();
+      if      (which === 'bookmarks') openBookmarks();
+      else if (which === 'siteinfo')  openSiteInfo();
+      else if (which === 'settings')  openSettings();
+      else if (which === 'devtools')  openDevTools();
     });
 
     els.siteInfoClose?.addEventListener('click', closeSiteInfo);
+
+    // Bookmark icon on the address bar — toggles current site in/out
+    // of nsite.json's bookmarks list. The icon's enabled / pressed
+    // state is driven by refreshBookmarkButton (called whenever the
+    // active tab's body changes).
+    els.bookmarkBtn?.addEventListener('click', () => void toggleBookmark());
   }
 
   // Track which mode the side pane is currently in so a resolve doesn't
@@ -20201,6 +20213,143 @@ const NsitePanel = (() => {
     updateStepper();
     renderDevToolsPane();
     if (els.siteInfo) els.siteInfo.hidden = false;
+  }
+
+  function openBookmarks() {
+    paneMode = 'bookmarks';
+    updateStepper();
+    void renderBookmarks();
+    if (els.siteInfo) els.siteInfo.hidden = false;
+  }
+
+  // Toggle current site in the bookmarks list. Uses the resolve
+  // response's pubkey + name + display + the original address from
+  // history so the saved entry round-trips through the resolver
+  // correctly (gateway URLs decoded to `nsite://name` re-resolve via
+  // the original URL, not the display form — same originalAddr fix
+  // from PR #126's trust toggle).
+  async function toggleBookmark() {
+    const tab = activeTab();
+    if (!tab || !tab.body) return;
+    const pubkey = String(tab.body.pubkey || '');
+    if (!/^[0-9a-f]{64}$/i.test(pubkey)) return;
+    const name = String(tab.body.name || '');
+    const display = String(tab.body.display || tab.display || pubkey);
+    const addr = (tab.cursor >= 0 && tab.history[tab.cursor]?.originalAddr)
+      || tab.originalAddr
+      || els.addr?.value
+      || display;
+    const desired = !tab.body.bookmarked;
+    try {
+      const token = getSessionToken();
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch('/api/nsite/bookmarks', {
+        method: 'POST', headers,
+        body: JSON.stringify({ pubkey, name, addr, display, allow: desired }),
+      });
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        throw new Error(b?.message || b?.error || `HTTP ${res.status}`);
+      }
+      // Optimistic local update — saves a re-resolve roundtrip just
+      // to flip the bookmarked flag. The pane re-renders if it's open
+      // in bookmarks mode.
+      tab.body.bookmarked = desired;
+      refreshBookmarkButton();
+      if (els.siteInfo && !els.siteInfo.hidden && paneMode === 'bookmarks') {
+        void renderBookmarks();
+      }
+    } catch (e) {
+      toast('Bookmark failed', String(e?.message || e));
+    }
+  }
+
+  function refreshBookmarkButton() {
+    if (!els.bookmarkBtn) return;
+    const tab = activeTab();
+    const has = !!tab?.body?.pubkey;
+    els.bookmarkBtn.disabled = !has;
+    const bookmarked = !!tab?.body?.bookmarked;
+    els.bookmarkBtn.setAttribute('aria-pressed', bookmarked ? 'true' : 'false');
+    els.bookmarkBtn.title = bookmarked
+      ? 'Bookmarked — click to remove'
+      : (has ? 'Bookmark this nsite' : 'Browse an nsite first to bookmark it');
+  }
+
+  // Render the bookmarks list in the side pane. One row per saved
+  // entry; click anywhere on the row to open in the active tab, click
+  // the trash to remove. Re-fetches from the server every time —
+  // bookmarks are small and the list reflects fresh state if the
+  // user edited nsite.json directly.
+  async function renderBookmarks() {
+    if (!els.siteInfoBody) return;
+    els.siteInfoBody.innerHTML = `<div class="nsite-siteinfo-empty">Loading bookmarks…</div>`;
+    try {
+      const token = getSessionToken();
+      const headers = { 'Accept': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch('/api/nsite/bookmarks', { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const list = Array.isArray(data?.bookmarks) ? data.bookmarks : [];
+      if (list.length === 0) {
+        els.siteInfoBody.innerHTML = `<div class="nsite-siteinfo-empty">No bookmarks yet. Browse to an nsite and click the bookmark icon on the address bar to save it here.</div>`;
+        return;
+      }
+      els.siteInfoBody.innerHTML = `
+        <div class="nsite-bookmark-list">
+          ${list.map((b) => `
+            <div class="nsite-bookmark-row" data-addr="${escapeHtml(b.addr || '')}" data-pk="${escapeHtml(b.pubkey || '')}" data-name="${escapeHtml(b.name || '')}">
+              <div class="body">
+                <div class="display">${escapeHtml(b.display || b.addr || b.pubkey)}</div>
+                <div class="sub">${escapeHtml(b.name || 'root manifest')} · ${escapeHtml(String(b.pubkey || '').slice(0, 12))}…</div>
+              </div>
+              <button class="remove" type="button" title="Remove bookmark" aria-label="Remove bookmark">&times;</button>
+            </div>
+          `).join('')}
+        </div>
+      `;
+      // Delegated click — row opens the bookmark in the active tab,
+      // trash removes via the same /api/nsite/bookmarks endpoint with
+      // allow=false.
+      els.siteInfoBody.querySelectorAll('.nsite-bookmark-row').forEach((row) => {
+        row.addEventListener('click', (ev) => {
+          const remove = ev.target?.closest?.('.remove');
+          const pk = row.getAttribute('data-pk') || '';
+          const name = row.getAttribute('data-name') || '';
+          const addr = row.getAttribute('data-addr') || '';
+          if (remove) {
+            ev.stopPropagation();
+            void (async () => {
+              try {
+                const tk = getSessionToken();
+                const hd = { 'Content-Type': 'application/json' };
+                if (tk) hd['Authorization'] = `Bearer ${tk}`;
+                await fetch('/api/nsite/bookmarks', {
+                  method: 'POST', headers: hd,
+                  body: JSON.stringify({ pubkey: pk, name, allow: false }),
+                });
+                // Refresh the list + flip the address-bar icon if the
+                // removed bookmark matches the active tab's site.
+                const tab = activeTab();
+                if (tab?.body?.pubkey === pk && (tab.body.name || '') === name) {
+                  tab.body.bookmarked = false;
+                  refreshBookmarkButton();
+                }
+                void renderBookmarks();
+              } catch (e) {
+                toast('Remove bookmark failed', String(e?.message || e));
+              }
+            })();
+            return;
+          }
+          if (addr) void go(addr);
+        });
+      });
+    } catch (e) {
+      els.siteInfoBody.innerHTML = `<div class="nsite-siteinfo-empty">Couldn't load bookmarks: ${escapeHtml(String(e?.message || e))}</div>`;
+    }
   }
 
   function openSiteInfo() {

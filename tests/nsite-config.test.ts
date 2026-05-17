@@ -220,3 +220,89 @@ test('writeNsiteConfig: omitting trustedExternalNsites preserves the existing li
   assert.deepEqual(r.trustedExternalNsites, [pk],
     'editing a different field must not clear the trust list');
 });
+
+// ── bookmarks ────────────────────────────────────────────────────────────
+
+test('readNsiteConfig: bookmarks defaults to [] when missing', () => {
+  rmCfg();
+  const r = readNsiteConfig();
+  assert.deepEqual(r.bookmarks, []);
+});
+
+test('readNsiteConfig: bookmarks round-trip with full fields', () => {
+  rmCfg();
+  const pk = 'a'.repeat(64);
+  const bm = { pubkey: pk, name: 'titan', addr: 'nsite://titan', display: 'nsite://titan', addedAt: 1700000000 };
+  fs.mkdirSync(path.dirname(CFG_FILE), { recursive: true });
+  fs.writeFileSync(CFG_FILE, JSON.stringify({ bookmarks: [bm] }));
+  const r = readNsiteConfig();
+  assert.deepEqual(r.bookmarks, [bm]);
+});
+
+test('readNsiteConfig: bookmarks drops malformed entries (bad pubkey, missing addr)', () => {
+  rmCfg();
+  const pk = 'b'.repeat(64);
+  fs.mkdirSync(path.dirname(CFG_FILE), { recursive: true });
+  fs.writeFileSync(CFG_FILE, JSON.stringify({
+    bookmarks: [
+      { pubkey: pk, name: '', addr: 'nsite://x', display: 'x', addedAt: 1700000000 }, // valid
+      { pubkey: 'not-hex', name: 'bad', addr: 'nsite://y' },                            // bad pubkey
+      { pubkey: pk, name: 'no-addr' },                                                  // missing addr
+      'totally-wrong',                                                                  // wrong type
+      null,                                                                             // null
+    ],
+  }));
+  const r = readNsiteConfig();
+  assert.equal(r.bookmarks.length, 1);
+  assert.equal(r.bookmarks[0].pubkey, pk);
+});
+
+test('readNsiteConfig: bookmarks dedupe on pubkey+name (different names stay distinct)', () => {
+  rmCfg();
+  const pk = 'c'.repeat(64);
+  fs.mkdirSync(path.dirname(CFG_FILE), { recursive: true });
+  fs.writeFileSync(CFG_FILE, JSON.stringify({
+    bookmarks: [
+      { pubkey: pk, name: 'project-a', addr: 'nsite://project-a', display: 'A', addedAt: 1700000000 },
+      { pubkey: pk, name: 'project-a', addr: 'nsite://project-a', display: 'A2', addedAt: 1700000100 }, // dup pubkey+name
+      { pubkey: pk, name: 'project-b', addr: 'nsite://project-b', display: 'B',  addedAt: 1700000200 }, // distinct name
+    ],
+  }));
+  const r = readNsiteConfig();
+  assert.equal(r.bookmarks.length, 2, 'pubkey+name dedupe collapses same-keyed entries');
+  // Sort order: newest first by addedAt — so project-b first.
+  assert.equal(r.bookmarks[0].name, 'project-b');
+  assert.equal(r.bookmarks[1].name, 'project-a');
+});
+
+test('writeNsiteConfig: bookmarks round-trip + sanitization', () => {
+  rmCfg();
+  const pk = 'd'.repeat(64);
+  const w = writeNsiteConfig({
+    bookmarks: [
+      { pubkey: pk, name: 'site', addr: 'nsite://site', display: 'site', addedAt: 1700000000 },
+      { pubkey: 'bad-row', addr: 'x' },  // dropped
+    ] as any,
+  });
+  assert.equal(w.bookmarks.length, 1);
+  assert.equal(w.bookmarks[0].pubkey, pk);
+  // Re-read confirms persistence.
+  assert.equal(readNsiteConfig().bookmarks.length, 1);
+});
+
+test('writeNsiteConfig: empty bookmarks array CLEARS the list', () => {
+  rmCfg();
+  const pk = 'e'.repeat(64);
+  writeNsiteConfig({ bookmarks: [{ pubkey: pk, name: '', addr: 'x', display: 'x', addedAt: 0 }] as any });
+  const cleared = writeNsiteConfig({ bookmarks: [] });
+  assert.deepEqual(cleared.bookmarks, [],
+    'passing an empty array must be how a user clears all bookmarks at once');
+});
+
+test('writeNsiteConfig: omitting bookmarks preserves the existing list', () => {
+  rmCfg();
+  const pk = '0'.repeat(64);
+  writeNsiteConfig({ bookmarks: [{ pubkey: pk, name: '', addr: 'x', display: 'x', addedAt: 0 }] as any });
+  const r = writeNsiteConfig({ contentRelays: ['wss://example'] });
+  assert.equal(r.bookmarks.length, 1, 'editing a different field must not clear bookmarks');
+});

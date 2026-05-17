@@ -49,6 +49,36 @@ export interface NsiteConfig {
    *  routes/nsite.ts:handleNsiteSubdomain for the host gate that keeps
    *  the dashboard /api/* surface invisible from nsite origins. */
   trustedExternalNsites: string[];
+  /** Saved bookmarks. Browser-style: starred sites the user wants
+   *  quick access to. Each entry remembers the resolve input the user
+   *  originally typed (so re-resolving picks the same path — gateway
+   *  URLs decoded to nsite://name don't round-trip via NSIT lookup,
+   *  see PR #126's originalAddr fix), plus a display label and a
+   *  timestamp for sort order. Dedupe key is pubkey + name, so two
+   *  sites at the same author pubkey but different v2-named manifests
+   *  remain distinct bookmarks. */
+  bookmarks: Bookmark[];
+}
+
+/** Persistent bookmark entry. Stored in nsite.json's bookmarks array.
+ *  The shape mirrors what /api/nsite/resolve returns so the bookmark
+ *  list can render without an extra fetch. */
+export interface Bookmark {
+  /** 64-hex author pubkey. Primary identity. */
+  pubkey:    string;
+  /** Optional v2-named manifest name (the `d` tag value). Empty for
+   *  root manifests / v1 / npub-only bookmarks. Part of the dedupe key
+   *  with pubkey. */
+  name:      string;
+  /** What the user originally typed — `nsite://titan`, an `npub1…`,
+   *  a gateway URL, etc. Re-resolving via this string is what makes
+   *  bookmarks click-to-open correctly across all input shapes. */
+  addr:      string;
+  /** Display label for the bookmark list. Usually the canonical
+   *  display form (`nsite://titan`) the resolver returned. */
+  display:   string;
+  /** Unix seconds when bookmarked. Used for sort order in the list. */
+  addedAt:   number;
 }
 
 function configDir(): string {
@@ -68,7 +98,23 @@ export function defaultNsiteConfig(): NsiteConfig {
     nsitIndexerPubkey:     DEFAULT_NSIT_INDEXER_PUBKEY,
     nsitIndexerRelays:     DEFAULT_NSIT_INDEXER_RELAYS.slice(),
     trustedExternalNsites: [],
+    bookmarks:             [],
   };
+}
+
+/** Sanitize a Bookmark off the wire / off disk. Drops obviously
+ *  malformed entries (bad pubkey, missing addr) rather than throwing —
+ *  consistent with how the other arrays in this config behave. */
+function sanitizeBookmark(raw: any): Bookmark | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const pubkey = typeof raw.pubkey === 'string' ? raw.pubkey.trim().toLowerCase() : '';
+  if (!HEX64.test(pubkey)) return null;
+  const addr = typeof raw.addr === 'string' ? raw.addr.trim() : '';
+  if (!addr) return null;
+  const name    = typeof raw.name === 'string'    ? raw.name.trim()    : '';
+  const display = typeof raw.display === 'string' ? raw.display.trim() : addr;
+  const addedAt = Number.isFinite(raw.addedAt) ? Math.floor(raw.addedAt) : Math.floor(Date.now() / 1000);
+  return { pubkey, name, addr, display, addedAt };
 }
 
 /**
@@ -102,6 +148,22 @@ export function readNsiteConfig(): NsiteConfig {
         .map((s: string) => s.trim().toLowerCase())
         .filter((s: string) => trustedSeen.has(s) ? false : (trustedSeen.add(s), true))
     : [];
+  // Bookmarks: dedupe on pubkey+name (so two named manifests at the
+  // same author stay distinct, but the same bookmark added twice
+  // collapses to one). Bad rows drop. Sort by addedAt desc so the
+  // most-recent bookmark shows first in the panel list.
+  const bmSeen = new Set<string>();
+  const bookmarks: Bookmark[] = Array.isArray(raw.bookmarks)
+    ? raw.bookmarks
+        .map(sanitizeBookmark)
+        .filter((b: Bookmark | null): b is Bookmark => !!b)
+        .filter((b: Bookmark) => {
+          const k = `${b.pubkey}|${b.name}`;
+          if (bmSeen.has(k)) return false;
+          bmSeen.add(k); return true;
+        })
+        .sort((a: Bookmark, b: Bookmark) => b.addedAt - a.addedAt)
+    : [];
   return {
     contentRelays:         wss.length   ? wss   : fallback.contentRelays,
     discoveryRelays:       disc.length  ? disc  : fallback.discoveryRelays,
@@ -109,6 +171,7 @@ export function readNsiteConfig(): NsiteConfig {
     nsitIndexerPubkey:     pk,
     nsitIndexerRelays:     nsit.length  ? nsit  : fallback.nsitIndexerRelays,
     trustedExternalNsites: trusted,
+    bookmarks,
   };
 }
 
@@ -155,6 +218,21 @@ export function writeNsiteConfig(input: Partial<NsiteConfig>): NsiteConfig {
       .filter((s: any): s is string => typeof s === 'string' && HEX64.test(s.trim()))
       .map((s: string) => s.trim().toLowerCase())
       .filter((s: string) => seen.has(s) ? false : (seen.add(s), true));
+  }
+
+  if (Array.isArray(input.bookmarks)) {
+    // Same shape — sanitize each entry, dedupe on pubkey+name, preserve
+    // existing-or-passed addedAt so the sort order on next read stays
+    // stable across writes.
+    const seen = new Set<string>();
+    merged.bookmarks = input.bookmarks
+      .map(sanitizeBookmark)
+      .filter((b: Bookmark | null): b is Bookmark => !!b)
+      .filter((b: Bookmark) => {
+        const k = `${b.pubkey}|${b.name}`;
+        if (seen.has(k)) return false;
+        seen.add(k); return true;
+      });
   }
 
   fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 });

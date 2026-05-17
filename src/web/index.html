@@ -597,6 +597,25 @@
                  class="nsite-addr-input" />
           <button id="nsite-go" class="primary">Go</button>
           <span id="nsite-status" class="nsite-status muted" aria-live="polite"></span>
+          <!-- Bookmark icon — toggles current site in/out of the user's
+               nsite.json bookmarks list. Outlined when not bookmarked,
+               filled when bookmarked. Disabled when there's no resolved
+               site on the active tab (a fresh empty tab can't be
+               bookmarked). Click hits /api/nsite/bookmarks; the
+               Bookmarks pane (4th stepper mode) renders the saved
+               list with click-to-open. -->
+          <button id="nsite-bookmark-btn"
+                  class="nsite-bookmark-btn"
+                  type="button"
+                  title="Bookmark this nsite"
+                  aria-label="Bookmark this nsite"
+                  aria-pressed="false"
+                  disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path class="bm-outline" d="M6 3h12v18l-6-4-6 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+              <path class="bm-fill"    d="M6 3h12v18l-6-4-6 4z" fill="currentColor"/>
+            </svg>
+          </button>
           <!-- Browser-style menu (⋮) anchored to the address bar so it
                lives where users conventionally find it in Chrome /
                Brave / Titan Browser. The popover opens below this
@@ -611,6 +630,10 @@
                     aria-haspopup="menu"
                     aria-expanded="false">&#x22EE;</button>
             <div id="nsite-menu" class="nsite-menu" role="menu" hidden>
+              <button class="nsite-menu-item" type="button" role="menuitem" data-menu="bookmarks">
+                <span class="nsite-menu-item-label">Bookmarks</span>
+                <span class="nsite-menu-item-hint">saved nsites</span>
+              </button>
               <button class="nsite-menu-item" type="button" role="menuitem" data-menu="siteinfo">
                 <span class="nsite-menu-item-label">Site info</span>
                 <span class="nsite-menu-item-hint">pubkey · author · relays</span>
@@ -713,6 +736,8 @@
           <aside class="nsite-siteinfo" id="nsite-siteinfo" hidden aria-label="Side pane">
             <div class="nsite-siteinfo-head">
               <div class="nsite-siteinfo-stepper" role="tablist" aria-label="Pane mode">
+                <button class="nsite-siteinfo-step" type="button" role="tab"
+                        data-step="bookmarks" aria-selected="false">Bookmarks</button>
                 <button class="nsite-siteinfo-step" type="button" role="tab"
                         data-step="siteinfo" aria-selected="true">Site info</button>
                 <button class="nsite-siteinfo-step" type="button" role="tab"
