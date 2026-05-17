@@ -619,6 +619,67 @@ export async function handleAi(
     return true;
   }
 
+  // POST /api/ai/providers/maple/check — validate a Maple AI key by
+  // hitting GET {baseUrl}/models on the local proxy. Same shape as the
+  // PPQ check but with an editable baseUrl since the Maple desktop app
+  // lets users change the proxy port. No balance — Maple is
+  // subscription-based, no credits API.
+  //
+  // Body: { key?: string, baseUrl?: string }
+  //   - key absent     → resolve from keychain slot ai:maple
+  //   - baseUrl absent → resolve from ai-config override / registry
+  // Response: { ok, modelCount?, error? }
+  if (url === '/api/ai/providers/maple/check' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+
+    let key = typeof parsed.key === 'string' ? parsed.key.trim() : '';
+    if (!key) {
+      try {
+        key = (await getKeychain().retrieve(keychainAccountFor('maple'))) ?? '';
+      } catch { key = ''; }
+    }
+    if (!key) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'no key provided and none stored' }));
+      return true;
+    }
+    if (isNsec(key)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'nsec detected — paste your Maple key instead' }));
+      return true;
+    }
+    const provider = getProvider('maple');
+    if (!provider || provider.type !== 'api') {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'maple missing from registry' }));
+      return true;
+    }
+    let baseUrl = typeof parsed.baseUrl === 'string' ? parsed.baseUrl.trim() : '';
+    if (!baseUrl) {
+      const cfg = readAiConfig();
+      baseUrl = cfg.providers.maple?.baseUrl ?? (provider as ApiProvider).baseUrl;
+    }
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid proxy URL' }));
+      return true;
+    }
+    try {
+      const models = await fetchOpenAICompatModels(key, baseUrl, false);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, modelCount: models.length }));
+    } catch (e: any) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: false,
+        error: String(e.message || e).slice(0, 140),
+      }));
+    }
+    return true;
+  }
+
   if (aiKeyMatch && method === 'DELETE') {
     const id = aiKeyMatch[1];
     const provider = getProvider(id);

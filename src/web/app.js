@@ -15605,6 +15605,42 @@ const ConfigPanel = (() => {
     }
   }
 
+  // Maple counterpart — proxies GET {baseUrl}/models against the user's
+  // local Maple proxy (default http://localhost:8080/v1, port may vary).
+  // Subscription-based so no balance, just "does the key unlock /models".
+  async function checkMapleKey({ key, baseUrl } = {}) {
+    try {
+      return await api('/api/ai/providers/maple/check', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ key, baseUrl }),
+      });
+    } catch (e) {
+      return { ok: false, error: e?.message || 'request failed' };
+    }
+  }
+
+  // HTML fragment swapped in when user picks "Maple AI" from the add
+  // dropdown. Layout mirrors the Routstr block (editable proxy URL
+  // because the desktop app lets users change the port) but the hint
+  // points users at the desktop-app download rather than a node web UI.
+  // Config panel only — the wizard's setup-ai-mapleworld block omits
+  // the external link to avoid bouncing users off-platform mid-flow.
+  function renderMapleAddBlock() {
+    return `
+      <div id="ai-add-maplerow" class="ai-add-maple" style="display:none;margin-top:8px">
+        <div class="np-hint" style="margin-bottom:8px">
+          Maple AI runs encrypted LLMs in trusted execution environments. The Maple desktop app starts a local proxy and provides your API key.
+          <a href="https://trymaple.ai/downloads" target="_blank" rel="noopener">Get Maple at trymaple.ai →</a>
+        </div>
+        <label class="field-label">Proxy URL</label>
+        <input id="ai-add-maple-baseurl" type="text" autocomplete="off"
+               placeholder="http://localhost:8080/v1" value="http://localhost:8080/v1">
+        <div id="ai-add-maple-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+      </div>
+    `;
+  }
+
   // HTML fragment swapped in when user picks "PayPerQ ⚡" from the add
   // dropdown. Smaller surface than the Routstr block — single endpoint,
   // single key format, no balance API. Just a deep-link to the key-mint
@@ -15706,6 +15742,59 @@ const ConfigPanel = (() => {
     `;
   }
 
+  // Maple configured-row renderer — like the Routstr row but trimmer.
+  // Shows the local proxy URL with inline pencil edit (port often gets
+  // customised in the Maple desktop app) plus the standard actions.
+  // No balance, no key-type, no Check balance button — subscription
+  // service with no credits API to call.
+  function renderMapleRow(p) {
+    const isChatDef = !!p.isDefault?.chat;
+    const baseUrl = p.baseUrl || 'http://localhost:8080/v1';
+    const open = isAiRowOpenInitially(p);
+
+    const badges = [`<span class="ai-badge type-api">api</span>`];
+    badges.push(p.hasKey
+      ? `<span class="ai-badge status-ok">✓ key set</span>`
+      : `<span class="ai-badge">needs key</span>`);
+    if (isChatDef) badges.push(`<span class="ai-badge default">chat default</span>`);
+
+    const actions = [];
+    actions.push(`<button class="ai-fetch-models" data-id="maple">Fetch models</button>`);
+    if (!isChatDef) {
+      actions.push(`<button class="ai-set-default" data-kind="chat" data-id="maple">Use for Chat</button>`);
+    }
+    actions.push(`<button class="danger ai-remove" data-id="maple">Remove</button>`);
+
+    const model = p.model ? `<span class="ai-model" style="margin-left:8px">${escapeHtml(p.model)}</span>` : '';
+
+    return `
+      <details class="ai-provider-row" data-id="maple" data-type="api"${open ? ' open' : ''}>
+        <summary class="ai-provider-summary">
+          <span class="ai-provider-name">${escapeHtml(p.displayName)}</span>
+          ${badges.join('')}
+        </summary>
+        <div class="ai-provider-body">
+          <div class="ai-provider-meta">
+            <span class="ai-maple-url-view">
+              <span class="muted">proxy:</span>
+              <code class="ai-maple-url-text">${escapeHtml(baseUrl)}</code>
+              <button class="ai-maple-url-edit" type="button" data-id="maple" title="Change proxy URL"
+                style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px">✎ edit</button>
+            </span>
+            <span class="ai-maple-url-edit-row" style="display:none">
+              <input class="ai-maple-url-input" type="text" value="${escapeHtml(baseUrl)}"
+                style="min-width:280px">
+              <button class="ai-maple-url-save"   type="button" data-id="maple">save</button>
+              <button class="ai-maple-url-cancel" type="button" data-id="maple">cancel</button>
+            </span>
+            ${model}
+          </div>
+          <div class="ai-provider-actions">${actions.join('')}</div>
+        </div>
+      </details>
+    `;
+  }
+
   function renderAiProviders(aiList) {
     if (!aiList || !Array.isArray(aiList.providers)) {
       return `<div style="color:var(--warn);font-size:12px">AI provider list unavailable — server may be pre-Step-4.</div>`;
@@ -15748,6 +15837,7 @@ const ConfigPanel = (() => {
         </div>
         ${renderRoutstrAddBlock()}
         ${renderPayperqAddBlock()}
+        ${renderMapleAddBlock()}
         <div id="ai-add-keyrow" class="keyrow" style="margin-top:8px;display:none">
           <div class="keyfield">
             <input id="ai-add-key" type="password" autocomplete="off" placeholder="paste provider key (sk-…)">
@@ -15772,9 +15862,11 @@ const ConfigPanel = (() => {
 
   function renderAiRow(p) {
     // Routstr gets a richer row (node URL with inline edit, key-type
-    // badge, Check balance button). Everything else uses the generic
-    // shape below.
+    // badge, Check balance button). Maple gets a trimmer variant with
+    // the inline proxy-URL edit but no balance / key-type. Everything
+    // else uses the generic shape below.
     if (p.id === 'routstr') return renderRoutstrRow(p);
+    if (p.id === 'maple')   return renderMapleRow(p);
 
     const typeLabel  = p.type === 'terminal-native' ? 'terminal' : 'api';
     const typeClass  = p.type === 'terminal-native' ? 'term' : 'api';
@@ -15987,6 +16079,47 @@ const ConfigPanel = (() => {
             return;
           }
         }
+        // Maple row: inline proxy-URL edit. Mirror of Routstr's URL
+        // edit — no balance button since Maple has no credits API.
+        if (id === 'maple') {
+          const row = btn.closest('.ai-provider-row');
+          if (!row) return;
+          if (btn.classList.contains('ai-maple-url-edit')) {
+            row.querySelector('.ai-maple-url-view').style.display = 'none';
+            row.querySelector('.ai-maple-url-edit-row').style.display = '';
+            row.querySelector('.ai-maple-url-input').focus();
+            return;
+          }
+          if (btn.classList.contains('ai-maple-url-cancel')) {
+            row.querySelector('.ai-maple-url-edit-row').style.display = 'none';
+            row.querySelector('.ai-maple-url-view').style.display = '';
+            row.querySelector('.ai-maple-url-input').value =
+              row.querySelector('.ai-maple-url-text').textContent || '';
+            return;
+          }
+          if (btn.classList.contains('ai-maple-url-save')) {
+            const next = (row.querySelector('.ai-maple-url-input').value || '').trim();
+            if (!/^https?:\/\//i.test(next)) {
+              toast('Bad proxy URL', 'Must start with http:// or https://', 'warn');
+              return;
+            }
+            btn.disabled = true;
+            try {
+              await api('/api/ai/config', {
+                method:  'POST',
+                headers: { 'content-type': 'application/json' },
+                body:    JSON.stringify({ providers: { maple: { baseUrl: next } } }),
+              });
+              toast('Proxy URL updated', next, 'ok');
+              load();
+            } catch (e) {
+              toast('Update failed', e.message, 'err');
+            } finally {
+              btn.disabled = false;
+            }
+            return;
+          }
+        }
       });
     }
 
@@ -16013,6 +16146,10 @@ const ConfigPanel = (() => {
     // a status slot for the on-blur "✓ key works" validation line.
     const payperqRow    = $('ai-add-payperqrow');
     const payperqStatus = $('ai-add-payperq-status');
+    // Maple — editable proxy URL like Routstr, but no balance affordance.
+    const mapleRow     = $('ai-add-maplerow');
+    const mapleBaseUrl = $('ai-add-maple-baseurl');
+    const mapleStatus  = $('ai-add-maple-status');
 
     function hideAdd() {
       keyRow.style.display = 'none';
@@ -16022,6 +16159,8 @@ const ConfigPanel = (() => {
       if (routstrStatus) routstrStatus.innerHTML    = '';
       if (payperqRow)    payperqRow.style.display   = 'none';
       if (payperqStatus) payperqStatus.innerHTML    = '';
+      if (mapleRow)      mapleRow.style.display     = 'none';
+      if (mapleStatus)   mapleStatus.innerHTML      = '';
     }
     hideAdd();
 
@@ -16076,14 +16215,29 @@ const ConfigPanel = (() => {
           // validation lights up the status slot below.
           if (customRow) customRow.style.display = 'none';
           if (routstrRow) routstrRow.style.display = 'none';
+          if (mapleRow) mapleRow.style.display = 'none';
           if (payperqRow) payperqRow.style.display = '';
           if (payperqStatus) payperqStatus.innerHTML = '';
           if (keyHint) keyHint.style.display = 'none';
           keyInput.focus();
+        } else if (id === 'maple') {
+          // Maple — desktop-app-managed local proxy, default
+          // http://localhost:8080/v1 but the port is user-configurable.
+          // Pre-fill from registry default; on blur the key field
+          // validates against {baseUrl}/models.
+          if (customRow) customRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow) mapleRow.style.display = '';
+          mapleBaseUrl.value = chosen.baseUrl || 'http://localhost:8080/v1';
+          mapleStatus.innerHTML = '';
+          if (keyHint) keyHint.style.display = 'none';
+          mapleBaseUrl.focus();
         } else {
           customRow.style.display = 'none';
           if (routstrRow) routstrRow.style.display = 'none';
           if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow) mapleRow.style.display = 'none';
           if (keyHint) keyHint.style.display = 'none';
           keyInput.focus();
         }
@@ -16141,6 +16295,30 @@ const ConfigPanel = (() => {
       keyInput.addEventListener('blur', validatePayperq);
     }
 
+    // Maple live validation: like PPQ's, but also waits for the proxy
+    // URL — fires on either field's blur. "Couldn't reach proxy" is
+    // the common failure mode (desktop app not running) and the inline
+    // ⚠ status is the cue users need to start it.
+    if (keyInput && mapleBaseUrl && mapleStatus) {
+      const validateMaple = async () => {
+        if (sel.value !== 'maple') return;
+        const key = keyInput.value.trim();
+        const baseUrl = mapleBaseUrl.value.trim();
+        if (!key || !baseUrl) { mapleStatus.innerHTML = ''; return; }
+        mapleStatus.innerHTML = `<span class="muted">checking…</span>`;
+        const r = await checkMapleKey({ key, baseUrl });
+        if (r.ok && typeof r.modelCount === 'number') {
+          mapleStatus.innerHTML = `<span style="color:var(--success)">✓ proxy reachable — ${r.modelCount} models available</span>`;
+        } else if (r.ok) {
+          mapleStatus.innerHTML = `<span style="color:var(--success)">✓ proxy reachable</span>`;
+        } else {
+          mapleStatus.innerHTML = `<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`;
+        }
+      };
+      keyInput.addEventListener('blur', validateMaple);
+      mapleBaseUrl.addEventListener('blur', validateMaple);
+    }
+
     keyEye?.addEventListener('click', () => {
       keyInput.type = keyInput.type === 'password' ? 'text' : 'password';
     });
@@ -16177,6 +16355,18 @@ const ConfigPanel = (() => {
           return;
         }
       }
+      // Maple: same shape as Routstr — proxy URL is mandatory + http(s).
+      if (id === 'maple') {
+        const baseUrl = (mapleBaseUrl?.value || '').trim();
+        if (!baseUrl) {
+          toast('Proxy URL required', 'Set the Maple proxy URL.', 'warn');
+          return;
+        }
+        if (!/^https?:\/\//i.test(baseUrl)) {
+          toast('Bad proxy URL', 'Must start with http:// or https://', 'warn');
+          return;
+        }
+      }
 
       saveBtn.disabled = true;
       try {
@@ -16195,12 +16385,13 @@ const ConfigPanel = (() => {
             }),
           });
         }
-        // Routstr: send baseUrl in the same /key POST. The server
-        // persists it alongside the keyRef and auto-detects keyType
-        // from the key prefix. One round-trip, no separate /api/ai/config
-        // call needed.
-        const keyBody = id === 'routstr'
-          ? { key, baseUrl: routstrBaseUrl.value.trim() }
+        // Routstr / Maple: send baseUrl in the same /key POST. The
+        // server persists it alongside the keyRef (Routstr also stores
+        // an auto-detected keyType from the prefix). One round-trip,
+        // no separate /api/ai/config call needed.
+        const keyBody =
+          id === 'routstr' ? { key, baseUrl: routstrBaseUrl.value.trim() }
+          : id === 'maple' ? { key, baseUrl: mapleBaseUrl.value.trim() }
           : { key };
         const r = await api(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
           method: 'POST',
@@ -16238,6 +16429,7 @@ const ConfigPanel = (() => {
       if (baseUrlInp)     baseUrlInp.value     = '';
       if (modelInp)       modelInp.value       = '';
       if (routstrBaseUrl) routstrBaseUrl.value = '';
+      if (mapleBaseUrl)   mapleBaseUrl.value   = '';
     });
   }
 
@@ -17890,6 +18082,15 @@ const SetupWizard = (() => {
               </div>
               <div id="setup-ai-payperq-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
             </div>
+            <div id="setup-ai-maplerow" style="display:none;margin-top:8px">
+              <div class="np-hint" style="margin-bottom:8px">
+                Maple AI runs encrypted LLMs in trusted execution environments. The Maple desktop app starts a local proxy and provides your API key. Paste an existing key, or Skip and add one later from Config.
+              </div>
+              <label class="field-label">Proxy URL</label>
+              <input id="setup-ai-maple-baseurl" type="text" autocomplete="off"
+                     placeholder="http://localhost:8080/v1" value="http://localhost:8080/v1">
+              <div id="setup-ai-maple-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+            </div>
             <div id="setup-ai-keyrow" style="margin-top:8px;display:none">
               <div class="keyrow">
                 <div class="keyfield">
@@ -17952,6 +18153,9 @@ const SetupWizard = (() => {
       const routstrStatus  = $('setup-ai-routstr-status');
       const payperqRow     = $('setup-ai-payperqrow');
       const payperqStatus  = $('setup-ai-payperq-status');
+      const mapleRow       = $('setup-ai-maplerow');
+      const mapleBaseUrl   = $('setup-ai-maple-baseurl');
+      const mapleStatus    = $('setup-ai-maple-status');
 
       // bareKey providers don't need an API key — derived from the
       // /api/ai/providers payload (`chosen.bareKey`). The curated
@@ -17964,6 +18168,7 @@ const SetupWizard = (() => {
           keyRow.style.display = 'none';
           if (routstrRow) routstrRow.style.display = 'none';
           if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
           return;
         }
         const chosen = list.providers.find(p => p.id === id);
@@ -17989,22 +18194,34 @@ const SetupWizard = (() => {
         keyRow.style.display = '';
         keyInput.value = '';
         // Provider-specific add hints: Routstr gets the node-URL field
-        // (federation), PPQ gets a deep-link to ppq.ai's key-mint page
-        // (single endpoint, just needs the user pointed at the right URL).
+        // (federation), Maple gets the proxy-URL field (local port may
+        // vary), PPQ just gets a one-liner. None of these surface
+        // external links in the wizard — that's a Config-panel-only
+        // affordance.
         if (id === 'routstr' && routstrRow) {
           routstrRow.style.display = '';
           if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
           routstrBaseUrl.value = chosen.baseUrl || 'https://api.routstr.com/v1';
           routstrStatus.innerHTML = '';
           routstrBaseUrl.focus();
         } else if (id === 'payperq' && payperqRow) {
           if (routstrRow) routstrRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
           payperqRow.style.display = '';
           payperqStatus.innerHTML = '';
           keyInput.focus();
+        } else if (id === 'maple' && mapleRow) {
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
+          mapleRow.style.display = '';
+          mapleBaseUrl.value = chosen.baseUrl || 'http://localhost:8080/v1';
+          mapleStatus.innerHTML = '';
+          mapleBaseUrl.focus();
         } else {
           if (routstrRow) routstrRow.style.display = 'none';
           if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
           keyInput.focus();
         }
       });
@@ -18058,12 +18275,36 @@ const SetupWizard = (() => {
         keyInput.addEventListener('blur', validatePayperq);
       }
 
+      // Maple wizard validation — same shape as Config panel. Common
+      // failure mode is "desktop app not running" → "couldn't reach
+      // proxy", which the inline ⚠ cue surfaces.
+      if (keyInput && mapleBaseUrl && mapleStatus) {
+        const validateMaple = async () => {
+          if (sel.value !== 'maple') return;
+          const key = keyInput.value.trim();
+          const baseUrl = mapleBaseUrl.value.trim();
+          if (!key || !baseUrl) { mapleStatus.innerHTML = ''; return; }
+          mapleStatus.innerHTML = `<span class="muted">checking…</span>`;
+          const r = await checkMapleKey({ key, baseUrl });
+          if (r.ok && typeof r.modelCount === 'number') {
+            mapleStatus.innerHTML = `<span style="color:var(--success)">✓ proxy reachable — ${r.modelCount} models available</span>`;
+          } else if (r.ok) {
+            mapleStatus.innerHTML = `<span style="color:var(--success)">✓ proxy reachable</span>`;
+          } else {
+            mapleStatus.innerHTML = `<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`;
+          }
+        };
+        keyInput.addEventListener('blur', validateMaple);
+        mapleBaseUrl.addEventListener('blur', validateMaple);
+      }
+
       saveBtn?.addEventListener('click', async () => {
         const id  = sel.value;
         const key = keyInput.value;
         if (!id || !key) return;
-        // Routstr: validate node URL before save. Empty falls back to
-        // the registry default; non-empty must be http(s).
+        // Routstr / Maple — both carry an editable base URL we send
+        // alongside the key. Empty falls back to the registry default;
+        // non-empty must be http(s).
         let routstrBaseUrlVal = '';
         if (id === 'routstr') {
           routstrBaseUrlVal = (routstrBaseUrl?.value || '').trim();
@@ -18072,10 +18313,19 @@ const SetupWizard = (() => {
             return;
           }
         }
+        let mapleBaseUrlVal = '';
+        if (id === 'maple') {
+          mapleBaseUrlVal = (mapleBaseUrl?.value || '').trim();
+          if (mapleBaseUrlVal && !/^https?:\/\//i.test(mapleBaseUrlVal)) {
+            toast('Bad proxy URL', 'Must start with http:// or https://', 'warn');
+            return;
+          }
+        }
         saveBtn.disabled = true;
         try {
-          const body = id === 'routstr' && routstrBaseUrlVal
-            ? { key, baseUrl: routstrBaseUrlVal }
+          const body =
+            id === 'routstr' && routstrBaseUrlVal ? { key, baseUrl: routstrBaseUrlVal }
+            : id === 'maple' && mapleBaseUrlVal   ? { key, baseUrl: mapleBaseUrlVal }
             : { key };
           await fetch(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
             method: 'POST',
@@ -18087,6 +18337,7 @@ const SetupWizard = (() => {
           keyRow.style.display = 'none';
           if (routstrRow) routstrRow.style.display = 'none';
           if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
           paint();
         } catch (e) {
           toast('Add failed', e.message, 'err');
@@ -18099,6 +18350,7 @@ const SetupWizard = (() => {
         keyRow.style.display = 'none';
         if (routstrRow) routstrRow.style.display = 'none';
         if (payperqRow) payperqRow.style.display = 'none';
+        if (mapleRow)   mapleRow.style.display   = 'none';
       });
     };
     paint();
