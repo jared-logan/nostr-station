@@ -54,6 +54,12 @@ export interface ProviderConfig {
   // prefers this over the hand-curated PROVIDER_LIST fallback so users
   // see exactly what their key is entitled to.
   knownModels?: string[];
+  // Routstr-only: which kind of auth material is in the keychain slot.
+  // 'sk' → managed key (the node tracks balance; GET /v1/wallet/info
+  // returns it). 'cashu' → cashu token (one-shot, anonymous; no balance
+  // API). Used by the Config panel to render the right row affordances
+  // (Check balance button is sk-only). Absent for non-routstr providers.
+  keyType?: 'sk' | 'cashu';
 }
 
 export interface AiConfig {

@@ -15520,6 +15520,286 @@ const ConfigPanel = (() => {
     `;
   }
 
+  // ── Collapsed row state — provider rows are <details> elements ──────
+  //
+  // The Config panel's AI list grew enough actions per row (Fetch models
+  // / Use for Chat / Remove plus provider-specific affordances like
+  // Routstr's Check balance and PPQ's Manage-on-ppq) that 3+ configured
+  // providers turned the section into a wall of buttons. Each row now
+  // collapses to badges-only; users expand the ones they're actively
+  // managing.
+  //
+  // Open/closed state persists in localStorage so a row I expanded
+  // doesn't snap shut when renderAiProviders re-runs (which happens
+  // after every action). Broken rows (API provider configured without
+  // a key) always render open — those need eyeballs, not a chevron.
+
+  // "Broken" = configured but missing the key it needs. The only
+  // production-likely case today; expand the predicate later if other
+  // provider-shaped failures need surfacing the same way.
+  function isAiRowBroken(p) {
+    return p.type === 'api' && p.configured && !p.hasKey && !p.bareKey;
+  }
+
+  function aiRowStorageKey(id) { return `ns:ai-row-open:${id}`; }
+
+  function isAiRowOpenInitially(p) {
+    if (isAiRowBroken(p)) return true;
+    try { return localStorage.getItem(aiRowStorageKey(p.id)) === '1'; }
+    catch { return false; }
+  }
+
+  // Persist on user toggle. <details>'s `toggle` event doesn't bubble,
+  // so we wire each row directly via querySelectorAll rather than
+  // relying on event delegation off the list container.
+  function wireAiRowTogglePersistence(listEl) {
+    if (!listEl) return;
+    listEl.querySelectorAll('details.ai-provider-row').forEach(det => {
+      det.addEventListener('toggle', () => {
+        const id = det.dataset.id;
+        if (!id) return;
+        try {
+          if (det.open) localStorage.setItem(aiRowStorageKey(id), '1');
+          else          localStorage.removeItem(aiRowStorageKey(id));
+        } catch {}
+      });
+    });
+  }
+
+  // Routstr key-prefix sniff (mirror of detectRoutstrKeyType in
+  // src/lib/routes/ai.ts). Used for instant client-side UI feedback as
+  // the user pastes — server still re-detects on save, so this is purely
+  // cosmetic. sk- → managed (node tracks balance); else → cashu token.
+  function routstrKeyTypeFromKey(key) {
+    return /^sk-/i.test((key || '').trim()) ? 'sk' : 'cashu';
+  }
+
+  // Calls POST /api/ai/providers/routstr/check. Returns the parsed JSON
+  // ({ ok, keyType, balanceSats?, error? }) or { ok:false, error } on
+  // network failure. Never throws — callers branch on .ok.
+  async function checkRoutstrKey({ key, baseUrl } = {}) {
+    try {
+      return await api('/api/ai/providers/routstr/check', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ key, baseUrl }),
+      });
+    } catch (e) {
+      return { ok: false, error: e?.message || 'request failed' };
+    }
+  }
+
+  // PPQ counterpart — calls POST /api/ai/providers/payperq/check which
+  // proxies GET https://api.ppq.ai/v1/models. PPQ has no Bearer-authed
+  // balance endpoint, so this only confirms "key works" + returns the
+  // count of models the user is entitled to. Same never-throw contract.
+  async function checkPayperqKey({ key } = {}) {
+    try {
+      return await api('/api/ai/providers/payperq/check', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ key }),
+      });
+    } catch (e) {
+      return { ok: false, error: e?.message || 'request failed' };
+    }
+  }
+
+  // Maple counterpart — proxies GET {baseUrl}/models against whichever
+  // Maple endpoint the user configured (cloud enclave by default, or
+  // the Maple desktop app's localhost proxy). Subscription-based so no
+  // balance, just "does the key unlock /models".
+  async function checkMapleKey({ key, baseUrl } = {}) {
+    try {
+      return await api('/api/ai/providers/maple/check', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ key, baseUrl }),
+      });
+    } catch (e) {
+      return { ok: false, error: e?.message || 'request failed' };
+    }
+  }
+
+  // HTML fragment swapped in when user picks "Maple AI" from the add
+  // dropdown. Defaults to the public enclave endpoint — works with any
+  // OpenAI client + Bearer auth, no local setup needed. Users running
+  // the Maple desktop app can override to its localhost proxy. Config
+  // panel only; the wizard's setup-ai-maplerow block omits the
+  // trymaple.ai link to avoid bouncing users off-platform mid-flow.
+  function renderMapleAddBlock() {
+    return `
+      <div id="ai-add-maplerow" class="ai-add-maple" style="display:none;margin-top:8px">
+        <div class="np-hint" style="margin-bottom:8px">
+          Maple AI runs encrypted LLMs in trusted execution environments. Use the cloud endpoint below, or point at the Maple desktop app's local proxy if you have it running.
+          <a href="https://trymaple.ai" target="_blank" rel="noopener">Get your key at trymaple.ai →</a>
+        </div>
+        <label class="field-label">Endpoint URL</label>
+        <input id="ai-add-maple-baseurl" type="text" autocomplete="off"
+               placeholder="https://enclave.trymaple.ai/v1" value="https://enclave.trymaple.ai/v1">
+        <div id="ai-add-maple-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+      </div>
+    `;
+  }
+
+  // HTML fragment swapped in when user picks "PayPerQ ⚡" from the add
+  // dropdown. Smaller surface than the Routstr block — single endpoint,
+  // single key format, no balance API. Just a deep-link to the key-mint
+  // page + a validation status slot.
+  function renderPayperqAddBlock() {
+    return `
+      <div id="ai-add-payperqrow" class="ai-add-payperq" style="display:none;margin-top:8px">
+        <div class="np-hint" style="margin-bottom:8px">
+          PayPerQ is a pay-per-prompt AI service funded via Lightning, crypto, or card.
+          <a href="https://ppq.ai/api-docs" target="_blank" rel="noopener">Create a key at ppq.ai →</a>
+        </div>
+        <div id="ai-add-payperq-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+      </div>
+    `;
+  }
+
+  // HTML fragment swapped in when user picks "Routstr ⚡" from the add
+  // dropdown. Mirrors the customRow / keyrow structure already in the
+  // config panel so styling carries over. Validation status div is the
+  // mount point for the inline "✓ 487 sats" / "key rejected" line that
+  // the paste handler writes into.
+  function renderRoutstrAddBlock(defaultBaseUrl) {
+    return `
+      <div id="ai-add-routstrrow" class="ai-add-routstr" style="display:none;margin-top:8px">
+        <div class="np-hint" style="margin-bottom:8px">
+          Routstr is a federation of nodes that resell AI inference paid in sats. Pick the node you have a key for.
+        </div>
+        <label class="field-label">Node URL</label>
+        <input id="ai-add-routstr-baseurl" type="text" autocomplete="off"
+               placeholder="https://api.routstr.com/v1" value="${escapeHtml(defaultBaseUrl || 'https://api.routstr.com/v1')}">
+        <div class="np-hint" style="margin-top:8px">
+          Paste an <code>sk-…</code> key or a <code>cashuA…</code> token. Get one from your cashu wallet or the node's web UI.
+        </div>
+        <div id="ai-add-routstr-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+      </div>
+    `;
+  }
+
+  // Configured-Routstr row — replaces renderAiRow for p.id === 'routstr'.
+  // Adds: node-URL subtitle with inline pencil edit, managed/cashu badge,
+  // Check balance button (sk- only), balance read-out slot.
+  function renderRoutstrRow(p) {
+    const isChatDef = !!p.isDefault?.chat;
+    const keyType = p.keyType; // 'sk' | 'cashu' | null
+    const baseUrl = p.baseUrl || 'https://api.routstr.com/v1';
+    const open = isAiRowOpenInitially(p);
+
+    const badges = [
+      `<span class="ai-badge type-api">api</span>`,
+      p.hasKey
+        ? `<span class="ai-badge status-ok">✓ key set</span>`
+        : `<span class="ai-badge">needs key</span>`,
+    ];
+    if (keyType === 'sk')    badges.push(`<span class="ai-badge">managed</span>`);
+    if (keyType === 'cashu') badges.push(`<span class="ai-badge">cashu</span>`);
+    if (isChatDef) badges.push(`<span class="ai-badge default">chat default</span>`);
+
+    const actions = [];
+    // Check balance: sk- only. cashu tokens have no balance API; the
+    // node's wallet/info call for a fresh cashu would either 401 or
+    // create a session — neither is a meaningful "balance" to surface.
+    if (keyType === 'sk') {
+      actions.push(`<button class="ai-routstr-check-balance" data-id="routstr">Check balance</button>`);
+    }
+    actions.push(`<button class="ai-fetch-models" data-id="routstr">Fetch models</button>`);
+    if (!isChatDef) {
+      actions.push(`<button class="ai-set-default" data-kind="chat" data-id="routstr">Use for Chat</button>`);
+    }
+    actions.push(`<button class="danger ai-remove" data-id="routstr">Remove</button>`);
+
+    const model = p.model ? `<span class="ai-model" style="margin-left:8px">${escapeHtml(p.model)}</span>` : '';
+
+    return `
+      <details class="ai-provider-row" data-id="routstr" data-type="api"${open ? ' open' : ''}>
+        <summary class="ai-provider-summary">
+          <span class="ai-provider-name">${escapeHtml(p.displayName)}</span>
+          ${badges.join('')}
+        </summary>
+        <div class="ai-provider-body">
+          <div class="ai-provider-meta">
+            <span class="ai-routstr-url-view">
+              <span class="muted">node:</span>
+              <code class="ai-routstr-url-text">${escapeHtml(baseUrl)}</code>
+              <button class="ai-routstr-url-edit" type="button" data-id="routstr" title="Change node URL"
+                style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px">✎ edit</button>
+            </span>
+            <span class="ai-routstr-url-edit-row" style="display:none">
+              <input class="ai-routstr-url-input" type="text" value="${escapeHtml(baseUrl)}"
+                style="min-width:280px">
+              <button class="ai-routstr-url-save"   type="button" data-id="routstr">save</button>
+              <button class="ai-routstr-url-cancel" type="button" data-id="routstr">cancel</button>
+            </span>
+            ${model}
+            <span class="ai-routstr-balance muted" style="font-size:11px;margin-left:8px"></span>
+          </div>
+          <div class="ai-provider-actions">${actions.join('')}</div>
+        </div>
+      </details>
+    `;
+  }
+
+  // Maple configured-row renderer — like the Routstr row but trimmer.
+  // Shows the endpoint URL with inline pencil edit (users may swap
+  // between the cloud enclave and the desktop app's localhost proxy)
+  // plus the standard actions. No balance, no key-type, no Check
+  // balance button — subscription service with no credits API to call.
+  function renderMapleRow(p) {
+    const isChatDef = !!p.isDefault?.chat;
+    const baseUrl = p.baseUrl || 'https://enclave.trymaple.ai/v1';
+    const open = isAiRowOpenInitially(p);
+
+    const badges = [`<span class="ai-badge type-api">api</span>`];
+    badges.push(p.hasKey
+      ? `<span class="ai-badge status-ok">✓ key set</span>`
+      : `<span class="ai-badge">needs key</span>`);
+    if (isChatDef) badges.push(`<span class="ai-badge default">chat default</span>`);
+
+    const actions = [];
+    actions.push(`<button class="ai-fetch-models" data-id="maple">Fetch models</button>`);
+    if (!isChatDef) {
+      actions.push(`<button class="ai-set-default" data-kind="chat" data-id="maple">Use for Chat</button>`);
+    }
+    // Off-site management — same rationale as PPQ's link. trymaple.ai
+    // is the account / billing dashboard; we have no in-app surface
+    // for those, so a deep-link is the right call.
+    actions.push(`<a class="ai-manage-link" href="https://trymaple.ai" target="_blank" rel="noopener">Manage on trymaple.ai ↗</a>`);
+    actions.push(`<button class="danger ai-remove" data-id="maple">Remove</button>`);
+
+    const model = p.model ? `<span class="ai-model" style="margin-left:8px">${escapeHtml(p.model)}</span>` : '';
+
+    return `
+      <details class="ai-provider-row" data-id="maple" data-type="api"${open ? ' open' : ''}>
+        <summary class="ai-provider-summary">
+          <span class="ai-provider-name">${escapeHtml(p.displayName)}</span>
+          ${badges.join('')}
+        </summary>
+        <div class="ai-provider-body">
+          <div class="ai-provider-meta">
+            <span class="ai-maple-url-view">
+              <span class="muted">url:</span>
+              <code class="ai-maple-url-text">${escapeHtml(baseUrl)}</code>
+              <button class="ai-maple-url-edit" type="button" data-id="maple" title="Change endpoint URL"
+                style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px">✎ edit</button>
+            </span>
+            <span class="ai-maple-url-edit-row" style="display:none">
+              <input class="ai-maple-url-input" type="text" value="${escapeHtml(baseUrl)}"
+                style="min-width:280px">
+              <button class="ai-maple-url-save"   type="button" data-id="maple">save</button>
+              <button class="ai-maple-url-cancel" type="button" data-id="maple">cancel</button>
+            </span>
+            ${model}
+          </div>
+          <div class="ai-provider-actions">${actions.join('')}</div>
+        </div>
+      </details>
+    `;
+  }
+
   function renderAiProviders(aiList) {
     if (!aiList || !Array.isArray(aiList.providers)) {
       return `<div style="color:var(--warn);font-size:12px">AI provider list unavailable — server may be pre-Step-4.</div>`;
@@ -15560,6 +15840,9 @@ const ConfigPanel = (() => {
           <label class="field-label">Default model id</label>
           <input id="ai-add-model" type="text" autocomplete="off" placeholder="gpt-4o-mini, llama3.2, etc.">
         </div>
+        ${renderRoutstrAddBlock()}
+        ${renderPayperqAddBlock()}
+        ${renderMapleAddBlock()}
         <div id="ai-add-keyrow" class="keyrow" style="margin-top:8px;display:none">
           <div class="keyfield">
             <input id="ai-add-key" type="password" autocomplete="off" placeholder="paste provider key (sk-…)">
@@ -15583,8 +15866,16 @@ const ConfigPanel = (() => {
   }
 
   function renderAiRow(p) {
+    // Routstr gets a richer row (node URL with inline edit, key-type
+    // badge, Check balance button). Maple gets a trimmer variant with
+    // the inline proxy-URL edit but no balance / key-type. Everything
+    // else uses the generic shape below.
+    if (p.id === 'routstr') return renderRoutstrRow(p);
+    if (p.id === 'maple')   return renderMapleRow(p);
+
     const typeLabel  = p.type === 'terminal-native' ? 'terminal' : 'api';
     const typeClass  = p.type === 'terminal-native' ? 'term' : 'api';
+    const open = isAiRowOpenInitially(p);
     const isChatDef  = !!p.isDefault?.chat;
     const isTermDef  = !!p.isDefault?.terminal;
     // Action buttons — only show "set default" when it's not already set
@@ -15601,6 +15892,13 @@ const ConfigPanel = (() => {
     }
     if (p.type === 'terminal-native' && !isTermDef) {
       actions.push(`<button class="ai-set-default" data-kind="terminal" data-id="${escapeHtml(p.id)}">Use for Terminal</button>`);
+    }
+    // PPQ-specific deep-link: nostr-station has no balance API for PPQ
+    // (only a credit-id endpoint), so users check balance / top up at
+    // ppq.ai itself. Render an off-site link styled as a button instead
+    // of trying to embed wallet UX in-app.
+    if (p.id === 'payperq') {
+      actions.push(`<a class="ai-manage-link" href="https://ppq.ai/account-activity" target="_blank" rel="noopener">Manage on ppq.ai ↗</a>`);
     }
     actions.push(`<button class="danger ai-remove" data-id="${escapeHtml(p.id)}">Remove</button>`);
 
@@ -15629,14 +15927,16 @@ const ConfigPanel = (() => {
     const model = p.model ? `<span class="ai-model">${escapeHtml(p.model)}</span>` : '';
 
     return `
-      <div class="ai-provider-row" data-id="${escapeHtml(p.id)}" data-type="${typeClass}">
-        <div class="ai-provider-head">
+      <details class="ai-provider-row" data-id="${escapeHtml(p.id)}" data-type="${typeClass}"${open ? ' open' : ''}>
+        <summary class="ai-provider-summary">
           <span class="ai-provider-name">${escapeHtml(p.displayName)}</span>
           ${badges.join('')}
+        </summary>
+        <div class="ai-provider-body">
+          ${model ? `<div class="ai-provider-meta">${model}</div>` : ''}
+          <div class="ai-provider-actions">${actions.join('')}</div>
         </div>
-        ${model ? `<div class="ai-provider-meta">${model}</div>` : ''}
-        <div class="ai-provider-actions">${actions.join('')}</div>
-      </div>
+      </details>
     `;
   }
 
@@ -15697,6 +15997,9 @@ const ConfigPanel = (() => {
     // renderAiProviders re-renders the whole list on every change, so
     // keeping listeners on the container dodges the re-bind dance.
     const list = $('ai-providers-list');
+    // Persist open/closed state per row. `toggle` doesn't bubble, so
+    // wire each <details> directly (the helper handles the loop).
+    wireAiRowTogglePersistence(list);
     if (list) {
       list.addEventListener('click', async (e) => {
         const btn = e.target.closest('button');
@@ -15721,6 +16024,107 @@ const ConfigPanel = (() => {
           await fetchModelsForProvider(id, btn);
           return;
         }
+        // Routstr row: inline node-URL edit + Check balance.
+        if (id === 'routstr') {
+          const row = btn.closest('.ai-provider-row');
+          if (!row) return;
+          if (btn.classList.contains('ai-routstr-url-edit')) {
+            row.querySelector('.ai-routstr-url-view').style.display = 'none';
+            row.querySelector('.ai-routstr-url-edit-row').style.display = '';
+            row.querySelector('.ai-routstr-url-input').focus();
+            return;
+          }
+          if (btn.classList.contains('ai-routstr-url-cancel')) {
+            row.querySelector('.ai-routstr-url-edit-row').style.display = 'none';
+            row.querySelector('.ai-routstr-url-view').style.display = '';
+            row.querySelector('.ai-routstr-url-input').value =
+              row.querySelector('.ai-routstr-url-text').textContent || '';
+            return;
+          }
+          if (btn.classList.contains('ai-routstr-url-save')) {
+            const next = (row.querySelector('.ai-routstr-url-input').value || '').trim();
+            if (!/^https?:\/\//i.test(next)) {
+              toast('Bad node URL', 'Must start with http:// or https://', 'warn');
+              return;
+            }
+            btn.disabled = true;
+            try {
+              await api('/api/ai/config', {
+                method:  'POST',
+                headers: { 'content-type': 'application/json' },
+                body:    JSON.stringify({ providers: { routstr: { baseUrl: next } } }),
+              });
+              toast('Node URL updated', next, 'ok');
+              load();
+            } catch (e) {
+              toast('Update failed', e.message, 'err');
+            } finally {
+              btn.disabled = false;
+            }
+            return;
+          }
+          if (btn.classList.contains('ai-routstr-check-balance')) {
+            const slot = row.querySelector('.ai-routstr-balance');
+            if (slot) slot.innerHTML = `<span class="muted">checking…</span>`;
+            btn.disabled = true;
+            try {
+              const r = await checkRoutstrKey({});
+              if (slot) {
+                if (r.ok && typeof r.balanceSats === 'number') {
+                  slot.innerHTML = `<span style="color:var(--success)">${r.balanceSats.toLocaleString()} sats available</span>`;
+                } else if (r.ok) {
+                  slot.innerHTML = `<span style="color:var(--success)">node reachable</span>`;
+                } else {
+                  slot.innerHTML = `<span style="color:var(--warn)">${escapeHtml(r.error || 'check failed')}</span>`;
+                }
+              }
+            } finally {
+              btn.disabled = false;
+            }
+            return;
+          }
+        }
+        // Maple row: inline proxy-URL edit. Mirror of Routstr's URL
+        // edit — no balance button since Maple has no credits API.
+        if (id === 'maple') {
+          const row = btn.closest('.ai-provider-row');
+          if (!row) return;
+          if (btn.classList.contains('ai-maple-url-edit')) {
+            row.querySelector('.ai-maple-url-view').style.display = 'none';
+            row.querySelector('.ai-maple-url-edit-row').style.display = '';
+            row.querySelector('.ai-maple-url-input').focus();
+            return;
+          }
+          if (btn.classList.contains('ai-maple-url-cancel')) {
+            row.querySelector('.ai-maple-url-edit-row').style.display = 'none';
+            row.querySelector('.ai-maple-url-view').style.display = '';
+            row.querySelector('.ai-maple-url-input').value =
+              row.querySelector('.ai-maple-url-text').textContent || '';
+            return;
+          }
+          if (btn.classList.contains('ai-maple-url-save')) {
+            const next = (row.querySelector('.ai-maple-url-input').value || '').trim();
+            if (!/^https?:\/\//i.test(next)) {
+              toast('Bad endpoint URL', 'Must start with http:// or https://', 'warn');
+              return;
+            }
+            btn.disabled = true;
+            try {
+              await api('/api/ai/config', {
+                method:  'POST',
+                headers: { 'content-type': 'application/json' },
+                body:    JSON.stringify({ providers: { maple: { baseUrl: next } } }),
+              });
+              toast('Proxy URL updated', next, 'ok');
+              load();
+            } catch (e) {
+              toast('Update failed', e.message, 'err');
+            } finally {
+              btn.disabled = false;
+            }
+            return;
+          }
+        }
       });
     }
 
@@ -15738,11 +16142,30 @@ const ConfigPanel = (() => {
     const modelInp    = $('ai-add-model');
     const saveBtn     = $('ai-add-save');
     const cancelBtn   = $('ai-add-cancel');
+    // Routstr-specific add-block elements. Same scope as the others so
+    // hideAdd / save / cancel can reach them without a second lookup.
+    const routstrRow      = $('ai-add-routstrrow');
+    const routstrBaseUrl  = $('ai-add-routstr-baseurl');
+    const routstrStatus   = $('ai-add-routstr-status');
+    // PPQ — smaller surface (no baseUrl field), just the info block +
+    // a status slot for the on-blur "✓ key works" validation line.
+    const payperqRow    = $('ai-add-payperqrow');
+    const payperqStatus = $('ai-add-payperq-status');
+    // Maple — editable endpoint URL like Routstr, but no balance affordance.
+    const mapleRow     = $('ai-add-maplerow');
+    const mapleBaseUrl = $('ai-add-maple-baseurl');
+    const mapleStatus  = $('ai-add-maple-status');
 
     function hideAdd() {
       keyRow.style.display = 'none';
-      if (customRow) customRow.style.display = 'none';
-      if (keyHint)   keyHint.style.display   = 'none';
+      if (customRow)     customRow.style.display    = 'none';
+      if (keyHint)       keyHint.style.display      = 'none';
+      if (routstrRow)    routstrRow.style.display   = 'none';
+      if (routstrStatus) routstrStatus.innerHTML    = '';
+      if (payperqRow)    payperqRow.style.display   = 'none';
+      if (payperqStatus) payperqStatus.innerHTML    = '';
+      if (mapleRow)      mapleRow.style.display     = 'none';
+      if (mapleStatus)   mapleStatus.innerHTML      = '';
     }
     hideAdd();
 
@@ -15775,17 +16198,132 @@ const ConfigPanel = (() => {
           // Custom Provider needs baseUrl + model id alongside the key.
           // Pre-fill from the registry default if any (empty for custom).
           customRow.style.display = '';
+          if (routstrRow) routstrRow.style.display = 'none';
           baseUrlInp.value = chosen.baseUrl || '';
           modelInp.value   = chosen.model   || '';
           if (keyHint) keyHint.style.display = '';
           baseUrlInp.focus();
+        } else if (id === 'routstr') {
+          // Routstr — node URL + a richer key field with live validation.
+          // Pre-fill baseUrl with whatever the server reports (registry
+          // default or user override from a previous add).
+          if (customRow) customRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
+          routstrRow.style.display = '';
+          routstrBaseUrl.value = chosen.baseUrl || 'https://api.routstr.com/v1';
+          routstrStatus.innerHTML = '';
+          if (keyHint) keyHint.style.display = 'none';
+          routstrBaseUrl.focus();
+        } else if (id === 'payperq') {
+          // PPQ — single endpoint, single key format. Just surface the
+          // "Create a key at ppq.ai" hint above the field; on-blur
+          // validation lights up the status slot below.
+          if (customRow) customRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (mapleRow) mapleRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = '';
+          if (payperqStatus) payperqStatus.innerHTML = '';
+          if (keyHint) keyHint.style.display = 'none';
+          keyInput.focus();
+        } else if (id === 'maple') {
+          // Maple — defaults to the cloud enclave endpoint. Users with
+          // the Maple desktop app can switch the URL to their localhost
+          // proxy via the same field. Pre-fill from registry default;
+          // on blur the key field validates against {baseUrl}/models.
+          if (customRow) customRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow) mapleRow.style.display = '';
+          mapleBaseUrl.value = chosen.baseUrl || 'https://enclave.trymaple.ai/v1';
+          mapleStatus.innerHTML = '';
+          if (keyHint) keyHint.style.display = 'none';
+          mapleBaseUrl.focus();
         } else {
           customRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow) mapleRow.style.display = 'none';
           if (keyHint) keyHint.style.display = 'none';
           keyInput.focus();
         }
       }
     });
+
+    // Routstr live validation: when both URL + key are present, call the
+    // server's /check endpoint and surface "✓ 487 sats" / "key rejected"
+    // inline. sk- keys validate against /v1/wallet/info; cashu tokens skip
+    // the round-trip (no meaningful balance to display).
+    if (keyInput && routstrBaseUrl && routstrStatus) {
+      const renderStatus = (html) => { routstrStatus.innerHTML = html; };
+      const validate = async () => {
+        if (sel.value !== 'routstr') return;
+        const key = keyInput.value.trim();
+        const baseUrl = routstrBaseUrl.value.trim();
+        if (!key || !baseUrl) { renderStatus(''); return; }
+        const kt = routstrKeyTypeFromKey(key);
+        if (kt === 'cashu') {
+          renderStatus(`<span style="color:var(--success)">✓ cashu token — one-shot prepaid</span>`);
+          return;
+        }
+        renderStatus(`<span class="muted">checking…</span>`);
+        const r = await checkRoutstrKey({ key, baseUrl });
+        if (r.ok && typeof r.balanceSats === 'number') {
+          renderStatus(`<span style="color:var(--success)">✓ managed key — ${r.balanceSats.toLocaleString()} sats available</span>`);
+        } else if (r.ok) {
+          renderStatus(`<span style="color:var(--success)">✓ managed key — node reachable</span>`);
+        } else {
+          renderStatus(`<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`);
+        }
+      };
+      keyInput.addEventListener('blur', validate);
+      routstrBaseUrl.addEventListener('blur', validate);
+    }
+
+    // PPQ live validation: same shape as Routstr but simpler — no
+    // baseUrl field, no balance, no key-type. Just "does this key
+    // unlock /v1/models?" and reflect the answer inline.
+    if (keyInput && payperqStatus) {
+      const validatePayperq = async () => {
+        if (sel.value !== 'payperq') return;
+        const key = keyInput.value.trim();
+        if (!key) { payperqStatus.innerHTML = ''; return; }
+        payperqStatus.innerHTML = `<span class="muted">checking…</span>`;
+        const r = await checkPayperqKey({ key });
+        if (r.ok && typeof r.modelCount === 'number') {
+          payperqStatus.innerHTML = `<span style="color:var(--success)">✓ key works — ${r.modelCount} models available</span>`;
+        } else if (r.ok) {
+          payperqStatus.innerHTML = `<span style="color:var(--success)">✓ key works</span>`;
+        } else {
+          payperqStatus.innerHTML = `<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`;
+        }
+      };
+      keyInput.addEventListener('blur', validatePayperq);
+    }
+
+    // Maple live validation: like PPQ's, but also waits for the URL —
+    // fires on either field's blur. "Couldn't reach endpoint" covers
+    // both modes — cloud endpoint unreachable (network issue) and
+    // localhost proxy not running (desktop app not started). The
+    // inline ⚠ status is the user's cue.
+    if (keyInput && mapleBaseUrl && mapleStatus) {
+      const validateMaple = async () => {
+        if (sel.value !== 'maple') return;
+        const key = keyInput.value.trim();
+        const baseUrl = mapleBaseUrl.value.trim();
+        if (!key || !baseUrl) { mapleStatus.innerHTML = ''; return; }
+        mapleStatus.innerHTML = `<span class="muted">checking…</span>`;
+        const r = await checkMapleKey({ key, baseUrl });
+        if (r.ok && typeof r.modelCount === 'number') {
+          mapleStatus.innerHTML = `<span style="color:var(--success)">✓ key works — ${r.modelCount} models available</span>`;
+        } else if (r.ok) {
+          mapleStatus.innerHTML = `<span style="color:var(--success)">✓ key works</span>`;
+        } else {
+          mapleStatus.innerHTML = `<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`;
+        }
+      };
+      keyInput.addEventListener('blur', validateMaple);
+      mapleBaseUrl.addEventListener('blur', validateMaple);
+    }
 
     keyEye?.addEventListener('click', () => {
       keyInput.type = keyInput.type === 'password' ? 'text' : 'password';
@@ -15810,6 +16348,31 @@ const ConfigPanel = (() => {
           return;
         }
       }
+      // Routstr: baseUrl is required (curated default seeds the field so
+      // a fresh user can just click save). Same http(s) sanity check.
+      if (id === 'routstr') {
+        const baseUrl = (routstrBaseUrl?.value || '').trim();
+        if (!baseUrl) {
+          toast('Node URL required', 'Paste the Routstr node URL.', 'warn');
+          return;
+        }
+        if (!/^https?:\/\//i.test(baseUrl)) {
+          toast('Bad node URL', 'Must start with http:// or https://', 'warn');
+          return;
+        }
+      }
+      // Maple: same shape as Routstr — endpoint URL is mandatory + http(s).
+      if (id === 'maple') {
+        const baseUrl = (mapleBaseUrl?.value || '').trim();
+        if (!baseUrl) {
+          toast('Endpoint URL required', 'Set the Maple endpoint URL.', 'warn');
+          return;
+        }
+        if (!/^https?:\/\//i.test(baseUrl)) {
+          toast('Bad endpoint URL', 'Must start with http:// or https://', 'warn');
+          return;
+        }
+      }
 
       saveBtn.disabled = true;
       try {
@@ -15828,10 +16391,18 @@ const ConfigPanel = (() => {
             }),
           });
         }
+        // Routstr / Maple: send baseUrl in the same /key POST. The
+        // server persists it alongside the keyRef (Routstr also stores
+        // an auto-detected keyType from the prefix). One round-trip,
+        // no separate /api/ai/config call needed.
+        const keyBody =
+          id === 'routstr' ? { key, baseUrl: routstrBaseUrl.value.trim() }
+          : id === 'maple' ? { key, baseUrl: mapleBaseUrl.value.trim() }
+          : { key };
         const r = await api(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ key }),
+          body: JSON.stringify(keyBody),
         });
         if (!r.ok) throw new Error(r.error || 'save failed');
         toast('Provider added', id, 'ok');
@@ -15861,8 +16432,10 @@ const ConfigPanel = (() => {
       hideAdd();
       sel.value = '';
       keyInput.value = '';
-      if (baseUrlInp) baseUrlInp.value = '';
-      if (modelInp)   modelInp.value   = '';
+      if (baseUrlInp)     baseUrlInp.value     = '';
+      if (modelInp)       modelInp.value       = '';
+      if (routstrBaseUrl) routstrBaseUrl.value = '';
+      if (mapleBaseUrl)   mapleBaseUrl.value   = '';
     });
   }
 
@@ -17497,6 +18070,33 @@ const SetupWizard = (() => {
               ${termOpts ? `<optgroup label="Terminal-native">${termOpts}</optgroup>` : ''}
               ${apiOpts  ? `<optgroup label="API">${apiOpts}</optgroup>` : ''}
             </select>
+            <div id="setup-ai-routstrrow" style="display:none;margin-top:8px">
+              <div class="np-hint" style="margin-bottom:8px">
+                Routstr is a federation of nodes that resell AI inference paid in sats. Pick the node you have a key for.
+              </div>
+              <label class="field-label">Node URL</label>
+              <input id="setup-ai-routstr-baseurl" type="text" autocomplete="off"
+                     placeholder="https://api.routstr.com/v1" value="https://api.routstr.com/v1">
+              <div class="np-hint" style="margin-top:8px">
+                Paste an <code>sk-…</code> key or a <code>cashuA…</code> token. Get one from your cashu wallet or the node's web UI.
+              </div>
+              <div id="setup-ai-routstr-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+            </div>
+            <div id="setup-ai-payperqrow" style="display:none;margin-top:8px">
+              <div class="np-hint" style="margin-bottom:8px">
+                PayPerQ is a pay-per-prompt AI service funded via Lightning, crypto, or card. Paste an existing key, or Skip and add one later from Config.
+              </div>
+              <div id="setup-ai-payperq-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+            </div>
+            <div id="setup-ai-maplerow" style="display:none;margin-top:8px">
+              <div class="np-hint" style="margin-bottom:8px">
+                Maple AI runs encrypted LLMs in trusted execution environments. Use the cloud endpoint below, or point at the Maple desktop app's local proxy. Paste an existing key, or Skip and add one later from Config.
+              </div>
+              <label class="field-label">Endpoint URL</label>
+              <input id="setup-ai-maple-baseurl" type="text" autocomplete="off"
+                     placeholder="https://enclave.trymaple.ai/v1" value="https://enclave.trymaple.ai/v1">
+              <div id="setup-ai-maple-status" style="margin-top:6px;font-size:12px;min-height:18px"></div>
+            </div>
             <div id="setup-ai-keyrow" style="margin-top:8px;display:none">
               <div class="keyrow">
                 <div class="keyfield">
@@ -17554,6 +18154,14 @@ const SetupWizard = (() => {
       const keyInput = $('setup-ai-key');
       const saveBtn = $('setup-ai-save');
       const cancelBtn = $('setup-ai-cancel');
+      const routstrRow     = $('setup-ai-routstrrow');
+      const routstrBaseUrl = $('setup-ai-routstr-baseurl');
+      const routstrStatus  = $('setup-ai-routstr-status');
+      const payperqRow     = $('setup-ai-payperqrow');
+      const payperqStatus  = $('setup-ai-payperq-status');
+      const mapleRow       = $('setup-ai-maplerow');
+      const mapleBaseUrl   = $('setup-ai-maple-baseurl');
+      const mapleStatus    = $('setup-ai-maple-status');
 
       // bareKey providers don't need an API key — derived from the
       // /api/ai/providers payload (`chosen.bareKey`). The curated
@@ -17562,7 +18170,13 @@ const SetupWizard = (() => {
 
       sel.addEventListener('change', async () => {
         const id = sel.value;
-        if (!id) { keyRow.style.display = 'none'; return; }
+        if (!id) {
+          keyRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
+          return;
+        }
         const chosen = list.providers.find(p => p.id === id);
         if (!chosen) return;
         if (chosen.type === 'terminal-native') {
@@ -17585,23 +18199,150 @@ const SetupWizard = (() => {
         }
         keyRow.style.display = '';
         keyInput.value = '';
-        keyInput.focus();
+        // Provider-specific add hints: Routstr gets the node-URL field
+        // (federation), Maple gets the proxy-URL field (local port may
+        // vary), PPQ just gets a one-liner. None of these surface
+        // external links in the wizard — that's a Config-panel-only
+        // affordance.
+        if (id === 'routstr' && routstrRow) {
+          routstrRow.style.display = '';
+          if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
+          routstrBaseUrl.value = chosen.baseUrl || 'https://api.routstr.com/v1';
+          routstrStatus.innerHTML = '';
+          routstrBaseUrl.focus();
+        } else if (id === 'payperq' && payperqRow) {
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
+          payperqRow.style.display = '';
+          payperqStatus.innerHTML = '';
+          keyInput.focus();
+        } else if (id === 'maple' && mapleRow) {
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
+          mapleRow.style.display = '';
+          mapleBaseUrl.value = chosen.baseUrl || 'https://enclave.trymaple.ai/v1';
+          mapleStatus.innerHTML = '';
+          mapleBaseUrl.focus();
+        } else {
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
+          keyInput.focus();
+        }
       });
+
+      // Live validation for Routstr — same UX as the Config panel's
+      // add form. sk- keys hit /v1/wallet/info via the server proxy;
+      // cashu tokens skip the round-trip (no balance API).
+      if (keyInput && routstrBaseUrl && routstrStatus) {
+        const renderStatus = (html) => { routstrStatus.innerHTML = html; };
+        const validate = async () => {
+          if (sel.value !== 'routstr') return;
+          const key = keyInput.value.trim();
+          const baseUrl = routstrBaseUrl.value.trim();
+          if (!key || !baseUrl) { renderStatus(''); return; }
+          const kt = routstrKeyTypeFromKey(key);
+          if (kt === 'cashu') {
+            renderStatus(`<span style="color:var(--success)">✓ cashu token — one-shot prepaid</span>`);
+            return;
+          }
+          renderStatus(`<span class="muted">checking…</span>`);
+          const r = await checkRoutstrKey({ key, baseUrl });
+          if (r.ok && typeof r.balanceSats === 'number') {
+            renderStatus(`<span style="color:var(--success)">✓ managed key — ${r.balanceSats.toLocaleString()} sats available</span>`);
+          } else if (r.ok) {
+            renderStatus(`<span style="color:var(--success)">✓ managed key — node reachable</span>`);
+          } else {
+            renderStatus(`<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`);
+          }
+        };
+        keyInput.addEventListener('blur', validate);
+        routstrBaseUrl.addEventListener('blur', validate);
+      }
+
+      // PPQ wizard validation — same shape as Config panel: blur on the
+      // key field hits the server proxy, status slot mirrors the result.
+      if (keyInput && payperqStatus) {
+        const validatePayperq = async () => {
+          if (sel.value !== 'payperq') return;
+          const key = keyInput.value.trim();
+          if (!key) { payperqStatus.innerHTML = ''; return; }
+          payperqStatus.innerHTML = `<span class="muted">checking…</span>`;
+          const r = await checkPayperqKey({ key });
+          if (r.ok && typeof r.modelCount === 'number') {
+            payperqStatus.innerHTML = `<span style="color:var(--success)">✓ key works — ${r.modelCount} models available</span>`;
+          } else if (r.ok) {
+            payperqStatus.innerHTML = `<span style="color:var(--success)">✓ key works</span>`;
+          } else {
+            payperqStatus.innerHTML = `<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`;
+          }
+        };
+        keyInput.addEventListener('blur', validatePayperq);
+      }
+
+      // Maple wizard validation — same shape as Config panel. Covers
+      // both cloud-endpoint failures and localhost-proxy-not-running.
+      if (keyInput && mapleBaseUrl && mapleStatus) {
+        const validateMaple = async () => {
+          if (sel.value !== 'maple') return;
+          const key = keyInput.value.trim();
+          const baseUrl = mapleBaseUrl.value.trim();
+          if (!key || !baseUrl) { mapleStatus.innerHTML = ''; return; }
+          mapleStatus.innerHTML = `<span class="muted">checking…</span>`;
+          const r = await checkMapleKey({ key, baseUrl });
+          if (r.ok && typeof r.modelCount === 'number') {
+            mapleStatus.innerHTML = `<span style="color:var(--success)">✓ key works — ${r.modelCount} models available</span>`;
+          } else if (r.ok) {
+            mapleStatus.innerHTML = `<span style="color:var(--success)">✓ key works</span>`;
+          } else {
+            mapleStatus.innerHTML = `<span style="color:var(--warn)">⚠ ${escapeHtml(r.error || 'validation failed')}</span>`;
+          }
+        };
+        keyInput.addEventListener('blur', validateMaple);
+        mapleBaseUrl.addEventListener('blur', validateMaple);
+      }
 
       saveBtn?.addEventListener('click', async () => {
         const id  = sel.value;
         const key = keyInput.value;
         if (!id || !key) return;
+        // Routstr / Maple — both carry an editable base URL we send
+        // alongside the key. Empty falls back to the registry default;
+        // non-empty must be http(s).
+        let routstrBaseUrlVal = '';
+        if (id === 'routstr') {
+          routstrBaseUrlVal = (routstrBaseUrl?.value || '').trim();
+          if (routstrBaseUrlVal && !/^https?:\/\//i.test(routstrBaseUrlVal)) {
+            toast('Bad node URL', 'Must start with http:// or https://', 'warn');
+            return;
+          }
+        }
+        let mapleBaseUrlVal = '';
+        if (id === 'maple') {
+          mapleBaseUrlVal = (mapleBaseUrl?.value || '').trim();
+          if (mapleBaseUrlVal && !/^https?:\/\//i.test(mapleBaseUrlVal)) {
+            toast('Bad endpoint URL', 'Must start with http:// or https://', 'warn');
+            return;
+          }
+        }
         saveBtn.disabled = true;
         try {
+          const body =
+            id === 'routstr' && routstrBaseUrlVal ? { key, baseUrl: routstrBaseUrlVal }
+            : id === 'maple' && mapleBaseUrlVal   ? { key, baseUrl: mapleBaseUrlVal }
+            : { key };
           await fetch(`/api/ai/providers/${encodeURIComponent(id)}/key`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ key }),
+            body: JSON.stringify(body),
           });
           toast(`Added ${id}`, '', 'ok');
           sel.value = '';
           keyRow.style.display = 'none';
+          if (routstrRow) routstrRow.style.display = 'none';
+          if (payperqRow) payperqRow.style.display = 'none';
+          if (mapleRow)   mapleRow.style.display   = 'none';
           paint();
         } catch (e) {
           toast('Add failed', e.message, 'err');
@@ -17612,6 +18353,9 @@ const SetupWizard = (() => {
       cancelBtn?.addEventListener('click', () => {
         sel.value = '';
         keyRow.style.display = 'none';
+        if (routstrRow) routstrRow.style.display = 'none';
+        if (payperqRow) payperqRow.style.display = 'none';
+        if (mapleRow)   mapleRow.style.display   = 'none';
       });
     };
     paint();

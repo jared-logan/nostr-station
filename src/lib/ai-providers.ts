@@ -31,6 +31,13 @@
  *                         format as Zen; users hit Fetch Models to pick.
  *   - PayPerQ ⚡        — Lightning-paid relay for Claude/GPT.
  *   - Routstr ⚡        — Cashu-paid relay for Claude/GPT/Llama.
+ *   - Maple AI          — TEE-encrypted private LLM service. Default
+ *                         baseUrl is the public enclave endpoint
+ *                         https://enclave.trymaple.ai/v1 (works with
+ *                         any OpenAI client + Bearer auth). Users who
+ *                         run the Maple desktop app can switch to its
+ *                         local proxy at http://localhost:8080/v1 via
+ *                         the Config panel's inline URL edit.
  *   - Custom            — user-supplied baseUrl + key, OpenAI-compat
  *                         shape. Escape hatch for anyone who wants
  *                         OpenAI / OpenRouter / Groq / Gemini / Ollama /
@@ -160,10 +167,28 @@ export const PROVIDERS: Record<string, Provider> = {
     flavor: 'openai-compat',
   },
 
+  // TEE-encrypted private LLM service. Two valid endpoints, same
+  // wire format (OpenAI-compat + Bearer auth):
+  //   - https://enclave.trymaple.ai/v1   (cloud — default, no setup)
+  //   - http://localhost:8080/v1         (Maple desktop app's local
+  //                                       proxy — convenience layer,
+  //                                       not required for encryption)
+  // TEE attestation happens server-side at the enclave regardless of
+  // which URL is used. Default model is left empty — Maple's roster
+  // is curated (llama-3.3-70b etc.); users hit Fetch Models to pick.
+  'maple': {
+    id: 'maple',
+    displayName: 'Maple AI',
+    type: 'api',
+    baseUrl: 'https://enclave.trymaple.ai/v1',
+    defaultModel: '',
+    flavor: 'openai-compat',
+  },
+
   // Escape hatch — user supplies baseUrl + model + key, we treat the
   // endpoint as OpenAI-compat. Covers OpenAI / OpenRouter / Groq /
-  // Mistral / Gemini / Ollama / LM Studio / Maple / anything else with
-  // a /v1/chat/completions endpoint. The defaults below are placeholders
+  // Mistral / Gemini / Ollama / LM Studio / anything else with a
+  // /v1/chat/completions endpoint. The defaults below are placeholders
   // overridden by the per-provider config in ai-config.json.
   'custom': {
     id: 'custom',
@@ -222,8 +247,9 @@ export function inferIdFromBaseUrl(baseUrl: string): string {
   if (url.includes('opencode.ai'))        return 'opencode-zen';
   if (url.includes('routstr'))      return 'routstr';
   if (url.includes('ppq.ai'))       return 'payperq';
+  if (url.includes('trymaple.ai'))  return 'maple';
   // Everything else (openai/openrouter/groq/mistral/gemini/ollama/lmstudio
-  // /maple/self-hosted) → Custom Provider. The user's existing baseUrl
+  // /self-hosted) → Custom Provider. The user's existing baseUrl
   // and keychain entry survive intact under the 'custom' id.
   return 'custom';
 }

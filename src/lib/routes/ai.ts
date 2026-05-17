@@ -64,6 +64,23 @@ export function completionsUrl(baseUrl: string): string {
   return base.endsWith('/v1') ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
 }
 
+// Routstr key prefix sniff. sk- keys are managed (node tracks balance);
+// anything else is treated as a cashu token (one-shot, anonymous, no
+// balance API). Two routstr-core key formats today: 'sk-…' and 'cashuA…'/
+// 'cashuB…'. Worst-case mis-classification is cosmetic (wrong badge in
+// the row); chat-time auth works for both via `Authorization: Bearer …`.
+export function detectRoutstrKeyType(key: string): 'sk' | 'cashu' {
+  return /^sk-/i.test(key.trim()) ? 'sk' : 'cashu';
+}
+
+// Build the /v1/wallet/info URL for a Routstr node. Tolerates both
+// `https://api.routstr.com` and `https://api.routstr.com/v1` as input,
+// matches the same trailing-slash convention as completionsUrl.
+export function walletInfoUrl(baseUrl: string): string {
+  const base = baseUrl.replace(/\/$/, '');
+  return base.endsWith('/v1') ? `${base}/wallet/info` : `${base}/v1/wallet/info`;
+}
+
 // ── Model-list adapters (used by GET /api/ai/providers/:id/models) ────────
 //
 // Anthropic + OpenAI-compat expose /v1/models; the Gemini-through-OpenAI
@@ -280,6 +297,11 @@ export async function handleAi(
         // override-vs-registry resolution client-side.
         model:   p.type === 'api' ? (entry?.model   ?? (p as ApiProvider).defaultModel) : undefined,
         baseUrl: p.type === 'api' ? (entry?.baseUrl ?? (p as ApiProvider).baseUrl)      : undefined,
+        // Routstr-only: 'sk' / 'cashu' / null. Lets the Config panel row
+        // pick which affordances to show (Check balance is sk-only). Null
+        // when keychain entry is pre-keyType-migration — UI falls back to
+        // a neutral "key set" badge until the user re-saves.
+        keyType: p.id === 'routstr' ? (entry?.keyType ?? null) : undefined,
         isDefault: {
           terminal: cfg.defaults.terminal === p.id,
           chat:     cfg.defaults.chat === p.id,
@@ -387,11 +409,25 @@ export async function handleAi(
       res.end(JSON.stringify({ ok: false, error: 'nsec detected — this slot is for AI keys only' }));
       return true;
     }
+    // Optional sidecar fields. baseUrl lets the Routstr/Custom add flows
+    // persist their node URL in the same round-trip as the key (one less
+    // call than the existing /api/ai/config dance the Custom Provider
+    // path does). Validated loosely; the registry resolution is forgiving.
+    const baseUrlRaw = typeof parsed.baseUrl === 'string' ? parsed.baseUrl.trim() : '';
+    const baseUrl = baseUrlRaw && /^https?:\/\//i.test(baseUrlRaw)
+      ? baseUrlRaw.slice(0, 300)
+      : undefined;
     try {
       await getKeychain().store(keychainAccountFor(id), key);
-      setProviderEntry(id, { keyRef: `keychain:${keychainAccountFor(id)}` });
+      const entry: AiProviderConfig = { keyRef: `keychain:${keychainAccountFor(id)}` };
+      if (baseUrl) entry.baseUrl = baseUrl;
+      // Routstr: auto-classify the pasted material so the row UI can
+      // pick the right affordances on next render. We never trust a
+      // client-supplied keyType — the prefix is the source of truth.
+      if (id === 'routstr') entry.keyType = detectRoutstrKeyType(key);
+      setProviderEntry(id, entry);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
+      res.end(JSON.stringify({ ok: true, keyType: entry.keyType ?? null }));
     } catch (e: any) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: String(e.message || e).slice(0, 200) }));
@@ -438,6 +474,209 @@ export async function handleAi(
     } catch (e: any) {
       res.writeHead(502, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: String(e.message || e).slice(0, 240) }));
+    }
+    return true;
+  }
+
+  // POST /api/ai/providers/routstr/check — validate an sk-/cashu key
+  // against a Routstr node by calling its /v1/wallet/info endpoint. Used
+  // by the Config panel's add-Routstr form (paste → live balance + key
+  // type detection) and the Check-balance button on the configured row.
+  //
+  // Body: { key?: string, baseUrl?: string }
+  //   - key absent     → resolve from keychain slot ai:routstr
+  //   - baseUrl absent → resolve from ai-config override / registry
+  // Response: { ok, keyType: 'sk'|'cashu', balanceSats?, reservedSats?, error? }
+  //   ok=false still carries keyType so the UI can render "key rejected
+  //   by node" vs "couldn't reach node" without a second probe.
+  if (url === '/api/ai/providers/routstr/check' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+
+    let key = typeof parsed.key === 'string' ? parsed.key.trim() : '';
+    if (!key) {
+      try {
+        key = (await getKeychain().retrieve(keychainAccountFor('routstr'))) ?? '';
+      } catch { key = ''; }
+    }
+    if (!key) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'no key provided and none stored' }));
+      return true;
+    }
+    if (isNsec(key)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'nsec detected — paste your routstr key instead' }));
+      return true;
+    }
+
+    let baseUrl = typeof parsed.baseUrl === 'string' ? parsed.baseUrl.trim() : '';
+    if (!baseUrl) {
+      const cfg = readAiConfig();
+      const provider = getProvider('routstr');
+      if (provider && provider.type === 'api') {
+        baseUrl = cfg.providers.routstr?.baseUrl ?? provider.baseUrl;
+      }
+    }
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid node URL' }));
+      return true;
+    }
+
+    const keyType = detectRoutstrKeyType(key);
+
+    try {
+      const r = await fetch(walletInfoUrl(baseUrl), {
+        headers: { 'Authorization': `Bearer ${key}`, 'Accept': 'application/json' },
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => '');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: false, keyType,
+          status: r.status,
+          error: `node returned ${r.status}${text ? `: ${text.slice(0, 120)}` : ''}`,
+        }));
+        return true;
+      }
+      const data: any = await r.json().catch(() => ({}));
+      // Routstr balances are in millisatoshis. Floor to sats for display;
+      // 999 msats → 0 sats is intentional (we never round up a partial sat).
+      const msToSats = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) ? Math.floor(v / 1000) : null;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true, keyType,
+        balanceSats:  msToSats(data.balance),
+        reservedSats: msToSats(data.reserved),
+      }));
+    } catch (e: any) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: false, keyType,
+        error: `couldn't reach node: ${String(e.message || e).slice(0, 120)}`,
+      }));
+    }
+    return true;
+  }
+
+  // POST /api/ai/providers/payperq/check — validate a PPQ key by listing
+  // models via GET https://api.ppq.ai/v1/models. We reuse the existing
+  // OpenAI-compat /models adapter so the wire details (header shape,
+  // empty-list rejection) stay consistent with the row's Fetch Models
+  // button.
+  //
+  // PPQ has no Bearer-authed balance endpoint we can call from a pasted
+  // key (the documented /credits/balance takes a credit-id UUID, not an
+  // API key), so this is purely "does the key work?" — no balance, no
+  // keyType. The configured row links users to ppq.ai/account-activity
+  // to check balance / top up out-of-band.
+  //
+  // Body: { key?: string }   ← absent → resolve from keychain ai:payperq
+  // Response: { ok, modelCount?, error? }
+  if (url === '/api/ai/providers/payperq/check' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+
+    let key = typeof parsed.key === 'string' ? parsed.key.trim() : '';
+    if (!key) {
+      try {
+        key = (await getKeychain().retrieve(keychainAccountFor('payperq'))) ?? '';
+      } catch { key = ''; }
+    }
+    if (!key) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'no key provided and none stored' }));
+      return true;
+    }
+    if (isNsec(key)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'nsec detected — paste your ppq.ai key instead' }));
+      return true;
+    }
+    const provider = getProvider('payperq');
+    if (!provider || provider.type !== 'api') {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'payperq missing from registry' }));
+      return true;
+    }
+    try {
+      const models = await fetchOpenAICompatModels(
+        key, (provider as ApiProvider).baseUrl, false,
+      );
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, modelCount: models.length }));
+    } catch (e: any) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: false,
+        error: String(e.message || e).slice(0, 140),
+      }));
+    }
+    return true;
+  }
+
+  // POST /api/ai/providers/maple/check — validate a Maple AI key by
+  // hitting GET {baseUrl}/models. baseUrl can be the cloud enclave
+  // (default — enclave.trymaple.ai/v1) or the Maple desktop app's
+  // localhost proxy; same wire format either way. Same shape as the
+  // PPQ check, plus an editable baseUrl. No balance — Maple is
+  // subscription-based, no credits API.
+  //
+  // Body: { key?: string, baseUrl?: string }
+  //   - key absent     → resolve from keychain slot ai:maple
+  //   - baseUrl absent → resolve from ai-config override / registry
+  // Response: { ok, modelCount?, error? }
+  if (url === '/api/ai/providers/maple/check' && method === 'POST') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+
+    let key = typeof parsed.key === 'string' ? parsed.key.trim() : '';
+    if (!key) {
+      try {
+        key = (await getKeychain().retrieve(keychainAccountFor('maple'))) ?? '';
+      } catch { key = ''; }
+    }
+    if (!key) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'no key provided and none stored' }));
+      return true;
+    }
+    if (isNsec(key)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'nsec detected — paste your Maple key instead' }));
+      return true;
+    }
+    const provider = getProvider('maple');
+    if (!provider || provider.type !== 'api') {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'maple missing from registry' }));
+      return true;
+    }
+    let baseUrl = typeof parsed.baseUrl === 'string' ? parsed.baseUrl.trim() : '';
+    if (!baseUrl) {
+      const cfg = readAiConfig();
+      baseUrl = cfg.providers.maple?.baseUrl ?? (provider as ApiProvider).baseUrl;
+    }
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid endpoint URL' }));
+      return true;
+    }
+    try {
+      const models = await fetchOpenAICompatModels(key, baseUrl, false);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, modelCount: models.length }));
+    } catch (e: any) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: false,
+        error: String(e.message || e).slice(0, 140),
+      }));
     }
     return true;
   }

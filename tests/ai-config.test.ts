@@ -87,6 +87,34 @@ test('setProviderEntry: passing null deletes the entry', () => {
   assert.ok(cfg.providers['opencode-zen']);
 });
 
+test('setProviderEntry: round-trips keyType for routstr', () => {
+  // Routstr config carries an extra `keyType` field ('sk' | 'cashu') so
+  // the row UI can pick which affordances to show (Check balance is
+  // sk-only). The field must survive read/write and merge alongside
+  // baseUrl + keyRef the same way other optional fields do.
+  setProviderEntry('routstr', {
+    keyRef:  'keychain:ai:routstr',
+    baseUrl: 'https://api.routstr.com/v1',
+    keyType: 'sk',
+  });
+  let cfg = readAiConfig();
+  assert.equal(cfg.providers.routstr.keyType, 'sk');
+  assert.equal(cfg.providers.routstr.baseUrl, 'https://api.routstr.com/v1');
+
+  // Updating baseUrl alone must preserve keyType — same regression
+  // shape as the keyRef/knownModels merge test above.
+  setProviderEntry('routstr', { baseUrl: 'https://privateprovider.xyz/v1' });
+  cfg = readAiConfig();
+  assert.equal(cfg.providers.routstr.keyType, 'sk');
+  assert.equal(cfg.providers.routstr.baseUrl, 'https://privateprovider.xyz/v1');
+
+  // Re-saving with a cashu key flips the type without dropping baseUrl.
+  setProviderEntry('routstr', { keyType: 'cashu' });
+  cfg = readAiConfig();
+  assert.equal(cfg.providers.routstr.keyType, 'cashu');
+  assert.equal(cfg.providers.routstr.baseUrl, 'https://privateprovider.xyz/v1');
+});
+
 // ── setDefault ────────────────────────────────────────────────────────────
 
 test('setDefault: sets chat and terminal independently', () => {
