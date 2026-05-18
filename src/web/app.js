@@ -5472,6 +5472,12 @@ const ProjectsPanel = (() => {
     try {
       const gs = await api(`/api/projects/${projectId}/git-state`);
       if (!gs) return;
+      // `error` means the server tried `git status` and failed — typically
+      // a 5 s timeout or `.git/index.lock` contention. The numeric fields
+      // are zeroed defaults in that path and treating them as truth would
+      // momentarily repaint a dirty repo as "up to date" until the next
+      // tick. Leave the badge alone instead.
+      if (gs.error) return;
       const cardEl = body.querySelector(`.project-card[data-id="${projectId}"] .pc-state`);
       if (!cardEl) return;  // user navigated away mid-fetch
       if (gs.backend === 'local-only') {
@@ -6047,8 +6053,21 @@ const ProjectsPanel = (() => {
           const extra = [];
           extra.push(`<span class="pchip"><span class="k">branch</span><span class="v">${escapeHtml(st.branch)}</span></span>`);
           extra.push(`<span class="pchip"><span class="k">HEAD</span><span class="v">${escapeHtml(st.hash)}</span></span>`);
-          if (st.dirty) extra.push(`<span class="pchip warn"><span class="k">uncommitted</span><span class="v">${st.dirty} file${st.dirty !== 1 ? 's' : ''}</span></span>`);
+          if (st.dirty) {
+            // The uncommitted chip is a real button — clicking it jumps to
+            // the Code tab and auto-selects the first changed file, so the
+            // user can see *which* file is flagged without dropping to the
+            // terminal.
+            extra.push(
+              `<button type="button" class="pchip warn pchip-uncommitted" title="View changes">` +
+                `<span class="k">uncommitted</span>` +
+                `<span class="v">${st.dirty} file${st.dirty !== 1 ? 's' : ''}</span>` +
+              `</button>`
+            );
+          }
           el.insertAdjacentHTML('afterbegin', extra.join(''));
+          const uBtn = el.querySelector('.pchip-uncommitted');
+          if (uBtn) uBtn.addEventListener('click', () => openChangesInCodeTab(p, st));
         }
       } catch {}
     }
@@ -6056,6 +6075,42 @@ const ProjectsPanel = (() => {
       el.insertAdjacentHTML('beforeend',
         `<span class="pchip"><span class="k">deployed</span><span class="v">${escapeHtml(fmtAgoIso(p.nsite.lastDeploy))}</span></span>`);
     }
+  }
+
+  // Jump from the "uncommitted N files" chip/link → Code tab → Changes
+  // section with the first dirty file pre-selected. Centralised here so
+  // every entry-point (chip bar, Overview row, possibly future surfaces)
+  // routes through the same code path.
+  function openChangesInCodeTab(p, st) {
+    const firstDirty = (st?.files && st.files[0]) || null;
+    // The Code tab is only present for projects with a real git checkout
+    // (path set + git or ngit capability — see hasGitCheckout above).
+    // Without one, the chip wouldn't have rendered in the first place,
+    // but be defensive: fall back to the existing exec-modal escape hatch
+    // so the user still sees *something* when they click.
+    const hasCheckout = !!p.path && (p.capabilities.git || p.capabilities.ngit);
+    if (!hasCheckout) {
+      openExecModal({
+        title: `git status · ${p.name}`,
+        subtitle: p.path || '',
+        endpoint: `/api/projects/${p.id}/exec`,
+        body: { cmd: 'git-status' },
+      });
+      return;
+    }
+    if (!state.codeView || state.codeView.projectId !== p.id) {
+      state.codeView = { projectId: p.id, ref: 'HEAD', path: '', selectedBlob: null, selectedDirty: null };
+    }
+    state.codeView.selectedBlob  = null;
+    state.codeView.selectedDirty = firstDirty ? firstDirty.path : null;
+    state.tab = 'code';
+    render();
+    // After render(), scroll the Changes section into view. setTimeout(0)
+    // defers past the synchronous render so the element exists.
+    setTimeout(() => {
+      const sec = document.querySelector('.code-changes');
+      if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 0);
   }
 
   function renderTab(container, p) {
@@ -6193,12 +6248,7 @@ const ProjectsPanel = (() => {
     });
     container.querySelector('.open-git-tab')?.addEventListener('click', (e) => {
       e.preventDefault();
-      openExecModal({
-        title: `git status · ${p.name}`,
-        subtitle: p.path || '',
-        endpoint: `/api/projects/${p.id}/exec`,
-        body: { cmd: 'git-status' },
-      });
+      openChangesInCodeTab(p, projectStatus);
     });
   }
 
@@ -6650,11 +6700,15 @@ const ProjectsPanel = (() => {
 
     // Per-tab navigation state — preserved across tab switches so the
     // user returns to the same ref/path/blob they were viewing. Reset
-    // when the project changes.
+    // when the project changes. `selectedDirty` is the path of an
+    // uncommitted file the user has clicked in the Changes section; it
+    // is mutually exclusive with `selectedBlob` (a tracked file picked
+    // from the ref browser).
     if (!state.codeView || state.codeView.projectId !== p.id) {
-      state.codeView = { projectId: p.id, ref: 'HEAD', path: '', selectedBlob: null };
+      state.codeView = { projectId: p.id, ref: 'HEAD', path: '', selectedBlob: null, selectedDirty: null };
     }
     const view = state.codeView;
+    if (!('selectedDirty' in view)) view.selectedDirty = null;
 
     // Fetch in parallel — the four endpoints are independent and the
     // round-trip dominates rendering latency. repoMeta now carries
@@ -6709,23 +6763,118 @@ const ProjectsPanel = (() => {
     // 2 — Ref selector + breadcrumb
     container.appendChild(renderCodeNav(p, refs, view));
 
-    // 3 — File browser
+    // 3 — Changes (working tree, when dirty). Populated async — the
+    // backend call is cheap but we don't want to gate the rest of the
+    // tab on it. The element renders empty until the fetch resolves;
+    // when it does and there's nothing to show, it hides itself.
+    const changesEl = document.createElement('div');
+    changesEl.className = 'code-changes';
+    changesEl.hidden = true;
+    container.appendChild(changesEl);
+
+    // 4 — File browser
     const filesEl = document.createElement('div');
     filesEl.className = 'code-files';
     container.appendChild(filesEl);
-    renderCodeFiles(filesEl, p, view);
 
-    // 4 — Preview (README on first open, blob on selection)
+    // 5 — Preview (README on first open, blob on selection)
     const previewEl = document.createElement('div');
     previewEl.className = 'code-preview';
     container.appendChild(previewEl);
     renderCodePreview(previewEl, p, view);
 
-    // 5 — Recent commits
+    // 6 — Recent commits
     const commitsEl = document.createElement('div');
     commitsEl.className = 'code-commits';
     container.appendChild(commitsEl);
     renderCodeCommits(commitsEl, p, view);
+
+    // Fetch git/status alongside the rest of the tab so Changes + the
+    // file-row decoration paint in one go. /git/status is cheap (a few
+    // local-git calls) so the join doesn't gate the visible header /
+    // preview / commits sections, which start loading immediately above.
+    (async () => {
+      let st = null;
+      try { st = await api(`/api/projects/${p.id}/git/status`); } catch {}
+      projectStatus = st;
+      renderCodeChanges(changesEl, previewEl, p, view, st);
+      renderCodeFiles(filesEl, p, view, st);
+    })();
+  }
+
+  // ── Code-tab Changes section ─────────────────────────────────────────
+  //
+  // Lists every entry from `git status` with a status badge + path. Click
+  // a row to load the per-file diff into the preview pane. The whole
+  // section is hidden when the working tree is clean so the Code tab
+  // matches its old layout exactly when there's nothing to show.
+  function renderCodeChanges(el, previewEl, p, view, st) {
+    if (!el) return;
+    const files = (st && Array.isArray(st.files)) ? st.files : [];
+    if (files.length === 0) {
+      el.hidden = true;
+      el.innerHTML = '';
+      // Clear stale selection if the user committed/discarded changes in
+      // another window — otherwise the preview pane would keep showing
+      // a diff for a file that's no longer dirty.
+      if (view.selectedDirty) {
+        view.selectedDirty = null;
+        renderCodePreview(previewEl, p, view);
+      }
+      return;
+    }
+    el.hidden = false;
+    const rows = files.map(f => {
+      const klass    = changeRowClass(f);
+      const badge    = changeBadge(f);
+      const label    = escapeHtml(f.path);
+      const subtitle = f.origPath ? `<span class="cc-orig muted">renamed from ${escapeHtml(f.origPath)}</span>` : '';
+      const isActive = view.selectedDirty === f.path;
+      return `
+        <button class="code-change-row ${klass} ${isActive ? 'active' : ''}"
+                data-path="${escapeHtml(f.path)}">
+          <span class="cc-badge ${klass}">${badge}</span>
+          <span class="cc-path">${label}${subtitle}</span>
+        </button>
+      `;
+    }).join('');
+    el.innerHTML = `
+      <div class="code-changes-head">
+        <h3>Changes <span class="muted">· ${files.length} file${files.length !== 1 ? 's' : ''}</span></h3>
+      </div>
+      <div class="code-change-list">${rows}</div>
+    `;
+    el.querySelectorAll('.code-change-row').forEach(row => {
+      row.addEventListener('click', () => {
+        view.selectedBlob  = null;
+        view.selectedDirty = row.dataset.path;
+        el.querySelectorAll('.code-change-row').forEach(r => r.classList.toggle('active', r === row));
+        renderCodePreview(previewEl, p, view);
+        if (previewEl) previewEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    });
+  }
+
+  // Map XY codes → CSS class + single-letter badge. Mirrors the
+  // GitHub/GitWorkshop/VS Code convention: M = modified (amber), A =
+  // added (green), D = deleted (red), R = renamed (blue), ? = untracked
+  // (green outline). Staging state isn't surfaced separately — for an
+  // "uncommitted work" pane the X-or-Y union is what matters.
+  function changeRowClass(f) {
+    const X = f.index, Y = f.worktree;
+    if (X === '?' && Y === '?') return 'cc-untracked';
+    if (X === 'A')              return 'cc-added';
+    if (X === 'D' || Y === 'D') return 'cc-deleted';
+    if (X === 'R' || Y === 'R') return 'cc-renamed';
+    return 'cc-modified';
+  }
+  function changeBadge(f) {
+    const X = f.index, Y = f.worktree;
+    if (X === '?' && Y === '?') return 'U';
+    if (X === 'A')              return 'A';
+    if (X === 'D' || Y === 'D') return 'D';
+    if (X === 'R' || Y === 'R') return 'R';
+    return 'M';
   }
 
   // ── First-publish wizard (Phase 1d) ────────────────────────────────
@@ -8053,7 +8202,7 @@ const ProjectsPanel = (() => {
     return wrap;
   }
 
-  async function renderCodeFiles(el, p, view) {
+  async function renderCodeFiles(el, p, view, st) {
     el.innerHTML = `<div class="muted">Loading files…</div>`;
     // Phase 7: withLog=1 asks the backend for per-entry last-commit
     // info. One bounded `git log` walk inside /repo/tree returns
@@ -8076,6 +8225,30 @@ const ProjectsPanel = (() => {
       el.innerHTML = `<div class="muted">Empty.</div>`;
       return;
     }
+    // Build a lookup of repo-relative paths that are dirty, so we can
+    // decorate the file browser the way Shakespeare/GitWorkshop colour
+    // changed entries. We index by both exact match (for blobs) and
+    // prefix (for trees — if any file inside a directory is dirty, the
+    // directory itself gets the marker).
+    const dirty = new Set();
+    const dirtyDirs = new Set();
+    const files = (st && Array.isArray(st.files)) ? st.files : [];
+    for (const f of files) {
+      dirty.add(f.path);
+      let i = f.path.indexOf('/');
+      while (i >= 0) {
+        dirtyDirs.add(f.path.slice(0, i));
+        i = f.path.indexOf('/', i + 1);
+      }
+    }
+    const prefix = view.path ? view.path + '/' : '';
+    const isDirtyEntry = (entry) => {
+      const full = prefix + entry.name;
+      if (entry.type === 'blob' || entry.type === 'commit') return dirty.has(full);
+      if (entry.type === 'tree') return dirtyDirs.has(full);
+      return false;
+    };
+
     const rows = entries.map(e => {
       const icon = e.type === 'tree' ? '📁' : (e.type === 'commit' ? '🔗' : '📄');
       const sizeCell = e.type === 'blob' && Number.isFinite(e.size)
@@ -8092,10 +8265,12 @@ const ProjectsPanel = (() => {
              <span class="code-file-commit-time">${escapeHtml(fmtAgoIso(new Date((lc.timestamp || 0) * 1000).toISOString()))}</span>
            </span>`
         : '<span class="code-file-commit muted"></span>';
+      const dirtyClass = isDirtyEntry(e) ? ' code-file-dirty' : '';
+      const dirtyDot   = isDirtyEntry(e) ? '<span class="code-file-dirty-dot" title="uncommitted changes">●</span>' : '';
       return `
-        <button class="code-file-row" data-name="${escapeHtml(e.name)}" data-type="${e.type}">
+        <button class="code-file-row${dirtyClass}" data-name="${escapeHtml(e.name)}" data-type="${e.type}">
           <span class="code-file-icon">${icon}</span>
-          <span class="code-file-name">${escapeHtml(e.name)}</span>
+          <span class="code-file-name">${escapeHtml(e.name)}${dirtyDot}</span>
           ${commitCell}
           ${sizeCell}
         </button>
@@ -8111,7 +8286,8 @@ const ProjectsPanel = (() => {
           view.selectedBlob = null;
           renderTab(document.querySelector('.project-tab-content'), p);
         } else if (type === 'blob') {
-          view.selectedBlob = view.path ? `${view.path}/${name}` : name;
+          view.selectedBlob  = view.path ? `${view.path}/${name}` : name;
+          view.selectedDirty = null;
           // Only re-render the preview pane — the file list and
           // commits don't change when you pick a file.
           const previewEl = document.querySelector('.code-preview');
@@ -8130,6 +8306,14 @@ const ProjectsPanel = (() => {
 
   async function renderCodePreview(el, p, view) {
     el.innerHTML = `<div class="muted">Loading preview…</div>`;
+    if (view.selectedDirty) {
+      // Per-file diff for an uncommitted change. Distinct from the
+      // tracked-blob branch below because git diff has its own JSON
+      // shape (status/binary/untracked content), and the rendering is a
+      // unified diff rather than a code block at a ref.
+      await renderDirtyPreview(el, p, view);
+      return;
+    }
     if (view.selectedBlob) {
       // Render a specific file picked in the browser.
       const qs = new URLSearchParams({ ref: view.ref, path: view.selectedBlob });
@@ -8190,6 +8374,105 @@ const ProjectsPanel = (() => {
       </div>
       <div class="code-preview-body code-md">${renderMarkdown(r.content || '')}</div>
     `;
+  }
+
+  // Preview pane for a working-tree change. Renders a unified diff for
+  // tracked modifications, the file contents (with a "new file" badge)
+  // for untracked files, and a metadata-only placeholder for binaries
+  // and oversize entries. Mirrors GitHub's PR-file view + the regular
+  // blob preview's close affordance so the user has one consistent way
+  // to dismiss it.
+  async function renderDirtyPreview(el, p, view) {
+    const filePath = view.selectedDirty;
+    let r;
+    try {
+      r = await api(`/api/projects/${p.id}/git/diff?path=${encodeURIComponent(filePath)}`);
+    } catch (e) {
+      el.innerHTML = `<div class="muted">Failed to load diff: ${escapeHtml(e?.message || String(e))}</div>`;
+      return;
+    }
+    if (!r) {
+      el.innerHTML = `<div class="muted">No diff available.</div>`;
+      return;
+    }
+    const closeBtnHtml = `<button class="code-preview-close" aria-label="Close preview">×</button>`;
+    const headBadge = (() => {
+      switch (r.status) {
+        case 'untracked': return `<span class="cc-badge cc-untracked">new file</span>`;
+        case 'added':     return `<span class="cc-badge cc-added">added</span>`;
+        case 'deleted':   return `<span class="cc-badge cc-deleted">deleted</span>`;
+        case 'renamed':   return `<span class="cc-badge cc-renamed">renamed</span>`;
+        case 'modified':  return `<span class="cc-badge cc-modified">modified</span>`;
+        default:          return '';
+      }
+    })();
+    const metaParts = [];
+    if (r.origPath)              metaParts.push(`from <code>${escapeHtml(r.origPath)}</code>`);
+    if (Number.isFinite(r.size)) metaParts.push(escapeHtml(fmtBytes(r.size)));
+    if (r.binary)                metaParts.push('binary');
+    const head = `
+      <div class="code-preview-head">
+        <span class="code-preview-path">${escapeHtml(r.path || filePath)}</span>
+        ${headBadge}
+        <span class="code-preview-meta muted">${metaParts.join(' · ')}</span>
+        ${closeBtnHtml}
+      </div>
+    `;
+
+    let body = '';
+    if (r.error) {
+      body = `<div class="code-preview-body muted">${escapeHtml(r.error)}</div>`;
+    } else if (r.binary) {
+      body = `<div class="code-preview-body muted">Binary file changed. Open it locally to review.</div>`;
+    } else if (r.truncated) {
+      body = `<div class="code-preview-body muted">File too large to preview (${escapeHtml(fmtBytes(r.size || 0))}). Open it locally.</div>`;
+    } else if (r.status === 'deleted') {
+      // Deleted files have no working-tree contents and (for now) no
+      // HEAD-restore view. The diff itself is the source of truth.
+      body = renderUnifiedDiffBlock(r.diff || '');
+    } else if (r.status === 'untracked') {
+      // New file — show its contents directly. No unified diff because
+      // diffing against an absent baseline is just a wall of '+' lines.
+      body = `<div class="code-preview-body code-untracked">${renderCodeBlock(r.content || '', extLang(filePath))}</div>`;
+    } else {
+      body = renderUnifiedDiffBlock(r.diff || '');
+    }
+
+    el.innerHTML = head + body;
+    el.querySelector('.code-preview-close')?.addEventListener('click', () => {
+      view.selectedDirty = null;
+      // Mirror the Changes-list active state.
+      document.querySelectorAll('.code-change-row.active').forEach(r => r.classList.remove('active'));
+      renderCodePreview(el, p, view);
+    });
+  }
+
+  // Render git's unified-diff text (output of `git diff HEAD -- <path>`)
+  // into a coloured pre/code block. We don't try to be clever — preserve
+  // the hunk headers verbatim and tint added/removed lines green/red.
+  // The "diff header" lines (`diff --git …`, `index …`, `---`/`+++`) get
+  // a muted style so the eye lands on the actual content. No file-path
+  // splitting needed: the diff is always for a single file in our usage.
+  function renderUnifiedDiffBlock(diff) {
+    if (!diff) {
+      return `<div class="code-preview-body muted">No textual changes to show. The staged copy may match HEAD; check <code>git diff --cached</code>.</div>`;
+    }
+    const lines = diff.split('\n');
+    const out = [];
+    for (const raw of lines) {
+      let cls = 'dl';
+      if (raw.startsWith('+++') || raw.startsWith('---') || raw.startsWith('diff ') || raw.startsWith('index ') || raw.startsWith('new file ') || raw.startsWith('deleted file ') || raw.startsWith('similarity ') || raw.startsWith('rename ')) {
+        cls = 'dl-meta';
+      } else if (raw.startsWith('@@')) {
+        cls = 'dl-hunk';
+      } else if (raw.startsWith('+')) {
+        cls = 'dl-add';
+      } else if (raw.startsWith('-')) {
+        cls = 'dl-del';
+      }
+      out.push(`<div class="${cls}">${escapeHtml(raw)}</div>`);
+    }
+    return `<div class="code-preview-body code-diff"><div class="diff-lines">${out.join('')}</div></div>`;
   }
 
   async function renderCodeCommits(el, p, view) {

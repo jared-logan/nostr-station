@@ -23,7 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync, spawn } from 'child_process';
 import {
-  projectGitStatus, projectGitLog, validateProjectPath,
+  projectGitStatus, projectGitLog, projectGitDiff, validateProjectPath,
 } from '../projects.js';
 import type { Project } from '../projects.js';
 import {
@@ -52,6 +52,16 @@ export async function handleProjectsGit(
   if (tail === 'git/log' && method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(projectGitLog(project.path || '')));
+    return true;
+  }
+  if (tail === 'git/diff' && method === 'GET') {
+    // Per-file diff for the Code-tab Changes view. Query parameter `path`
+    // is repo-relative; projectGitDiff validates and refuses traversal.
+    if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+    const url = new URL(req.url ?? '', 'http://internal');
+    const qPath = url.searchParams.get('path') ?? '';
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(projectGitDiff(project.path, qPath)));
     return true;
   }
   if (tail === 'git/pull' && method === 'POST') {

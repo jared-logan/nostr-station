@@ -705,6 +705,19 @@ export function detectPath(targetPath: string): DetectResult {
 
 // ── Git status helpers (scoped to a project path) ───────────────────────────
 
+export interface ProjectGitFile {
+  // Final (destination) path as reported by git. May contain spaces; not
+  // shell-escaped. Renames/copies expose the source in `origPath`.
+  path:      string;
+  origPath?: string;
+  // Two-char XY status from `git status --porcelain=v1`. X = index/staged,
+  // Y = working tree. Frontend interprets — e.g. '??' = untracked, ' M' =
+  // modified unstaged, 'M ' = modified staged, 'MM' = both, 'A ' = added,
+  // ' D' = deleted unstaged, 'R ' = renamed staged, etc.
+  index:     string;
+  worktree:  string;
+}
+
 export interface ProjectGitStatus {
   inRepo:    boolean;
   branch?:   string;
@@ -713,8 +726,69 @@ export interface ProjectGitStatus {
   timestamp?: number;
   author?:   string;
   dirty?:    number;
+  files?:    ProjectGitFile[];
   remotes?:  Array<{ name: string; url: string; type: 'github' | 'ngit' | 'other' }>;
   error?:    string;
+}
+
+// Decode git's C-style quoted pathnames. Git quotes a path when it contains
+// special chars (control bytes, embedded quotes, or non-ASCII when
+// `core.quotePath=true`, which is the default). The output is wrapped in
+// double-quotes with backslash escapes per the C string convention plus
+// three-digit octal for raw bytes. We mirror that minimally — enough to
+// round-trip the names users actually have in their repos.
+function unquoteGitPath(raw: string): string {
+  if (raw.length < 2 || raw[0] !== '"' || raw[raw.length - 1] !== '"') return raw;
+  const body = raw.slice(1, -1);
+  const bytes: number[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch !== '\\') { bytes.push(body.charCodeAt(i)); continue; }
+    const next = body[++i];
+    if (next === undefined) break;
+    if (next >= '0' && next <= '7') {
+      // Octal triplet.
+      const oct = body.slice(i, i + 3);
+      if (/^[0-7]{3}$/.test(oct)) {
+        bytes.push(parseInt(oct, 8));
+        i += 2;
+        continue;
+      }
+    }
+    const map: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '\\': 92, '"': 34 };
+    if (map[next] !== undefined) { bytes.push(map[next]); continue; }
+    bytes.push(next.charCodeAt(0));
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+function parsePorcelainV1(raw: string): ProjectGitFile[] {
+  const files: ProjectGitFile[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.length < 4) continue;
+    const X = line[0];
+    const Y = line[1];
+    // Spec: "XY <path>" or for R/C "XY <orig> -> <new>". The space at
+    // index 2 is always present.
+    let rest = line.slice(3);
+    let pathStr: string;
+    let origPath: string | undefined;
+    if (X === 'R' || X === 'C' || Y === 'R' || Y === 'C') {
+      const arrow = rest.indexOf(' -> ');
+      if (arrow >= 0) {
+        const left = rest.slice(0, arrow);
+        const right = rest.slice(arrow + 4);
+        origPath = left.startsWith('"') ? unquoteGitPath(left) : left;
+        pathStr  = right.startsWith('"') ? unquoteGitPath(right) : right;
+      } else {
+        pathStr = rest.startsWith('"') ? unquoteGitPath(rest) : rest;
+      }
+    } else {
+      pathStr = rest.startsWith('"') ? unquoteGitPath(rest) : rest;
+    }
+    files.push({ path: pathStr, origPath, index: X, worktree: Y });
+  }
+  return files;
 }
 
 export function projectGitStatus(projectPath: string): ProjectGitStatus {
@@ -726,8 +800,14 @@ export function projectGitStatus(projectPath: string): ProjectGitStatus {
   const message = runIn(projectPath, "git log -1 --pretty=%s") ?? '';
   const ts      = Number(runIn(projectPath, "git log -1 --pretty=%ct") ?? '0') * 1000;
   const author  = runIn(projectPath, "git log -1 --pretty=%an") ?? '';
-  const dirtyRaw = runIn(projectPath, 'git status --short') ?? '';
-  const dirty   = dirtyRaw.split('\n').filter(Boolean).length;
+  // Porcelain v1 output MUST NOT be trimmed — every status line starts
+  // with the XY two-character column, and X is space whenever there's
+  // no staged change. `runIn` calls .trim(), which would strip the
+  // leading space and shift the parser onto the wrong byte (the bug
+  // that turned `README.md` into `EADME.md` in early testing).
+  const dirtyRaw = runFileIn(projectPath, 'git', ['status', '--porcelain=v1']) ?? '';
+  const files   = parsePorcelainV1(dirtyRaw);
+  const dirty   = files.length;
   const remotesRaw = runIn(projectPath, 'git remote -v') ?? '';
   const seen = new Set<string>();
   const remotes: ProjectGitStatus['remotes'] = [];
@@ -742,7 +822,166 @@ export function projectGitStatus(projectPath: string): ProjectGitStatus {
     else if (url.startsWith('nostr://') || url.startsWith('naddr') || url.includes('.nostr')) type = 'ngit';
     remotes!.push({ name, url: scrubRemoteUrl(url), type });
   }
-  return { inRepo: true, branch, hash, message, timestamp: ts, author, dirty, remotes };
+  return { inRepo: true, branch, hash, message, timestamp: ts, author, dirty, files, remotes };
+}
+
+// ── Per-file diff helpers ──────────────────────────────────────────────────
+//
+// Backs GET /api/projects/:id/git/diff?path=<repo-relative path>. Drives the
+// Code tab's Changes view: shows what changed in a single file. We give the
+// frontend the raw `git diff HEAD -- <path>` (covering both staged and
+// unstaged work in one hunk-set) for tracked changes, and the verbatim
+// working-tree contents for untracked files (since there's no HEAD blob to
+// diff against — a wall of green "all added" lines is noise).
+
+export interface ProjectGitDiff {
+  // Path is echoed back so the client can correlate. `status` is one of the
+  // human-readable codes; the raw XY is also returned for parity with the
+  // status list.
+  path:       string;
+  status:     'modified' | 'untracked' | 'added' | 'deleted' | 'renamed' | 'unknown';
+  index:      string;
+  worktree:   string;
+  origPath?:  string;
+  binary?:    boolean;
+  // For tracked changes — unified diff text from `git diff HEAD --`. Empty
+  // when the file has no working-tree changes (e.g. fully staged + a stale
+  // index check). For untracked files we leave this empty and populate
+  // `content` instead so the frontend can render it as a "new file" view.
+  diff?:      string;
+  // Only set for untracked files small enough to fit in MAX_UNTRACKED_BYTES.
+  content?:   string;
+  size?:      number;
+  truncated?: boolean;
+  error?:     string;
+}
+
+// Same per-file size cap as the readBlob path (2 MiB). Untracked binaries or
+// huge text logs would otherwise blow the JSON response — and the user can't
+// usefully review a megabyte of unstructured text in a panel anyway.
+const MAX_UNTRACKED_BYTES = 2 * 1024 * 1024;
+
+// Safe-path guard for the diff endpoint. The path comes from the URL, so we
+// must reject anything that could escape the project root or address a
+// special git file. Pathnames git itself emits (status -> diff click) are
+// always relative, forward-slash separated, and never start with '/'.
+export function isSafeRepoPath(p: string): boolean {
+  if (!p) return false;
+  if (p.length > 4096) return false;
+  if (p.startsWith('/') || p.includes('\\')) return false;
+  // Reject NUL and other control bytes.
+  if (/[\x00-\x1f]/.test(p)) return false;
+  // No traversal — `..` as its own segment, anywhere.
+  for (const seg of p.split('/')) {
+    if (seg === '..' || seg === '.') return false;
+  }
+  return true;
+}
+
+function runFileIn(cwd: string, file: string, args: string[]): string | null {
+  try {
+    return execFileSync(file, args, { cwd, stdio: 'pipe' }).toString();
+  } catch {
+    return null;
+  }
+}
+
+function statusForXY(X: string, Y: string): ProjectGitDiff['status'] {
+  if (X === '?' && Y === '?') return 'untracked';
+  // Index status (X) wins when both columns disagree — staging is the more
+  // semantically loaded state ("you've decided this goes in the next
+  // commit"). Working-tree-only states fall through to the Y column below.
+  if (X === 'A') return 'added';
+  if (X === 'D' || Y === 'D') return 'deleted';
+  if (X === 'R' || Y === 'R') return 'renamed';
+  if (X === 'M' || Y === 'M' || X === 'T' || Y === 'T') return 'modified';
+  return 'unknown';
+}
+
+export function projectGitDiff(projectPath: string, filePath: string): ProjectGitDiff {
+  if (!projectPath || !fs.existsSync(path.join(projectPath, '.git'))) {
+    return { path: filePath, status: 'unknown', index: ' ', worktree: ' ', error: 'not a git repo' };
+  }
+  if (!isSafeRepoPath(filePath)) {
+    return { path: filePath, status: 'unknown', index: ' ', worktree: ' ', error: 'invalid path' };
+  }
+
+  // Re-query git for THIS file's current XY codes. We can't trust an XY
+  // baked into the URL because the working tree may have changed since the
+  // last status list was rendered — and the diff vs. untracked branching
+  // below hinges on whether the file is tracked.
+  const statusRaw = runFileIn(projectPath, 'git', ['status', '--porcelain=v1', '--', filePath]) ?? '';
+  const lines = statusRaw.split('\n').filter(Boolean);
+  let X = ' ';
+  let Y = ' ';
+  let origPath: string | undefined;
+  if (lines.length > 0) {
+    const parsed = parsePorcelainV1(lines.join('\n'));
+    // Multiple lines can come back if `filePath` is actually a directory
+    // (git expands to per-file entries). For the diff view we only need
+    // the first entry that matches our exact path.
+    const exact = parsed.find(f => f.path === filePath) ?? parsed[0];
+    X = exact.index;
+    Y = exact.worktree;
+    origPath = exact.origPath;
+  }
+
+  const status = statusForXY(X, Y);
+
+  if (status === 'untracked') {
+    // Read the working-tree file directly — there's no git object to ask
+    // for content. Size-cap mirrors readBlob: above the threshold we show
+    // metadata only so the panel never has to hold a megabyte payload in
+    // memory.
+    const abs = path.join(projectPath, filePath);
+    let stat: fs.Stats | null = null;
+    try { stat = fs.statSync(abs); } catch (e: any) {
+      return { path: filePath, status, index: X, worktree: Y, error: e?.message ?? 'stat failed' };
+    }
+    if (!stat.isFile()) {
+      return { path: filePath, status, index: X, worktree: Y, error: 'not a regular file' };
+    }
+    if (stat.size > MAX_UNTRACKED_BYTES) {
+      return { path: filePath, status, index: X, worktree: Y, size: stat.size, truncated: true };
+    }
+    let buf: Buffer;
+    try { buf = fs.readFileSync(abs); }
+    catch (e: any) {
+      return { path: filePath, status, index: X, worktree: Y, error: e?.message ?? 'read failed' };
+    }
+    // Same binary heuristic as repo.ts uses (NUL byte in the first 8 KiB).
+    const sniff = buf.slice(0, 8192);
+    let binary = false;
+    for (let i = 0; i < sniff.length; i++) {
+      if (sniff[i] === 0) { binary = true; break; }
+    }
+    if (binary) {
+      return { path: filePath, status, index: X, worktree: Y, size: stat.size, binary: true };
+    }
+    return { path: filePath, status, index: X, worktree: Y, size: stat.size, content: buf.toString('utf8') };
+  }
+
+  // Tracked changes (modified/added/deleted/renamed). `git diff HEAD --`
+  // combines staged + unstaged so the user sees the full delta to commit.
+  // For renames we diff the destination — git tracks the rename internally,
+  // so passing the new path is sufficient.
+  const diffRaw = runFileIn(projectPath, 'git',
+    ['diff', '--no-color', '--no-ext-diff', 'HEAD', '--', filePath]) ?? '';
+
+  // Detect binary diffs from the marker git emits. We strip the diff body
+  // so the JSON stays small; the frontend renders a "binary file changed"
+  // placeholder using the flag.
+  const binary = /^Binary files /m.test(diffRaw);
+
+  return {
+    path: filePath,
+    status,
+    index: X,
+    worktree: Y,
+    origPath,
+    binary: binary || undefined,
+    diff: binary ? '' : diffRaw,
+  };
 }
 
 export function projectGitLog(projectPath: string, limit = 10): Array<{ hash: string; message: string; author: string; timestamp: number }> {

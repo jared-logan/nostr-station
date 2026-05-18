@@ -57,6 +57,15 @@ export interface GitState {
   branch:   string;
   label:    GitStateLabel;
   backend:  SyncBackend;
+  // Set when `git status` itself failed (timeout, .git/index.lock held by
+  // a concurrent op, etc). The other numeric/boolean fields fall back to
+  // defaults but the dashboard MUST NOT treat that as "actually clean" —
+  // it should leave the previous badge in place until the next successful
+  // poll. Distinguishing this from "really a clean repo" was the whole
+  // reason the field exists; the prior code conflated them and produced
+  // a "dirty -> up to date -> dirty" flicker every time a poll raced an
+  // ngit fetch or auto-sync tick.
+  error?:   string;
 }
 
 export interface NgitProposal {
@@ -180,6 +189,21 @@ export async function getProjectGitState(project: Project): Promise<GitState> {
     return { ...NOT_A_REPO, backend };
   }
 
+  // Cheap up-front check: if there's no `.git` directory the path simply
+  // isn't a repo. We return a clean state with no `error` so the dashboard
+  // renders "up to date" without blame — distinct from the catch branch
+  // below, which is reserved for "git was supposed to work but didn't".
+  try {
+    const { existsSync } = await import('fs');
+    const { join } = await import('path');
+    if (!existsSync(join(project.path, '.git'))) {
+      return { ...NOT_A_REPO, backend };
+    }
+  } catch {
+    // fs import shouldn't fail at runtime; fall through and let git itself
+    // be the source of truth.
+  }
+
   try {
     const { stdout } = await execFileAsync(
       gitBin,
@@ -187,10 +211,15 @@ export async function getProjectGitState(project: Project): Promise<GitState> {
       { cwd: project.path, timeout: 5000 },
     );
     return parseGitState(stdout, backend);
-  } catch {
-    // Not a git repo, path missing, etc. Same neutral state — the
-    // pathMissing pill on the project card already surfaces the issue.
-    return { ...NOT_A_REPO, backend };
+  } catch (e: any) {
+    // Transient: timeout (5 s), index.lock held by a concurrent git op
+    // (auto-sync, the user clicking Publish in another tab, an editor's
+    // own git integration), EACCES on the .git dir, etc. We surface the
+    // failure via `error` so the polling client preserves whatever badge
+    // it last drew successfully instead of momentarily painting a dirty
+    // repo as clean.
+    const msg = (e?.stderr || e?.message || 'git status failed').toString().slice(0, 200);
+    return { ...NOT_A_REPO, backend, error: msg };
   }
 }
 
