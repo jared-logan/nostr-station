@@ -11083,21 +11083,55 @@ const ProjectsPanel = (() => {
            Save below to migrate it under <code>.nostr-station/</code> (the legacy file stays — delete it manually when ready).
          </div>` : '';
 
-    // Surfaces files that USED to live in .nostr-station/ but moved to
-    // the user config dir, and which we couldn't auto-remove because
-    // they're tracked in git. The user needs to git-rm them deliberately
-    // — auto-deleting tracked files would create a surprise staged
-    // deletion in their working tree.
+    // Top-priority: plaintext nsecs in git history. Pre-refactor builds
+    // had a gitignore race that left test-identities.json unprotected,
+    // so a `git add .` at any point could have committed nsecs. We
+    // surface this BEFORE the legacy-files banner because regenerating
+    // identities is more urgent than tidying up untracked artifacts.
+    const nsecCommits = bundle.nsecsInHistory || [];
+    const nsecHistoryBanner = nsecCommits.length
+      ? `<div class="callout err" style="margin-bottom:10px;border:1px solid var(--err);background:rgba(255,0,0,0.04)">
+           <div style="font-weight:700;color:var(--err)">
+             ⚠ Plaintext nsecs found in git history
+           </div>
+           <div style="margin-top:6px">
+             <code>.nostr-station/test-identities.json</code> was added in
+             <strong>${nsecCommits.length}</strong> commit${nsecCommits.length === 1 ? '' : 's'}
+             across this repository's history. The file stores private
+             keys (nsecs) in plaintext. Treat any identities ever stored
+             there as compromised — they may already be on remotes
+             you've pushed to.
+           </div>
+           <div style="margin-top:8px">
+             Audit (lists each commit's full content):
+             <pre style="margin:4px 0;padding:6px 8px;background:var(--bg-2);border-radius:4px;font-size:11px;overflow-x:auto">git log -p --all -- .nostr-station/test-identities.json</pre>
+           </div>
+           <div style="margin-top:6px">
+             Next step: use <strong>Reset all</strong> in
+             <a href="#" class="jump-test-users">Test users</a> to
+             regenerate every identity in this project. History rewrite
+             (e.g. <code>git filter-repo</code>) is a separate audit
+             once you know which commits are involved.
+           </div>
+         </div>` : '';
+
+    // Files that USED to live in .nostr-station/ but moved to the
+    // user config dir, plus the orphan auto-managed gitignore if it
+    // survived migration (tracked-in-git case). All three are now
+    // dead weight in the repo and want a deliberate `git rm`.
     const legacyFiles = bundle.legacyLocalFiles || [];
-    const legacyFilesBanner = legacyFiles.length
+    const gitRmTargets = [
+      ...legacyFiles.map(f => `.nostr-station/${f}`),
+      ...(bundle.orphanGitignore ? ['.nostr-station/.gitignore'] : []),
+    ];
+    const legacyFilesBanner = gitRmTargets.length
       ? `<div class="callout warn" style="margin-bottom:10px">
-           <strong>Legacy private files still tracked in git.</strong>
-           These moved to your user config dir, but the copies in
-           <code>.nostr-station/</code> are tracked and need a deliberate
-           <code>git rm</code>:
-           <ul style="margin:6px 0 4px 18px">
-             ${legacyFiles.map(f => `<li><code>.nostr-station/${escapeHtml(f)}</code></li>`).join('')}
-           </ul>
+           <strong>Legacy nostr-station files still in the working tree.</strong>
+           These moved out of <code>.nostr-station/</code> in a recent
+           upgrade. They're tracked in git, so we left them in place to
+           avoid surprise staged deletions — you can clean them up with:
+           <pre style="margin:6px 0 4px;padding:6px 8px;background:var(--bg-2);border-radius:4px;font-size:11px;overflow-x:auto">git rm ${gitRmTargets.map(t => `'${t}'`).join(' ')}
+git commit -m "chore: drop legacy nostr-station artifacts"</pre>
            ${legacyFiles.includes('test-identities.json') ? `
              <div style="color:var(--err);font-weight:600;margin-top:8px">
                ⚠ test-identities.json contains private keys (nsecs). If
@@ -11108,6 +11142,7 @@ const ProjectsPanel = (() => {
          </div>` : '';
 
     root.innerHTML = `
+      ${nsecHistoryBanner}
       ${legacyBanner}
       ${legacyFilesBanner}
       <div class="pcfg-row">
@@ -11148,6 +11183,15 @@ const ProjectsPanel = (() => {
         <button class="primary pcfg-save">Save AI config</button>
       </div>
     `;
+
+    // Security banner's "Test users" link — smooth-scroll into view
+    // rather than reload the page (the default '#' href would).
+    root.querySelector('.jump-test-users')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      document.getElementById('test-users-section')?.scrollIntoView({
+        behavior: 'smooth', block: 'start',
+      });
+    });
 
     root.querySelector('.pcfg-save').addEventListener('click', async () => {
       const provider = root.querySelector('.pcfg-provider').value;
