@@ -196,21 +196,41 @@ function migrateLegacyFiles(project: Project): void {
 
   // The old auto-managed `.gitignore` becomes dead weight after the
   // files it was ignoring are gone. Same rule — only remove when
-  // untracked AND its contents match what we used to write (so we
+  // untracked AND its contents match a retired-only signature (so we
   // never wipe a user-customized gitignore).
   try {
     const giPath = path.join(project.path, CONFIG_DIRNAME, '.gitignore');
-    if (fs.existsSync(giPath)) {
-      const have = fs.readFileSync(giPath, 'utf8').trim();
-      const wasOurs = have
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .every(line => (MIGRATED_FILES as readonly string[]).includes(line) || line === 'cache/');
-      if (wasOurs && !fileIsTrackedInGit(project.path, `${CONFIG_DIRNAME}/.gitignore`)) {
-        fs.unlinkSync(giPath);
-      }
+    if (fs.existsSync(giPath) && isRetiredOnlyGitignore(giPath)
+        && !fileIsTrackedInGit(project.path, `${CONFIG_DIRNAME}/.gitignore`)) {
+      fs.unlinkSync(giPath);
     }
   } catch { /* best-effort */ }
+}
+
+// The set of lines we ever auto-wrote into `<project>/.nostr-station/.gitignore`
+// across the lifetime of the pre-refactor code. Any gitignore whose
+// non-blank lines are all drawn from this set is one we authored — safe
+// to delete (when untracked) or flag as orphan (when tracked). Any
+// other line means the user customized the file, so leave it alone.
+const RETIRED_GITIGNORE_LINES = new Set<string>([
+  PERMISSIONS_FILE,
+  CHAT_FILE,
+  'test-identities.json',
+  'cache/',
+]);
+
+function isRetiredOnlyGitignore(giPath: string): boolean {
+  try {
+    const have = fs.readFileSync(giPath, 'utf8').trim();
+    if (!have) return false;
+    return have
+      .split(/\r?\n/)
+      .map(s => s.trim())
+      .filter(Boolean)
+      .every(line => RETIRED_GITIGNORE_LINES.has(line));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -227,6 +247,85 @@ export function legacyLocalFiles(project: Project): string[] {
     if (fs.existsSync(legacy)) out.push(file);
   }
   return out;
+}
+
+/**
+ * Whether `<project>/.nostr-station/.gitignore` exists and contains
+ * only entries this codebase used to auto-write (and no user
+ * customizations). True = dead weight in the repo, safe for the user
+ * to `git rm`. False = file is absent OR user-customized (leave alone).
+ */
+export function isOrphanGitignore(project: Project): boolean {
+  if (!project.path) return false;
+  const giPath = path.join(project.path, CONFIG_DIRNAME, '.gitignore');
+  if (!fs.existsSync(giPath)) return false;
+  return isRetiredOnlyGitignore(giPath);
+}
+
+// ── Historical nsec leak detector ─────────────────────────────────────────
+//
+// In pre-refactor builds, the `.nostr-station/.gitignore` writer in
+// `nostr-query.ts:setCached()` would clobber the project-config-managed
+// gitignore (which listed `test-identities.json`) with just `cache/\n` —
+// because the cache writer ran unconditionally on every cache write and
+// did an exact-equality comparison. Net effect: the inner gitignore
+// only ever protected `cache/`, not the private files it was supposed
+// to. A casual `git add .` in any pre-refactor build would have staged
+// test-identities.json, plaintext nsecs and all.
+//
+// This detector runs `git log --all --diff-filter=A` against that path
+// to find any commit that ever introduced the file. The `--all` is
+// load-bearing — it surfaces leaks on branches the user doesn't have
+// checked out (including ngit-pushed feature branches). Result is
+// memoized per process per project so the shell-out fires at most once.
+
+const nsecHistoryMemo = new Map<string, string[] | null>();
+const NSEC_HISTORY_TIMEOUT_MS = 2000;
+const NSEC_HISTORY_MAX_COMMITS = 100;
+
+/**
+ * Returns commit SHAs (newest first) that added
+ * `.nostr-station/test-identities.json` at any point in this repo's
+ * history. Bounded scan — at most NSEC_HISTORY_MAX_COMMITS results,
+ * 2 s timeout. Returns:
+ *
+ *   - `null`  — couldn't check (no path, no .git, no git binary,
+ *               timeout, or other error). UI should treat as "unknown,
+ *               don't alarm the user".
+ *   - `[]`    — checked and clean. Show no banner.
+ *   - `[...]` — found leaks. Show the red security banner.
+ */
+export function detectNsecsInHistory(project: Project): string[] | null {
+  if (!project.path) return null;
+  if (nsecHistoryMemo.has(project.id)) return nsecHistoryMemo.get(project.id)!;
+
+  const result = scanNsecHistory(project.path);
+  nsecHistoryMemo.set(project.id, result);
+  return result;
+}
+
+function scanNsecHistory(projectPath: string): string[] | null {
+  if (!fs.existsSync(path.join(projectPath, '.git'))) return null;
+  try {
+    const raw = execFileSync(
+      'git',
+      [
+        'log', '--all', '--diff-filter=A',
+        `--max-count=${NSEC_HISTORY_MAX_COMMITS}`,
+        '--pretty=format:%H',
+        '--', `${CONFIG_DIRNAME}/test-identities.json`,
+      ],
+      {
+        cwd: projectPath,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: NSEC_HISTORY_TIMEOUT_MS,
+      },
+    ).toString().trim();
+    if (!raw) return [];
+    return raw.split('\n').filter(Boolean);
+  } catch {
+    return null;
+  }
 }
 
 // ── Public reads ──────────────────────────────────────────────────────────
@@ -436,6 +535,21 @@ export interface ProjectAiConfigBundle {
   // when non-empty so the user can deliberately remove them from the
   // index.
   legacyLocalFiles: string[];
+  // True when `<project>/.nostr-station/.gitignore` exists and only
+  // lists retired station entries — dead weight in the repo. The UI
+  // surfaces this in the same "you can git rm these" hint as
+  // legacyLocalFiles. Distinct flag because the gitignore itself
+  // doesn't appear in legacyLocalFiles (different category — it's
+  // not a private file, it's a stale ignore rule).
+  orphanGitignore: boolean;
+  // Commit SHAs that ever added `<project>/.nostr-station/test-identities.json`
+  // to git history. Pre-refactor builds had a gitignore race that left
+  // this file unprotected — a stray `git add .` could and did stage
+  // it. `null` = couldn't check; `[]` = clean; non-empty = SECURITY
+  // INCIDENT, plaintext nsecs may be in history (and on any remote
+  // they've been pushed to). UI surfaces this as a red banner with
+  // audit guidance.
+  nsecsInHistory: string[] | null;
 }
 
 export function readProjectAiConfig(project: Project): ProjectAiConfigBundle {
@@ -451,5 +565,7 @@ export function readProjectAiConfig(project: Project): ProjectAiConfigBundle {
     legacyContext:  !!(legacyContextPath && fs.existsSync(legacyContextPath)
                       && !fs.existsSync(path.join(configDir(project.path!), PROJECT_CONTEXT_FILE))),
     legacyLocalFiles: legacyLocalFiles(project),
+    orphanGitignore:  isOrphanGitignore(project),
+    nsecsInHistory:   detectNsecsInHistory(project),
   };
 }

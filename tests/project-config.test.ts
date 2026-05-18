@@ -21,6 +21,7 @@ const {
   readProjectChatOverride, writeProjectChatOverride,
   deleteProjectPermissions, deleteProjectChatOverride,
   readProjectAiConfig, legacyLocalFiles,
+  isOrphanGitignore, detectNsecsInHistory,
   userConfigDirFor,
   CONFIG_DIRNAME,
 } = await import('../src/lib/project-config.js');
@@ -330,4 +331,136 @@ test('readProjectAiConfig: legacyContext false once dot-dir version exists', () 
   const b = readProjectAiConfig(project);
   assert.equal(b.legacyContext, false);
   assert.equal(b.projectContext, 'new');
+});
+
+// ── isOrphanGitignore ─────────────────────────────────────────────────────
+
+test('isOrphanGitignore: true for the "cache/" only gitignore (real-world case)', () => {
+  // The exact contents Claude Code found in Blip's .nostr-station/
+  // after the pre-refactor cache writer clobbered project-config's
+  // gitignore. The retired-only check must recognize this so the
+  // banner can offer the user a deliberate `git rm`.
+  const dir = makeProjectDir();
+  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
+  fs.writeFileSync(path.join(dir, CONFIG_DIRNAME, '.gitignore'), 'cache/\n');
+  const project = makeProject({ id: 'gi-cache-only', path: dir });
+  assert.equal(isOrphanGitignore(project), true);
+});
+
+test('isOrphanGitignore: true for the full retired set', () => {
+  const dir = makeProjectDir();
+  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
+  fs.writeFileSync(
+    path.join(dir, CONFIG_DIRNAME, '.gitignore'),
+    'permissions.json\nchat.json\ntest-identities.json\ncache/\n',
+  );
+  const project = makeProject({ id: 'gi-full', path: dir });
+  assert.equal(isOrphanGitignore(project), true);
+});
+
+test('isOrphanGitignore: false when user added a custom rule', () => {
+  // Even one unfamiliar line means we leave the file alone — never
+  // wipe a user-authored gitignore.
+  const dir = makeProjectDir();
+  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
+  fs.writeFileSync(
+    path.join(dir, CONFIG_DIRNAME, '.gitignore'),
+    'cache/\nmy-scratch-notes.md\n',
+  );
+  const project = makeProject({ id: 'gi-custom', path: dir });
+  assert.equal(isOrphanGitignore(project), false);
+});
+
+test('isOrphanGitignore: false when file is absent', () => {
+  const project = makeProject({ id: 'gi-missing', path: makeProjectDir() });
+  assert.equal(isOrphanGitignore(project), false);
+});
+
+test('isOrphanGitignore: false for an empty gitignore (could be intentional)', () => {
+  // An empty file isn't ours — could be a user's deliberate placeholder
+  // (e.g. about to add rules). Leave alone.
+  const dir = makeProjectDir();
+  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
+  fs.writeFileSync(path.join(dir, CONFIG_DIRNAME, '.gitignore'), '');
+  const project = makeProject({ id: 'gi-empty', path: dir });
+  assert.equal(isOrphanGitignore(project), false);
+});
+
+// ── detectNsecsInHistory ──────────────────────────────────────────────────
+
+test('detectNsecsInHistory: null when project has no .git', () => {
+  const project = makeProject({ id: 'nh-no-git', path: makeProjectDir() });
+  assert.equal(detectNsecsInHistory(project), null);
+});
+
+test('detectNsecsInHistory: empty when repo is clean of the file', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const dir = makeProjectDir();
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 't@e.l'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'T'], { cwd: dir });
+  fs.writeFileSync(path.join(dir, 'README.md'), '# hi\n');
+  execFileSync('git', ['add', 'README.md'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: dir });
+  const project = makeProject({ id: 'nh-clean', path: dir });
+  assert.deepEqual(detectNsecsInHistory(project), []);
+});
+
+test('detectNsecsInHistory: surfaces commits that added test-identities.json', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const dir = makeProjectDir();
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 't@e.l'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'T'], { cwd: dir });
+  // Two commits — first adds the file, second removes it. The
+  // detector must STILL flag the first commit, because the plaintext
+  // nsec is forever in history (and on any remote the user pushed to).
+  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
+  fs.writeFileSync(
+    path.join(dir, CONFIG_DIRNAME, 'test-identities.json'),
+    '{"identities":[{"nsec":"nsec1leaked"}]}',
+  );
+  execFileSync('git', ['add', `${CONFIG_DIRNAME}/test-identities.json`], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'leak'], { cwd: dir });
+  execFileSync('git', ['rm', `${CONFIG_DIRNAME}/test-identities.json`], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'remove'], { cwd: dir });
+
+  // Memoization is per project.id — use a fresh id so this test isn't
+  // affected by any earlier-in-file detector call.
+  const project = makeProject({ id: 'nh-leaked', path: dir });
+  const commits = detectNsecsInHistory(project);
+  assert.ok(Array.isArray(commits));
+  assert.equal(commits!.length, 1, `expected exactly one ADD commit, got ${commits!.length}`);
+  assert.match(commits![0], /^[0-9a-f]{40}$/);
+});
+
+// ── readProjectAiConfig with the new banner fields ────────────────────────
+
+test('readProjectAiConfig: orphanGitignore + nsecsInHistory wired through to bundle', async () => {
+  // Two-condition test:
+  //   - gitignore must be TRACKED in git so the migration's auto-
+  //     cleanup leaves it alone — only then does the banner field
+  //     have something to report.
+  //   - nsecsInHistory uses --all so the leak commit must really be
+  //     reachable from a ref; HEAD here suffices.
+  const { execFileSync } = await import('node:child_process');
+  const dir = makeProjectDir();
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 't@e.l'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'T'], { cwd: dir });
+  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
+  fs.writeFileSync(path.join(dir, CONFIG_DIRNAME, '.gitignore'), 'cache/\n');
+  fs.writeFileSync(
+    path.join(dir, CONFIG_DIRNAME, 'test-identities.json'),
+    '{"identities":[]}',
+  );
+  execFileSync('git', ['add', `${CONFIG_DIRNAME}/.gitignore`,
+                                `${CONFIG_DIRNAME}/test-identities.json`], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'seed'], { cwd: dir });
+
+  const project = makeProject({ id: 'bundle-banners', path: dir });
+  const b = readProjectAiConfig(project);
+  assert.equal(b.orphanGitignore, true);
+  assert.ok(Array.isArray(b.nsecsInHistory));
+  assert.equal(b.nsecsInHistory!.length, 1);
 });
