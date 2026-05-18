@@ -79,6 +79,14 @@ export async function handleProjects(
   url: string,
   method: string,
 ): Promise<boolean> {
+  // Strip the query string before path matching. The legacy projMatch
+  // regex below pins to `$` so a URL like `/api/projects/:id/git/diff
+  // ?path=…` would otherwise fail to match and fall through as
+  // "unknown project endpoint" — same trick repo.ts uses for its own
+  // routes. The downstream handlers that need query params re-parse
+  // `req.url` directly, so this strip is purely about dispatch.
+  const qIdx = url.indexOf('?');
+  if (qIdx >= 0) url = url.slice(0, qIdx);
   // ── Projects ───────────────────────────────────────────────────────
   if (url === '/api/projects' && method === 'GET') {
     // Annotate each project with derived flags:
