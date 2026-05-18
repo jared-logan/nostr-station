@@ -7012,6 +7012,126 @@ body.term-expanded .term-bar-toggle .term-chevron {
   text-align: center;
 }
 
+/* ── Changes section (Code tab) ──────────────────────────────────────
+ *
+ * Lists working-tree changes returned by /api/projects/:id/git/status.
+ * Sits above the regular file browser so the user sees what's
+ * uncommitted before they scan committed history. Click a row → diff
+ * loads in the existing preview pane. Hidden when the tree is clean
+ * so the Code tab keeps its old layout exactly for clean repos. */
+.code-changes {
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  overflow: hidden;
+}
+.code-changes-head {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev, var(--bg-card));
+}
+.code-changes-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.code-change-list {
+  display: flex;
+  flex-direction: column;
+}
+.code-change-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12.5px;
+}
+.code-change-row:last-child { border-bottom: none; }
+.code-change-row:hover { background: var(--bg-hover); }
+.code-change-row.active {
+  background: var(--accent-soft);
+  color: var(--text-bright);
+}
+.code-change-row .cc-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-change-row .cc-orig { margin-left: 8px; font-size: 11px; }
+
+/* Status badge — single-letter pill on each Changes row, mirrored
+ * (full word) inside the preview head. Colors match the chips in
+ * the regular pchip family for visual consistency. */
+.cc-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  border: 1px solid transparent;
+}
+.cc-badge.cc-modified  { background: rgba(255,184,0,0.10); color: var(--warn);    border-color: rgba(255,184,0,0.32); }
+.cc-badge.cc-added     { background: rgba( 80,200,120,0.12); color: #6cd28a;     border-color: rgba(80,200,120,0.32); }
+.cc-badge.cc-untracked { background: rgba( 80,200,120,0.06); color: #6cd28a;     border-color: rgba(80,200,120,0.32); }
+.cc-badge.cc-deleted   { background: rgba(255, 80, 80,0.10); color: var(--error); border-color: rgba(255,80,80,0.32); }
+.cc-badge.cc-renamed   { background: var(--accent-soft);    color: var(--accent-bright); border-color: var(--accent-dim); }
+
+/* Make the chip-bar "uncommitted" entry visibly a button — same shape
+ * as the surrounding pchips, with hover affordance + pointer cursor. */
+.pchip-uncommitted {
+  background: rgba(255,184,0,0.08);
+  border: 1px solid rgba(255,184,0,0.32);
+  color: var(--warn);
+  cursor: pointer;
+  font: inherit;
+}
+.pchip-uncommitted:hover { background: rgba(255,184,0,0.16); }
+.pchip-uncommitted .k { color: rgba(255,184,0,0.75); }
+.pchip-uncommitted .v { color: var(--warn); font-weight: 600; }
+
+/* File-browser row decoration when an entry (blob) or any descendant
+ * (tree) has uncommitted changes. Subtle amber tint + small dot next
+ * to the name so the cue is visible without dominating the row. */
+.code-file-row.code-file-dirty .code-file-name { color: var(--warn); }
+.code-file-dirty-dot {
+  margin-left: 6px;
+  color: var(--warn);
+  font-size: 10px;
+  vertical-align: middle;
+}
+
+/* Unified-diff renderer. Hunk header is highlighted; +/- lines tinted
+ * green/red with a subtle background so they're scannable; diff/meta
+ * lines (git diff …, index …, ---, +++) are muted. */
+.code-diff .diff-lines {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.code-diff .diff-lines > div {
+  padding: 0 6px;
+  white-space: pre;
+  min-width: max-content;
+}
+.code-diff .dl       { color: var(--text); }
+.code-diff .dl-meta  { color: var(--muted); }
+.code-diff .dl-hunk  { color: var(--accent-bright); background: var(--accent-soft); padding: 2px 6px; margin: 2px 0; }
+.code-diff .dl-add   { color: #9be0b0; background: rgba( 80,200,120,0.10); }
+.code-diff .dl-del   { color: #ff9c9c; background: rgba(255, 80, 80,0.10); }
+
+.code-untracked { padding: 0; }
+.code-untracked pre { padding: 12px 16px; }
+
 /* Markdown content inside the preview body. Scoped under .code-md so
  * the styles don't leak into other Markdown surfaces (chat overlay,
  * future patch cover-letter renders) — those will add their own
