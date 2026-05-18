@@ -13,13 +13,15 @@ import { useTempHome, resetTempHome } from './_home.js';
 const HOME = useTempHome();
 
 const {
-  ensureConfigDir, seedProjectConfig,
+  ensureConfigDir, ensureUserConfigDir, seedProjectConfig,
   readSystemPromptOverride, writeSystemPromptOverride,
   readProjectContextOverlay, writeProjectContextOverlay,
   readProjectTemplate, writeProjectTemplate,
   readProjectPermissions, writeProjectPermissions,
   readProjectChatOverride, writeProjectChatOverride,
-  readProjectAiConfig,
+  deleteProjectPermissions, deleteProjectChatOverride,
+  readProjectAiConfig, legacyLocalFiles,
+  userConfigDirFor,
   CONFIG_DIRNAME,
 } = await import('../src/lib/project-config.js');
 
@@ -49,41 +51,45 @@ function makeProjectDir(): string {
 
 beforeEach(() => resetTempHome(HOME));
 
-// ── ensureConfigDir + .gitignore ──────────────────────────────────────────
+// ── ensureConfigDir + ensureUserConfigDir ────────────────────────────────
 
-test('ensureConfigDir: creates the dir and gitignore', () => {
+test('ensureConfigDir: creates the shareable dir but no longer writes .gitignore', () => {
   const dir = makeProjectDir();
   const project = makeProject({ path: dir });
   const created = ensureConfigDir(project);
   assert.equal(created, path.join(dir, CONFIG_DIRNAME));
   assert.ok(fs.statSync(created!).isDirectory());
-  const gi = fs.readFileSync(path.join(created!, '.gitignore'), 'utf8');
-  assert.match(gi, /permissions\.json/);
-  assert.match(gi, /chat\.json/);
+  // Auto-managed .gitignore is gone — the files it used to ignore now
+  // live outside the project tree entirely, so there's nothing to
+  // ignore here. We must NOT touch <project>/.nostr-station/.gitignore
+  // because any pre-existing file there may be user-authored.
+  assert.equal(fs.existsSync(path.join(created!, '.gitignore')), false);
 });
 
-test('ensureConfigDir: preserves user customizations + appends required entries', () => {
+test('ensureConfigDir: does not overwrite an existing .gitignore', () => {
   const dir = makeProjectDir();
   const project = makeProject({ path: dir });
   ensureConfigDir(project);
-  // User customizes .gitignore.
   const giPath = path.join(dir, CONFIG_DIRNAME, '.gitignore');
-  fs.writeFileSync(giPath, 'custom\n');
+  fs.writeFileSync(giPath, 'user-custom\n');
   ensureConfigDir(project);
-  const after = fs.readFileSync(giPath, 'utf8');
-  // The user's custom line stays. Required entries (permissions.json,
-  // chat.json, test-identities.json) are appended when absent — load-
-  // bearing for upgrades: a project scaffolded before test-identities
-  // existed would otherwise leak that file to git.
-  assert.match(after, /^custom$/m);
-  assert.match(after, /^permissions\.json$/m);
-  assert.match(after, /^chat\.json$/m);
-  assert.match(after, /^test-identities\.json$/m);
+  assert.equal(fs.readFileSync(giPath, 'utf8'), 'user-custom\n');
 });
 
 test('ensureConfigDir: returns null for path-less project', () => {
   const project = makeProject();
   assert.equal(ensureConfigDir(project), null);
+});
+
+test('ensureUserConfigDir: creates ~/.config/nostr-station/projects/<id>/ at 0o700', () => {
+  const project = makeProject({ id: 'user-cfg-test', path: makeProjectDir() });
+  const created = ensureUserConfigDir(project);
+  assert.equal(created, userConfigDirFor(project));
+  const st = fs.statSync(created);
+  assert.ok(st.isDirectory());
+  // Owner-only permissions; protects nsecs and per-machine preferences
+  // on shared systems.
+  assert.equal(st.mode & 0o777, 0o700);
 });
 
 // ── Round-trip writes ────────────────────────────────────────────────────
@@ -153,25 +159,26 @@ test('template record: returns null for malformed file', () => {
 });
 
 test('permissions: rejects unknown modes on read', () => {
-  const dir = makeProjectDir();
-  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
-  fs.writeFileSync(path.join(dir, CONFIG_DIRNAME, 'permissions.json'), '{"mode":"god-mode"}');
-  const project = makeProject({ path: dir });
+  const project = makeProject({ id: 'perm-bad', path: makeProjectDir() });
+  ensureUserConfigDir(project);
+  fs.writeFileSync(path.join(userConfigDirFor(project), 'permissions.json'), '{"mode":"god-mode"}');
   assert.equal(readProjectPermissions(project), null);
 });
 
-test('permissions: round-trip for each valid mode', () => {
+test('permissions: round-trip writes to user-config dir, not the project tree', () => {
   const dir = makeProjectDir();
-  const project = makeProject({ path: dir });
+  const project = makeProject({ id: 'perm-rt', path: dir });
   for (const mode of ['read-only', 'auto-edit', 'yolo'] as const) {
     writeProjectPermissions(project, { mode });
     assert.deepEqual(readProjectPermissions(project), { mode });
   }
+  // File lives outside the project tree — guarantees no git noise.
+  assert.equal(fs.existsSync(path.join(dir, CONFIG_DIRNAME, 'permissions.json')), false);
+  assert.ok(fs.existsSync(path.join(userConfigDirFor(project), 'permissions.json')));
 });
 
 test('chat override: only persists known fields', () => {
-  const dir = makeProjectDir();
-  const project = makeProject({ path: dir });
+  const project = makeProject({ id: 'chat-rt', path: makeProjectDir() });
   writeProjectChatOverride(project, { provider: 'anthropic', model: 'claude-opus-4-7' } as any);
   const got = readProjectChatOverride(project);
   assert.equal(got!.provider, 'anthropic');
@@ -179,11 +186,65 @@ test('chat override: only persists known fields', () => {
 });
 
 test('chat override: returns null when both fields blank', () => {
-  const dir = makeProjectDir();
-  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
-  fs.writeFileSync(path.join(dir, CONFIG_DIRNAME, 'chat.json'), '{}');
-  const project = makeProject({ path: dir });
+  const project = makeProject({ id: 'chat-blank', path: makeProjectDir() });
+  ensureUserConfigDir(project);
+  fs.writeFileSync(path.join(userConfigDirFor(project), 'chat.json'), '{}');
   assert.equal(readProjectChatOverride(project), null);
+});
+
+test('chat override: delete clears the user-config file', () => {
+  const project = makeProject({ id: 'chat-del', path: makeProjectDir() });
+  writeProjectChatOverride(project, { provider: 'anthropic' });
+  assert.ok(readProjectChatOverride(project));
+  deleteProjectChatOverride(project);
+  assert.equal(readProjectChatOverride(project), null);
+});
+
+// ── Migration: legacy <project>/.nostr-station/{permissions,chat}.json ────
+
+test('migration: untracked legacy permissions.json is copied + deleted', () => {
+  const dir = makeProjectDir();
+  const project = makeProject({ id: 'mig-untracked', path: dir });
+  // Seed legacy file.
+  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
+  fs.writeFileSync(
+    path.join(dir, CONFIG_DIRNAME, 'permissions.json'),
+    '{"mode":"yolo"}',
+  );
+  // Trigger migration via a read.
+  const perms = readProjectPermissions(project);
+  assert.deepEqual(perms, { mode: 'yolo' });
+  // Untracked legacy file should be auto-removed (no git repo here, so
+  // ls-files errors → "untracked" branch).
+  assert.equal(fs.existsSync(path.join(dir, CONFIG_DIRNAME, 'permissions.json')), false);
+  // And the new location now has it.
+  assert.ok(fs.existsSync(path.join(userConfigDirFor(project), 'permissions.json')));
+});
+
+test('migration: tracked legacy chat.json is copied but NOT deleted', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const dir = makeProjectDir();
+  const project = makeProject({ id: 'mig-tracked', path: dir });
+  // Make it a git repo, then commit the legacy file so it's tracked.
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 't@e.l'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'T'], { cwd: dir });
+  fs.mkdirSync(path.join(dir, CONFIG_DIRNAME));
+  fs.writeFileSync(
+    path.join(dir, CONFIG_DIRNAME, 'chat.json'),
+    '{"provider":"anthropic"}',
+  );
+  execFileSync('git', ['add', `${CONFIG_DIRNAME}/chat.json`], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'seed'], { cwd: dir });
+  // Trigger migration.
+  const chat = readProjectChatOverride(project);
+  assert.deepEqual(chat, { provider: 'anthropic' });
+  // Tracked legacy stays — leaves no surprise staged deletion.
+  assert.ok(fs.existsSync(path.join(dir, CONFIG_DIRNAME, 'chat.json')));
+  // New location populated.
+  assert.ok(fs.existsSync(path.join(userConfigDirFor(project), 'chat.json')));
+  // Banner surfaces the leftover.
+  assert.ok(legacyLocalFiles(project).includes('chat.json'));
 });
 
 // ── seedProjectConfig (scaffold-time) ─────────────────────────────────────
@@ -231,8 +292,10 @@ test('seedProjectConfig: works with null template (no-op for template fields)', 
   seedProjectConfig(project, null);
   assert.equal(readProjectTemplate(project), null);
   assert.equal(readProjectContextOverlay(project), null);
-  // But the dir + gitignore are seeded.
-  assert.ok(fs.existsSync(path.join(dir, CONFIG_DIRNAME, '.gitignore')));
+  // The shareable dir is seeded. No gitignore — that file got
+  // retired now that private files don't live here.
+  assert.ok(fs.existsSync(path.join(dir, CONFIG_DIRNAME)));
+  assert.equal(fs.existsSync(path.join(dir, CONFIG_DIRNAME, '.gitignore')), false);
 });
 
 // ── readProjectAiConfig bundle ────────────────────────────────────────────

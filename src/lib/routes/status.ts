@@ -259,6 +259,7 @@ function readAnnouncementRelays(project: Project): string[] {
   if (!project.path) return [];
   try {
     const cached = getCached<{ relays?: string[] }>({
+      projectId:   project.id,
       projectPath: project.path,
       key:         'repo-30617',
       ttlMs:       60 * 60 * 1000,            // mirror REPO_CACHE_TTL_MS
@@ -303,7 +304,7 @@ async function fetchStatusEvents(
   if (relays.length === 0) return { events: [], cached: false, relays: [] };
 
   const aTag = `30617:${coords.pubkey}:${coords.identifier}`;
-  const cacheKey = { projectPath: project.path, key: 'status-163x' };
+  const cacheKey = { projectId: project.id, projectPath: project.path, key: 'status-163x' };
 
   // The per-repo (a-tag) pull is cacheable — it changes slowly and is
   // shared across all rootIds. The per-rootId (e-tag) pull is always
@@ -415,7 +416,7 @@ async function fetchRootAuthors(
   const coords = decodeNgitRemote(project);
   if (!coords) return result;
 
-  const cacheKey = { projectPath: project.path, key: 'root-authors' };
+  const cacheKey = { projectId: project.id, projectPath: project.path, key: 'root-authors' };
   const cached = getCached<CachedRootAuthors>({ ...cacheKey, ttlMs: ROOT_AUTHOR_CACHE_TTL_MS });
   const known = cached?.authors ?? {};
   const need: string[] = [];

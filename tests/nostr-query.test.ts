@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { useTempHome } from './_home.js';
+
+// Cache helpers below resolve `~/.config/nostr-station/projects/<id>/`
+// — pin HOME to a tmpdir so the round-trip tests don't pollute the
+// real user-config dir.
+useTempHome();
 
 const {
   buildNakArgs,
@@ -16,6 +22,12 @@ const {
   getCachedOrFetch,
   queryRelays,
 } = await import('../src/lib/nostr-query.ts');
+
+// Cache is keyed by projectId now. Tests use unique ids so they don't
+// collide with each other under HOME/.config/nostr-station/projects/.
+function makeProjectId(prefix: string): string {
+  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 // ── buildNakArgs ──────────────────────────────────────────────────────────
 
@@ -215,102 +227,123 @@ test('queryRelays: returns empty (no spawn) when relays list is empty', async ()
 
 // ── Cache helpers ────────────────────────────────────────────────────────
 
-function makeProjectDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'nostr-station-cache-'));
+function cacheFileFor(projectId: string, key: string): string {
+  return path.join(os.homedir(), '.config', 'nostr-station', 'projects', projectId, 'cache', `${key}.json`);
 }
 
 test('cache: setCached / getCached round-trip', () => {
-  const dir = makeProjectDir();
-  setCached({ projectPath: dir, key: 'patches' }, { count: 3, items: ['a', 'b', 'c'] });
+  const id = makeProjectId('rt');
+  setCached({ projectId: id, key: 'patches' }, { count: 3, items: ['a', 'b', 'c'] });
   const v = getCached<{ count: number; items: string[] }>({
-    projectPath: dir, key: 'patches',
+    projectId: id, key: 'patches',
   });
   assert.deepEqual(v, { count: 3, items: ['a', 'b', 'c'] });
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('cache: returns null when entry is missing', () => {
-  const dir = makeProjectDir();
-  assert.equal(getCached({ projectPath: dir, key: 'never-set' }), null);
-  fs.rmSync(dir, { recursive: true, force: true });
+  assert.equal(getCached({ projectId: makeProjectId('miss'), key: 'never-set' }), null);
 });
 
 test('cache: returns null when entry is expired', () => {
-  const dir = makeProjectDir();
-  setCached({ projectPath: dir, key: 'stale' }, 'value');
+  const id = makeProjectId('exp');
+  setCached({ projectId: id, key: 'stale' }, 'value');
   // Hand-edit cachedAt to simulate a 2-hour-old entry, then ask with
-  // a 1-hour TTL. (The default TTL would also expire it, but pinning
-  // ttlMs makes the intent obvious.)
-  const file = path.join(dir, '.nostr-station', 'cache', 'stale.json');
+  // a 1-hour TTL.
+  const file = cacheFileFor(id, 'stale');
   const env  = JSON.parse(fs.readFileSync(file, 'utf8'));
   env.cachedAt = Date.now() - 2 * 60 * 60 * 1000;
   fs.writeFileSync(file, JSON.stringify(env));
   assert.equal(
-    getCached({ projectPath: dir, key: 'stale', ttlMs: 60 * 60 * 1000 }),
+    getCached({ projectId: id, key: 'stale', ttlMs: 60 * 60 * 1000 }),
     null,
   );
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('cache: returns null when entry is corrupt', () => {
-  const dir = makeProjectDir();
-  setCached({ projectPath: dir, key: 'broken' }, 'value');
-  const file = path.join(dir, '.nostr-station', 'cache', 'broken.json');
-  fs.writeFileSync(file, '{not json');
-  assert.equal(getCached({ projectPath: dir, key: 'broken' }), null);
-  fs.rmSync(dir, { recursive: true, force: true });
+  const id = makeProjectId('corrupt');
+  setCached({ projectId: id, key: 'broken' }, 'value');
+  fs.writeFileSync(cacheFileFor(id, 'broken'), '{not json');
+  assert.equal(getCached({ projectId: id, key: 'broken' }), null);
 });
 
 test('cache: clearCache deletes the entry', () => {
-  const dir = makeProjectDir();
-  setCached({ projectPath: dir, key: 'gone' }, 'value');
-  clearCache({ projectPath: dir, key: 'gone' });
-  assert.equal(getCached({ projectPath: dir, key: 'gone' }), null);
+  const id = makeProjectId('clear');
+  setCached({ projectId: id, key: 'gone' }, 'value');
+  clearCache({ projectId: id, key: 'gone' });
+  assert.equal(getCached({ projectId: id, key: 'gone' }), null);
   // Idempotent — a second clear on a missing entry is a no-op.
-  clearCache({ projectPath: dir, key: 'gone' });
-  fs.rmSync(dir, { recursive: true, force: true });
+  clearCache({ projectId: id, key: 'gone' });
+});
+
+test('cache: writes to user-config dir, never to the project tree', () => {
+  const id = makeProjectId('isolation');
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-isolation-'));
+  // Pass projectPath as a migration hint — the cache must STILL land
+  // in the user-config dir, not in projectDir/.nostr-station/cache/.
+  setCached({ projectId: id, projectPath: projectDir, key: 'isolated' }, 'v');
+  assert.equal(
+    fs.existsSync(path.join(projectDir, '.nostr-station', 'cache')),
+    false,
+    'cache must not be written under the project tree',
+  );
+  assert.ok(fs.existsSync(cacheFileFor(id, 'isolated')));
+  fs.rmSync(projectDir, { recursive: true, force: true });
+});
+
+test('cache: migrates legacy <project>/.nostr-station/cache/ on first access', () => {
+  const id = makeProjectId('migrate');
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-migrate-'));
+  const legacyDir = path.join(projectDir, '.nostr-station', 'cache');
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(legacyDir, 'legacy.json'),
+    JSON.stringify({ cachedAt: Date.now(), value: { legacy: true } }),
+  );
+  const v = getCached<{ legacy: boolean }>({
+    projectId: id, projectPath: projectDir, key: 'legacy',
+  });
+  assert.deepEqual(v, { legacy: true });
+  // Untracked legacy dir (no git repo here) gets auto-removed.
+  assert.equal(fs.existsSync(legacyDir), false);
+  fs.rmSync(projectDir, { recursive: true, force: true });
 });
 
 test('cache: rejects unsafe keys (path traversal, special chars)', () => {
-  const dir = makeProjectDir();
+  const id = makeProjectId('safe');
   for (const bad of ['../escape', 'has/slash', 'has\\back', 'has space', '', 'a'.repeat(65)]) {
     assert.throws(
-      () => setCached({ projectPath: dir, key: bad }, 'x'),
+      () => setCached({ projectId: id, key: bad }, 'x'),
       /unsafe cache key/,
       `should reject ${JSON.stringify(bad)}`,
     );
   }
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('getCachedOrFetch: skips fetcher on cache hit, calls on miss', async () => {
-  const dir = makeProjectDir();
+  const id = makeProjectId('gof');
   let fetchCount = 0;
   const fetcher = async () => { fetchCount++; return { hello: 'world' }; };
 
   // First call → miss, fetcher runs.
-  const a = await getCachedOrFetch({ projectPath: dir, key: 'gof' }, fetcher);
+  const a = await getCachedOrFetch({ projectId: id, key: 'gof' }, fetcher);
   assert.deepEqual(a, { hello: 'world' });
   assert.equal(fetchCount, 1);
 
   // Second call → hit, fetcher not invoked again.
-  const b = await getCachedOrFetch({ projectPath: dir, key: 'gof' }, fetcher);
+  const b = await getCachedOrFetch({ projectId: id, key: 'gof' }, fetcher);
   assert.deepEqual(b, { hello: 'world' });
   assert.equal(fetchCount, 1);
-
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('getCachedOrFetch: fetcher rejection propagates and skips cache write', async () => {
-  const dir = makeProjectDir();
+  const id = makeProjectId('rej');
   await assert.rejects(
     () => getCachedOrFetch(
-      { projectPath: dir, key: 'fail' },
+      { projectId: id, key: 'fail' },
       async () => { throw new Error('nope'); },
     ),
     /nope/,
   );
   // Nothing should have been persisted.
-  assert.equal(getCached({ projectPath: dir, key: 'fail' }), null);
-  fs.rmSync(dir, { recursive: true, force: true });
+  assert.equal(getCached({ projectId: id, key: 'fail' }), null);
 });

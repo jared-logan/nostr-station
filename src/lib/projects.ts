@@ -213,8 +213,12 @@ export function projectEnvContract(project: Project): Record<string, string> {
   out.NOSTR_STATION_BLOSSOM    = block.blossoms[0] || '';
   out.NOSTR_STATION_BLOSSOMS   = block.blossoms.join(',');
   if (project.path) {
-    out.NOSTR_STATION_TEST_IDENTITIES_PATH =
-      path.join(project.path, '.nostr-station', 'test-identities.json');
+    // Mirrors userConfigDirFor() in project-config.ts. Inlined to keep
+    // projects.ts free of upward imports from project-config (which
+    // already depends on Project's type).
+    out.NOSTR_STATION_TEST_IDENTITIES_PATH = path.join(
+      configDir(), 'projects', project.id, 'test-identities.json',
+    );
   }
   return out;
 }

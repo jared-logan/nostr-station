@@ -30,7 +30,7 @@ function proj(name: string) {
 
 // ── Storage + CRUD ────────────────────────────────────────────────────────
 
-test('addIdentity: creates file at mode 0600 + omits nsec from list', () => {
+test('addIdentity: creates file at mode 0600 in user-config dir + omits nsec from list', async () => {
   const p = proj('ti-create');
   const r = TI.addIdentity(p, { label: 'teacher-alice', role: 'teacher' });
   assert.equal(r.ok, true);
@@ -38,9 +38,18 @@ test('addIdentity: creates file at mode 0600 + omits nsec from list', () => {
   assert.ok(r.result.nsec.startsWith('nsec1'));
   assert.match(r.result.pubkey, /^[0-9a-f]{64}$/);
 
-  const fp = path.join(p.path!, '.nostr-station', 'test-identities.json');
+  // @ts-expect-error — runtime import
+  const PC = await import('../src/lib/project-config.ts');
+  const fp = path.join(PC.userConfigDirFor(p), 'test-identities.json');
   const mode = fs.statSync(fp).mode & 0o777;
   assert.equal(mode, 0o600, `file mode should be 0600, got 0${mode.toString(8)}`);
+  // Critical invariant: nsecs never live in the project tree, so
+  // they can never be reached by git add, ngit push, etc.
+  assert.equal(
+    fs.existsSync(path.join(p.path!, '.nostr-station', 'test-identities.json')),
+    false,
+    'test-identities.json must not be written to the project tree',
+  );
 
   const listing = TI.listIdentities(p);
   assert.equal(listing.ok, true);
@@ -95,10 +104,12 @@ test('regenerateAll: wipes every identity', () => {
   assert.equal(after.ok && after.identities.length, 0);
 });
 
-test('listIdentities: refuses to load a file with wrong mode', () => {
+test('listIdentities: refuses to load a file with wrong mode', async () => {
   const p = proj('ti-mode');
   TI.addIdentity(p, { label: 'a', role: 'r' });
-  const fp = path.join(p.path!, '.nostr-station', 'test-identities.json');
+  // @ts-expect-error — runtime import
+  const PC = await import('../src/lib/project-config.ts');
+  const fp = path.join(PC.userConfigDirFor(p), 'test-identities.json');
   fs.chmodSync(fp, 0o644);
   const r = TI.listIdentities(p);
   assert.equal(r.ok, false);
@@ -106,6 +117,37 @@ test('listIdentities: refuses to load a file with wrong mode', () => {
     assert.equal(r.reason, 'bad-mode');
     assert.equal(r.mode, 0o644);
   }
+});
+
+test('migration: legacy <project>/.nostr-station/test-identities.json is moved', async () => {
+  const p = proj('ti-migrate');
+  // Seed legacy file with the same on-disk shape addIdentity writes.
+  const legacy = path.join(p.path!, '.nostr-station', 'test-identities.json');
+  fs.mkdirSync(path.dirname(legacy), { recursive: true });
+  fs.writeFileSync(legacy, JSON.stringify({
+    identities: [{
+      id: 'legacy-1', label: 'legacy-bob', role: 'student',
+      npub: 'npub1q'.padEnd(63, 'x'),
+      pubkey: 'aa'.repeat(32),
+      createdAt: 1700000000000,
+      nsec: 'nsec1' + 'b'.repeat(58),
+    }],
+    updatedAt: 1700000000000,
+  }), { mode: 0o600 });
+
+  // First read triggers migration.
+  const r = TI.listIdentities(p);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.identities.length, 1);
+
+  // @ts-expect-error — runtime import
+  const PC = await import('../src/lib/project-config.ts');
+  const dest = path.join(PC.userConfigDirFor(p), 'test-identities.json');
+  assert.ok(fs.existsSync(dest), 'migrated file should exist in user-config dir');
+  assert.equal(fs.statSync(dest).mode & 0o777, 0o600);
+  // Untracked legacy → auto-deleted (no git repo set up here, so
+  // ls-files errors and we hit the "safe to delete" branch).
+  assert.equal(fs.existsSync(legacy), false);
 });
 
 test('getNsec: returns nsec for known id, null otherwise', () => {

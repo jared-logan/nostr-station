@@ -25,6 +25,7 @@
  */
 import { spawn, execFileSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import WebSocket from 'ws';
 import { findBin } from './detect.js';
@@ -302,24 +303,39 @@ export async function queryRelays(opts: RelayQueryOptions): Promise<RelayQueryRe
 
 // ── Per-project event cache ───────────────────────────────────────────────
 //
-// JSON-file cache rooted at `<projectPath>/.nostr-station/cache/<key>.json`.
+// JSON-file cache rooted at
+// `~/.config/nostr-station/projects/<projectId>/cache/<key>.json`.
 // Phase 1+ uses this to avoid re-querying relays for slow-changing data
 // like the kind-30617 announcement on every Code-tab open.
+//
+// Lives in user-config (not in the project tree) so the cache can never
+// dirty the user's repo, regardless of what their .gitignore looks like
+// or how aggressive `git add -A` is. Removes the need for the previous
+// auto-untrack / auto-write-gitignore machinery this module used to
+// carry. Legacy `<project>/.nostr-station/cache/` is migrated lazily on
+// first read or write.
 //
 // Single envelope shape `{cachedAt, value}` so TTL is enforced uniformly
 // and a missing/corrupt entry collapses to `null` (no exception bubbling
 // into request handlers).
 
-const CACHE_DIR_NAME = path.join('.nostr-station', 'cache');
+const CACHE_DIR_NAME = 'cache';
 const DEFAULT_CACHE_TTL_MS = 60 * 60 * 1000;
 // `key` becomes a filename — restrict to a conservative charset rather
 // than escaping, so we can't be talked into ../ traversal by a future
 // caller passing a derived string.
 const SAFE_KEY = /^[A-Za-z0-9._-]{1,64}$/;
 
+/**
+ * Cache scope. Always identified by `projectId` (UUID) since the cache
+ * lives outside the project tree now. `projectPath` is accepted as an
+ * optional hint so we can find-and-migrate any legacy
+ * `<projectPath>/.nostr-station/cache/` from before the move.
+ */
 export interface CacheKey {
-  projectPath: string;
-  key:         string;
+  projectId:    string;
+  projectPath?: string;
+  key:          string;
 }
 
 export interface CacheOptions extends CacheKey {
@@ -331,14 +347,77 @@ interface CacheEnvelope<T> {
   value:    T;
 }
 
+function cacheRoot(projectId: string): string {
+  return path.join(os.homedir(), '.config', 'nostr-station', 'projects', projectId, CACHE_DIR_NAME);
+}
+
 function cachePath(k: CacheKey): string {
   if (!SAFE_KEY.test(k.key)) {
     throw new Error(`unsafe cache key (must match ${SAFE_KEY}): ${k.key}`);
   }
-  return path.join(k.projectPath, CACHE_DIR_NAME, `${k.key}.json`);
+  return path.join(cacheRoot(k.projectId), `${k.key}.json`);
+}
+
+// One-time-per-process per-project migration of the legacy
+// `<projectPath>/.nostr-station/cache/` directory into the new
+// user-config location. Recursively copies entries that don't already
+// exist in the destination, then removes the legacy dir when it's
+// untracked. Tracked legacy entries surface through
+// project-config.ts's legacyLocalFiles() so the UI can nudge the user.
+const cacheMigrated = new Set<string>();
+
+function migrateLegacyCache(projectId: string, projectPath?: string): void {
+  if (!projectPath) return;
+  if (cacheMigrated.has(projectId)) return;
+  cacheMigrated.add(projectId);
+
+  const legacyDir = path.join(projectPath, '.nostr-station', CACHE_DIR_NAME);
+  if (!fs.existsSync(legacyDir)) return;
+
+  const destDir = cacheRoot(projectId);
+  try {
+    fs.mkdirSync(destDir, { recursive: true, mode: 0o700 });
+    for (const entry of fs.readdirSync(legacyDir)) {
+      const from = path.join(legacyDir, entry);
+      const to   = path.join(destDir, entry);
+      if (fs.existsSync(to)) continue;
+      try {
+        const buf = fs.readFileSync(from);
+        fs.writeFileSync(to, buf);
+      } catch { /* best-effort per-file */ }
+    }
+  } catch { /* best-effort */ }
+
+  // Remove the legacy directory when nothing in it is tracked. Three
+  // "safe to delete" cases that look different but are all OK:
+  //   - not a git repo at all                 (nothing CAN be tracked)
+  //   - git binary missing                    (we can't check; the
+  //                                            project tree is the
+  //                                            same as the not-a-repo
+  //                                            case — files were
+  //                                            never added to git)
+  //   - git ls-files returns empty            (no tracked entries)
+  // The ONLY case we must avoid is "some entry under
+  // .nostr-station/cache/ is tracked" — there, deleting would create a
+  // surprise staged deletion. The user gets a banner instead.
+  let safeToDelete = true;
+  const gitBin = findBin('git');
+  if (gitBin) {
+    try {
+      const tracked = execFileSync(
+        gitBin, ['ls-files', '--', '.nostr-station/cache'],
+        { cwd: projectPath, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 },
+      ).toString().trim();
+      if (tracked) safeToDelete = false;
+    } catch { /* not a repo / other error — same as no-git: safe */ }
+  }
+  if (safeToDelete) {
+    try { fs.rmSync(legacyDir, { recursive: true, force: true }); } catch {}
+  }
 }
 
 export function getCached<T>(opts: CacheOptions): T | null {
+  migrateLegacyCache(opts.projectId, opts.projectPath);
   const ttl  = opts.ttlMs ?? DEFAULT_CACHE_TTL_MS;
   const file = cachePath(opts);
   let raw: string;
@@ -350,94 +429,13 @@ export function getCached<T>(opts: CacheOptions): T | null {
   return env.value;
 }
 
-// Per-process memo of projects we've already inspected for tracked
-// cache files. Untracking is a one-time cleanup; once we've checked a
-// project (whether we found tracked files or not), no point re-running
-// `git ls-files` on every subsequent cache write.
-const untrackInspected = new Set<string>();
-
-// If the project's index has files under .nostr-station/cache/, stage
-// their removal AND commit it, scoped tightly to that pathspec so user
-// WIP elsewhere is never touched. Combined with the .gitignore we
-// write below, this turns a "permanently dirty because of dashboard
-// cache" project into a clean working tree fully automatically — the
-// user never has to know cleanup was needed, never has to think about
-// it in their snapshot, never has to open a terminal.
-//
-// Path-scoped commit: `git commit -- .nostr-station/cache/` only
-// captures changes affecting that pathspec, so the user's other
-// staged/unstaged work is preserved. The only thing in scope is our
-// own `git rm --cached` from a moment earlier.
-//
-// Identity requirement: `git commit` needs user.name + user.email.
-// ngit-scan clones get seeded by seedRepoGitIdentityIfMissing on the
-// clone path, and projects scaffolded through the dashboard inherit
-// the station identity. Truly identity-less projects (adopted from a
-// path with no global git config) will fail at the commit step; the
-// rm --cached still stands, and the user's next snapshot picks it
-// up the same way it would have without this auto-commit. Either
-// way, no terminal-poking required from the user.
-//
-// Safe across edge cases: not-a-git-repo, missing git binary, empty
-// index — all surface as a non-zero exit / empty stdout and we no-op.
-function maybeUntrackCacheFiles(projectPath: string): void {
-  if (untrackInspected.has(projectPath)) return;
-  untrackInspected.add(projectPath);
-
-  const gitBin = findBin('git');
-  if (!gitBin) return;
-
-  try {
-    const tracked = execFileSync(
-      gitBin, ['ls-files', '.nostr-station/cache'],
-      { cwd: projectPath, stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 },
-    ).toString().trim();
-    if (!tracked) return; // Nothing tracked → no cleanup needed.
-
-    execFileSync(
-      gitBin,
-      ['rm', '--cached', '-r', '--ignore-unmatch', '.nostr-station/cache'],
-      { cwd: projectPath, stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000 },
-    );
-
-    // Path-scoped commit — only the cache deletions, not user WIP.
-    // Best-effort: swallow if identity isn't configured. The rm
-    // --cached is still staged; the next snapshot would commit it.
-    try {
-      execFileSync(
-        gitBin,
-        ['commit', '-m', 'chore: stop tracking nostr-station cache files', '--', '.nostr-station/cache'],
-        { cwd: projectPath, stdio: ['ignore', 'ignore', 'ignore'], timeout: 5000 },
-      );
-    } catch { /* identity missing, nothing to commit, etc. — fall through */ }
-  } catch {
-    // best-effort — not a git repo, ls-files errored, anything: no-op.
-  }
-}
-
 export function setCached<T>(opts: CacheKey, value: T): void {
+  migrateLegacyCache(opts.projectId, opts.projectPath);
   const file = cachePath(opts);
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o755 });
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const env: CacheEnvelope<T> = { cachedAt: Date.now(), value };
-    fs.writeFileSync(file, JSON.stringify(env, null, 2), { mode: 0o644 });
-    // Idempotent .gitignore at .nostr-station/.gitignore so the cache
-    // dir is never staged by snapshot / commit. Without this, every
-    // dashboard relay-poll rewrites these JSON files, git sees the
-    // project as dirty forever, and snapshots accumulate noise commits
-    // for cache deltas that the user never asked to track.
-    const ignorePath = path.join(opts.projectPath, '.nostr-station', '.gitignore');
-    const desired = 'cache/\n';
-    let needsWrite = true;
-    try { needsWrite = fs.readFileSync(ignorePath, 'utf8') !== desired; } catch { /* missing → write */ }
-    if (needsWrite) {
-      try { fs.writeFileSync(ignorePath, desired, { mode: 0o644 }); } catch { /* best-effort */ }
-    }
-    // For projects that committed cache files BEFORE the .gitignore
-    // landed, stage their untracking once per process lifetime. The
-    // .gitignore alone can't help these — git keeps tracking what's
-    // already in the index regardless of ignore rules.
-    maybeUntrackCacheFiles(opts.projectPath);
+    fs.writeFileSync(file, JSON.stringify(env, null, 2), { mode: 0o600 });
   } catch {
     // best-effort — a cache write failure should never break the query
     // path. The next call will just re-query relays.

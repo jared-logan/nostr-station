@@ -57,6 +57,8 @@ import {
   ensureConfigDir, readProjectAiConfig,
   writeSystemPromptOverride, writeProjectContextOverlay,
   writeProjectPermissions, writeProjectChatOverride,
+  deleteSystemPromptOverride, deleteProjectContextOverlay,
+  deleteProjectPermissions, deleteProjectChatOverride,
 } from '../project-config.js';
 import {
   allocatePort as allocateDevServerPort,
@@ -453,22 +455,23 @@ export async function handleProjects(
       }
       try {
         ensureConfigDir(project);
-        // systemPrompt: string → write; null → remove file; undefined → ignore.
+        // For each field: string → write; null → clear; undefined → ignore.
+        // The delete helpers know whether their target file lives in the
+        // shareable `<project>/.nostr-station/` dir or the per-user
+        // `~/.config/nostr-station/projects/<id>/` dir, so the route
+        // doesn't have to know that distinction.
         if (parsed.systemPrompt === null) {
-          const p = path.join(project.path, '.nostr-station', 'system-prompt.md');
-          try { fs.unlinkSync(p); } catch {}
+          deleteSystemPromptOverride(project);
         } else if (typeof parsed.systemPrompt === 'string') {
           writeSystemPromptOverride(project, parsed.systemPrompt);
         }
         if (parsed.projectContext === null) {
-          const p = path.join(project.path, '.nostr-station', 'project-context.md');
-          try { fs.unlinkSync(p); } catch {}
+          deleteProjectContextOverlay(project);
         } else if (typeof parsed.projectContext === 'string') {
           writeProjectContextOverlay(project, parsed.projectContext);
         }
         if (parsed.permissions === null) {
-          const p = path.join(project.path, '.nostr-station', 'permissions.json');
-          try { fs.unlinkSync(p); } catch {}
+          deleteProjectPermissions(project);
         } else if (parsed.permissions && typeof parsed.permissions === 'object'
                    && (parsed.permissions.mode === 'read-only'
                        || parsed.permissions.mode === 'auto-edit'
@@ -476,8 +479,7 @@ export async function handleProjects(
           writeProjectPermissions(project, { mode: parsed.permissions.mode });
         }
         if (parsed.chat === null) {
-          const p = path.join(project.path, '.nostr-station', 'chat.json');
-          try { fs.unlinkSync(p); } catch {}
+          deleteProjectChatOverride(project);
         } else if (parsed.chat && typeof parsed.chat === 'object') {
           const ch: { provider?: string; model?: string } = {};
           if (typeof parsed.chat.provider === 'string') ch.provider = parsed.chat.provider;

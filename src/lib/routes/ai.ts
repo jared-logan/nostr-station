@@ -42,7 +42,7 @@ import {
   type ApprovalDecision,
 } from '../ai-tools/approval-gate.js';
 import type { ToolContext } from '../ai-tools/index.js';
-import { readProjectPermissions } from '../project-config.js';
+import { readProjectPermissions, readProjectChatOverride } from '../project-config.js';
 import { getKeychain } from '../keychain.js';
 import { getProject } from '../projects.js';
 import { readBody } from './_shared.js';
@@ -769,17 +769,14 @@ export async function handleAi(
       res.end();
     };
 
-    // Resolution order: explicit > project override > defaults.chat.
-    // Project override is read from projects.json via getProject(); the
-    // `aiDefaults` field is optional and only gets populated when a user
-    // explicitly scopes a different provider per-project.
+    // Resolution order: explicit > per-project chat.json > defaults.chat.
+    // Per-project override lives in ~/.config/nostr-station/projects/<id>/
+    // chat.json — written by the Settings drawer's AI configuration
+    // section (PUT /api/projects/:id/ai-config).
     const cfg = readAiConfig();
+    const chatOverride = project ? readProjectChatOverride(project) : null;
     let providerId: string | null = explicit;
-    if (!providerId && projectId) {
-      const p = getProject(projectId);
-      const pd = (p as any)?.aiDefaults?.chat;
-      if (typeof pd === 'string') providerId = pd;
-    }
+    if (!providerId && chatOverride?.provider) providerId = chatOverride.provider;
     if (!providerId) providerId = cfg.defaults.chat ?? null;
 
     if (!providerId) {
@@ -818,14 +815,22 @@ export async function handleAi(
     }
 
     // Resolution order for model + baseUrl:
-    //   explicit request field > ai-config override > registry default.
-    // Explicit model lets the Chat dropdown's current value take
-    // effect immediately — no race with the async persistModelChange
-    // POST that also updates ai-config. Empty baseUrl only valid for
-    // anthropic-native.
-    const entry     = cfg.providers[providerId];
-    const baseUrl   = entry?.baseUrl ?? provider.baseUrl;
-    const model     = explicitModel ?? entry?.model ?? provider.defaultModel;
+    //   explicit request field > per-project chat.json model
+    //   > ai-config override > registry default.
+    // Per-project chat.json only takes effect when the override's
+    // provider matches the resolved providerId — switching providers
+    // shouldn't drag an unrelated model id along (a Claude model name
+    // pinned in chat.json must not leak through to an OpenAI provider
+    // selection). Explicit model lets the Chat dropdown's current value
+    // take effect immediately — no race with the async
+    // persistModelChange POST that also updates ai-config. Empty
+    // baseUrl only valid for anthropic-native.
+    const entry        = cfg.providers[providerId];
+    const baseUrl      = entry?.baseUrl ?? provider.baseUrl;
+    const overrideModel = (chatOverride?.provider === providerId)
+      ? chatOverride?.model
+      : undefined;
+    const model     = explicitModel ?? overrideModel ?? entry?.model ?? provider.defaultModel;
     const isAnth    = provider.flavor === 'anthropic';
 
     // Build the context block + merge with any caller-supplied system

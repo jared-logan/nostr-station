@@ -5,15 +5,23 @@
  * app code during local development to simulate multiple users without
  * burning real social capital on disposable accounts.
  *
- * Storage: `<project>/.nostr-station/test-identities.json` (mode 0600,
- * gitignored). Plain JSON, intentionally human-inspectable — the nsecs
- * are not encrypted on disk; the safety story is the `client` tag
- * (forced into every event signed by these keys) plus the local-only
- * relay write-gating and the promote-time refusal. See:
+ * Storage: `~/.config/nostr-station/projects/<id>/test-identities.json`
+ * (mode 0600). Lives in user-config (not in the project tree) so the
+ * nsecs can never be reached by `git add`, ngit push, or any sweep that
+ * a project's own .gitignore might miss. Plain JSON, intentionally
+ * human-inspectable — the nsecs are not encrypted on disk; the safety
+ * story is the `client` tag (forced into every event signed by these
+ * keys) plus the local-only relay write-gating and the promote-time
+ * refusal. See:
  *
  *   - src/lib/local-signer.ts        — forces the "client" tag at sign time
  *   - src/relay/index.ts             — refuses non-loopback publish of tagged events
  *   - src/lib/promote.ts (Phase E)   — refuses to ever publish to prod
+ *
+ * Legacy migration: pre-2026-05 projects stored this at
+ * `<project>/.nostr-station/test-identities.json`. `migrateLegacy()` runs
+ * once per process per project on the read path and copies the legacy
+ * file (preserving 0600) before deleting it when untracked in git.
  *
  * On-disk shape (kept narrow so a user editing the file by hand can do so):
  *
@@ -29,11 +37,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import WebSocket from 'ws';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { nip19 } from 'nostr-tools';
 import type { Project } from './projects.js';
-import { CONFIG_DIRNAME, ensureConfigDir } from './project-config.js';
+import { CONFIG_DIRNAME, userConfigDirFor, ensureUserConfigDir } from './project-config.js';
 import { getWhitelistRef, getInprocRelayPort } from './routes/_shared.js';
 import { signEventWithLocalKey } from './local-signer.js';
 
@@ -66,10 +75,57 @@ interface PersistedFile {
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────
+//
+// `fileFor` now returns a user-config path regardless of project.path
+// (project.id is always set). We keep returning `null` only for the
+// edge case where the project has no local path at all — addIdentity()
+// and friends still refuse there, because callers (UI, signing) need
+// SOME notion of "this project lives on disk" to be meaningful.
 
 function fileFor(project: Project): string | null {
   if (!project.path) return null;
-  return path.join(project.path, CONFIG_DIRNAME, FILE_NAME);
+  return path.join(userConfigDirFor(project), FILE_NAME);
+}
+
+// One-time-per-process per-project copy of a legacy
+// `<project>/.nostr-station/test-identities.json` into the new
+// user-config location, with the legacy file deleted afterwards when
+// it's untracked in git. Tracked legacy files are left alone — surface
+// via project-config's legacyLocalFiles() so the UI can nudge for a
+// deliberate `git rm`.
+const legacyMigrated = new Set<string>();
+
+function migrateLegacy(project: Project): void {
+  if (!project.path) return;
+  if (legacyMigrated.has(project.id)) return;
+  legacyMigrated.add(project.id);
+
+  const legacy = path.join(project.path, CONFIG_DIRNAME, FILE_NAME);
+  const dest   = fileFor(project);
+  if (!dest) return;
+  try {
+    if (!fs.existsSync(dest) && fs.existsSync(legacy)) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+      const data = fs.readFileSync(legacy);
+      fs.writeFileSync(dest, data, { mode: STRICT_MODE });
+      try { fs.chmodSync(dest, STRICT_MODE); } catch {}
+    }
+    if (fs.existsSync(legacy)) {
+      // git ls-files exits non-zero when the file isn't tracked.
+      let tracked = false;
+      try {
+        execFileSync('git', ['ls-files', '--error-unmatch', '--', `${CONFIG_DIRNAME}/${FILE_NAME}`], {
+          cwd: project.path,
+          stdio: ['ignore', 'ignore', 'ignore'],
+          timeout: 2000,
+        });
+        tracked = true;
+      } catch { /* untracked or not a repo */ }
+      if (!tracked) {
+        try { fs.unlinkSync(legacy); } catch {}
+      }
+    }
+  } catch { /* best-effort */ }
 }
 
 function readFileStrict(p: string): { ok: true; data: PersistedFile } | { ok: false; reason: 'missing' | 'bad-mode' | 'bad-json'; mode?: number } {
@@ -110,6 +166,7 @@ export type LoadResult =
 export function listIdentities(project: Project): LoadResult {
   const fp = fileFor(project);
   if (!fp) return { ok: false, reason: 'no-path' };
+  migrateLegacy(project);
   const r = readFileStrict(fp);
   if (!r.ok) {
     if (r.reason === 'missing') return { ok: true, identities: [] };
@@ -139,7 +196,8 @@ export function addIdentity(project: Project, input: AddInput): { ok: true; resu
   const fp = fileFor(project);
   if (!fp) return { ok: false, error: 'project has no local path' };
   if (!input.label || !input.label.trim()) return { ok: false, error: 'label is required' };
-  ensureConfigDir(project);
+  migrateLegacy(project);
+  ensureUserConfigDir(project);
 
   let current: PersistedFile = { identities: [], updatedAt: Date.now() };
   const existing = readFileStrict(fp);
@@ -188,6 +246,7 @@ export function addIdentity(project: Project, input: AddInput): { ok: true; resu
 export function removeIdentity(project: Project, id: string): { ok: true; pubkey: string } | { ok: false; error: string } {
   const fp = fileFor(project);
   if (!fp) return { ok: false, error: 'project has no local path' };
+  migrateLegacy(project);
   const existing = readFileStrict(fp);
   if (!existing.ok) {
     if (existing.reason === 'missing') return { ok: false, error: 'no test identities for this project' };
@@ -209,6 +268,7 @@ export function removeIdentity(project: Project, id: string): { ok: true; pubkey
 export function regenerateAll(project: Project): { ok: true; cleared: number } | { ok: false; error: string } {
   const fp = fileFor(project);
   if (!fp) return { ok: false, error: 'project has no local path' };
+  migrateLegacy(project);
   const existing = readFileStrict(fp);
   if (!existing.ok && existing.reason !== 'missing') {
     return { ok: false, error: `refusing to wipe — file is ${existing.reason}` };
@@ -225,6 +285,7 @@ export function regenerateAll(project: Project): { ok: true; cleared: number } |
 export function getNsec(project: Project, id: string): string | null {
   const fp = fileFor(project);
   if (!fp) return null;
+  migrateLegacy(project);
   const existing = readFileStrict(fp);
   if (!existing.ok) return null;
   const rec = existing.data.identities.find(i => i.id === id);
@@ -318,6 +379,7 @@ export function listAllTestPubkeys(projects: Project[]): Array<{ pubkey: string;
   for (const p of projects) {
     const fp = fileFor(p);
     if (!fp) continue;
+    migrateLegacy(p);
     const r = readFileStrict(fp);
     if (!r.ok) continue;
     for (const id of r.data.identities) out.push({ pubkey: id.pubkey, projectId: p.id });
