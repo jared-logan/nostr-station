@@ -467,7 +467,7 @@ async function fetchPatchEvents(
   if (!coords || !project.path) {
     return { events: [], cached: false, diagnostics: null };
   }
-  const cacheKey = { projectPath: project.path, key: 'patches-1617' };
+  const cacheKey = { projectId: project.id, projectPath: project.path, key: 'patches-1617' };
   if (!refresh) {
     const cached = getCached<CachedPatchIndex>({ ...cacheKey, ttlMs: PATCHES_CACHE_TTL_MS });
     if (cached) return { events: cached.events, cached: true, diagnostics: null };

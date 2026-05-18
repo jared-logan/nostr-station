@@ -10328,7 +10328,10 @@ const ProjectsPanel = (() => {
         <div class="muted">
           Per-project overrides for the Chat pane. Empty fields inherit
           the station defaults from <a href="#config">Config</a>.
-          Stored at <code>${escapeHtml(p.path || '<no path>')}/.nostr-station/</code>.
+          Shareable settings (system prompt, project context, template)
+          live in <code>.nostr-station/</code>; private settings
+          (permissions, model override, test identities) live in your
+          user config dir so they never touch git.
         </div>
         <div class="pcfg-body">loading…</div>
       </div>
@@ -10852,8 +10855,11 @@ const ProjectsPanel = (() => {
         </div>
       `;
       // No server-side "fix permissions" endpoint yet — point user at the path.
+      // Test identities now live in the user config dir, not under the
+      // project tree. Path is constructed from the same template the
+      // server uses (userConfigDirFor in src/lib/project-config.ts).
       root.querySelector('.tu-fix-perms')?.addEventListener('click', () => {
-        const fp = `${p.path}/.nostr-station/test-identities.json`;
+        const fp = `~/.config/nostr-station/projects/${p.id}/test-identities.json`;
         toast('Run in your terminal',
           `chmod 600 "${fp}"`, 'warn');
       });
@@ -11077,8 +11083,33 @@ const ProjectsPanel = (() => {
            Save below to migrate it under <code>.nostr-station/</code> (the legacy file stays — delete it manually when ready).
          </div>` : '';
 
+    // Surfaces files that USED to live in .nostr-station/ but moved to
+    // the user config dir, and which we couldn't auto-remove because
+    // they're tracked in git. The user needs to git-rm them deliberately
+    // — auto-deleting tracked files would create a surprise staged
+    // deletion in their working tree.
+    const legacyFiles = bundle.legacyLocalFiles || [];
+    const legacyFilesBanner = legacyFiles.length
+      ? `<div class="callout warn" style="margin-bottom:10px">
+           <strong>Legacy private files still tracked in git.</strong>
+           These moved to your user config dir, but the copies in
+           <code>.nostr-station/</code> are tracked and need a deliberate
+           <code>git rm</code>:
+           <ul style="margin:6px 0 4px 18px">
+             ${legacyFiles.map(f => `<li><code>.nostr-station/${escapeHtml(f)}</code></li>`).join('')}
+           </ul>
+           ${legacyFiles.includes('test-identities.json') ? `
+             <div style="color:var(--err);font-weight:600;margin-top:8px">
+               ⚠ test-identities.json contains private keys (nsecs). If
+               it has been pushed to any remote, treat these identities
+               as compromised — use "Reset all" below to regenerate.
+             </div>
+           ` : ''}
+         </div>` : '';
+
     root.innerHTML = `
       ${legacyBanner}
+      ${legacyFilesBanner}
       <div class="pcfg-row">
         <div class="pcfg-label">Template</div>
         <div class="pcfg-value">${tmplChip}</div>

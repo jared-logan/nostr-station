@@ -273,7 +273,7 @@ async function fetchIssuesInbox(
 ): Promise<{ events: NostrEvent[]; cached: boolean; diagnostics: any | null }> {
   const coords = decodeNgitRemote(project);
   if (!coords || !project.path) return { events: [], cached: false, diagnostics: null };
-  const cacheKey = { projectPath: project.path, key: 'issues-inbox' };
+  const cacheKey = { projectId: project.id, projectPath: project.path, key: 'issues-inbox' };
   if (!refresh) {
     const cached = getCached<CachedInbox>({ ...cacheKey, ttlMs: ISSUES_CACHE_TTL_MS });
     if (cached) return { events: cached.events, cached: true, diagnostics: null };

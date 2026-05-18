@@ -1,25 +1,34 @@
 /**
- * Per-project AI configuration directory — `<project>/.nostr-station/`.
+ * Per-project AI configuration — split across two directories:
  *
- * Every project gets a small dot-dir at its root that holds editable AI
- * config: a system-prompt override, a project-context overlay, the
- * template that scaffolded it, the permissions mode, and a per-project
- * provider/model override. Resolution falls through global defaults
- * (~/.config/nostr-station/) and ultimately the built-in seed in
- * `editor.ts`, so empty / absent files mean "inherit the next layer."
- *
- *   <project>/.nostr-station/
+ *   <project>/.nostr-station/              ← shareable, commits with the repo
  *     system-prompt.md       — override of the templated system prompt
  *     project-context.md     — developer-authored overlay (verbatim splice)
- *     template.json          — { templateId, scaffoldedAt, ... }
+ *     template.json          — { templateId, scaffoldedAt, ... } provenance
+ *
+ *   ~/.config/nostr-station/projects/<id>/ ← private, never commits
  *     permissions.json       — { mode: 'read-only' | 'auto-edit' | 'yolo' }
  *     chat.json              — { provider, model } per-project AI override
- *     .gitignore             — keeps machine-local files out of git
+ *     test-identities.json   — handled by test-identities.ts (mode 0600)
+ *     cache/                 — handled by nostr-query.ts
+ *
+ * The split exists because the second group is per-user, per-machine state
+ * that has no business in the repo. Keeping it out entirely — rather than
+ * relying on an auto-managed `.nostr-station/.gitignore` — means the
+ * working tree never goes dirty from station activity, no matter what
+ * AI agents do with the project's own .gitignore, no matter whether a
+ * pre-existing nested gitignore was already committed, and no matter
+ * what `git add -A` sweeps catch.
+ *
+ * Migration: legacy files written to `<project>/.nostr-station/{permissions,
+ * chat,test-identities}.json` are copied to the new location on first read.
+ * Untracked legacy files get auto-deleted; tracked ones are left alone so
+ * the user sees no surprise staged deletions, and the bundle surfaces a
+ * `legacy` flag so the UI can nudge them to `git rm`.
  *
  * Back-compat: a pre-existing `<project>/project-context.md` (the legacy
- * location) is still read when `.nostr-station/project-context.md` is
- * absent. We never auto-move the legacy file — the developer migrates
- * deliberately when they want.
+ * location predating `.nostr-station/`) is still read when
+ * `.nostr-station/project-context.md` is absent. We never auto-move it.
  *
  * Path safety: every read goes through `path.join(projectPath, ...)` and
  * we never accept an external path here. The `Project` value comes from
@@ -29,7 +38,9 @@
  */
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import type { Project } from './projects.js';
 import type { Template, PermissionMode } from './templates.js';
 
@@ -40,14 +51,6 @@ export const PROJECT_CONTEXT_FILE = 'project-context.md';
 export const TEMPLATE_FILE        = 'template.json';
 export const PERMISSIONS_FILE     = 'permissions.json';
 export const CHAT_FILE            = 'chat.json';
-export const GITIGNORE_FILE       = '.gitignore';
-
-// Files that are machine-local and should not be committed to git. Keep
-// `system-prompt.md`, `project-context.md`, and `template.json` out of
-// the gitignore so they DO travel with the repo — they're shareable
-// per-project guidance and provenance. `test-identities.json` contains
-// raw nsecs — never committable under any circumstance.
-const GITIGNORE_CONTENTS = `${PERMISSIONS_FILE}\n${CHAT_FILE}\ntest-identities.json\n`;
 
 export interface ProjectTemplateRecord {
   templateId:   string;
@@ -75,7 +78,25 @@ export function configDirFor(project: Project): string | null {
   return project.path ? configDir(project.path) : null;
 }
 
-function pathFor(project: Project, file: string): string | null {
+/**
+ * `~/.config/nostr-station/projects/<id>/`. The user-config root mirrors
+ * the location of `projects.json` (in `projects.ts`) so all per-user
+ * station state sits under one directory.
+ */
+export function userConfigDirFor(project: Project): string {
+  return path.join(os.homedir(), '.config', 'nostr-station', 'projects', project.id);
+}
+
+function shareablePathFor(project: Project, file: string): string | null {
+  if (!project.path) return null;
+  return path.join(configDir(project.path), file);
+}
+
+function userPathFor(project: Project, file: string): string {
+  return path.join(userConfigDirFor(project), file);
+}
+
+function legacyPathFor(project: Project, file: string): string | null {
   if (!project.path) return null;
   return path.join(configDir(project.path), file);
 }
@@ -102,6 +123,112 @@ function readJsonFile<T>(p: string): T | null {
   }
 }
 
+// ── Migration: legacy → user-config dir ───────────────────────────────────
+//
+// One-time-per-process scan that copies any legacy
+// `<project>/.nostr-station/{permissions,chat,test-identities}.json` into
+// the new user-config location, then deletes the legacy file if it's
+// untracked in git. Tracked files are left alone so users never see a
+// surprise staged deletion; the bundle reader records what remains so
+// the UI can surface a nudge to `git rm` them deliberately.
+
+const migrationInspected = new Set<string>();
+
+/**
+ * Files that moved out of `<project>/.nostr-station/`. Each entry is a
+ * filename within that dir. `test-identities.json` is migrated by
+ * test-identities.ts itself (different perms requirements, atomic
+ * writer); listed here so the legacy banner can mention it even when
+ * the user has never opened test-identities.
+ */
+const MIGRATED_FILES = [PERMISSIONS_FILE, CHAT_FILE, 'test-identities.json'] as const;
+
+function fileIsTrackedInGit(projectPath: string, relPath: string): boolean {
+  try {
+    execFileSync('git', ['ls-files', '--error-unmatch', '--', relPath], {
+      cwd: projectPath,
+      stdio: ['ignore', 'ignore', 'ignore'],
+      timeout: 2000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function copyIfMissing(from: string, to: string, mode?: number): boolean {
+  try {
+    if (fs.existsSync(to)) return false;
+    if (!fs.existsSync(from)) return false;
+    fs.mkdirSync(path.dirname(to), { recursive: true, mode: 0o700 });
+    const data = fs.readFileSync(from);
+    fs.writeFileSync(to, data, mode !== undefined ? { mode } : undefined);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Idempotent per-process migration. Safe to call on every read; the
+ * memo short-circuits after the first invocation per project.
+ */
+function migrateLegacyFiles(project: Project): void {
+  if (!project.path) return;
+  if (migrationInspected.has(project.id)) return;
+  migrationInspected.add(project.id);
+
+  for (const file of MIGRATED_FILES) {
+    const legacy = path.join(project.path, CONFIG_DIRNAME, file);
+    const dest   = path.join(userConfigDirFor(project), file);
+    // test-identities.json carries nsecs; preserve 0600 on copy.
+    const mode = file === 'test-identities.json' ? 0o600 : undefined;
+    copyIfMissing(legacy, dest, mode);
+    // Auto-delete the legacy file when it's safe (i.e. not tracked in
+    // git). Tracked files are left alone — deleting them would create
+    // an unexpected staged deletion in the user's working tree.
+    try {
+      if (fs.existsSync(legacy) && !fileIsTrackedInGit(project.path, `${CONFIG_DIRNAME}/${file}`)) {
+        fs.unlinkSync(legacy);
+      }
+    } catch { /* best-effort */ }
+  }
+
+  // The old auto-managed `.gitignore` becomes dead weight after the
+  // files it was ignoring are gone. Same rule — only remove when
+  // untracked AND its contents match what we used to write (so we
+  // never wipe a user-customized gitignore).
+  try {
+    const giPath = path.join(project.path, CONFIG_DIRNAME, '.gitignore');
+    if (fs.existsSync(giPath)) {
+      const have = fs.readFileSync(giPath, 'utf8').trim();
+      const wasOurs = have
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .every(line => (MIGRATED_FILES as readonly string[]).includes(line) || line === 'cache/');
+      if (wasOurs && !fileIsTrackedInGit(project.path, `${CONFIG_DIRNAME}/.gitignore`)) {
+        fs.unlinkSync(giPath);
+      }
+    }
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Returns the list of legacy files still present in `.nostr-station/`
+ * — i.e. files that survived the migration sweep because they're
+ * tracked in git. The UI uses this to surface a "you can `git rm`
+ * these" banner. Always returns an empty list for path-less projects.
+ */
+export function legacyLocalFiles(project: Project): string[] {
+  if (!project.path) return [];
+  const out: string[] = [];
+  for (const file of MIGRATED_FILES) {
+    const legacy = path.join(project.path, CONFIG_DIRNAME, file);
+    if (fs.existsSync(legacy)) out.push(file);
+  }
+  return out;
+}
+
 // ── Public reads ──────────────────────────────────────────────────────────
 
 /**
@@ -109,7 +236,7 @@ function readJsonFile<T>(p: string): T | null {
  * file is missing or empty (caller falls through to global → built-in).
  */
 export function readSystemPromptOverride(project: Project): string | null {
-  const p = pathFor(project, SYSTEM_PROMPT_FILE);
+  const p = shareablePathFor(project, SYSTEM_PROMPT_FILE);
   return p ? readTextFile(p) : null;
 }
 
@@ -120,7 +247,7 @@ export function readSystemPromptOverride(project: Project): string | null {
  */
 export function readProjectContextOverlay(project: Project): string | null {
   if (!project.path) return null;
-  const dotDir = pathFor(project, PROJECT_CONTEXT_FILE);
+  const dotDir = shareablePathFor(project, PROJECT_CONTEXT_FILE);
   const dotVal = dotDir ? readTextFile(dotDir) : null;
   if (dotVal !== null) return dotVal;
   // Back-compat: pre-2026-05 projects placed it at the project root.
@@ -129,7 +256,7 @@ export function readProjectContextOverlay(project: Project): string | null {
 }
 
 export function readProjectTemplate(project: Project): ProjectTemplateRecord | null {
-  const p = pathFor(project, TEMPLATE_FILE);
+  const p = shareablePathFor(project, TEMPLATE_FILE);
   if (!p) return null;
   const raw = readJsonFile<ProjectTemplateRecord>(p);
   if (!raw || typeof raw !== 'object') return null;
@@ -140,8 +267,8 @@ export function readProjectTemplate(project: Project): ProjectTemplateRecord | n
 }
 
 export function readProjectPermissions(project: Project): ProjectPermissions | null {
-  const p = pathFor(project, PERMISSIONS_FILE);
-  if (!p) return null;
+  migrateLegacyFiles(project);
+  const p = userPathFor(project, PERMISSIONS_FILE);
   const raw = readJsonFile<ProjectPermissions>(p);
   if (!raw || typeof raw !== 'object') return null;
   if (raw.mode !== 'read-only' && raw.mode !== 'auto-edit' && raw.mode !== 'yolo') {
@@ -151,8 +278,8 @@ export function readProjectPermissions(project: Project): ProjectPermissions | n
 }
 
 export function readProjectChatOverride(project: Project): ProjectChatOverride | null {
-  const p = pathFor(project, CHAT_FILE);
-  if (!p) return null;
+  migrateLegacyFiles(project);
+  const p = userPathFor(project, CHAT_FILE);
   const raw = readJsonFile<ProjectChatOverride>(p);
   if (!raw || typeof raw !== 'object') return null;
   const out: ProjectChatOverride = {};
@@ -164,32 +291,26 @@ export function readProjectChatOverride(project: Project): ProjectChatOverride |
 // ── Public writes ─────────────────────────────────────────────────────────
 
 /**
- * Lazy-create the dot-dir if it doesn't exist. Caller is responsible for
- * project.path being a writable directory. Idempotent.
+ * Lazy-create the shareable `<project>/.nostr-station/` dir. Used for
+ * system-prompt.md, project-context.md, and template.json — all of
+ * which are intended to commit with the repo. Returns null when the
+ * project has no path. Idempotent.
  */
 export function ensureConfigDir(project: Project): string | null {
   if (!project.path) return null;
   const dir = configDir(project.path);
   fs.mkdirSync(dir, { recursive: true });
-  // .gitignore: write fresh when absent; otherwise append any
-  // newly-mandatory entries the file is missing. The append branch is
-  // load-bearing for upgrade — existing projects scaffolded before
-  // test-identities.json existed would otherwise leak the nsec file.
-  const giPath = path.join(dir, GITIGNORE_FILE);
-  if (!fs.existsSync(giPath)) {
-    fs.writeFileSync(giPath, GITIGNORE_CONTENTS);
-  } else {
-    try {
-      const have = fs.readFileSync(giPath, 'utf8');
-      const lines = have.split(/\r?\n/);
-      const need = GITIGNORE_CONTENTS.split(/\r?\n/).filter(Boolean);
-      const missing = need.filter(n => !lines.includes(n));
-      if (missing.length) {
-        const sep = have.endsWith('\n') ? '' : '\n';
-        fs.appendFileSync(giPath, `${sep}${missing.join('\n')}\n`);
-      }
-    } catch { /* best-effort */ }
-  }
+  return dir;
+}
+
+/**
+ * Lazy-create the user-config dir for this project. Mode 0o700 so
+ * other users on a shared machine can't read private state (test
+ * identity nsecs, model preferences). Idempotent.
+ */
+export function ensureUserConfigDir(project: Project): string {
+  const dir = userConfigDirFor(project);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
 
@@ -212,15 +333,40 @@ export function writeProjectTemplate(project: Project, record: ProjectTemplateRe
 }
 
 export function writeProjectPermissions(project: Project, permissions: ProjectPermissions): void {
-  const dir = ensureConfigDir(project);
-  if (!dir) throw new Error('project has no path');
+  const dir = ensureUserConfigDir(project);
   fs.writeFileSync(path.join(dir, PERMISSIONS_FILE), JSON.stringify(permissions, null, 2));
 }
 
 export function writeProjectChatOverride(project: Project, override: ProjectChatOverride): void {
-  const dir = ensureConfigDir(project);
-  if (!dir) throw new Error('project has no path');
+  const dir = ensureUserConfigDir(project);
   fs.writeFileSync(path.join(dir, CHAT_FILE), JSON.stringify(override, null, 2));
+}
+
+// ── Public deletes (for "clear override" UI) ──────────────────────────────
+
+export function deleteSystemPromptOverride(project: Project): void {
+  const p = shareablePathFor(project, SYSTEM_PROMPT_FILE);
+  if (p) try { fs.unlinkSync(p); } catch {}
+}
+
+export function deleteProjectContextOverlay(project: Project): void {
+  const p = shareablePathFor(project, PROJECT_CONTEXT_FILE);
+  if (p) try { fs.unlinkSync(p); } catch {}
+}
+
+export function deleteProjectPermissions(project: Project): void {
+  try { fs.unlinkSync(userPathFor(project, PERMISSIONS_FILE)); } catch {}
+  // Also clean up any legacy copy left behind by a tracked-in-git
+  // migration — `null` in the bundle PUT means "reset to inherit" and
+  // a leftover legacy file would silently keep the override alive.
+  const legacy = legacyPathFor(project, PERMISSIONS_FILE);
+  if (legacy) try { fs.unlinkSync(legacy); } catch {}
+}
+
+export function deleteProjectChatOverride(project: Project): void {
+  try { fs.unlinkSync(userPathFor(project, CHAT_FILE)); } catch {}
+  const legacy = legacyPathFor(project, CHAT_FILE);
+  if (legacy) try { fs.unlinkSync(legacy); } catch {}
 }
 
 // ── Scaffold-time seeding ─────────────────────────────────────────────────
@@ -228,7 +374,6 @@ export function writeProjectChatOverride(project: Project, override: ProjectChat
 /**
  * Called once during `scaffoldProject` after the project record is
  * created in projects.json. Writes:
- *   - .gitignore                (always)
  *   - template.json             (if a template was used)
  *   - project-context.md        (if the template has a `defaults.projectContext`)
  *   - permissions.json          (if the template has a `defaults.permissions`)
@@ -265,7 +410,7 @@ export function seedProjectConfig(
       }
     }
     if (template.defaults?.permissions) {
-      const existing = path.join(dir, PERMISSIONS_FILE);
+      const existing = userPathFor(project, PERMISSIONS_FILE);
       if (!fs.existsSync(existing)) {
         writeProjectPermissions(project, { mode: template.defaults.permissions });
       }
@@ -285,6 +430,12 @@ export interface ProjectAiConfigBundle {
   // surfaces this so users can migrate by accepting the prompt to move
   // it under .nostr-station/.
   legacyContext:   boolean;
+  // Names of files that used to live in `<project>/.nostr-station/`
+  // and survived the auto-migration because they're tracked in git.
+  // Empty list = clean. The UI shows a "you can git rm these" hint
+  // when non-empty so the user can deliberately remove them from the
+  // index.
+  legacyLocalFiles: string[];
 }
 
 export function readProjectAiConfig(project: Project): ProjectAiConfigBundle {
@@ -299,5 +450,6 @@ export function readProjectAiConfig(project: Project): ProjectAiConfigBundle {
     chat:           readProjectChatOverride(project),
     legacyContext:  !!(legacyContextPath && fs.existsSync(legacyContextPath)
                       && !fs.existsSync(path.join(configDir(project.path!), PROJECT_CONTEXT_FILE))),
+    legacyLocalFiles: legacyLocalFiles(project),
   };
 }

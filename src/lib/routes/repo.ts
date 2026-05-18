@@ -334,7 +334,7 @@ async function fetchRepoMeta(
   const coords = decodeNgitRemote(project);
   if (!coords || !project.path) return { repo: null, cached: false, diagnostics: null };
 
-  const cacheKey = { projectPath: project.path, key: 'repo-30617' };
+  const cacheKey = { projectId: project.id, projectPath: project.path, key: 'repo-30617' };
   if (!refresh) {
     const cached = getCached<RepoMeta>({ ...cacheKey, ttlMs: REPO_CACHE_TTL_MS });
     if (cached) return { repo: cached, cached: true, diagnostics: null };
@@ -953,7 +953,7 @@ async function handleAnnounce(
   // Even if zero relays accepted, the user might be retrying — bust the
   // cache so a stale 30617 doesn't haunt them.
   if (project.path) {
-    try { clearCache({ projectPath: project.path, key: 'repo-30617' }); } catch {}
+    try { clearCache({ projectId: project.id, projectPath: project.path, key: 'repo-30617' }); } catch {}
   }
 
   return json(res, accepted > 0 ? 200 : 502, {

@@ -831,7 +831,12 @@ test('projectEnvContract: reflects the active environment block', () => {
   assert.equal(env.NOSTR_STATION_RELAYS,               'ws://localhost:7777');
   assert.equal(env.NOSTR_STATION_BLOSSOM,              'http://localhost:8081');
   assert.equal(env.NOSTR_STATION_BLOSSOMS,             'http://localhost:8081');
-  assert.ok(env.NOSTR_STATION_TEST_IDENTITIES_PATH.endsWith('.nostr-station/test-identities.json'));
+  // Test identities now live in the user-config dir keyed by project
+  // id, not under the project tree. Keeps nsecs out of any possible
+  // `git add` sweep regardless of the project's own .gitignore.
+  assert.ok(env.NOSTR_STATION_TEST_IDENTITIES_PATH.endsWith(
+    path.join('.config', 'nostr-station', 'projects', r.project.id, 'test-identities.json'),
+  ));
 });
 
 test('projectEnvContract: flips on active-env toggle', () => {
