@@ -6763,7 +6763,19 @@ const ProjectsPanel = (() => {
     // 2 — Ref selector + breadcrumb
     container.appendChild(renderCodeNav(p, refs, view));
 
-    // 3 — Changes (working tree, when dirty). Populated async — the
+    // 3 — Latest commit chip. Sits ABOVE the file browser so the
+    // first thing the eye lands on is "what's the current state of
+    // this repo" — mirrors GitHub / gitworkshop. The chip has a
+    // "Commits ↓" link that smooth-scrolls to the full Recent
+    // commits list further down. Hides itself when there are no
+    // commits (fresh repo) or the fetch fails.
+    const latestCommitEl = document.createElement('div');
+    latestCommitEl.className = 'code-latest-commit';
+    latestCommitEl.hidden = true;
+    container.appendChild(latestCommitEl);
+    renderCodeLatestCommit(latestCommitEl, p, view);
+
+    // 4 — Changes (working tree, when dirty). Populated async — the
     // backend call is cheap but we don't want to gate the rest of the
     // tab on it. The element renders empty until the fetch resolves;
     // when it does and there's nothing to show, it hides itself.
@@ -6772,18 +6784,18 @@ const ProjectsPanel = (() => {
     changesEl.hidden = true;
     container.appendChild(changesEl);
 
-    // 4 — File browser
+    // 5 — File browser
     const filesEl = document.createElement('div');
     filesEl.className = 'code-files';
     container.appendChild(filesEl);
 
-    // 5 — Preview (README on first open, blob on selection)
+    // 6 — Preview (README on first open, blob on selection)
     const previewEl = document.createElement('div');
     previewEl.className = 'code-preview';
     container.appendChild(previewEl);
     renderCodePreview(previewEl, p, view);
 
-    // 6 — Recent commits
+    // 7 — Recent commits
     const commitsEl = document.createElement('div');
     commitsEl.className = 'code-commits';
     container.appendChild(commitsEl);
@@ -8473,6 +8485,45 @@ const ProjectsPanel = (() => {
       out.push(`<div class="${cls}">${escapeHtml(raw)}</div>`);
     }
     return `<div class="code-preview-body code-diff"><div class="diff-lines">${out.join('')}</div></div>`;
+  }
+
+  // Slim chip above the file browser. One commit, GitHub/gitworkshop
+  // style: subject + abbrev SHA + author + age, plus a link that
+  // smooth-scrolls to the full Recent commits list below. The chip
+  // stays hidden until the fetch resolves with at least one commit so
+  // the layout never flashes an empty card on first paint.
+  async function renderCodeLatestCommit(el, p, view) {
+    if (!el) return;
+    const qs = new URLSearchParams({ ref: view.ref, limit: '1' });
+    let r;
+    try {
+      r = await api(`/api/projects/${p.id}/repo/log?${qs}`);
+    } catch {
+      el.hidden = true;
+      return;
+    }
+    if (r?.error) { el.hidden = true; return; }
+    const c = Array.isArray(r?.commits) ? r.commits[0] : null;
+    if (!c) { el.hidden = true; return; }
+    const age = fmtAgoIso(new Date((c.timestamp || 0) * 1000).toISOString());
+    el.hidden = false;
+    el.innerHTML = `
+      <div class="code-latest-commit-main">
+        <div class="code-latest-commit-subject">${escapeHtml(c.subject || '(no message)')}</div>
+        <div class="code-latest-commit-meta muted">
+          <code class="cmd-inline">${escapeHtml(c.abbrev)}</code>
+          · ${escapeHtml(c.author || 'unknown')}
+          · ${escapeHtml(age)}
+        </div>
+      </div>
+      <a href="#" class="code-latest-commit-link">Commits ↓</a>
+    `;
+    el.querySelector('.code-latest-commit-link')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      el.parentElement?.querySelector('.code-commits')?.scrollIntoView({
+        behavior: 'smooth', block: 'start',
+      });
+    });
   }
 
   async function renderCodeCommits(el, p, view) {
@@ -11104,7 +11155,7 @@ const ProjectsPanel = (() => {
            </div>
            <div style="margin-top:8px">
              Audit (lists each commit's full content):
-             <pre style="margin:4px 0;padding:6px 8px;background:var(--bg-2);border-radius:4px;font-size:11px;overflow-x:auto">git log -p --all -- .nostr-station/test-identities.json</pre>
+             <pre style="margin:4px 0;padding:6px 8px;background:var(--bg-hover);border-radius:4px;font-size:11px;overflow-x:auto">git log -p --all -- .nostr-station/test-identities.json</pre>
            </div>
            <div style="margin-top:6px">
              Next step: use <strong>Reset all</strong> in
@@ -11130,7 +11181,7 @@ const ProjectsPanel = (() => {
            These moved out of <code>.nostr-station/</code> in a recent
            upgrade. They're tracked in git, so we left them in place to
            avoid surprise staged deletions — you can clean them up with:
-           <pre style="margin:6px 0 4px;padding:6px 8px;background:var(--bg-2);border-radius:4px;font-size:11px;overflow-x:auto">git rm ${gitRmTargets.map(t => `'${t}'`).join(' ')}
+           <pre style="margin:6px 0 4px;padding:6px 8px;background:var(--bg-hover);border-radius:4px;font-size:11px;overflow-x:auto">git rm ${gitRmTargets.map(t => `'${t}'`).join(' ')}
 git commit -m "chore: drop legacy nostr-station artifacts"</pre>
            ${legacyFiles.includes('test-identities.json') ? `
              <div style="color:var(--err);font-weight:600;margin-top:8px">
