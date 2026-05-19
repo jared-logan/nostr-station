@@ -7183,6 +7183,52 @@ body.term-expanded .term-bar-toggle .term-chevron {
 .code-md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
 .code-md img { max-width: 100%; height: auto; }
 
+/* Latest-commit chip above the file browser. Card-styled to match
+ * .code-commits-list so the "current state of the repo" reads as
+ * commit-history-flavored info rather than another section header.
+ * Single row with subject + meta on the left, "Commits ↓" link on
+ * the right. Mirrors GitHub / gitworkshop conventions for where the
+ * eye expects this info to land. */
+.code-latest-commit {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+}
+.code-latest-commit-main {
+  flex: 1;
+  min-width: 0;
+}
+.code-latest-commit-subject {
+  color: var(--text-bright);
+  font-size: 13px;
+  margin-bottom: 2px;
+  word-break: break-word;
+}
+.code-latest-commit-meta {
+  font-size: 11px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.code-latest-commit-link {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-decoration: none;
+  white-space: nowrap;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.code-latest-commit-link:hover {
+  color: var(--text-bright);
+  background: var(--bg-hover);
+}
+
 .code-commits {
   margin-top: 16px;
 }
