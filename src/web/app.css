@@ -3950,12 +3950,6 @@ body.sidebar-open .sidebar-toggle-bars span:nth-child(3) { transform: translateY
   border-radius: 999px;
   letter-spacing: 0.4px;
 }
-.nav a .badge.dot {
-  width: 8px;
-  height: 8px;
-  padding: 0;
-  background: var(--accent);
-}
 
 /* ── git panel ────────────────────────────────────────────────────────── */
 
