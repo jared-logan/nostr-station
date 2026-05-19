@@ -402,7 +402,7 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 0 10px;
+  padding: 8px 10px 0;
   font-size: 11px;
 }
 .health .row {
