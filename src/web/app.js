@@ -19381,70 +19381,7 @@ const ClientPanel = (() => {
   });
 
   return {
-    onEnter() { void probeDittoBundle(); ClientNotifBadge.markSeen(); },
-  };
-})();
-
-// ── Client notification dot ──────────────────────────────────────────────
-//
-// Polls /api/client/notifications, compares the newest event's created_at
-// against a "last seen" timestamp in localStorage. Shows a small accent-
-// coloured dot on the Client nav link when there's something newer. Cleared
-// when the user enters the Client panel (ClientPanel.onEnter).
-//
-// Polling is gated on document.visibilityState — no relay query while the
-// tab is backgrounded. limit=5 keeps the server-side relay fanout minimal;
-// we only need the newest created_at.
-const ClientNotifBadge = (() => {
-  const KEY = 'nostr-station:client:last-seen-notif';
-  const POLL_MS = 60_000;
-  let timer = null;
-
-  function lastSeen() {
-    const v = parseInt(localStorage.getItem(KEY) || '0', 10);
-    return Number.isFinite(v) ? v : 0;
-  }
-  function setLastSeen(ts) {
-    localStorage.setItem(KEY, String(ts));
-  }
-  function show()  { const b = $('client-badge'); if (b) b.hidden = false; }
-  function hide()  { const b = $('client-badge'); if (b) b.hidden = true; }
-
-  async function poll() {
-    if (document.hidden) return;
-    try {
-      const r = await fetch('/api/client/notifications?limit=5', { cache: 'no-store' });
-      if (!r.ok) return;   // owner unconfigured / no relays / transient — silent
-      const data = await r.json();
-      const events = Array.isArray(data?.events) ? data.events : [];
-      if (events.length === 0) return;
-      const newest = events.reduce((m, e) => Math.max(m, e.created_at | 0), 0);
-      if (newest > lastSeen()) show();
-    } catch { /* silent — network hiccups shouldn't surface anywhere */ }
-  }
-
-  function markSeen() {
-    setLastSeen(Math.floor(Date.now() / 1000));
-    hide();
-  }
-
-  function start() {
-    if (timer) return;
-    timer = setInterval(poll, POLL_MS);
-  }
-
-  return {
-    init() {
-      // Cold-start: seed last-seen to "now" so the user doesn't see a dot
-      // for notifications that arrived before this feature shipped.
-      if (!localStorage.getItem(KEY)) setLastSeen(Math.floor(Date.now() / 1000));
-      void poll();
-      start();
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) void poll();
-      });
-    },
-    markSeen,
+    onEnter() { void probeDittoBundle(); },
   };
 })();
 
@@ -21760,7 +21697,6 @@ function bootDashboard(localhostExempt) {
     refreshHeader();
     refreshHealth();
     Updates.init();
-    ClientNotifBadge.init();
     activatePanel(currentPanel());
     // Terminal panel is opt-in per session (user clicks to open) but the
     // capability probe + reconnect-if-live runs during boot so a refreshed
