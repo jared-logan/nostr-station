@@ -52,7 +52,7 @@ import { installNgit } from './ngit-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 import {
   readIdentity, setSetupComplete, isNsec,
-  setInprocBlossomEnabled,
+  setInprocBlossomEnabled, setWatchdogEnabled,
 } from './identity.js';
 import {
   issueChallenge, consumeChallenge, createSession,
@@ -401,6 +401,11 @@ async function disableInprocBlossomUserInitiated(): Promise<void> {
 async function maybeStartWatchdog(): Promise<void> {
   if (process.env.STATION_DISABLE_WATCHDOG === '1') return;
   if (watchdog || !inprocRelay) return;
+  // Persisted opt-out — Config → Watchdog flips this. Boot honors it so
+  // a disabled watchdog stays disabled across restarts. The user-
+  // initiated POST /api/watchdog/start path skips this gate via
+  // startWatchdogUserInitiated below.
+  if (readIdentity().watchdogEnabled === false) return;
   const wd = new Watchdog({
     relay: inprocRelay,
     onLog: (level, text) => logBuffers.watchdog.push(level, text),
@@ -411,6 +416,30 @@ async function maybeStartWatchdog(): Promise<void> {
   } catch (e: any) {
     logBuffers.watchdog.error(`watchdog start failed: ${e?.message || e}`);
   }
+}
+
+// Same as maybeStartWatchdog but ignores the persisted opt-out — used by
+// the explicit Enable button so flipping on via UI starts the worker AND
+// persists the flag in one round-trip. Mirrors how the Blossom enable
+// flow is split into boot-time vs. user-initiated paths.
+async function startWatchdogUserInitiated(): Promise<void> {
+  try { setWatchdogEnabled(true); } catch {}
+  if (process.env.STATION_DISABLE_WATCHDOG === '1') return;
+  if (watchdog || !inprocRelay) return;
+  const wd = new Watchdog({
+    relay: inprocRelay,
+    onLog: (level, text) => logBuffers.watchdog.push(level, text),
+  });
+  await wd.start();
+  watchdog = wd;
+}
+
+function stopWatchdogUserInitiated(): void {
+  if (watchdog) {
+    watchdog.stop();
+    watchdog = null;
+  }
+  try { setWatchdogEnabled(false); } catch {}
 }
 
 // Ensure the `seed-nsec` keychain slot exists and its pubkey is registered
@@ -1305,15 +1334,21 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // relay's lifecycle (1.3) because some users may want the relay
       // up without the watchdog (or vice versa).
       if (url === '/api/watchdog/status' && method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(watchdog ? watchdog.status() : {
+        // `enabled` reflects the persisted opt-in flag from identity.json
+        // — distinct from `running`, which is the live timer state. The
+        // Config panel renders Enable / Disable based on `enabled`; the
+        // dashboard card uses `running` for the liveness pill.
+        const enabled = readIdentity().watchdogEnabled !== false;
+        const base = watchdog ? watchdog.status() : {
           running: false, lastHeartbeatAt: null, npub: null, intervalMs: 0,
-        }));
+        };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ...base, enabled }));
         return;
       }
       if (url === '/api/watchdog/start' && method === 'POST') {
         try {
-          await maybeStartWatchdog();
+          await startWatchdogUserInitiated();
           cachedGatherStatus.invalidate();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, status: watchdog?.status() ?? null }));
@@ -1324,10 +1359,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
         return;
       }
       if (url === '/api/watchdog/stop' && method === 'POST') {
-        if (watchdog) {
-          watchdog.stop();
-          watchdog = null;
-        }
+        stopWatchdogUserInitiated();
         cachedGatherStatus.invalidate();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));

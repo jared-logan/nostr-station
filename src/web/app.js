@@ -14848,6 +14848,16 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
+      <details class="config-section cfg-collapsible" id="cfg-watchdog-section">
+        <summary>
+          <h3>Watchdog (relay monitoring)</h3>
+          <span class="cfg-summary-meta" id="cfg-watchdog-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-watchdog-body">
+          <div class="muted">loading watchdog status…</div>
+        </div>
+      </details>
+
       <details class="config-section cfg-collapsible" id="cfg-ai-section">
         <summary>
           <h3>AI</h3>
@@ -15421,6 +15431,7 @@ const ConfigPanel = (() => {
     // muted "not running" line with an enable button.
     paintBlossomConfigSection();
     paintMailConfigSection();
+    paintWatchdogConfigSection();
     paintNsiteConfigSection();
   }
 
@@ -15804,6 +15815,93 @@ const ConfigPanel = (() => {
       } catch (err) {
         toast('Save failed', err?.message || '', 'err');
         e.target.checked = !want;
+      }
+    });
+  }
+
+  // ── Watchdog section ───────────────────────────────────────────────────
+  // Blossom-shaped Enable / Disable flow. `enabled` is the persisted
+  // opt-in (identity.json → watchdogEnabled); `running` is the live
+  // timer state. Both come back on /api/watchdog/status. The two
+  // diverge only briefly during a start/stop round-trip; the section
+  // repaints after every action so it converges.
+  async function paintWatchdogConfigSection() {
+    const body    = $('cfg-watchdog-body');
+    const summary = $('cfg-watchdog-summary');
+    if (!body) return;
+    let status = null;
+    try { status = await api('/api/watchdog/status', undefined, { silent: true }); }
+    catch { /* surface as "unavailable" below */ }
+
+    if (!status) {
+      if (summary) summary.textContent = 'unavailable';
+      body.innerHTML = `<div class="muted">Watchdog endpoint not reachable.</div>`;
+      return;
+    }
+
+    const enabled = status.enabled !== false;
+    const running = !!status.running;
+    const lastBeat = status.lastHeartbeatAt
+      ? new Date(status.lastHeartbeatAt).toLocaleString()
+      : 'never';
+    const intervalSec = Math.round((status.intervalMs || 0) / 1000);
+
+    if (summary) {
+      summary.textContent = enabled
+        ? (running ? `running · last heartbeat ${lastBeat}` : 'starting…')
+        : 'disabled';
+    }
+
+    if (!enabled) {
+      body.innerHTML = `
+        <div class="muted" style="margin-bottom:10px">
+          Watchdog publishes a kind-1 heartbeat to the local relay every
+          ${intervalSec || 300}s so you can verify the relay is alive
+          end-to-end (sign → publish → store → readback). Disabled here;
+          the heartbeat keypair stays in the OS keychain so re-enabling
+          reuses the same npub.
+        </div>
+        <div class="step-actions">
+          <button class="primary" id="cfg-watchdog-enable">Enable Watchdog</button>
+        </div>
+      `;
+      $('cfg-watchdog-enable')?.addEventListener('click', async () => {
+        try {
+          await api('/api/watchdog/start', { method: 'POST' });
+          apiInvalidate('/api/watchdog/status');
+          apiInvalidate('/api/status');
+          toast('Watchdog', 'Enabled', 'ok');
+          paintWatchdogConfigSection();
+          refreshHealth?.();
+        } catch (e) {
+          toast('Failed to enable Watchdog', e?.message || '', 'err');
+        }
+      });
+      return;
+    }
+
+    body.innerHTML = `
+      <div class="config-row"><div class="k">Status</div><div class="v">
+        ${running
+          ? `<span class="ok">running</span> · heartbeat every ${intervalSec}s`
+          : `<span class="muted">starting…</span>`}
+      </div></div>
+      <div class="config-row"><div class="k">Last heartbeat</div><div class="v">${escapeHtml(lastBeat)}</div></div>
+      <div class="config-row"><div class="k">npub</div><div class="v"><code>${escapeHtml(status.npub || '—')}</code></div></div>
+      <div class="step-actions" style="margin-top:10px">
+        <button id="cfg-watchdog-disable">Disable Watchdog</button>
+      </div>
+    `;
+    $('cfg-watchdog-disable')?.addEventListener('click', async () => {
+      try {
+        await api('/api/watchdog/stop', { method: 'POST' });
+        apiInvalidate('/api/watchdog/status');
+        apiInvalidate('/api/status');
+        toast('Watchdog', 'Disabled', 'ok');
+        paintWatchdogConfigSection();
+        refreshHealth?.();
+      } catch (e) {
+        toast('Failed to disable Watchdog', e?.message || '', 'err');
       }
     });
   }
@@ -17303,8 +17401,9 @@ const ConfigPanel = (() => {
     // enable/disable from the Dashboard card and the Config panel
     // happens to be mounted. Lockstep update across the three surfaces
     // (Dashboard card / sidebar Health / this section).
-    refreshBlossomSection: paintBlossomConfigSection,
-    refreshMailSection:    paintMailConfigSection,
+    refreshBlossomSection:  paintBlossomConfigSection,
+    refreshMailSection:     paintMailConfigSection,
+    refreshWatchdogSection: paintWatchdogConfigSection,
     isDirty() { return dirty; },
     // Re-exported so the Dashboard's Identity card can drive the same
     // follower / following lookup without duplicating the helper.
