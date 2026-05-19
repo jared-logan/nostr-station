@@ -5985,11 +5985,6 @@ const ProjectsPanel = (() => {
       ? ` <span class="tab-count">${n}</span>` : '';
     const tabs = [
       { key: 'overview', label: 'Overview' },
-      // About — gitworkshop-style metadata page. Only meaningful for
-      // ngit-published projects (no 30617 → nothing to show). Sits
-      // before Code so it acts as the canonical "what is this repo?"
-      // landing for visitors after Overview.
-      (p.capabilities.ngit && p.remotes.ngit) && { key: 'about', label: 'About' },
       hasGitCheckout && { key: 'code', label: 'Code' },
       // Renamed from "Proposals" — every other Nostr-git client and
       // github itself call them "Pull requests" / "PRs". Matching
@@ -6121,7 +6116,6 @@ const ProjectsPanel = (() => {
     container.__cleanup = null;
     container.innerHTML = '';
     if (state.tab === 'overview') renderOverview(container, p);
-    else if (state.tab === 'about')     renderAboutTab(container, p);
     else if (state.tab === 'code')      renderCodeTab(container, p);
     else if (state.tab === 'proposals') renderProposalsTab(container, p);
     else if (state.tab === 'issues')    renderIssuesTab(container, p);
@@ -6229,6 +6223,11 @@ const ProjectsPanel = (() => {
         </div>`;
     }
 
+    // About metadata (kind-30617 announcement) merged in below the
+    // operational Status + Actions. Only ngit-published projects have
+    // anything to show here. The slot paints async — Status renders
+    // immediately, About fills in once /api/projects/:id/repo returns.
+    const wantsAbout = p.capabilities.ngit && p.remotes.ngit;
     container.innerHTML = `
       ${gitBlock}${ngitBlock}${nsiteBlock}
       <div class="tab-section">
@@ -6238,6 +6237,7 @@ const ProjectsPanel = (() => {
           ${p.capabilities.nsite ? '<button class="quick-deploy">Deploy</button>' : ''}
         </div>
       </div>
+      ${wantsAbout ? `<div class="overview-about-slot"><div class="tab-section"><div class="muted">loading about…</div></div></div>` : ''}
     `;
     container.querySelector('.open-chat-btn')?.addEventListener('click', () => openInChat(p));
     container.querySelector('.quick-push')?.addEventListener('click', () => runProjectPublish(p));
@@ -6250,6 +6250,11 @@ const ProjectsPanel = (() => {
       e.preventDefault();
       openChangesInCodeTab(p, projectStatus);
     });
+
+    if (wantsAbout) {
+      const slot = container.querySelector('.overview-about-slot');
+      if (slot) loadAboutInto(slot, p);
+    }
   }
 
   // ── About tab ────────────────────────────────────────────────────────
@@ -6273,31 +6278,42 @@ const ProjectsPanel = (() => {
   //
   // All data comes from /api/projects/:id/repo (repo + maintainerSet).
   // No new server work; the analysis is pure client-side derivation.
-  async function renderAboutTab(container, p) {
-    container.innerHTML = `<div class="muted">loading…</div>`;
+  // About metadata renderer — now writes into a *slot* inside the
+  // Overview tab rather than owning a full tab body. The slot is
+  // created by renderOverview when ngit + an announcement are both
+  // present; for projects without an announcement, the slot's
+  // placeholder is replaced with a compact "run `ngit init`" hint so
+  // the Overview tab is never blank in the About region.
+  //
+  // Three-phase paint, same as before:
+  //   1. Initial paint with placeholder names from the profile cache
+  //   2. Re-paint after resolveProfiles() upgrades names + avatars
+  //   3. Re-paint after resolveProfilesVerified() adds NIP-05 ticks
+  async function loadAboutInto(slot, p) {
+    slot.innerHTML = `<div class="tab-section"><div class="muted">loading about…</div></div>`;
     let repoMeta;
     try {
       repoMeta = await api(`/api/projects/${p.id}/repo`);
     } catch (e) {
-      container.innerHTML = `<div class="empty-state err">Failed to load repo metadata: ${escapeHtml(e?.message || String(e))}</div>`;
+      slot.innerHTML = `<div class="tab-section"><div class="muted">About metadata unavailable: ${escapeHtml(e?.message || String(e))}</div></div>`;
       return;
     }
     const repo = repoMeta?.repo;
     if (!repo) {
-      container.innerHTML = `
-        <div class="empty-state">
-          <div class="muted">This project hasn't been announced to nostr yet.</div>
-          <div class="muted" style="font-size:11px;margin-top:8px">Run <code>ngit init</code> to publish the kind-30617 announcement.</div>
+      slot.innerHTML = `
+        <div class="tab-section">
+          <h3>About</h3>
+          <div class="muted">Not yet announced to nostr — run <code>ngit init</code> to publish the kind-30617 announcement.</div>
         </div>
       `;
       return;
     }
     const ms = repoMeta.maintainerSet;
-    paintAboutTab(container, p, repo, ms);
-    // Kick off profile resolution for every pubkey we display. The painter
-    // pulls names from the profile cache, so a second paint after this
-    // promise resolves upgrades the visible rows from npub-truncated
-    // placeholders to real names + avatars.
+    paintAboutInto(slot, p, repo, ms);
+    // Kick off profile resolution for every pubkey we display. The
+    // painter pulls names from the profile cache, so a second paint
+    // after this promise resolves upgrades npub-truncated placeholders
+    // to real names + avatars.
     const allPubkeys = [
       repo.pubkey,
       ...(ms?.verified || []),
@@ -6305,30 +6321,24 @@ const ProjectsPanel = (() => {
     ];
     const analysisForKeys = analyseAnnouncements(repo, ms);
     for (const k of analysisForKeys.clonesByMaintainer.keys()) allPubkeys.push(k);
-    // Repo's relays + maintainer-announcement relays make a decent
-    // initial hint set for profile lookups — these maintainers are most
-    // likely to have their kind-0 on relays the repo already touches.
     const relays = Array.isArray(repo.relays) ? repo.relays : [];
     resolveProfiles(allPubkeys, { relays }).then(() => {
-      // Guard against tab switch during the fetch — only re-paint if the
-      // user is still on this tab and the container is in the DOM.
-      if (!container.isConnected) return;
-      paintAboutTab(container, p, repo, ms);
-      // Kick off NIP-05 verification asynchronously. This adds DNS +
-      // HTTPS per claim — slower than the kind-0 fetch, hence a third
-      // paint when it completes. Non-blocking; the tab is fully
-      // usable after the second paint without verification.
+      // Guard against tab switch during the fetch — only re-paint if
+      // the slot is still in the DOM.
+      if (!slot.isConnected) return;
+      paintAboutInto(slot, p, repo, ms);
       resolveProfilesVerified(allPubkeys, { relays }).then(() => {
-        if (!container.isConnected) return;
-        paintAboutTab(container, p, repo, ms);
+        if (!slot.isConnected) return;
+        paintAboutInto(slot, p, repo, ms);
       });
     });
   }
 
-  // Pure painter — synchronous, idempotent. Called once with placeholder
-  // names, then again after profile resolution upgrades the cache. Reads
-  // names/avatars from profileCache via profileNameOf.
-  function paintAboutTab(container, p, repo, ms) {
+  // Pure painter — synchronous, idempotent. Called once with
+  // placeholder names, then again after profile resolution upgrades
+  // the cache. Reads names/avatars from profileCache via
+  // profileNameOf.
+  function paintAboutInto(slot, p, repo, ms) {
     const analysis = analyseAnnouncements(repo, ms);
 
     // Section order matches gitworkshop: Topics → Maintainers → GRASP →
@@ -6342,8 +6352,9 @@ const ProjectsPanel = (() => {
       ?? p.remotes?.ngit
       ?? '';
 
-    container.innerHTML = `
+    slot.innerHTML = `
       <div class="about-tab">
+        <h3 class="about-section-heading">About</h3>
         ${repo.description ? `<div class="about-desc">${escapeHtml(repo.description)}</div>` : ''}
 
         ${repo.web?.length ? `
@@ -6446,25 +6457,25 @@ const ProjectsPanel = (() => {
       </div>
     `;
 
-    container.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
-    container.querySelector('.about-action-raw')?.addEventListener('click', () => {
+    slot.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
+    slot.querySelector('.about-action-raw')?.addEventListener('click', () => {
       openAnnouncementsModal(repo, ms);
     });
-    container.querySelector('.about-action-edit')?.addEventListener('click', () => {
+    slot.querySelector('.about-action-edit')?.addEventListener('click', () => {
       openEditRepositoryModal(p, repo, ms, () => {
         // After a successful save, re-fetch the repo metadata so the
-        // About tab reflects the new announcement. The cache is busted
-        // server-side. Guard against the user having switched tabs
-        // during the round-trip — re-rendering into a detached
-        // container would leak DOM and orphan our cleanup hooks.
-        if (!container.isConnected) return;
-        renderAboutTab(container, p);
+        // About region reflects the new announcement. The cache is
+        // busted server-side. Guard against the user having switched
+        // tabs during the round-trip — re-rendering into a detached
+        // slot would leak DOM.
+        if (!slot.isConnected) return;
+        loadAboutInto(slot, p);
       });
     });
-    container.querySelector('.about-action-share')?.addEventListener('click', () => {
+    slot.querySelector('.about-action-share')?.addEventListener('click', () => {
       openShareLinksModal(p, repo);
     });
-    container.querySelector('.about-action-delete')?.addEventListener('click', () => {
+    slot.querySelector('.about-action-delete')?.addEventListener('click', () => {
       openDeleteProjectConfirm(p);
     });
   }
@@ -10292,8 +10303,8 @@ const ProjectsPanel = (() => {
         <span class="muted">This tab manages how nostr-station handles this project locally
         — path, capabilities, signing identity, AI config.
         Edit the repository's public announcement (name, description, website, topics,
-        relays, maintainers) on the
-        <a href="#" class="settings-banner-link" data-go="about">About</a> tab.</span>
+        relays, maintainers) in the About section of the
+        <a href="#" class="settings-banner-link" data-go="overview">Overview</a> tab.</span>
       </div>
     ` : '';
     container.innerHTML = `
@@ -10428,16 +10439,26 @@ const ProjectsPanel = (() => {
       if (gid) gid.innerHTML = '<div class="muted">Project has no local path — git identity requires a path.</div>';
     }
 
-    // Banner link: switch to About without a full page navigation.
+    // Banner link: switch to Overview and scroll to the About region
+    // (which now lives in the same tab as Overview's status + actions).
     container.querySelector('.settings-banner-link')?.addEventListener('click', (e) => {
       e.preventDefault();
-      state.tab = 'about';
-      renderTab(document.querySelector('.project-tab-content'), p);
-      // Highlight the About tab in the strip — render() rebuilds the
-      // strip but renderTab alone doesn't, so set the visual state too.
+      state.tab = 'overview';
+      const tabRoot = document.querySelector('.project-tab-content');
+      renderTab(tabRoot, p);
       document.querySelectorAll('.project-tabs .tab').forEach(t => {
-        t.classList.toggle('active', t.dataset.tab === 'about');
+        t.classList.toggle('active', t.dataset.tab === 'overview');
       });
+      // The About slot paints async — poll briefly for its appearance
+      // and then smooth-scroll. Cheap (a few rAF ticks) and bounded so
+      // a fetch failure can't pin the page forever.
+      let tries = 0;
+      const tick = () => {
+        const tgt = tabRoot?.querySelector('.about-tab');
+        if (tgt) { tgt.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+        if (++tries < 60) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
     });
 
     container.querySelector('.save-name').addEventListener('click', async () => {

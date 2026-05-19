@@ -6449,12 +6449,26 @@ body.term-expanded .term-bar-toggle .term-chevron {
   color: var(--warn, #e6b800);
 }
 
-/* ── About tab ───────────────────────────────────────────────────────── */
+/* ── About region (now nested inside the Overview tab) ──────────────── */
 .about-tab {
   display: flex;
   flex-direction: column;
   gap: 18px;
   max-width: 720px;
+}
+/* Top-of-region heading. Matches the tone of `.tab-section h3` so
+ * the merged tab reads as one coherent vertical scroll. The extra
+ * top margin separates it from the Quick actions row above. */
+.about-section-heading {
+  margin: 24px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.overview-about-slot {
+  display: block;
 }
 .about-desc {
   font-size: 14px;
