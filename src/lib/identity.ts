@@ -46,6 +46,13 @@ export interface Identity {
   // an env override still wins so headless / CI installs can pin off
   // without touching identity.json.
   mailEnabled?: boolean;
+  // Persisted on/off for the in-Node watchdog (kind-1 heartbeat to the
+  // local relay every 5 min). Default ON — preserves the auto-start
+  // behavior pre-toggle so existing installs don't silently lose
+  // monitoring on upgrade. Flipped via Config → Watchdog (Enable /
+  // Disable buttons; same shape as Blossom). STATION_DISABLE_WATCHDOG=1
+  // still wins independently so headless / CI installs can pin off.
+  watchdogEnabled?: boolean;
   // Opt-out of dashboard auth for localhost requests (127.0.0.1, ::1). Default
   // true — manual override only, not surfaced in the UI yet.
   requireAuth?: boolean;
@@ -123,6 +130,10 @@ export function readIdentity(): Identity {
       // Mail is core like the social Client panel, not opt-in like
       // hosting blob storage.
       mailEnabled: parsed.mailEnabled === false ? false : true,
+      // Watchdog enable bit — same default-on polarity as mail. Only
+      // explicit false flips it off; any other shape (undefined, true,
+      // truthy) reads as on.
+      watchdogEnabled: parsed.watchdogEnabled === false ? false : true,
       requireAuth: parsed.requireAuth === false ? false : undefined,
       setupComplete: typeof parsed.setupComplete === 'boolean' ? parsed.setupComplete : undefined,
     };
@@ -145,7 +156,7 @@ export function readIdentity(): Identity {
     }
     return ident;
   } catch {
-    return { npub: '', readRelays: DEFAULT_READ_RELAYS.slice(), appRelaysEnabled: true, mailEnabled: true };
+    return { npub: '', readRelays: DEFAULT_READ_RELAYS.slice(), appRelaysEnabled: true, mailEnabled: true, watchdogEnabled: true };
   }
 }
 
@@ -198,6 +209,13 @@ export function setMailEnabled(enabled: boolean): { ok: true; mailEnabled: boole
   ident.mailEnabled = !!enabled;
   writeIdentity(ident);
   return { ok: true, mailEnabled: ident.mailEnabled };
+}
+
+export function setWatchdogEnabled(enabled: boolean): { ok: true; watchdogEnabled: boolean } {
+  const ident = readIdentity();
+  ident.watchdogEnabled = !!enabled;
+  writeIdentity(ident);
+  return { ok: true, watchdogEnabled: ident.watchdogEnabled };
 }
 
 export function setAppRelaysEnabled(enabled: boolean): { ok: true; appRelaysEnabled: boolean } {
