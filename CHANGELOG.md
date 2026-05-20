@@ -70,6 +70,44 @@ Retracts this claim from the 4.0.37 PR's CHANGELOG entry:
 The replacement mechanism still works, but it's not a substitute for a
 manual republish action — that affordance is back.
 
+### nvpn 4.x — installer hardening for the update path
+
+> P2 followup to PR #154 (the 4.0.37 pin bump). The PR-#154 walkthrough
+> revealed three installer rough edges that turned the "click Update" path
+> into a manual recovery exercise:
+>
+> 1. `sudo -n nvpn install-cli` silently failed (empty cred cache) but
+>    the installer returned `ok: true` anyway, leaving the user with the
+>    new binary in `~/.cargo/bin/nvpn` but stale `/usr/local/bin/nvpn` —
+>    `which nvpn` kept resolving to the old version.
+> 2. Upstream 4.x's `install-cli` refuses to overwrite an existing
+>    binary without `--force`. We weren't passing it, so the relocate
+>    silently no-op'd whenever a prior install existed.
+> 3. The force-update path skipped `service install` entirely. The
+>    systemd unit's ExecStart kept pointing at the original install
+>    location (typically `~/.cargo/bin/nvpn`), surviving until cargo
+>    bin gets cleaned, then breaking the daemon.
+
+**Fixes** (`src/lib/nvpn-installer.ts`):
+
+- `install-cli` is now invoked with `--force` on the upgrade path
+  (`opts.force === true`). First-install paths still pass through
+  without the flag — harmless since there's no existing binary to
+  overwrite.
+- A failed `install-cli` no longer returns `ok: true` silently. Sets
+  `warn: true` on the result with the actual stderr in `detail` and an
+  explicit remediation command. Dashboard renders this as yellow with
+  the next step inline.
+- Force-update path now also runs `sudo -n nvpn service install --force`
+  so the systemd unit / launchd plist is rewritten with the canonical
+  PATH location of the new binary. Best-effort: if sudo fails, the warn
+  flag fires with both remediation commands stitched together.
+
+Net effect: clicking Update in the dashboard now either fully completes
+the upgrade (binary swapped + relocated + unit refreshed) or surfaces a
+yellow "run these two commands" hint, instead of silently leaving the
+install in a half-finished state.
+
 ### nvpn 4.0.37 — upstream major-version bump + breaking CLI changes
 
 > **Upstream major.** `mmalmi/nostr-vpn` cut v4.0.0 on 2026-05-07 with a
