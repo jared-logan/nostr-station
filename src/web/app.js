@@ -12573,6 +12573,33 @@ const VpnPanel = (() => {
     `;
   }
 
+  // Stale-status banner (nvpn 4.x). The CLI silently falls back to a
+  // config snapshot when it can't reach the daemon — typically a
+  // $HOME / --config dir mismatch under sudo, but also surfaces when
+  // the daemon is down and the systemd unit hasn't restarted it yet.
+  // The server flags this with `status.stale` (set by routes/nvpn.ts);
+  // we render a banner explaining why the data is unreliable instead
+  // of just rendering "everything zero" with no signal.
+  function renderStaleStatusBanner() {
+    const slot = $('vpn-stale-banner') || (() => {
+      const el = document.createElement('div');
+      el.id = 'vpn-stale-banner';
+      el.className = 'vpn-deployment-banner';  // reuse styling
+      stripEl.parentNode.insertBefore(el, stripEl);
+      return el;
+    })();
+    const stale = lastStatus && lastStatus.stale ? lastStatus.stale : null;
+    if (!stale) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
+    slot.style.display = 'block';
+    slot.className = 'vpn-deployment-banner warn';
+    slot.innerHTML = `
+      <div class="vpn-deployment-banner-row">
+        <strong>Showing a stale snapshot — daemon is unreachable</strong>
+      </div>
+      <div class="muted vpn-deployment-banner-detail">${escapeHtml(stale.detail || '')}</div>
+    `;
+  }
+
   // Split-brain banner (#58). Renders above the status strip when the
   // server reports two daemons (user-mode + systemd-managed) are both
   // alive. Includes a "Consolidate" action that stops the user-mode
@@ -12633,6 +12660,15 @@ const VpnPanel = (() => {
       : '';
     const pid = (status.raw && status.raw.daemon && status.raw.daemon.pid != null)
       ? `<span class="muted">pid ${escapeHtml(String(status.raw.daemon.pid))}</span>` : '';
+    // Node identity (4.x lifted npub out of status JSON; server now
+    // reads it from config.toml's [nostr] block and surfaces it under
+    // `identity.npub`). Truncated display because npub1 strings are
+    // 63 chars and would dominate the strip; full value in the title
+    // attribute and copyable from the Network tab.
+    const npub = status.identity && status.identity.npub;
+    const npubBadge = npub
+      ? `<code class="cmd-inline vpn-strip-npub" title="${escapeHtml(npub)}">${escapeHtml(npub.slice(0, 14) + '…' + npub.slice(-4))}</code>`
+      : '';
     // Reality check (issue #56). status.health is the rolled-up surface
     // from nvpnHealthSummary — when it disagrees with the daemon-claimed
     // "running" pill (e.g., publish channel broken, STUN never landed),
@@ -12652,6 +12688,7 @@ const VpnPanel = (() => {
         ${degraded}
         ${tunnel}
         ${endpointBadge}
+        ${npubBadge}
         ${pid}
       </div>
       ${health && Array.isArray(health.issues) && health.issues.length > 0 && status.running
@@ -12734,6 +12771,7 @@ const VpnPanel = (() => {
     lastSplitBrain   = splitBrain;
     lastJoinRequests = joinReqs;
     renderDeploymentBanner();
+    renderStaleStatusBanner();
     renderSplitBrainBanner();
     renderStatusStrip();
     renderActiveTab();
@@ -12957,7 +12995,23 @@ const VpnPanel = (() => {
         e.preventDefault(); pubBtn.disabled = true;
         try {
           const resp = await api('/api/nvpn/roster/publish', { method: 'POST' });
-          toast('roster published', resp?.detail || '', 'ok');
+          // Honest reporting of publish delivery — `published_recipients`
+          // can be 0 even on a successful API call (relay timeouts, WoT
+          // gates, POW gates). Yellow on 0, green on ≥1 so users see
+          // "saved locally" vs "delivered" at a glance instead of
+          // both flows showing the same green toast.
+          const n = typeof resp?.publishedRecipients === 'number' ? resp.publishedRecipients : null;
+          if (n === 0) {
+            toast('Saved locally, no relays reached',
+                  'Roster persisted, but no Nostr relay accepted the publish. Check the Relays tab for errors and try again.',
+                  'warn');
+          } else if (n != null && n > 0) {
+            toast(`Roster published`, `Delivered to ${n} relay${n === 1 ? '' : 's'}.`, 'ok');
+          } else {
+            // publishedRecipients absent (pre-4.x daemon or upstream
+            // schema drift) — keep the original detail string.
+            toast('Roster published', resp?.detail || '', 'ok');
+          }
         } catch { /* api() already toasted */ }
         pubBtn.disabled = false;
       });
@@ -13812,9 +13866,31 @@ const VpnPanel = (() => {
     const out = [];
     for (const p of arr) {
       if (!p || typeof p !== 'object') continue;
+      // 4.x peer identity is scattered across new fields:
+      //   - `participant_pubkey` — 64-hex pubkey, the canonical live field
+      //   - `fips_endpoint_npub` — npub-encoded form (for FIPS overlay peers)
+      //   - `public_key` — EMPTY string in live mode (was the canonical pre-4.x)
+      //   - `node_id` — sometimes a UUID, sometimes hex pubkey, sometimes alias
+      // Pre-4.x rosters still emit `npub` / `pubkey` directly. Walk the
+      // priority chain so a peer with ANY identity field resolves
+      // correctly; mergePeers below uses these for roster/live join.
+      const liveNpub = typeof p.npub === 'string' && p.npub
+        ? p.npub
+        : (typeof p.fips_endpoint_npub === 'string' && p.fips_endpoint_npub
+          ? p.fips_endpoint_npub
+          : null);
+      const livePubkey = (typeof p.pubkey === 'string' && p.pubkey)
+        ? p.pubkey
+        : (typeof p.public_key === 'string' && p.public_key)
+          ? p.public_key
+          : (typeof p.participant_pubkey === 'string' && p.participant_pubkey)
+            ? p.participant_pubkey
+            : (typeof p.node_id === 'string' && /^[0-9a-f]{64}$/i.test(p.node_id))
+              ? p.node_id
+              : null;
       out.push({
-        npub:      typeof p.npub === 'string' ? p.npub : null,
-        pubkey:    typeof p.pubkey === 'string' ? p.pubkey : null,
+        npub:      liveNpub,
+        pubkey:    livePubkey,
         ip:        typeof p.ip === 'string' ? p.ip
                  : typeof p.address === 'string' ? p.address
                  : typeof p.tunnel_ip === 'string' ? p.tunnel_ip
@@ -13905,17 +13981,36 @@ const VpnPanel = (() => {
         aliasLookup.set(k.toLowerCase(), { aliasKey: k, alias: v });
       }
     }
-    const liveByKey = new Map();
+    // Live peers indexed three ways so we can match rostered entries by
+    // any identity field they happen to share. In 4.x the same physical
+    // node can appear under one identity in a live FIPS entry and a
+    // different identity in a config-roster entry; we use tunnel-IP as
+    // the tiebreaker. Without this, a rostered peer that's also been
+    // FIPS-discovered renders as TWO rows in the Network tab.
+    const liveByIdentity = new Map();
+    const liveByIp = new Map();
     for (const lp of livePeers) {
-      const k = (lp.npub || lp.pubkey || lp.ip || '').toLowerCase();
-      if (k) liveByKey.set(k, lp);
+      const idKey = (lp.npub || lp.pubkey || '').toLowerCase();
+      if (idKey) liveByIdentity.set(idKey, lp);
+      const ipKey = (lp.ip || '').toLowerCase();
+      if (ipKey) liveByIp.set(ipKey, lp);
     }
     const out = [];
-    const seen = new Set();
+    const seenIds = new Set();
+    const consumedLive = new Set();   // identity-keys of live peers already folded into a rostered row
+    const consumedLiveIps = new Set();
     for (const p of rosterParts) {
       const k = String(p).toLowerCase();
-      seen.add(k);
-      const live = liveByKey.get(k);
+      seenIds.add(k);
+      // Try identity first — that's the canonical join. Falls through
+      // to "any live entry whose tunnel_ip matches a rostered peer's
+      // tunnel_ip" via the second map. Roster entries don't carry a
+      // tunnel_ip themselves so the tunnel-IP join only fires when
+      // some other live peer (under a different identity) is already
+      // associated with this roster member's hex pubkey via a prior
+      // discovery — which is exactly the 4.x dup case.
+      let live = liveByIdentity.get(k);
+      if (live) { consumedLive.add(k); if (live.ip) consumedLiveIps.add(live.ip.toLowerCase()); }
       const aliasEntry = aliasLookup.get(k);
       out.push({
         id:        p,
@@ -13927,14 +14022,21 @@ const VpnPanel = (() => {
         roster:    true,
       });
     }
-    // Anything live but not in roster (mid-import / mid-publish race) —
-    // surface so the user can see the discovery happen, but mark as
-    // "discovered" so they know it's not yet in their config.
-    for (const [k, live] of liveByKey) {
-      if (seen.has(k)) continue;
-      const aliasEntry = aliasLookup.get(k);
+    // Second pass: live entries not yet folded into a rostered row.
+    // Dedup by tunnel_ip — if two live entries share the same IP
+    // (FIPS-overlay entry + raw discovered entry, common in 4.x),
+    // keep only the first. Anything truly novel goes through as
+    // "discovered (not in roster)."
+    for (const live of livePeers) {
+      const idKey = (live.npub || live.pubkey || '').toLowerCase();
+      if (idKey && consumedLive.has(idKey)) continue;
+      const ipKey = (live.ip || '').toLowerCase();
+      if (ipKey && consumedLiveIps.has(ipKey)) continue;
+      if (ipKey) consumedLiveIps.add(ipKey);
+      if (idKey) consumedLive.add(idKey);
+      const aliasEntry = aliasLookup.get(idKey);
       out.push({
-        id:        live.npub || live.pubkey || live.ip || k,
+        id:        live.npub || live.pubkey || live.ip || idKey || `peer-${out.length}`,
         rosterKey: null,
         live,
         alias:     aliasEntry?.alias || null,
