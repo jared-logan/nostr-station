@@ -8,7 +8,7 @@ export const COMPONENT_VERSIONS: Partial<Record<string, string>> = {
   // nvpn: Rust binary tarball, fetched from
   // https://github.com/mmalmi/nostr-vpn releases. Bump in lockstep with
   // BINARY_SHA256.nvpn below.
-  'nvpn': '0.3.12',
+  'nvpn': '4.0.37',
   // nak: Go binary, fetched from https://github.com/fiatjaf/nak releases.
   // The crates.io entry of the same name is unrelated — historically
   // this entry was a `cargo install nak` step that silently installed
@@ -45,9 +45,9 @@ export const BINARY_SHA256: Record<string, Record<string, string>> = {
     'linux-arm64':  '6882b4ebd0adb2e606680a96db0723239475cf6e570e6f3ff3264059b9fc9f03',
   },
   nvpn: {
-    'aarch64-apple-darwin':       '7fd31fd1cf2b23ef4eb1550dd0580c6dbe00ddc5712cdc5210881860a2260582',
-    'aarch64-unknown-linux-musl': 'c5976952a1ea31d1f8a06697cc034725ece49637378f30a74b8b5e54956d3cbd',
-    'x86_64-unknown-linux-musl':  '2e54cc12208bff537b069e93d1aeffc4e80d22573f23d29157eff5e1c0de90fb',
+    'aarch64-apple-darwin':       '3a6fef13fd1bb1637777f4fa8d31de9052bc3864029eca6048e30b47acca7feb',
+    'aarch64-unknown-linux-musl': 'edcf98d68618f1badb4007fb64705b1db923d5278510768d68675b56d5736332',
+    'x86_64-unknown-linux-musl':  '79d954664e7fee3d4ab841503f6a1b221b110a1af9c34db4b959fd6c19bac6de',
     // x86_64-apple-darwin: upstream does not publish this asset.
   },
   // ngit asset filename: ngit-v{version}-{target}.tar.gz

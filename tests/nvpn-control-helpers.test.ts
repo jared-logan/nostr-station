@@ -38,14 +38,25 @@ test('clampInt: numeric strings are accepted', () => {
 
 test('isSettableNvpnKey: known nvpn-set keys', () => {
   // Curated subset of `nvpn set --<key>` flags. Add cases here when the
-  // allowlist grows in src/lib/nvpn.ts.
+  // allowlist grows in src/lib/nvpn.ts. `relay-for-others`,
+  // `provide-nat-assist`, and `magic-dns-port` were removed in
+  // nvpn 4.x and are no longer settable.
   for (const k of ['node-name', 'listen-port', 'autoconnect',
                    'advertise-exit-node', 'advertise-routes',
-                   'relay-for-others', 'magic-dns-suffix',
-                   'magic-dns-port', 'tunnel-ip',
-                   'endpoint', 'exit-node', 'provide-nat-assist',
+                   'exit-node-leak-protection', 'magic-dns-suffix',
+                   'tunnel-ip', 'endpoint', 'exit-node',
                    'network-id']) {
     assert.equal(isSettableNvpnKey(k), true, `expected ${k} to be settable`);
+  }
+});
+
+test('isSettableNvpnKey: nvpn-4.x removals are no longer settable', () => {
+  // These three flags vanished from `nvpn set` in the FIPS-mesh
+  // redesign. If a future upstream brings any of them back, restore
+  // them in SETTABLE_KEYS (and add them to the test above).
+  for (const removed of ['relay-for-others', 'provide-nat-assist', 'magic-dns-port']) {
+    assert.equal(isSettableNvpnKey(removed), false,
+      `${removed} should not be settable on nvpn 4.x`);
   }
 });
 
