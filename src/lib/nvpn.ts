@@ -351,42 +351,60 @@ function summarizeError(e: any): string {
   return (stderr.trim() || msg).slice(0, 240);
 }
 
+// systemctl wrapper for the service-installed daemon lifecycle on
+// Linux. nvpn's CLI does NOT expose `nvpn service start/stop/restart`
+// — `service` only has install/uninstall/enable/disable/status. The
+// daemon's runtime lifecycle is controlled via systemctl directly,
+// which is what `applyLinuxCapsDropIn` already does for its
+// try-restart at the end of the caps drop-in flow.
+//
+// macOS is out of scope here: the equivalent would be `launchctl
+// bootstrap/bootout system <plist-path>`, but no macOS users have
+// reported the Start-button issue (macOS doesn't have Linux's
+// CAP_NET_ADMIN gating, so user-mode `nvpn start --daemon` works
+// there). Tracking macOS launchctl routing as a follow-up.
+async function systemctlControl(
+  op: 'start' | 'stop' | 'restart',
+): Promise<ControlResult> {
+  try {
+    await execa('sudo', ['-n', 'systemctl', op, 'nvpn.service'], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+    });
+    return { ok: true, detail: `systemctl ${op} nvpn.service` };
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) {
+      return {
+        ok: false,
+        detail: `sudo cred cache empty — run \`sudo systemctl ${op} nvpn.service\` in your terminal, then refresh the dashboard.`,
+      };
+    }
+    return { ok: false, detail: summarizeError(e) };
+  }
+}
+
 export async function startNvpn(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
-    // Prefer the systemd / launchd service when one is installed. Running
+    // Prefer the systemd service when one is installed (Linux). Running
     // `nvpn start --daemon` as the dashboard user fails on Linux without
     // CAP_NET_ADMIN — the daemon dies in <2s on the first `ip address
     // replace` RTNETLINK call with "Operation not permitted." The
     // service-installed daemon has the right caps via the drop-in at
-    // /etc/systemd/system/nvpn.service.d/10-nostr-station-caps.conf and
-    // is the only working path on most Linux installs.
+    // /etc/systemd/system/nvpn.service.d/10-nostr-station-caps.conf
+    // and is the only working path on most Linux installs.
     //
     // probeUncached (not the SWR-cached export) so a fresh button click
-    // doesn't race against a stale "service: not installed" snapshot from
-    // a few seconds ago.
-    const svc = await probeNvpnServiceStatusUncached();
-    if (svc.installed) {
-      try {
-        await execa('sudo', ['-n', binPath, 'service', 'start'], {
-          timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
-        });
-        return { ok: true, detail: 'nvpn service started' };
-      } catch (e: any) {
-        const stderr = (e?.stderr?.toString?.() || '').trim();
-        if (/password is required|sudo:.*required/i.test(stderr)) {
-          return {
-            ok: false,
-            detail: `sudo cred cache empty — run \`sudo ${binPath} service start\` in your terminal, then refresh the dashboard.`,
-          };
-        }
-        return { ok: false, detail: summarizeError(e) };
-      }
+    // doesn't race against a stale "service: not installed" snapshot.
+    if (process.platform === 'linux') {
+      const svc = await probeNvpnServiceStatusUncached();
+      if (svc.installed) return await systemctlControl('start');
     }
-    // No service installed — user-mode daemon. This path works on macOS
-    // (no caps needed) and on Linux when the user has been granted file
-    // caps on the nvpn binary, or is otherwise running with CAP_NET_ADMIN.
+    // Fallback: user-mode daemon. macOS, or Linux without the systemd
+    // unit. On Linux without caps this still fails — but that matches
+    // the pre-fix behavior; granting file caps or installing the
+    // systemd service is the way through.
     await execa(binPath, ['start', '--daemon'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
     return { ok: true, detail: 'nvpn daemon started' };
   } catch (e: any) {
@@ -403,26 +421,9 @@ export async function stopNvpn(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
-    // Mirror startNvpn — when the systemd service is the daemon source,
-    // `sudo -n nvpn service stop` is the only correct stop path. A
-    // user-mode `nvpn stop` won't reach the root-owned daemon socket.
-    const svc = await probeNvpnServiceStatusUncached();
-    if (svc.installed) {
-      try {
-        await execa('sudo', ['-n', binPath, 'service', 'stop'], {
-          timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
-        });
-        return { ok: true, detail: 'nvpn service stopped' };
-      } catch (e: any) {
-        const stderr = (e?.stderr?.toString?.() || '').trim();
-        if (/password is required|sudo:.*required/i.test(stderr)) {
-          return {
-            ok: false,
-            detail: `sudo cred cache empty — run \`sudo ${binPath} service stop\` in your terminal, then refresh the dashboard.`,
-          };
-        }
-        return { ok: false, detail: summarizeError(e) };
-      }
+    if (process.platform === 'linux') {
+      const svc = await probeNvpnServiceStatusUncached();
+      if (svc.installed) return await systemctlControl('stop');
     }
     await execa(binPath, buildNvpnArgs(['stop']), { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
     return { ok: true, detail: 'nvpn daemon stopped' };
@@ -436,31 +437,19 @@ export async function stopNvpn(): Promise<ControlResult> {
 export async function restartNvpn(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
-  // For service-managed daemons, prefer the atomic `service restart`
-  // verb instead of stop-then-start — systemctl handles the transition
-  // in one syscall set, avoiding the brief "stopped" window during
-  // which a status probe would paint the meta strip red.
-  const svc = await probeNvpnServiceStatusUncached();
-  if (svc.installed) {
-    try {
-      await execa('sudo', ['-n', binPath, 'service', 'restart'], {
-        timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
-      });
+  // Prefer the atomic `systemctl restart` verb over stop-then-start —
+  // systemd handles the transition in one syscall set, avoiding the
+  // brief "stopped" window during which a status probe would paint
+  // the meta strip red.
+  if (process.platform === 'linux') {
+    const svc = await probeNvpnServiceStatusUncached();
+    if (svc.installed) {
+      const r = await systemctlControl('restart');
       nvpnEvents.emit('state-changed');
-      return { ok: true, detail: 'nvpn service restarted' };
-    } catch (e: any) {
-      const stderr = (e?.stderr?.toString?.() || '').trim();
-      nvpnEvents.emit('state-changed');
-      if (/password is required|sudo:.*required/i.test(stderr)) {
-        return {
-          ok: false,
-          detail: `sudo cred cache empty — run \`sudo ${binPath} service restart\` in your terminal, then refresh the dashboard.`,
-        };
-      }
-      return { ok: false, detail: summarizeError(e) };
+      return r;
     }
   }
-  // User-mode fallback — best-effort stop, then start. Existing behavior.
+  // User-mode fallback — best-effort stop, then start.
   const stop = await stopNvpn();
   const start = await startNvpn();
   if (!start.ok) return { ok: false, detail: start.detail };
