@@ -235,25 +235,6 @@ export async function installNostrVpn(
     };
   }
 
-  // nvpn init — best-effort. Upstream subcommand spelling shifted in
-  // 4.x: `--yes` was renamed to `--force`. Try the new flag first, fall
-  // back to a stdin-newline (covers older binaries that may linger in
-  // an existing install before the binary is swapped).
-  log.step('nvpn init');
-  try {
-    await execa(nvpnBin, ['init', '--force'], { stdio: 'pipe', timeout: 10_000 });
-    log.append('init --force ok');
-  } catch {
-    try {
-      await execa(nvpnBin, ['init'], {
-        stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000, input: '\n',
-      });
-      log.append('init (stdin-newline) ok');
-    } catch (e: any) {
-      log.append(`init skipped: ${(e?.message || '').slice(0, 120)}`);
-    }
-  }
-
   // Pre-seed a free magic-dns-port + lay down the systemd caps drop-in
   // BEFORE service install, so the daemon's first start sees both.
   // Without this, port 1053 collisions and missing CAP_DAC_OVERRIDE
@@ -271,10 +252,22 @@ export async function installNostrVpn(
   log.append(`caps drop-in: ${caps.ok ? 'ok' : 'skipped'} — ${caps.detail}`);
 
   // System service install — writes /Library/LaunchDaemons (macOS) or
-  // /etc/systemd/system (linux). `sudo -n` fails fast if the cred cache
-  // is empty. The dashboard runs in an SSE response, no TTY for a sudo
-  // prompt — the user has to have run a sudo command in the same shell
-  // session shortly beforehand for this to succeed.
+  // /etc/systemd/system (linux), creates the root-owned identity at
+  // /root/.config/nvpn/ (or root's $XDG_CONFIG_HOME equivalent), and
+  // starts the daemon. `sudo -n` fails fast if the cred cache is empty.
+  // The dashboard runs in an SSE response, no TTY for a sudo prompt —
+  // the user has to have run a sudo command in the same shell session
+  // shortly beforehand for this to succeed.
+  //
+  // We DELIBERATELY don't run `nvpn init` as the dashboard user before
+  // this step. Doing so creates a second, parallel identity at
+  // ~/.config/nvpn/ with its own network_id + tunnel_ip — distinct
+  // from what the root-owned service daemon ends up using. The two
+  // identities then confuse the dashboard's status / network / roster
+  // probes (which read the user-side config) vs. the actual running
+  // daemon (which uses the root-side config). The user-mode init is
+  // now a fallback path further down — it only runs when service
+  // install fails and we need user-mode `nvpn start --daemon` to work.
   log.step('sudo nvpn service install');
   try {
     const { stdout, stderr } = await execa(
@@ -287,6 +280,29 @@ export async function installNostrVpn(
     const stderr = (e?.stderr?.toString?.() || '').trim();
     const needsPassword = /password is required|sudo:.*required/i.test(stderr);
     log.append(`service install FAILED: ${stderr.slice(0, 240) || (e?.message || '').slice(0, 240)}`);
+
+    // Fallback: when service install fails (no sudo cache, missing
+    // systemd, container without privileged init), the user-mode
+    // daemon path is the only remaining option. That path needs a
+    // user-side identity, which `nvpn init --force` creates at
+    // ~/.config/nvpn/. Upstream subcommand spelling shifted in 4.x
+    // (--yes → --force); try the new flag first, fall back to stdin-
+    // newline for older binaries. Best-effort — a failure here just
+    // means the user-mode CLI may prompt them on first manual run.
+    log.step('nvpn init (user-mode fallback)');
+    try {
+      await execa(nvpnBin, ['init', '--force'], { stdio: 'pipe', timeout: 10_000 });
+      log.append('init --force ok');
+    } catch {
+      try {
+        await execa(nvpnBin, ['init'], {
+          stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000, input: '\n',
+        });
+        log.append('init (stdin-newline) ok');
+      } catch (initErr: any) {
+        log.append(`init skipped: ${(initErr?.message || '').slice(0, 120)}`);
+      }
+    }
 
     const nextStep = needsPassword
       ? `run \`sudo ${nvpnBin} service install\` when ready for auto-start — or start on demand with \`${nvpnBin} start --daemon\``

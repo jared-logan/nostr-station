@@ -249,29 +249,39 @@ async function probeNvpnStatusUncached(): Promise<NvpnStatus> {
       tunnelIp: null, statusSource: null, raw: null, error: null, fetchedAt,
     };
   }
-  let raw: NvpnStatusJson | null = null;
-  let error: string | null = null;
-  try {
-    // --config pins the lookup against $HOME/$XDG_CONFIG_HOME drift.
-    // Without this, sudo / mismatched-user invocations fall through to
-    // 4.x's silent config-snapshot mode (status_source: "config").
-    const { stdout } = await execa(binPath, buildNvpnArgs(['status', '--json']), {
-      timeout: STATUS_TIMEOUT_MS, stdio: 'pipe',
-    });
-    try { raw = JSON.parse(stdout); }
-    catch (e: any) { error = `unparseable status JSON: ${(e?.message || '').slice(0, 120)}`; }
-  } catch (e: any) {
-    // execa surfaces both timeout and non-zero exit via thrown errors. We
-    // collapse both to a short single-line string for the UI. NB: a probe
-    // failure leaves `running: false` because we never saw a daemon.running
-    // payload — but consumers must NOT read that as "daemon stopped" on its
-    // own. A wedged or slow socket on a healthy daemon hits this same
-    // branch; the banner code in web-server.ts cross-checks
-    // probeNvpnServiceStatus() before flipping the user-facing pill.
-    error = (e?.shortMessage || e?.message || String(e)).slice(0, 240);
-  }
-  const statusSource = typeof raw?.status_source === 'string'
+  // First pass — user-mode probe. Works on macOS and on Linux when the
+  // user is running the daemon directly.
+  let { raw, error } = await runStatusProbe(binPath, /* asRoot */ false);
+
+  let statusSource = typeof raw?.status_source === 'string'
     ? (raw.status_source as string) : null;
+
+  // Second pass — when the user-mode probe returned the static
+  // config-snapshot path AND a systemd / launchd service is installed
+  // and running, the live daemon is the root-owned service one. The
+  // user-mode CLI can't see its socket; re-probe via sudo so the
+  // dashboard reflects truth instead of the user-side phantom.
+  //
+  // Sidesteps the "Start button works, UI still says stopped" UX bug
+  // that came out of the post-pentest VM smoke. probeNvpnServiceStatus
+  // is SWR-cached so the extra hop is at most one subprocess per cache
+  // window, and only fires when status_source already told us we're
+  // looking at the wrong identity.
+  if (statusSource !== 'daemon') {
+    try {
+      const svc = await probeNvpnServiceStatusUncached();
+      if (svc.installed && svc.running) {
+        const sudoProbe = await runStatusProbe(binPath, /* asRoot */ true);
+        if (sudoProbe.raw) {
+          raw = sudoProbe.raw;
+          error = sudoProbe.error;
+          statusSource = typeof raw?.status_source === 'string'
+            ? (raw.status_source as string) : null;
+        }
+      }
+    } catch { /* best-effort — fall through with the user-mode result */ }
+  }
+
   // In 4.x, when status_source !== "daemon" every "live" field (running,
   // endpoint, peer state, …) is nulled and what's returned is a static
   // config snapshot. Treating daemon.running as authoritative in that
@@ -283,6 +293,43 @@ async function probeNvpnStatusUncached(): Promise<NvpnStatus> {
   const running  = liveStatus && !!raw?.daemon?.running;
   const tunnelIp = (raw?.tunnel_ip as string) ?? null;
   return { installed: true, binPath, running, tunnelIp, statusSource, raw, error, fetchedAt };
+}
+
+// Single-call probe used by both passes above. Returns the parsed JSON
+// (or null + error) without interpreting status_source — the caller
+// decides whether to re-probe via sudo based on what came back.
+async function runStatusProbe(
+  binPath: string, asRoot: boolean,
+): Promise<{ raw: NvpnStatusJson | null; error: string | null }> {
+  // --config pins the lookup against $HOME/$XDG_CONFIG_HOME drift.
+  // Without this, sudo / mismatched-user invocations fall through to
+  // 4.x's silent config-snapshot mode (status_source: "config").
+  const args = buildNvpnArgs(['status', '--json']);
+  try {
+    const { stdout } = asRoot
+      ? await execa('sudo', ['-n', binPath, ...args], {
+          timeout: STATUS_TIMEOUT_MS, stdio: 'pipe',
+        })
+      : await execa(binPath, args, {
+          timeout: STATUS_TIMEOUT_MS, stdio: 'pipe',
+        });
+    try { return { raw: JSON.parse(stdout), error: null }; }
+    catch (e: any) {
+      return { raw: null, error: `unparseable status JSON: ${(e?.message || '').slice(0, 120)}` };
+    }
+  } catch (e: any) {
+    // execa surfaces both timeout and non-zero exit via thrown errors. We
+    // collapse both to a short single-line string for the UI. NB: a probe
+    // failure leaves `running: false` because we never saw a daemon.running
+    // payload — but consumers must NOT read that as "daemon stopped" on its
+    // own. A wedged or slow socket on a healthy daemon hits this same
+    // branch; the banner code in web-server.ts cross-checks
+    // probeNvpnServiceStatus() before flipping the user-facing pill.
+    return {
+      raw: null,
+      error: (e?.shortMessage || e?.message || String(e)).slice(0, 240),
+    };
+  }
 }
 
 // Public probe — TTL-cached + concurrent-call deduped (see memoizeWithTtl
@@ -308,6 +355,38 @@ export async function startNvpn(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
+    // Prefer the systemd / launchd service when one is installed. Running
+    // `nvpn start --daemon` as the dashboard user fails on Linux without
+    // CAP_NET_ADMIN — the daemon dies in <2s on the first `ip address
+    // replace` RTNETLINK call with "Operation not permitted." The
+    // service-installed daemon has the right caps via the drop-in at
+    // /etc/systemd/system/nvpn.service.d/10-nostr-station-caps.conf and
+    // is the only working path on most Linux installs.
+    //
+    // probeUncached (not the SWR-cached export) so a fresh button click
+    // doesn't race against a stale "service: not installed" snapshot from
+    // a few seconds ago.
+    const svc = await probeNvpnServiceStatusUncached();
+    if (svc.installed) {
+      try {
+        await execa('sudo', ['-n', binPath, 'service', 'start'], {
+          timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+        });
+        return { ok: true, detail: 'nvpn service started' };
+      } catch (e: any) {
+        const stderr = (e?.stderr?.toString?.() || '').trim();
+        if (/password is required|sudo:.*required/i.test(stderr)) {
+          return {
+            ok: false,
+            detail: `sudo cred cache empty — run \`sudo ${binPath} service start\` in your terminal, then refresh the dashboard.`,
+          };
+        }
+        return { ok: false, detail: summarizeError(e) };
+      }
+    }
+    // No service installed — user-mode daemon. This path works on macOS
+    // (no caps needed) and on Linux when the user has been granted file
+    // caps on the nvpn binary, or is otherwise running with CAP_NET_ADMIN.
     await execa(binPath, ['start', '--daemon'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
     return { ok: true, detail: 'nvpn daemon started' };
   } catch (e: any) {
@@ -324,6 +403,27 @@ export async function stopNvpn(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
+    // Mirror startNvpn — when the systemd service is the daemon source,
+    // `sudo -n nvpn service stop` is the only correct stop path. A
+    // user-mode `nvpn stop` won't reach the root-owned daemon socket.
+    const svc = await probeNvpnServiceStatusUncached();
+    if (svc.installed) {
+      try {
+        await execa('sudo', ['-n', binPath, 'service', 'stop'], {
+          timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+        });
+        return { ok: true, detail: 'nvpn service stopped' };
+      } catch (e: any) {
+        const stderr = (e?.stderr?.toString?.() || '').trim();
+        if (/password is required|sudo:.*required/i.test(stderr)) {
+          return {
+            ok: false,
+            detail: `sudo cred cache empty — run \`sudo ${binPath} service stop\` in your terminal, then refresh the dashboard.`,
+          };
+        }
+        return { ok: false, detail: summarizeError(e) };
+      }
+    }
     await execa(binPath, buildNvpnArgs(['stop']), { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
     return { ok: true, detail: 'nvpn daemon stopped' };
   } catch (e: any) {
@@ -334,10 +434,34 @@ export async function stopNvpn(): Promise<ControlResult> {
 }
 
 export async function restartNvpn(): Promise<ControlResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  // For service-managed daemons, prefer the atomic `service restart`
+  // verb instead of stop-then-start — systemctl handles the transition
+  // in one syscall set, avoiding the brief "stopped" window during
+  // which a status probe would paint the meta strip red.
+  const svc = await probeNvpnServiceStatusUncached();
+  if (svc.installed) {
+    try {
+      await execa('sudo', ['-n', binPath, 'service', 'restart'], {
+        timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+      });
+      nvpnEvents.emit('state-changed');
+      return { ok: true, detail: 'nvpn service restarted' };
+    } catch (e: any) {
+      const stderr = (e?.stderr?.toString?.() || '').trim();
+      nvpnEvents.emit('state-changed');
+      if (/password is required|sudo:.*required/i.test(stderr)) {
+        return {
+          ok: false,
+          detail: `sudo cred cache empty — run \`sudo ${binPath} service restart\` in your terminal, then refresh the dashboard.`,
+        };
+      }
+      return { ok: false, detail: summarizeError(e) };
+    }
+  }
+  // User-mode fallback — best-effort stop, then start. Existing behavior.
   const stop = await stopNvpn();
-  // Best-effort stop — proceed to start either way. If the daemon was
-  // already down `nvpn stop` exits non-zero, but a fresh start is still
-  // the right outcome from a UI button labelled "restart."
   const start = await startNvpn();
   if (!start.ok) return { ok: false, detail: start.detail };
   return { ok: true, detail: stop.ok ? 'restarted' : `started (stop hint: ${stop.detail})` };
