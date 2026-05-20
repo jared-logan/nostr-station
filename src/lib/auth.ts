@@ -116,6 +116,28 @@ export function loadSessions(): void {
   }
 }
 
+// ── Constant-time string equality ───────────────────────────────────────────
+//
+// Used for explicit equality checks against attacker-controlled inputs
+// (NIP-98 challenge content, claimed pubkey). JS `===` on strings can
+// short-circuit at the first differing byte; timingSafeEqual on
+// equal-length Buffers reads every byte regardless. Practical impact
+// over loopback is near-zero (nanosecond timing differences are below
+// the network noise floor) but the helper is free and removes
+// "timing-attack on session" from the threat-model conversation.
+//
+// Map-based lookups (sessions, challenges) intentionally stay as-is:
+// V8's Map.get does a full equality compare internally and is constant
+// in expected timing modulo hash randomization. Iterating all entries
+// and timingSafeEqual'ing each would be O(n) for no real-world gain.
+function eqConstantTime(a: string, b: string): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  } catch { return false; }
+}
+
 // ── Challenges ──────────────────────────────────────────────────────────────
 
 export function issueChallenge(): { challenge: string; expiresAt: number } {
@@ -173,21 +195,91 @@ export function deleteSession(token: string): boolean {
   return sessions.delete(token);
 }
 
+// ── Download tokens ────────────────────────────────────────────────────────
+//
+// Short-lived single-use tokens for `<a target="_blank">` / `<a download>`
+// flows where the long-lived session token would otherwise have to live
+// in the URL. URLs end up in browser history; the session token there is
+// a 8-hour bearer credential. A download token is 60 seconds, one use,
+// tied to its issuing session — leaking it after consumption is
+// harmless, and even before consumption it can only fetch resources
+// the issuing session itself could.
+//
+// Wire: POST /api/auth/download-token (session-authed) → { token, expiresAt }
+//       GET  /any?dt=<download_token>  resolves to the session's auth
+//
+// Existing `?token=<session>` query-string usage for SSE / WS stays
+// (those don't enter browser history), so this is additive — not a
+// replacement.
+
+interface DownloadToken {
+  sessionToken: string;     // the session this delegates to
+  expiresAt:    number;     // ms epoch
+}
+const downloadTokens = new Map<string, DownloadToken>();
+const DOWNLOAD_TOKEN_TTL_MS = 60 * 1000;
+
+export function issueDownloadToken(sessionToken: string): { token: string; expiresAt: number } | null {
+  // Only issue if the session is currently valid. The download token
+  // outlives nothing — it expires before the session would and is
+  // single-use anyway.
+  if (!getSession(sessionToken)) return null;
+  pruneDownloadTokens();
+  const token     = crypto.randomBytes(32).toString('hex');
+  const expiresAt = Date.now() + DOWNLOAD_TOKEN_TTL_MS;
+  downloadTokens.set(token, { sessionToken, expiresAt });
+  return { token, expiresAt };
+}
+
+// Consumes a download token and returns the underlying session token
+// on success. Single-use: any subsequent presentation of the same
+// download token returns null.
+function consumeDownloadToken(token: string): string | null {
+  const entry = downloadTokens.get(token);
+  if (!entry) return null;
+  downloadTokens.delete(token);
+  if (entry.expiresAt < Date.now()) return null;
+  // Verify the underlying session is still live.
+  if (!getSession(entry.sessionToken)) return null;
+  return entry.sessionToken;
+}
+
+function pruneDownloadTokens(): void {
+  const now = Date.now();
+  for (const [t, e] of downloadTokens) if (e.expiresAt < now) downloadTokens.delete(t);
+}
+
 export function extractBearer(req: http.IncomingMessage): string | null {
   const h = req.headers['authorization'];
   if (typeof h === 'string') {
     const m = h.match(/^Bearer\s+([a-f0-9]{64})$/i);
     if (m) return m[1];
   }
-  // Fallback: browser APIs that can't set Authorization headers (EventSource,
-  // WebSocket, <a> downloads) pass the session token as a `?token=…` query
-  // param instead. Accepted because the dashboard is 127.0.0.1-only and
-  // session tokens are short-lived — the standard caveats about tokens in
-  // URLs don't apply on the local trust boundary.
+  // Fallback: browser APIs that can't set Authorization headers
+  // (EventSource, WebSocket) pass the session token as a `?token=…`
+  // query param. EventSource / WebSocket URLs don't enter browser
+  // history, so this is fine on loopback.
+  //
+  // Downloads (`<a target="_blank">` / `<a download>`) instead use a
+  // short-lived single-use `?dt=…` token that's minted by
+  // POST /api/auth/download-token. The URL still enters browser
+  // history but the token is already consumed by the time anyone
+  // could read it back. See issueDownloadToken / consumeDownloadToken.
   const url = req.url || '';
   const q   = url.indexOf('?');
   if (q < 0) return null;
-  const tok = new URLSearchParams(url.slice(q + 1)).get('token');
+  const params = new URLSearchParams(url.slice(q + 1));
+  const dt = params.get('dt');
+  if (dt && /^[a-f0-9]{64}$/.test(dt)) {
+    const session = consumeDownloadToken(dt);
+    if (session) return session;
+    // Invalid / expired / already-consumed download token. Don't fall
+    // through to ?token= — the request explicitly opted into the
+    // download-token flow; treating it as if it had no auth is what
+    // we want (the caller's URL was stale).
+    return null;
+  }
+  const tok = params.get('token');
   return tok && /^[a-f0-9]{64}$/.test(tok) ? tok : null;
 }
 
@@ -227,7 +319,7 @@ export function verifyNip98(input: VerifyInput): VerifyResult {
   if (!ev || typeof ev !== 'object')       return { ok: false, error: 'missing event' };
   if (ev.kind !== 27235)                   return { ok: false, error: 'event kind must be 27235 (NIP-98)' };
   if (typeof ev.content !== 'string')      return { ok: false, error: 'event content missing' };
-  if (ev.content !== input.challenge)      return { ok: false, error: 'challenge mismatch' };
+  if (!eqConstantTime(ev.content, input.challenge)) return { ok: false, error: 'challenge mismatch' };
   if (typeof ev.created_at !== 'number')   return { ok: false, error: 'invalid created_at' };
 
   const nowSec = Math.floor(Date.now() / 1000);
@@ -241,7 +333,8 @@ export function verifyNip98(input: VerifyInput): VerifyResult {
   if (!uTag || uTag[1] !== input.expectedUrl) return { ok: false, error: 'u tag must match dashboard URL' };
   if (!mTag || mTag[1] !== 'POST')            return { ok: false, error: 'method tag must be POST' };
 
-  if (typeof ev.pubkey !== 'string' || ev.pubkey.toLowerCase() !== expectedHex.toLowerCase()) {
+  if (typeof ev.pubkey !== 'string'
+      || !eqConstantTime(ev.pubkey.toLowerCase(), expectedHex.toLowerCase())) {
     return { ok: false, error: 'pubkey does not match station owner' };
   }
 

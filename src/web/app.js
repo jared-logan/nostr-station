@@ -20055,23 +20055,30 @@ const MailPanel = (() => {
                                  : `${size} B`;
     }
     function renderAttachmentChip(m, a) {
-      const tok = getSessionToken();
-      let href;
+      const name = a.name || (a.blossom?.sha256 || '').slice(0, 12) || 'attachment';
+      let hrefAttr, extraAttrs;
       if (a.blossom) {
         // Blossom-hosted, AES-256-GCM encrypted. Route through the
-        // proxy-decrypt endpoint so the browser sees plaintext.
-        href = `/api/mail/download?id=${encodeURIComponent(m.id)}&sha=${encodeURIComponent(a.blossom.sha256)}${tok ? `&token=${tok}` : ''}`;
+        // proxy-decrypt endpoint so the browser sees plaintext. The
+        // real URL is constructed at click-time by the delegated
+        // handler below (it fetches a one-shot ?dt= download token
+        // first so the long-lived session token never enters the
+        // browser's address bar / history).
+        hrefAttr = '#';
+        extraAttrs = `data-mail-id="${escapeHtml(m.id)}" `
+                   + `data-blossom-sha="${escapeHtml(a.blossom.sha256)}" `
+                   + `data-name="${escapeHtml(name)}"`;
       } else if (a.inlineBase64 != null) {
         // Inline base64 — decode to a data URL for direct download. The
         // bytes were already E2E-encrypted at rest inside the gift wrap;
         // there's nothing to fetch.
-        href = `data:${a.mime};base64,${a.inlineBase64}`;
+        hrefAttr = `data:${a.mime};base64,${a.inlineBase64}`;
+        extraAttrs = `download="${escapeHtml(name)}"`;
       } else {
-        href = '#';
+        hrefAttr = '#';
+        extraAttrs = '';
       }
-      const name = a.name || (a.blossom?.sha256 || '').slice(0, 12) || 'attachment';
-      return `<a class="mail-msg-fileChip" href="${escapeHtml(href)}"
-                 ${a.blossom ? 'target="_blank" rel="noopener noreferrer"' : `download="${escapeHtml(name)}"`}>
+      return `<a class="mail-msg-fileChip" href="${escapeHtml(hrefAttr)}" ${extraAttrs}>
         <span class="mail-att-icon">${ICON_PAPERCLIP}</span>
         <div class="mail-msg-fileMeta">
           <div class="mail-msg-fileName">${escapeHtml(name)} <span class="mail-att-lock" title="end-to-end encrypted">${ICON_LOCK}</span></div>
@@ -20101,6 +20108,35 @@ const MailPanel = (() => {
       </div>`;
     }).join('');
     el.innerHTML = `${head}<div class="mail-msgs">${msgs}</div>`;
+    // Delegated click handler for Blossom attachments — mint a single-
+    // use download token at click time and open the URL with ?dt= so
+    // the long-lived session token never enters browser history.
+    // Inline base64 chips (data: URLs) bypass this — they don't need
+    // any auth.
+    el.addEventListener('click', async (ev) => {
+      const chip = ev.target.closest && ev.target.closest('.mail-msg-fileChip[data-blossom-sha]');
+      if (!chip) return;
+      ev.preventDefault();
+      const mailId = chip.getAttribute('data-mail-id');
+      const sha    = chip.getAttribute('data-blossom-sha');
+      if (!mailId || !sha) return;
+      try {
+        const r = await api('/api/auth/download-token', { method: 'POST' });
+        let url = `/api/mail/download?id=${encodeURIComponent(mailId)}`
+                + `&sha=${encodeURIComponent(sha)}`;
+        if (r && r.token) {
+          url += `&dt=${encodeURIComponent(r.token)}`;
+        } else if (!r || r.mode !== 'unauthenticated') {
+          // Anything other than a token or the localhost-exempt "no
+          // token needed" signal is a real failure.
+          toast('Download failed', 'Could not mint download token. Try signing in again.', 'err');
+          return;
+        }
+        window.open(url, '_blank', 'noopener,noreferrer');
+      } catch (e) {
+        toast('Download failed', String(e && e.message || e), 'err');
+      }
+    });
     const moveSel = $('mail-thread-move');
     if (moveSel) {
       moveSel.addEventListener('change', async () => {

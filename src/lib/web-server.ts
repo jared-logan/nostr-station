@@ -58,7 +58,7 @@ import {
   issueChallenge, consumeChallenge, createSession,
   deleteSession, extractBearer, verifyNip98, authStatus,
   isPublicApi, requireSession, expectedDashboardUrl,
-  loadSessions, persistSessions,
+  loadSessions, persistSessions, issueDownloadToken,
 } from './auth.js';
 import {
   startUpdatePoller, stopUpdatePoller, getUpdateStatus,
@@ -846,6 +846,39 @@ export async function startWebServer(port: number): Promise<http.Server> {
         if (token) deleteSession(token);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // POST /api/auth/download-token — mint a short-lived single-use
+      // token for <a target="_blank"> / <a download> URLs (currently
+      // just mail attachments). The dashboard's session token is too
+      // long-lived to safely embed in URLs that enter browser history.
+      // See auth.ts issueDownloadToken / consumeDownloadToken.
+      //
+      // When the dashboard is in the localhost-exempt mode (wizard
+      // phase OR requireAuth:false), requireSession() returns a
+      // synthetic session token of 'localhost-exempt' that doesn't
+      // live in the sessions Map. In that mode the user's downloads
+      // also don't need a token — the localhost-exempt path will
+      // re-authorize them on arrival. Return mode:'unauthenticated'
+      // so the client opens the URL bare.
+      if (url === '/api/auth/download-token' && method === 'POST') {
+        const session = requireSession(req, res);
+        if (!session) return;
+        if (session.token === 'localhost-exempt') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ mode: 'unauthenticated' }));
+          return;
+        }
+        const tok = extractBearer(req);
+        const dt  = tok ? issueDownloadToken(tok) : null;
+        if (!dt) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'session no longer valid' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(dt));
         return;
       }
 

@@ -338,6 +338,27 @@ export function setNpub(npub: string): { ok: boolean; error?: string; npub?: str
   return { ok: true, npub };
 }
 
+// First-time ownership claim — atomic check-and-set for the bootstrap
+// path. The dashboard's /api/identity/set route hits this when no owner
+// is configured yet. Without the in-flight flag two concurrent requests
+// (both passing CSRF — only possible from the user's own browser today
+// but defense-in-depth) could each read `!npub`, both write, and the
+// last write wins. The check-then-write window is microseconds but
+// real; this closes it without needing OS-level locking.
+let _bootstrapInFlight = false;
+export function bootstrapIdentity(npub: string): { ok: boolean; error?: string; npub?: string } {
+  if (_bootstrapInFlight) return { ok: false, error: 'bootstrap already in progress' };
+  _bootstrapInFlight = true;
+  try {
+    if (readIdentity().npub) {
+      return { ok: false, error: 'station already configured' };
+    }
+    return setNpub(npub);
+  } finally {
+    _bootstrapInFlight = false;
+  }
+}
+
 export function setSetupComplete(complete: boolean): void {
   const ident = readIdentity();
   ident.setupComplete = complete;

@@ -82,7 +82,11 @@ export const HTML_SECURITY_HEADERS: Record<string, string> = {
   // policy, which the `?token=` fetch-guard needs to distinguish a
   // dashboard-initiated EventSource from a cross-origin attacker request.
   // Cross-origin requests get zero Referer info, same as `no-referrer`.
-  'Referrer-Policy': 'same-origin',
+  // 'no-referrer' (was 'same-origin'). Tighter so even SSE / WS / API
+  // URLs that carry a token in the query string can't leak it via
+  // Referer header on subsequent outbound navigation (e.g. clicking
+  // an external link from a logs panel that streams to ?token=…).
+  'Referrer-Policy': 'no-referrer',
   'Content-Security-Policy': [
     "default-src 'self'",
     "frame-ancestors 'none'",
