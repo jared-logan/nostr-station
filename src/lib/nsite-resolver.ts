@@ -860,6 +860,51 @@ export function unionRelays(primary: string[], secondary: string[]): string[] {
 
 import { createHash } from 'crypto';
 
+// Reject Blossom server URLs that target private / loopback / link-local
+// / CGNAT address space. Without this, a crafted kind-10063 or kind-34128
+// event published to an external relay could direct fetchBlob() at an
+// internal service the user can reach (AWS metadata at 169.254.169.254,
+// an internal admin endpoint, etc.) — SHA-256 verification discards the
+// response body, but the request itself still happens, leaking the
+// service's presence and triggering any state-mutating GET handler.
+//
+// We check IP LITERALS only. Hostnames that DNS-resolve into private
+// space could still slip through; that residual risk is acknowledged
+// in docs/SECURITY.md and partly mitigated by `redirect: 'manual'`
+// below (so a 302 to an internal IP advances to the next server
+// rather than being followed). A synchronous DNS pre-check would slow
+// every fetch and isn't worth the cost vs. the SHA-discard floor.
+//
+// Env opt-out: STATION_NSITE_ALLOW_PRIVATE=1 disables both this check
+// and the https-only requirement, for users self-hosting Blossom on
+// their LAN.
+function isPrivateOrLoopbackHost(host: string): boolean {
+  if (!host) return false;
+  // IPv6 — strip brackets.
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (h === '::1') return true;
+  if (h === '::') return true;
+  if (h.startsWith('fe80:')) return true;   // link-local
+  if (h.startsWith('fc') && h[2] !== ':') {  // fc00::/7 unique-local
+    const second = parseInt(h.slice(2, 4), 16);
+    if (!Number.isNaN(second) && second >= 0x00 && second <= 0xff) return true;
+  }
+  if (h.startsWith('fd')) return true;       // also fc00::/7
+  // IPv4
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const [a, b] = [parseInt(m[1]), parseInt(m[2])];
+    if (a === 127) return true;                              // 127.0.0.0/8
+    if (a === 10)  return true;                              // 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true;        // 172.16.0.0/12
+    if (a === 192 && b === 168) return true;                 // 192.168.0.0/16
+    if (a === 169 && b === 254) return true;                 // 169.254.0.0/16
+    if (a === 100 && b >= 64 && b <= 127) return true;       // 100.64.0.0/10 CGNAT
+    if (a === 0)   return true;                              // 0.0.0.0/8
+  }
+  return false;
+}
+
 /**
  * Try each Blossom server in order; return the first byte stream that
  * verifies against `sha256`. A 404 / network error advances to the next
@@ -878,14 +923,41 @@ export async function fetchBlob(
   if (servers.length === 0) {
     throw new NsiteError('no_blossom_servers', 'no Blossom servers configured');
   }
+  const allowPrivate = process.env.STATION_NSITE_ALLOW_PRIVATE === '1';
   const errors: string[] = [];
   for (const server of servers) {
+    // Parse-and-validate before we touch the network. Untrusted input:
+    // these URLs come from kind-10063 / kind-34128 events published by
+    // arbitrary nsite authors to external relays.
+    let parsed: URL;
+    try { parsed = new URL(server); }
+    catch (e: any) {
+      errors.push(`${server}: invalid URL (${e?.message || e})`);
+      continue;
+    }
+    if (!allowPrivate) {
+      if (parsed.protocol !== 'https:') {
+        errors.push(`${server}: https:// required (set STATION_NSITE_ALLOW_PRIVATE=1 to allow http)`);
+        continue;
+      }
+      if (isPrivateOrLoopbackHost(parsed.hostname)) {
+        errors.push(`${server}: refused private/loopback target (set STATION_NSITE_ALLOW_PRIVATE=1 to allow)`);
+        continue;
+      }
+    }
     const url = `${server.replace(/\/+$/, '')}/${sha256}`;
     let res: Response;
     try {
-      res = await fetchImpl(url, { redirect: 'follow' });
+      // redirect: 'manual' — a Blossom server returning a 302 to an
+      // internal address would otherwise re-open the SSRF after the
+      // host check passes. Treat 3xx as "next server".
+      res = await fetchImpl(url, { redirect: 'manual' });
     } catch (e: any) {
       errors.push(`${server}: ${e?.message || e}`);
+      continue;
+    }
+    if (res.status >= 300 && res.status < 400) {
+      errors.push(`${server}: refusing redirect (HTTP ${res.status})`);
       continue;
     }
     if (!res.ok) {

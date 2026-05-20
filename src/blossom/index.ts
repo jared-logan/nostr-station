@@ -95,9 +95,19 @@ export class BlossomServer {
       return;
     }
 
-    // Permissive CORS — local dev means a Vite/Next app on a different
-    // localhost port will talk to us. Loopback bind makes this safe.
-    res.setHeader('Access-Control-Allow-Origin',  '*');
+    // Echo loopback Origin only — was 'Access-Control-Allow-Origin: *'.
+    // Goal: a Vite/Next app on a different localhost port keeps full
+    // read/write access (it sends Origin: http://localhost:5173 etc.);
+    // a cross-origin browser tab from http://evil.com gets no ACAO
+    // header back, so the browser's CORS layer refuses to expose the
+    // response body to the page even though the byte transfer
+    // completes on the wire. CLI clients (no Origin) don't receive
+    // the header but also don't care — they're not subject to SOP.
+    const reqOrigin = (req.headers.origin as string | undefined) || '';
+    if (reqOrigin && isLoopbackOrigin(reqOrigin)) {
+      res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+      res.setHeader('Vary', 'Origin');
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Content-Sha256');
     res.setHeader('Access-Control-Expose-Headers', 'X-Content-Sha256');
@@ -252,6 +262,21 @@ function isLoopbackAddr(addr: string): boolean {
   if (addr === '::1')       return true;
   if (addr.startsWith('::ffff:127.')) return true;
   return false;
+}
+
+// Origin header validator. Mirrors src/relay/index.ts isLoopbackOrigin —
+// declared locally so the blossom layer doesn't reach into lib/.
+// Port wildcard intentional: scaffolded user apps run at arbitrary
+// loopback ports (5173, 8080, …) and must still receive ACAO.
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return u.hostname === '127.0.0.1'
+        || u.hostname === 'localhost'
+        || u.hostname === '[::1]'
+        || u.hostname === '::1';
+  } catch { return false; }
 }
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
