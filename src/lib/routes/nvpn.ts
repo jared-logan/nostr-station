@@ -36,6 +36,7 @@ import {
   nvpnRowStateFor, nvpnHealthSummary,
   addParticipants, removeParticipants, addAdmins, removeAdmins,
   publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster, readNvpnNetworks,
+  readNvpnNodeIdentity,
   pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork,
   pingNvpnPeer, netcheckNvpn, doctorNvpn, natDiscoverNvpn,
   setNvpnSettings, statsNvpn,
@@ -103,7 +104,29 @@ export async function handleNvpn(
       tunnelIp:  status.tunnelIp,
       raw:       status.raw,
     });
-    await writeJson(res, 200, { ...status, row, health });
+    // 4.x silent-fallback gate. When the CLI couldn't reach the daemon
+    // it returns HTTP-200 with status_source: "config" and every live
+    // field nulled — that's the snapshot landmine we hit during the PR
+    // #154 walkthrough. Surface it as an explicit warning so the
+    // dashboard can render a banner ("daemon unreachable, showing
+    // stale config snapshot") instead of painting "everything zero"
+    // with no signal. Lib layer already force-flipped `running` to
+    // false in this mode; the banner is the user-visible side.
+    const stale = (status.statusSource && status.statusSource !== 'daemon')
+      ? {
+          reason: 'config-snapshot',
+          source: status.statusSource,
+          detail: 'nvpn CLI fell back to a config-derived snapshot — the daemon is unreachable from the dashboard process. '
+                + 'Common cause: $HOME / --config dir mismatch between the dashboard user and the daemon. '
+                + 'Restart nvpn or check that ~/.config/nvpn/daemon.pid exists.',
+        }
+      : null;
+    // Identity: 4.x dropped `npub` / `pubkey` from status JSON; the
+    // local node's pubkey only lives in config.toml. The helper is
+    // leak-safe — it returns ONLY `[nostr] public_key`, never the
+    // secret_key or wireguard private key that sit next to it.
+    const identity = readNvpnNodeIdentity();
+    await writeJson(res, 200, { ...status, row, health, stale, identity });
     return true;
   }
 
@@ -311,13 +334,18 @@ export async function handleNvpn(
   }
 
   if (url === '/api/nvpn/roster/publish' && method === 'POST') {
-    // 501 not 500: `publish-roster` was removed from the CLI in
-    // nvpn 4.x — every mutation auto-publishes via the `--publish`
-    // flag (default-on in the routes above). The endpoint stays
-    // wired so the UI gets a recognizable "feature gone" response
-    // rather than a generic 500.
+    // PR #154 fenced this behind 501 on the premise that --publish on
+    // each mutation made a standalone republish redundant. Live VM
+    // validation proved that wrong — mutations regularly report
+    // `published_recipients: 0` (relay timeouts, WoT/POW gates), and
+    // users had no retry-publish path. publishRoster() now triggers a
+    // republish by re-adding an existing admin with --publish (a no-op
+    // mutation that exercises the publish path), so the dashboard
+    // gets back its "publish now" action. Response includes
+    // `publishedRecipients` so the UI can show recipient count
+    // honestly (yellow on 0, green on ≥1).
     const r = await publishRoster();
-    await writeJson(res, r.ok ? 200 : 501, r);
+    await writeJson(res, r.ok ? 200 : 500, r);
     return true;
   }
 
