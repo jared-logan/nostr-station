@@ -203,18 +203,50 @@ export function gatherStatus(): ServiceStatus[] {
   // is down, so we still cap; 4s matches the dashboard's banner probe and
   // is forgiving enough that a healthy-but-loaded daemon doesn't get
   // mis-reported as "not connected" on a transient stall.
+  //
+  // Two-pass on Linux: when the user-mode probe shows daemon:not-running
+  // (or returns the config-snapshot fallback that means "unreachable
+  // from this $HOME") AND `systemctl is-active nvpn.service` reports
+  // active, re-probe via `sudo -H -n nvpn status --json`. The -H is
+  // load-bearing: without it sudo preserves the dashboard user's HOME
+  // and nvpn reads the user-side config (the phantom from pre-#162
+  // installs) instead of /root/.config/nvpn/ where the service-installed
+  // daemon actually lives. The async sibling in lib/nvpn.ts uses the
+  // same pattern.
   const nvpnPath = findBin('nvpn');
-  const nvpnProbe = (() => {
-    if (!nvpnPath) return { running: false, meshIp: null as string | null };
+  const probeNvpn = (sudo: boolean): {
+    running: boolean; meshIp: string | null; statusSource: string | null;
+  } | null => {
+    if (!nvpnPath) return null;
     try {
-      const out = cmd(`${nvpnPath} status --json`, 4000);
-      if (!out) return { running: false, meshIp: null };
+      const c = sudo
+        ? `sudo -H -n ${nvpnPath} status --json`
+        : `${nvpnPath} status --json`;
+      const out = cmd(c, 4000);
+      if (!out) return null;
       const j = JSON.parse(out);
       return {
         running: !!j?.daemon?.running,
-        meshIp: (j?.tunnel_ip as string) ?? null,
+        meshIp:  (j?.tunnel_ip as string) ?? null,
+        statusSource: typeof j?.status_source === 'string' ? j.status_source : null,
       };
-    } catch { return { running: false, meshIp: null }; }
+    } catch { return null; }
+  };
+  const nvpnProbe = (() => {
+    if (!nvpnPath) return { running: false, meshIp: null as string | null };
+    let p = probeNvpn(false);
+    if (process.platform === 'linux'
+        && (!p || !p.running || (p.statusSource && p.statusSource !== 'daemon'))) {
+      // Cheap check — `systemctl is-active` returns "active" exactly
+      // when the unit's running. Skip the sudo round-trip otherwise.
+      const active = cmd('systemctl is-active nvpn.service', 1500);
+      if (active === 'active') {
+        const rootP = probeNvpn(true);
+        if (rootP) p = rootP;
+      }
+    }
+    if (!p) return { running: false, meshIp: null };
+    return { running: p.running, meshIp: p.meshIp };
   })();
   const vpnRow = nvpnStateFor({
     binPresent: !!nvpnPath,
