@@ -15,6 +15,7 @@
  */
 import { readIdentity } from './identity.js';
 import { signEventWithSavedBunker } from './auth-bunker.js';
+import { MAX_WS_PAYLOAD } from './ws-limits.js';
 
 export interface VerifyStep { name: string; ok: boolean; detail?: string }
 export interface VerifyResult {
@@ -58,7 +59,7 @@ export async function runSetupVerify(): Promise<VerifyResult> {
   // Steps 2 + 3 — publish + read back, both over a single WS connection.
   // Lazy-import ws so we don't pay the cost on cold-path requests.
   const { WebSocket } = await import('ws');
-  const ws = new WebSocket(relayUrl);
+  const ws = new WebSocket(relayUrl, { maxPayload: MAX_WS_PAYLOAD });
 
   // Generic JSON-frame waiter so each step can wait for the message it
   // cares about without racing on the buffer's order.

@@ -11,6 +11,7 @@
 
 import WebSocket from 'ws';
 import type { Project } from './projects.js';
+import { MAX_WS_PAYLOAD } from './ws-limits.js';
 import {
   listIdentities, getNsec,
 } from './test-identities.js';
@@ -109,7 +110,7 @@ function renderSeedContent(label: string, role: string, i: number): string {
 
 function connect(url: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(url, { maxPayload: MAX_WS_PAYLOAD });
     const timer = setTimeout(() => {
       try { ws.close(); } catch {}
       reject(new Error(`connect timeout: ${url}`));

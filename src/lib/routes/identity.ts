@@ -23,6 +23,7 @@
  */
 import http from 'http';
 import { WebSocket } from 'ws';
+import { MAX_WS_PAYLOAD } from '../ws-limits.js';
 import { readIdentity, addReadRelay, removeReadRelay,
   setNpub as setIdentityNpub,
   setSetupComplete, isNpubOrHex, isNsec,
@@ -85,7 +86,7 @@ function fetchKind0FromRelay(relayUrl: string, hex: string, timeoutMs: number): 
       resolve(ev);
     };
     let ws: WebSocket;
-    try { ws = new WebSocket(relayUrl); }
+    try { ws = new WebSocket(relayUrl, { maxPayload: MAX_WS_PAYLOAD }); }
     catch { resolve(null); return; }
 
     const timer = setTimeout(() => finish(null), timeoutMs);
@@ -206,7 +207,7 @@ function fetchKind0BatchFromRelay(
       resolve(out);
     };
     let ws: WebSocket;
-    try { ws = new WebSocket(relayUrl); }
+    try { ws = new WebSocket(relayUrl, { maxPayload: MAX_WS_PAYLOAD }); }
     catch { resolve(out); return; }
     const timer = setTimeout(finish, timeoutMs);
     const subId = 'ns-profiles-' + Math.random().toString(36).slice(2, 8);

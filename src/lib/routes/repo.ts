@@ -47,6 +47,7 @@ import path from 'path';
 import { nip19 } from 'nostr-tools';
 import { WebSocket } from 'ws';
 import { getProject, type Project } from '../projects.js';
+import { MAX_WS_PAYLOAD } from '../ws-limits.js';
 import { findBin } from '../detect.js';
 import { isValidRelayUrl, getGraspServers, readIdentity } from '../identity.js';
 import { safeHttpUrl } from '../url-safety.js';
@@ -818,7 +819,7 @@ export async function publishEventToRelays(
       clearTimeout(timer);
       resolve(r);
     };
-    try { ws = new WebSocket(url); }
+    try { ws = new WebSocket(url, { maxPayload: MAX_WS_PAYLOAD }); }
     catch (e: any) { resolve({ relay: url, ok: false, reason: e?.message || 'invalid url' }); return; }
     const timer = setTimeout(() => finish({ relay: url, ok: false, reason: 'timeout' }), timeoutMs);
     ws.addEventListener('open', () => {

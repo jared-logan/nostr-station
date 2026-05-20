@@ -19,6 +19,7 @@
 
 import { WebSocket } from 'ws';
 import { EventEmitter } from 'node:events';
+import { MAX_WS_PAYLOAD } from '../ws-limits.js';
 
 import { readIdentity, npubToHex } from '../identity.js';
 import { AmberSigner } from './signer.js';
@@ -154,7 +155,7 @@ export class InboxWorker extends EventEmitter {
     if (this.stopping || !this.ownerPubkey) return;
     let ws: WebSocket;
     try {
-      ws = new WebSocket(state.url, { handshakeTimeout: 15_000 });
+      ws = new WebSocket(state.url, { handshakeTimeout: 15_000, maxPayload: MAX_WS_PAYLOAD });
     } catch (e: any) {
       this.scheduleRetry(state, e?.message || 'ws init failed');
       return;

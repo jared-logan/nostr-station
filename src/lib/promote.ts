@@ -24,6 +24,7 @@
 import WebSocket from 'ws';
 import crypto from 'crypto';
 import { signEventWithSavedBunker } from './auth-bunker.js';
+import { MAX_WS_PAYLOAD } from './ws-limits.js';
 import { isTestIdentityEvent } from './local-signer.js';
 import type { Project } from './projects.js';
 import { readIdentity, npubToHex } from './identity.js';
@@ -263,7 +264,7 @@ function escapeRx(s: string): string {
 
 function queryRelay(url: string, filter: { authors?: string[]; since?: number }): Promise<any[]> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(url, { maxPayload: MAX_WS_PAYLOAD });
     const events: any[] = [];
     const subId = 'promote-' + crypto.randomBytes(4).toString('hex');
     const timer = setTimeout(() => {
@@ -295,7 +296,7 @@ function queryRelay(url: string, filter: { authors?: string[]; since?: number })
 
 function publishToRelay(url: string, ev: any): Promise<void> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(url, { maxPayload: MAX_WS_PAYLOAD });
     const timer = setTimeout(() => {
       try { ws.close(); } catch {}
       reject(new Error('publish timeout'));

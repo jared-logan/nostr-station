@@ -80,6 +80,10 @@ export interface RelayOptions {
 const DEFAULT_PORT = 7777;
 const DEFAULT_HOST = '127.0.0.1';
 
+// Mirrors src/lib/ws-limits.ts MAX_WS_PAYLOAD — re-declared here so
+// the relay layer never imports from lib. Keep in sync.
+const MAX_WS_PAYLOAD = 1024 * 1024;
+
 // Origin allowlist for WebSocket upgrades. Browsers send the `Origin`
 // header on every WS handshake initiated from a page context; Node /
 // CLI clients (nak, project-seed.ts, setup-verify.ts, nostr-query.ts)
@@ -138,6 +142,7 @@ export class Relay {
     this.http = http.createServer((req, res) => this.handleHttp(req, res));
     this.wss  = new WebSocketServer({
       server: this.http,
+      maxPayload: MAX_WS_PAYLOAD,
       // Reject cross-origin browser tabs at the upgrade handshake. A
       // missing Origin header means a Node / CLI client (nak, our own
       // in-process Node WebSockets) — always allowed. A present Origin
