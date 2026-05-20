@@ -146,26 +146,89 @@ export async function installNostrVpn(
   // with `sudo -n` so it fails fast on an empty cred cache; on
   // failure we fall back to keeping the cargo-bin copy and warn —
   // the binary still works via absolute path.
+  // 4.x: `install-cli` refuses to overwrite an existing binary unless
+  // `--force` is passed. Without --force on the upgrade path, the new
+  // binary lands in ~/.cargo/bin/ but the system-PATH copy stays
+  // stale — `which nvpn` keeps resolving to the old version. Pass
+  // --force on opts.force so the relocation actually replaces the
+  // old binary; first-install paths still pass through without the
+  // flag (no existing binary → no-op anyway).
   log.step('sudo nvpn install-cli');
+  const installCliArgs = opts.force
+    ? [nvpnBin, 'install-cli', '--force']
+    : [nvpnBin, 'install-cli'];
+  let installCliFailed = false;
+  let installCliErrDetail = '';
   try {
-    await execa('sudo', ['-n', nvpnBin, 'install-cli'], { stdio: 'pipe', timeout: 10_000 });
+    await execa('sudo', ['-n', ...installCliArgs], { stdio: 'pipe', timeout: 10_000 });
     log.append('install-cli ok — binary placed on PATH');
   } catch (e: any) {
     const stderr = (e?.stderr?.toString?.() || '').trim();
-    log.append(`install-cli skipped: ${stderr.slice(0, 160) || (e?.message || '').slice(0, 120)}`);
+    installCliErrDetail = stderr.slice(0, 160) || (e?.message || '').slice(0, 120);
+    log.append(`install-cli FAILED: ${installCliErrDetail}`);
+    installCliFailed = true;
   }
 
   // Update path stops here: every remaining step is first-run setup
-  // (keypair init, systemd unit, drop-in caps, magic-dns-port seed)
-  // that's either idempotent-but-noisy or actively rewrites system
-  // state we don't want to touch on a binary refresh. The new binary
-  // is now on disk + on PATH; the daemon will pick it up on next
-  // service restart.
+  // (keypair init, drop-in caps, magic-dns-port seed) that's either
+  // idempotent-but-noisy or actively rewrites system state we don't
+  // want to touch on a binary refresh. We DO re-run service install
+  // --force so the systemd unit's ExecStart picks up the new
+  // canonical PATH; without that, the unit keeps pointing at
+  // whatever path the original `service install` saw (typically
+  // ~/.cargo/bin/nvpn), which is fine until cargo bin gets cleaned.
   if (opts.force) {
     const restartHint = process.platform === 'darwin'
       ? 'sudo launchctl kickstart -k system/com.github.nvpn'
       : 'sudo systemctl restart nvpn';
-    log.append('update mode — skipping init / caps / port-seed / service install');
+
+    // service install --force on the upgrade path. Best-effort: if
+    // sudo cred cache is empty it fails fast and we surface that via
+    // the warn flag below. 4.x supports the --force flag (verified
+    // against the v4.0.37 help output).
+    log.step('sudo nvpn service install --force');
+    let serviceInstallFailed = false;
+    let serviceInstallErr = '';
+    try {
+      const { stdout } = await execa(
+        'sudo', ['-n', nvpnBin, 'service', 'install', '--force'],
+        { stdio: 'pipe', timeout: 30_000 },
+      );
+      log.append(`service install --force ok; stdout=${stdout.slice(0, 240)}`);
+    } catch (e: any) {
+      const stderr = (e?.stderr?.toString?.() || '').trim();
+      serviceInstallErr = stderr.slice(0, 160) || (e?.message || '').slice(0, 120);
+      log.append(`service install --force FAILED: ${serviceInstallErr}`);
+      serviceInstallFailed = true;
+    }
+
+    // P2.1 — warn-not-silent when install-cli or service-install
+    // failed during a force-update. Pre-fix the installer returned
+    // ok:true with the warning buried in the log file, so the user
+    // got a green "✓ updated" dashboard while `nvpn` on PATH was
+    // still the old binary (or the systemd unit was still pointing
+    // at the old binary path). The warn flag lets the dashboard
+    // render this case as yellow with a clear remediation hint.
+    if (installCliFailed || serviceInstallFailed) {
+      const remediation: string[] = [];
+      if (installCliFailed) {
+        remediation.push(`\`sudo ${nvpnBin} install-cli --force\``);
+      }
+      if (serviceInstallFailed) {
+        remediation.push(`\`sudo ${nvpnBin} service install --force\``);
+      }
+      remediation.push(`then \`${restartHint}\``);
+      const errCauses = [installCliErrDetail, serviceInstallErr].filter(Boolean).join(' / ');
+      return {
+        ok:     true,
+        warn:   true,
+        detail:
+          `binary updated at ${nvpnBin}, but post-install relocation didn't complete cleanly ` +
+          `(${errCauses || 'sudo cred cache empty / unknown'}). ` +
+          `Run ${remediation.join(', ')} to finish the upgrade. (log: ${log.logPath})`,
+      };
+    }
+    log.append('update mode — skipping init / caps / port-seed');
     return {
       ok:     true,
       detail: `binary updated at ${nvpnBin}. Run \`${restartHint}\` to load the new code now (otherwise it picks up on next service restart).`,
