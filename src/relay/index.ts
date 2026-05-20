@@ -348,34 +348,24 @@ export class Relay {
   private handleEvent(ws: WebSocket, raw: unknown): void {
     if (!isEvent(raw)) return ok(ws, '', false, 'invalid: not an event object');
 
-    let valid = false;
-    try { valid = verifyEvent(raw as any); } catch { valid = false; }
-    if (!valid) return ok(ws, raw.id, false, 'invalid: bad signature');
-
-    // Future-timestamp ceiling — reject events that claim to be created
-    // more than FUTURE_CREATED_AT_SLACK_SEC ahead of wall-clock. See
-    // module-level constant for rationale. Past timestamps are
-    // intentionally accepted: backfilled / imported events are a
-    // first-class use case (relay imports, NIP-94 file metadata, etc.).
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (raw.created_at - nowSec > FUTURE_CREATED_AT_SLACK_SEC) {
-      this.log('warn',
-        `EVENT rejected — created_at ${raw.created_at} > now+${FUTURE_CREATED_AT_SLACK_SEC}s (id ${raw.id.slice(0, 8)}…)`);
-      return ok(ws, raw.id, false,
-        `invalid: created_at is more than ${FUTURE_CREATED_AT_SLACK_SEC}s in the future`);
-    }
-
-    // Write gating — pubkey-based, not connection-based. The signature on
-    // `raw` already proves authorship, so we don't need an AUTHed
-    // connection state to know who's writing; we just check the event's
-    // own pubkey against (station owner) ∪ whitelist. Rejections use the
-    // NIP-42 `auth-required:` prefix so spec-aware clients know the
-    // failure is policy-driven (vs the spec-defined `invalid:` /
-    // `duplicate:` / `error:` prefixes for protocol-level failures).
-    const evPubkey = raw.pubkey.toLowerCase();
-    const ownerHex = (this.getOwnerHex?.() ?? '').toLowerCase();
+    // Cheap gating BEFORE signature verification. Schnorr verifies are
+    // expensive; without this order, an attacker who reaches handleEvent
+    // (cross-origin browser tabs are blocked at the WS upgrade — see
+    // isLoopbackOrigin — so the residual attacker is a co-resident
+    // process or in-machine misbehaving client) can spam bad-sig events
+    // to peg CPU. Pubkey/tag inspection is O(1); only events we'd
+    // actually store reach the verifyEvent call below.
+    //
+    // Info-leak note: this ordering surfaces "auth-required:" instead
+    // of "invalid: bad signature" for unauthorized-pubkey events. That's
+    // semantically meaningful only to an attacker who can otherwise
+    // already read identity.json + whitelist.json from disk (loopback
+    // access is a prerequisite), so it grants nothing new.
+    const evPubkey      = raw.pubkey.toLowerCase();
+    const ownerHex      = (this.getOwnerHex?.() ?? '').toLowerCase();
     const isOwner       = !!ownerHex && ownerHex === evPubkey;
     const isWhitelisted = this.whitelist.has(evPubkey);
+
     // Test-identity defense layer 1: refuse to accept events carrying
     // the ["client", "nostr-station-test", …] tag from a non-loopback
     // connection. Defends a future deployment that binds the relay
@@ -402,6 +392,26 @@ export class Relay {
       const auth = (ws as any).__nsAuth as ConnAuth | undefined;
       if (auth) sendJson(ws, ['AUTH', auth.challenge]);
       return;
+    }
+
+    // Signature verification — only for events that passed the cheap
+    // gate above. Forged "owner pubkey + fake signature" events get
+    // rejected here, same as before the reorder.
+    let valid = false;
+    try { valid = verifyEvent(raw as any); } catch { valid = false; }
+    if (!valid) return ok(ws, raw.id, false, 'invalid: bad signature');
+
+    // Future-timestamp ceiling — reject events that claim to be created
+    // more than FUTURE_CREATED_AT_SLACK_SEC ahead of wall-clock. See
+    // module-level constant for rationale. Past timestamps are
+    // intentionally accepted: backfilled / imported events are a
+    // first-class use case (relay imports, NIP-94 file metadata, etc.).
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (raw.created_at - nowSec > FUTURE_CREATED_AT_SLACK_SEC) {
+      this.log('warn',
+        `EVENT rejected — created_at ${raw.created_at} > now+${FUTURE_CREATED_AT_SLACK_SEC}s (id ${raw.id.slice(0, 8)}…)`);
+      return ok(ws, raw.id, false,
+        `invalid: created_at is more than ${FUTURE_CREATED_AT_SLACK_SEC}s in the future`);
     }
 
     const result = this.store.add(raw);
