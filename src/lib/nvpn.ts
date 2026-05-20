@@ -177,7 +177,40 @@ export interface NvpnStatusJson {
   npub?:         string | null;
   pubkey?:       string | null;
   peers?:        unknown;
+  // 4.x: "daemon" | "config" | other strings; absent on 0.3.x.
+  status_source?: string;
   [k: string]:   unknown;
+}
+
+// Insert `--config <path>` into a base argv at the position the nvpn
+// CLI expects it: after the subcommand name(s) but before any --flag
+// option. So `['status', '--json']` becomes `['status', '--config',
+// PATH, '--json']`; `['service', 'status', '--json']` becomes
+// `['service', 'status', '--config', PATH, '--json']`; positional
+// args like `['import-invite', '<str>', '--json']` get the flag
+// inserted between the positional and `--json`. Walking until the
+// first `--` token covers all the shapes the CLI accepts without us
+// hard-coding subcommand depth.
+//
+// Threading --config everywhere is mostly defensive — the
+// nostr-station process runs as the same user who installed nvpn so
+// the default lookup works — but anything that ever invokes nvpn
+// under sudo (or with a mismatched $HOME) would otherwise drop into
+// 4.x's silent config-snapshot fallback. Preempting that.
+function buildNvpnArgs(base: string[]): string[] {
+  const cfg = findNvpnConfigPath();
+  if (!cfg) return base;
+  const out: string[] = [];
+  let inserted = false;
+  for (const arg of base) {
+    if (!inserted && arg.startsWith('--')) {
+      out.push('--config', cfg);
+      inserted = true;
+    }
+    out.push(arg);
+  }
+  if (!inserted) out.push('--config', cfg);
+  return out;
 }
 
 export interface NvpnStatus {
@@ -185,6 +218,14 @@ export interface NvpnStatus {
   binPath:      string | null;
   running:      boolean;
   tunnelIp:     string | null;
+  // 4.x adds a `status_source` field that distinguishes live-daemon
+  // data from a config snapshot: when the CLI can't reach the daemon
+  // (typically because --config and $HOME resolve to different config
+  // dirs) it silently falls back to printing config.toml-derived static
+  // info with every live field nulled. Surface this so the route layer
+  // can flag stale data to the dashboard instead of rendering
+  // "everything zero" without warning.
+  statusSource: string | null;
   raw:          NvpnStatusJson | null;
   error:        string | null;
   fetchedAt:    number;
@@ -205,13 +246,16 @@ async function probeNvpnStatusUncached(): Promise<NvpnStatus> {
   if (!binPath) {
     return {
       installed: false, binPath: null, running: false,
-      tunnelIp: null, raw: null, error: null, fetchedAt,
+      tunnelIp: null, statusSource: null, raw: null, error: null, fetchedAt,
     };
   }
   let raw: NvpnStatusJson | null = null;
   let error: string | null = null;
   try {
-    const { stdout } = await execa(binPath, ['status', '--json'], {
+    // --config pins the lookup against $HOME/$XDG_CONFIG_HOME drift.
+    // Without this, sudo / mismatched-user invocations fall through to
+    // 4.x's silent config-snapshot mode (status_source: "config").
+    const { stdout } = await execa(binPath, buildNvpnArgs(['status', '--json']), {
       timeout: STATUS_TIMEOUT_MS, stdio: 'pipe',
     });
     try { raw = JSON.parse(stdout); }
@@ -226,9 +270,19 @@ async function probeNvpnStatusUncached(): Promise<NvpnStatus> {
     // probeNvpnServiceStatus() before flipping the user-facing pill.
     error = (e?.shortMessage || e?.message || String(e)).slice(0, 240);
   }
-  const running  = !!raw?.daemon?.running;
+  const statusSource = typeof raw?.status_source === 'string'
+    ? (raw.status_source as string) : null;
+  // In 4.x, when status_source !== "daemon" every "live" field (running,
+  // endpoint, peer state, …) is nulled and what's returned is a static
+  // config snapshot. Treating daemon.running as authoritative in that
+  // mode would tell the dashboard "everything is down" while the daemon
+  // is actually fine — force-flip running to false so the UI banner code
+  // doesn't paint a green pill on top of a stale snapshot. The route
+  // layer adds a top-level `stale` warning so the user sees *why*.
+  const liveStatus = statusSource === null || statusSource === 'daemon';
+  const running  = liveStatus && !!raw?.daemon?.running;
   const tunnelIp = (raw?.tunnel_ip as string) ?? null;
-  return { installed: true, binPath, running, tunnelIp, raw, error, fetchedAt };
+  return { installed: true, binPath, running, tunnelIp, statusSource, raw, error, fetchedAt };
 }
 
 // Public probe — TTL-cached + concurrent-call deduped (see memoizeWithTtl
@@ -270,7 +324,7 @@ export async function stopNvpn(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
-    await execa(binPath, ['stop'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
+    await execa(binPath, buildNvpnArgs(['stop']), { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
     return { ok: true, detail: 'nvpn daemon stopped' };
   } catch (e: any) {
     return { ok: false, detail: summarizeError(e) };
@@ -332,7 +386,7 @@ async function probeNvpnServiceStatusUncached(): Promise<NvpnServiceStatus> {
     };
   }
   try {
-    const { stdout } = await execa(binPath, ['service', 'status', '--json'], {
+    const { stdout } = await execa(binPath, buildNvpnArgs(['service', 'status', '--json']), {
       timeout: SERVICE_STATUS_TIMEOUT_MS, stdio: 'pipe',
     });
     let raw: Record<string, unknown> | null = null;
@@ -681,6 +735,61 @@ export function extractTomlList(section: string, key: string): string[] {
   const out: string[] = [];
   for (const sm of m[1].matchAll(/"([^"]+)"/g)) out.push(sm[1]);
   return out;
+}
+
+// ── Node identity (`[nostr] public_key` in config.toml) ─────────────────
+//
+// In nvpn 4.x the local node's pubkey/npub is no longer surfaced via
+// `nvpn status --json` (both `npub` and `pubkey` are null in live output).
+// The pubkey only lives on disk in config.toml's `[nostr]` block:
+//
+//   [nostr]
+//   secret_key = "nsec1..."   ← MUST NEVER LEAK
+//   public_key = "npub1..."   ← what we surface
+//
+// This helper is the one supported path for reading it. It MUST NOT
+// return or log any other field from `[nostr]` or `[node]` (both
+// sections contain private key material). The unit test
+// `tests/nvpn-identity.test.ts` pins the leak-safe shape.
+
+export interface NvpnNodeIdentity {
+  /** npub1... bech32-encoded Nostr pubkey, or null if config.toml is missing
+   *  or doesn't have an `[nostr] public_key` field. */
+  npub:       string | null;
+  /** Source file the npub was extracted from — useful for "where is this
+   *  coming from?" debugging in the dashboard. */
+  configPath: string | null;
+}
+
+function extractNostrPublicKey(toml: string): string | null {
+  // Match only the [nostr] section's public_key field, not [node]'s
+  // (which is the WireGuard pubkey, base64, not an npub).
+  //
+  // Two-step: find the [nostr] section header, slice until the next
+  // top-level table heading, then pluck `public_key = "..."` from
+  // inside. Mirrors the extractPeerAliasesSection pattern.
+  const header = toml.match(/^\s*\[nostr\][^\S\r\n]*\r?\n?/m);
+  if (!header || header.index === undefined) return null;
+  const rest = toml.slice(header.index + header[0].length);
+  const next = rest.search(/^\s*\[(?:\[)?/m);
+  const body = next >= 0 ? rest.slice(0, next) : rest;
+  // The npub format is bech32; the regex is strict on shape so we don't
+  // accidentally surface arbitrary garbage from a malformed TOML.
+  const m = body.match(/^\s*public_key\s*=\s*"(npub1[023456789acdefghjklmnpqrstuvwxyz]{58})"\s*$/m);
+  return m ? m[1] : null;
+}
+
+export function readNvpnNodeIdentity(): NvpnNodeIdentity {
+  const configPath = findNvpnConfigPath();
+  if (!configPath) return { npub: null, configPath: null };
+  let toml = '';
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch { return { npub: null, configPath }; }
+  // CRITICAL: only call extractNostrPublicKey on the file contents.
+  // Never destructure or pass the whole file body to the caller — the
+  // file also contains [nostr] secret_key and [node] private_key, both
+  // of which would compromise the user if echoed back through the API.
+  return { npub: extractNostrPublicKey(toml), configPath };
 }
 
 export function extractTomlString(section: string, key: string): string | null {
@@ -1078,7 +1187,7 @@ async function runRosterCommand(
   args.push('--json');
 
   try {
-    const { stdout } = await execa(binPath, args, {
+    const { stdout } = await execa(binPath, buildNvpnArgs(args), {
       timeout: ROSTER_TIMEOUT_MS, stdio: 'pipe',
     });
     let raw: Record<string, unknown> | null = null;
@@ -1112,16 +1221,57 @@ export function removeAdmins(participants: string[], publish: boolean): Promise<
 }
 
 export interface PublishRosterResult extends ControlResult {
-  raw?: Record<string, unknown> | null;
+  raw?:                 Record<string, unknown> | null;
+  published?:           boolean;
+  publishedRecipients?: number;
 }
+
+// Trigger a roster broadcast without changing the roster itself.
+//
+// 4.x removed the standalone `nvpn publish-roster` verb (it was folded
+// into each mutation's `--publish` flag). The PR #154 fence assumed
+// that was enough — but in practice `--publish` regularly reports
+// `published_recipients: 0` when relays are flaky / WoT-gated / POW-
+// gated, and users had no separate "retry publish" affordance to
+// recover. Now they do: this helper re-adds an existing admin (or
+// participant, if no admins exist) with `--publish`, which is
+// idempotent on a member already in the roster and triggers the
+// publish path. Same `published_recipients` field on the response, so
+// the dashboard can show "saved locally, X relays reached" honestly.
+//
+// Picks an admin first (admins should always be in the roster), with
+// a fallback to the first participant. If the roster is empty we
+// can't trigger this verb at all — caller gets a clear error.
 export async function publishRoster(): Promise<PublishRosterResult> {
-  // Removed in nvpn 4.x. Each roster mutation now broadcasts inline
-  // via its own `--publish` flag (already the default in our
-  // routes/nvpn.ts handler), so a standalone "republish" verb has no
-  // upstream backing. UI button still works via add/remove paths.
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  const roster = readNvpnRoster();
+  if (!roster.found) {
+    return {
+      ok: false,
+      detail: 'no nvpn config found — initialize the daemon first',
+    };
+  }
+  // Prefer admins because in 4.x only admins can publish a signed
+  // roster — re-adding a non-admin participant won't actually trigger
+  // the publish path even with --publish. Fall back to a participant
+  // only as a last resort (covers the rare case of a no-admin network).
+  const target = roster.admins[0] ?? roster.participants[0];
+  if (!target) {
+    return {
+      ok: false,
+      detail: 'roster is empty — add a peer first',
+    };
+  }
+  const cmd = roster.admins.includes(target) ? 'add-admin' : 'add-participant';
+  const result = await runRosterCommand(cmd, [target], /* publish */ true);
+  if (!result.ok) return { ok: false, detail: `republish via ${cmd} failed: ${result.detail}` };
   return {
-    ok: false,
-    detail: 'publish-roster removed in nvpn 4.x — mutations auto-publish with --publish',
+    ok:                  true,
+    detail:              result.detail.replace('roster updated', 'roster published'),
+    raw:                 result.raw,
+    published:           result.published,
+    publishedRecipients: result.publishedRecipients,
   };
 }
 
@@ -1134,7 +1284,7 @@ export async function createInvite(): Promise<InviteResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
-    const { stdout } = await execa(binPath, ['create-invite', '--json'], {
+    const { stdout } = await execa(binPath, buildNvpnArgs(['create-invite', '--json']), {
       timeout: INVITE_TIMEOUT_MS, stdio: 'pipe',
     });
     let raw: Record<string, unknown> | null = null;
@@ -1159,7 +1309,7 @@ export async function importInvite(invite: string): Promise<InviteResult> {
     return { ok: false, detail: 'invite must start with nvpn://invite/' };
   }
   try {
-    const { stdout } = await execa(binPath, ['import-invite', trimmed, '--json'], {
+    const { stdout } = await execa(binPath, buildNvpnArgs(['import-invite', trimmed, '--json']), {
       timeout: INVITE_TIMEOUT_MS, stdio: 'pipe',
     });
     let raw: Record<string, unknown> | null = null;
@@ -1183,7 +1333,7 @@ export async function whoisPeer(query: string): Promise<WhoisResult> {
   // local roster + cached peer state is usually enough to resolve.
   try {
     const { stdout } = await execa(
-      binPath, ['whois', trimmed, '--discover-secs', '0', '--json'],
+      binPath, buildNvpnArgs(['whois', trimmed, '--discover-secs', '0', '--json']),
       { timeout: WHOIS_TIMEOUT_MS, stdio: 'pipe' },
     );
     let raw: Record<string, unknown> | null = null;
@@ -1205,7 +1355,7 @@ export async function pauseNvpn(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
-    await execa(binPath, ['pause'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
+    await execa(binPath, buildNvpnArgs(['pause']), { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
     return { ok: true, detail: 'nvpn paused' };
   } catch (e: any) { return { ok: false, detail: summarizeError(e) }; }
 }
@@ -1214,7 +1364,7 @@ export async function resumeNvpn(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
-    await execa(binPath, ['resume'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
+    await execa(binPath, buildNvpnArgs(['resume']), { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
     return { ok: true, detail: 'nvpn resumed' };
   } catch (e: any) { return { ok: false, detail: summarizeError(e) }; }
 }
@@ -1223,7 +1373,7 @@ export async function reloadNvpn(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
-    await execa(binPath, ['reload'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
+    await execa(binPath, buildNvpnArgs(['reload']), { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
     return { ok: true, detail: 'nvpn config reloaded' };
   } catch (e: any) { return { ok: false, detail: summarizeError(e) }; }
 }
@@ -1232,7 +1382,7 @@ export async function repairNvpnNetwork(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
   if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
   try {
-    await execa(binPath, ['repair-network'], { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
+    await execa(binPath, buildNvpnArgs(['repair-network']), { timeout: CONTROL_TIMEOUT_MS, stdio: 'pipe' });
     return { ok: true, detail: 'network state repaired' };
   } catch (e: any) { return { ok: false, detail: summarizeError(e) }; }
 }
@@ -1262,7 +1412,7 @@ export async function pingNvpnPeer(target: string, opts: PingOptions = {}): Prom
   try {
     const { stdout, stderr } = await execa(
       binPath,
-      ['ping', trimmed, '--count', String(count), '--timeout-secs', String(timeoutSecs)],
+      buildNvpnArgs(['ping', trimmed, '--count', String(count), '--timeout-secs', String(timeoutSecs)]),
       { timeout: totalCap, stdio: 'pipe' },
     );
     return { ok: true, detail: 'ping ok', output: (stdout || stderr || '').slice(0, 4000) };
@@ -1307,7 +1457,7 @@ export async function doctorNvpn(opts: DoctorOptions = {}): Promise<DoctorResult
     args.push('--write-bundle', bundlePath);
   }
   try {
-    const { stdout } = await execa(binPath, args, {
+    const { stdout } = await execa(binPath, buildNvpnArgs(args), {
       timeout: DOCTOR_TIMEOUT_MS, stdio: 'pipe',
     });
     let raw: Record<string, unknown> | null = null;
@@ -1375,7 +1525,7 @@ export async function setNvpnSettings(input: Record<string, unknown>): Promise<S
   if (added === 0) return { ok: false, detail: 'no settable fields in payload' };
   args.push('--json');
   try {
-    const { stdout } = await execa(binPath, args, { timeout: 10_000, stdio: 'pipe' });
+    const { stdout } = await execa(binPath, buildNvpnArgs(args), { timeout: 10_000, stdio: 'pipe' });
     let raw: Record<string, unknown> | null = null;
     try { raw = JSON.parse(stdout); } catch { /* keep null */ }
     return { ok: true, detail: `${added} field${added === 1 ? '' : 's'} updated`, raw };

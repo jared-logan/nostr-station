@@ -5,6 +5,71 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nvpn 4.x — P0 silent-landmine hotfix
+
+> Followup to the 4.0.37 pin bump below. Live VM validation of that PR surfaced
+> three classes of silent failure the sandbox audit couldn't catch:
+>
+> 1. `nvpn status --json` falls back to a config snapshot when the CLI can't
+>    reach the daemon (typically a $HOME / --config dir mismatch under sudo).
+>    The fallback is HTTP-200 with every live field nulled — the dashboard
+>    used to render "everything zero" with no warning.
+> 2. Identity (`npub` / `pubkey`) was removed from status JSON; the local
+>    pubkey only lives in `~/.config/nvpn/config.toml`'s `[nostr]` block.
+> 3. The previous PR removed `/api/nvpn/roster/publish` on the premise that
+>    `--publish` made it redundant. Live data showed `published_recipients:
+>    0` is a common outcome (relay timeouts, WoT/POW gates), and users had
+>    no retry path. That premise was wrong.
+
+**Status route gates the silent fallback** (`src/lib/routes/nvpn.ts` status
+handler, `src/lib/nvpn.ts` `probeNvpnStatusUncached`):
+- `NvpnStatus` now carries `statusSource` from the new 4.x `status_source` field.
+- When `status_source !== "daemon"`, `running` is force-flipped to false so the
+  dashboard doesn't paint a "running" pill on top of stale data.
+- The status route adds a top-level `stale: { reason, source, detail }` warning
+  to the response so the UI can surface a banner explaining *why* the data is
+  unreliable, not just *that* something is off.
+
+**`--config <path>` threaded through every CLI invocation** (`src/lib/nvpn.ts`
+`buildNvpnArgs` helper). Mostly defensive — nostr-station runs as the user
+who installed nvpn so the default lookup works — but anything that ever
+shells out via sudo or with a mismatched $HOME would otherwise drop into the
+config-snapshot fallback. Covers: `status`, `service status`, `stop`,
+`pause`, `resume`, `reload`, `repair-network`, `ping`, `doctor`,
+`create-invite`, `import-invite`, `whois`, `set`, `add-participant`,
+`remove-participant`, `add-admin`, `remove-admin`.
+
+**Identity helper that's leak-safe** (`src/lib/nvpn.ts`
+`readNvpnNodeIdentity`):
+- New helper reads `[nostr] public_key` from config.toml — the ONE place
+  4.x stashes the local node's npub. Same file holds `[nostr] secret_key`
+  and `[node] private_key`; the helper's strict bech32 regex and
+  section-scoped extraction guarantee neither field can be returned.
+- Spliced into `/api/nvpn/status` as `identity.npub` so the dashboard has
+  a single source for identity display.
+- New unit test (`tests/nvpn-identity.test.ts`, 8 cases) pins the
+  leak-safe shape: result has exactly `{ npub, configPath }` keys, and a
+  serialized round-trip asserts no `nsec1`, no WireGuard private-key
+  bytes, no `[node] public_key` confusion appears anywhere in the
+  output even when fed a config with all three.
+
+**`/api/nvpn/roster/publish` restored** (flipped 501 → 200 in
+`src/lib/routes/nvpn.ts`; `src/lib/nvpn.ts` `publishRoster()`
+re-implemented). Now triggers a republish by re-adding an existing admin
+(or, if no admins, the first participant) with `--publish`. That's a no-op
+on the roster but exercises the publish path, so the dashboard's "Publish
+roster" button works again. Response includes `publishedRecipients` so the
+UI can render the recipient count honestly (yellow when 0, green when ≥1
+— UI hook lands in P1).
+
+Retracts this claim from the 4.0.37 PR's CHANGELOG entry:
+
+> ~~`POST /api/nvpn/roster/publish` — `nvpn publish-roster` was removed;
+> every roster mutation now broadcasts inline via the `--publish` flag~~
+
+The replacement mechanism still works, but it's not a substitute for a
+manual republish action — that affordance is back.
+
 ### nvpn 4.0.37 — upstream major-version bump + breaking CLI changes
 
 > **Upstream major.** `mmalmi/nostr-vpn` cut v4.0.0 on 2026-05-07 with a
