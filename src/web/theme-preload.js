@@ -60,7 +60,23 @@
       rootDecls.push('--bg-hover:      rgba(255, 255, 255, 0.08)');
       rootDecls.push('--border:        rgba(255, 255, 255, 0.16)');
       rootDecls.push('--border-strong: rgba(255, 255, 255, 0.28)');
-      var safeUrl = bgImage.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      // CSP img-src 'self' data: blocks raw https:// backgrounds, so
+      // route the URL through /api/img-proxy. Inlined here (small)
+      // because theme-preload runs before app.js / markdown.js can
+      // import proxyImageUrl. Keep in sync with markdown.js
+      // proxyImageUrl.
+      var proxiedBg = bgImage;
+      try {
+        var pu = new URL(bgImage, location.href);
+        var ph = pu.hostname;
+        var isLocal = pu.origin === location.origin
+                   || ph === '127.0.0.1' || ph === 'localhost'
+                   || ph === '::1' || /\.localhost$/.test(ph);
+        if (!isLocal && pu.protocol === 'https:') {
+          proxiedBg = '/api/img-proxy?u=' + encodeURIComponent(pu.toString());
+        }
+      } catch (_) {}
+      var safeUrl = proxiedBg.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       var bodyCss = ':root[data-theme="ditto"] body {' +
         ' background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("' + safeUrl + '");' +
         ' background-color: ' + fallback + ';' +

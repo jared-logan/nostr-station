@@ -149,8 +149,10 @@ function applyDittoStyleBlock(theme) {
       // and dims it uniformly. Second layer: the user's image. Tuned
       // to match Ditto's own "image as faint backdrop" feel — without
       // a strong overlay, high-contrast photos make chat text (which
-      // renders directly on body, no card) illegible.
-      `  background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("${escCssUrl(bgImage)}");` +
+      // renders directly on body, no card) illegible. The URL is
+      // routed through the image proxy so CSP img-src 'self' data:
+      // accepts the same-origin background fetch.
+      `  background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("${escCssUrl(proxyImageUrl(bgImage))}");` +
       `  background-color: ${fallback};` +
       `  background-size: 100% 100%, ${size};` +
       `  background-position: center center, center center;` +

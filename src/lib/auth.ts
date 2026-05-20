@@ -431,6 +431,14 @@ const PUBLIC_API_PREFIXES = [
   // BEFORE any session exists — read-only, takes the npub in the query
   // string, never touches stored identity state.
   '/api/identity/profile/preview',
+  // Image proxy: <img> tags can't set Authorization headers, so the
+  // proxy MUST be reachable without a session. Threat model is fine
+  // — the proxy only fetches public https images (private IPs are
+  // refused), has a 5 MiB size cap + 5 s timeout, validates
+  // content-type against a small allowlist. An unauth'd attacker on
+  // loopback could only trigger fetches of public URLs they could
+  // already fetch directly. See src/lib/img-proxy.ts.
+  '/api/img-proxy',
 ];
 
 export function isPublicApi(urlPath: string): boolean {
