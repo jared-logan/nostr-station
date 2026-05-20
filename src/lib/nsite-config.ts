@@ -19,6 +19,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { atomicWriteJson } from './atomic-write.js';
 import {
   DEFAULT_CONTENT_RELAYS,
   DEFAULT_BLOSSOM_SERVERS,
@@ -235,8 +236,7 @@ export function writeNsiteConfig(input: Partial<NsiteConfig>): NsiteConfig {
       });
   }
 
-  fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(configPath(), JSON.stringify(merged, null, 2) + '\n', { mode: 0o600 });
+  atomicWriteJson(configPath(), merged, { mode: 0o600 });
   return merged;
 }
 

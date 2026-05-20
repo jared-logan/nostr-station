@@ -80,6 +80,34 @@ export interface RelayOptions {
 const DEFAULT_PORT = 7777;
 const DEFAULT_HOST = '127.0.0.1';
 
+// Mirrors src/lib/ws-limits.ts MAX_WS_PAYLOAD — re-declared here so
+// the relay layer never imports from lib. Keep in sync.
+const MAX_WS_PAYLOAD = 1024 * 1024;
+
+// Origin allowlist for WebSocket upgrades. Browsers send the `Origin`
+// header on every WS handshake initiated from a page context; Node /
+// CLI clients (nak, project-seed.ts, setup-verify.ts, nostr-query.ts)
+// send no Origin at all. Goal: block cross-origin browser tabs
+// (http://evil.com) from reading the local event store via REQ;
+// preserve every legitimate connector.
+//
+// Port wildcard is intentional. Unlike the dashboard's gate which pins
+// to its own port, the relay must accept loopback Origins from ANY
+// port: scaffolded user apps (Stacks, mkstack, Vite previews) reach
+// the relay via NOSTR_STATION_RELAY from their own dev-server ports
+// (typically 5173, 3000, 8080…). Locking to a single port would break
+// the whole "build apps locally against the relay" loop.
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return u.hostname === '127.0.0.1'
+        || u.hostname === 'localhost'
+        || u.hostname === '[::1]'
+        || u.hostname === '::1';
+  } catch { return false; }
+}
+
 export class Relay {
   readonly store:     EventStore;
   readonly whitelist: WhitelistStore;
@@ -112,7 +140,24 @@ export class Relay {
     // standard Nostr expectations. A bare HTTP GET to the relay port
     // returns NIP-11 metadata.
     this.http = http.createServer((req, res) => this.handleHttp(req, res));
-    this.wss  = new WebSocketServer({ server: this.http });
+    this.wss  = new WebSocketServer({
+      server: this.http,
+      maxPayload: MAX_WS_PAYLOAD,
+      // Reject cross-origin browser tabs at the upgrade handshake. A
+      // missing Origin header means a Node / CLI client (nak, our own
+      // in-process Node WebSockets) — always allowed. A present Origin
+      // must be loopback; anything else (http://evil.com) is hostile.
+      // See isLoopbackOrigin above for the port-wildcard rationale.
+      verifyClient: (info, callback) => {
+        const origin = info.origin || '';
+        if (origin && !isLoopbackOrigin(origin)) {
+          this.log('warn', `rejected WS upgrade — non-loopback origin: ${origin.slice(0, 120)}`);
+          callback(false, 403, 'origin not allowed');
+          return;
+        }
+        callback(true);
+      },
+    });
 
     this.wss.on('connection', (ws, req) => this.handleConnection(ws, req));
 
@@ -308,34 +353,24 @@ export class Relay {
   private handleEvent(ws: WebSocket, raw: unknown): void {
     if (!isEvent(raw)) return ok(ws, '', false, 'invalid: not an event object');
 
-    let valid = false;
-    try { valid = verifyEvent(raw as any); } catch { valid = false; }
-    if (!valid) return ok(ws, raw.id, false, 'invalid: bad signature');
-
-    // Future-timestamp ceiling — reject events that claim to be created
-    // more than FUTURE_CREATED_AT_SLACK_SEC ahead of wall-clock. See
-    // module-level constant for rationale. Past timestamps are
-    // intentionally accepted: backfilled / imported events are a
-    // first-class use case (relay imports, NIP-94 file metadata, etc.).
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (raw.created_at - nowSec > FUTURE_CREATED_AT_SLACK_SEC) {
-      this.log('warn',
-        `EVENT rejected — created_at ${raw.created_at} > now+${FUTURE_CREATED_AT_SLACK_SEC}s (id ${raw.id.slice(0, 8)}…)`);
-      return ok(ws, raw.id, false,
-        `invalid: created_at is more than ${FUTURE_CREATED_AT_SLACK_SEC}s in the future`);
-    }
-
-    // Write gating — pubkey-based, not connection-based. The signature on
-    // `raw` already proves authorship, so we don't need an AUTHed
-    // connection state to know who's writing; we just check the event's
-    // own pubkey against (station owner) ∪ whitelist. Rejections use the
-    // NIP-42 `auth-required:` prefix so spec-aware clients know the
-    // failure is policy-driven (vs the spec-defined `invalid:` /
-    // `duplicate:` / `error:` prefixes for protocol-level failures).
-    const evPubkey = raw.pubkey.toLowerCase();
-    const ownerHex = (this.getOwnerHex?.() ?? '').toLowerCase();
+    // Cheap gating BEFORE signature verification. Schnorr verifies are
+    // expensive; without this order, an attacker who reaches handleEvent
+    // (cross-origin browser tabs are blocked at the WS upgrade — see
+    // isLoopbackOrigin — so the residual attacker is a co-resident
+    // process or in-machine misbehaving client) can spam bad-sig events
+    // to peg CPU. Pubkey/tag inspection is O(1); only events we'd
+    // actually store reach the verifyEvent call below.
+    //
+    // Info-leak note: this ordering surfaces "auth-required:" instead
+    // of "invalid: bad signature" for unauthorized-pubkey events. That's
+    // semantically meaningful only to an attacker who can otherwise
+    // already read identity.json + whitelist.json from disk (loopback
+    // access is a prerequisite), so it grants nothing new.
+    const evPubkey      = raw.pubkey.toLowerCase();
+    const ownerHex      = (this.getOwnerHex?.() ?? '').toLowerCase();
     const isOwner       = !!ownerHex && ownerHex === evPubkey;
     const isWhitelisted = this.whitelist.has(evPubkey);
+
     // Test-identity defense layer 1: refuse to accept events carrying
     // the ["client", "nostr-station-test", …] tag from a non-loopback
     // connection. Defends a future deployment that binds the relay
@@ -362,6 +397,26 @@ export class Relay {
       const auth = (ws as any).__nsAuth as ConnAuth | undefined;
       if (auth) sendJson(ws, ['AUTH', auth.challenge]);
       return;
+    }
+
+    // Signature verification — only for events that passed the cheap
+    // gate above. Forged "owner pubkey + fake signature" events get
+    // rejected here, same as before the reorder.
+    let valid = false;
+    try { valid = verifyEvent(raw as any); } catch { valid = false; }
+    if (!valid) return ok(ws, raw.id, false, 'invalid: bad signature');
+
+    // Future-timestamp ceiling — reject events that claim to be created
+    // more than FUTURE_CREATED_AT_SLACK_SEC ahead of wall-clock. See
+    // module-level constant for rationale. Past timestamps are
+    // intentionally accepted: backfilled / imported events are a
+    // first-class use case (relay imports, NIP-94 file metadata, etc.).
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (raw.created_at - nowSec > FUTURE_CREATED_AT_SLACK_SEC) {
+      this.log('warn',
+        `EVENT rejected — created_at ${raw.created_at} > now+${FUTURE_CREATED_AT_SLACK_SEC}s (id ${raw.id.slice(0, 8)}…)`);
+      return ok(ws, raw.id, false,
+        `invalid: created_at is more than ${FUTURE_CREATED_AT_SLACK_SEC}s in the future`);
     }
 
     const result = this.store.add(raw);

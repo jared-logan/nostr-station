@@ -3,7 +3,7 @@
 // utilities (toast, modal, copy-button) at the bottom.
 
 import { previewRetryDecision } from './preview-retry.js';
-import { renderMarkdown, renderCodeBlock } from './markdown.js';
+import { renderMarkdown, renderCodeBlock, proxyImageUrl } from './markdown.js';
 
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -20,6 +20,9 @@ function escapeHtml(s) {
     .replaceAll('"',  '&quot;')
     .replaceAll("'", '&#39;');
 }
+
+// proxyImageUrl moved to markdown.js so both the inline-img sites here
+// and the marked image renderer share one definition.
 
 function stateClass(s) { return s === 'ok' ? 'ok' : s === 'warn' ? 'warn' : 'err'; }
 
@@ -146,8 +149,10 @@ function applyDittoStyleBlock(theme) {
       // and dims it uniformly. Second layer: the user's image. Tuned
       // to match Ditto's own "image as faint backdrop" feel — without
       // a strong overlay, high-contrast photos make chat text (which
-      // renders directly on body, no card) illegible.
-      `  background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("${escCssUrl(bgImage)}");` +
+      // renders directly on body, no card) illegible. The URL is
+      // routed through the image proxy so CSP img-src 'self' data:
+      // accepts the same-origin background fetch.
+      `  background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("${escCssUrl(proxyImageUrl(bgImage))}");` +
       `  background-color: ${fallback};` +
       `  background-size: 100% 100%, ${size};` +
       `  background-position: center center, center center;` +
@@ -258,7 +263,7 @@ function renderDittoCard() {
   const safeBgImage = theme.bgImage && isSafeImageUrl(theme.bgImage) ? theme.bgImage : '';
   const imagePreview = safeBgImage
     ? `<div class="ditto-theme-image">
-         <img src="${escapeHtml(safeBgImage)}" alt="" loading="lazy">
+         <img src="${escapeHtml(proxyImageUrl(safeBgImage))}" alt="" loading="lazy">
          <div class="ditto-theme-image-meta">
            <span style="color:var(--muted)">bg image</span>
            <span>${escapeHtml(theme.bgMode || 'cover')}</span>
@@ -1101,7 +1106,7 @@ async function refreshIdentityChip() {
     if (p && !p.empty) {
       __profile = p;
       if (p.picture) {
-        avatar.innerHTML = `<img src="${escapeHtml(p.picture)}" alt="">`;
+        avatar.innerHTML = `<img src="${escapeHtml(proxyImageUrl(p.picture))}" alt="">`;
         // If the image 404s, fall back to the pixel art.
         const img = avatar.querySelector('img');
         img.addEventListener('error', () => { avatar.innerHTML = pixelAvatar(cfg.npub); });
@@ -1322,7 +1327,7 @@ const IdentityDrawer = (() => {
 
   function profileMarkup(p, npub) {
     const avatarHtml = p && p.picture
-      ? `<img src="${escapeHtml(p.picture)}" alt="">`
+      ? `<img src="${escapeHtml(proxyImageUrl(p.picture))}" alt="">`
       : pixelAvatar(npub, 48);
     const nameHtml = p && p.name ? escapeHtml(p.name) : escapeHtml(truncNpub(npub));
     const nip05Html = p && p.nip05
@@ -2026,7 +2031,7 @@ const StatusPanel = {
       }
       const name = profile?.name || truncNpub(ident.npub);
       const avatar = profile?.picture
-        ? `<img src="${escapeHtml(profile.picture)}" alt="" class="dash-avatar">`
+        ? `<img src="${escapeHtml(proxyImageUrl(profile.picture))}" alt="" class="dash-avatar">`
         : `<span class="dash-avatar">${pixelAvatar(ident.npub, 36)}</span>`;
       const nip05 = profile?.nip05
         ? `<div class="dash-sub ${profile.nip05Verified ? 'ok' : ''}">${escapeHtml(profile.nip05)}${profile.nip05Verified ? ' ✓' : ''}</div>`
@@ -6468,7 +6473,7 @@ const ProjectsPanel = (() => {
       // prevents the "2" placeholder reading as a count badge when
       // profile resolution hasn't returned a kind-0 for this pubkey.
       const avatar = pic
-        ? `<img class="about-avatar" src="${escapeHtml(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
+        ? `<img class="about-avatar" src="${escapeHtml(proxyImageUrl(pic))}" alt="" referrerpolicy="no-referrer" loading="lazy">`
         : hasResolvedProfileName(pubkey)
           ? `<div class="about-avatar-placeholder" aria-hidden="true">${escapeHtml(profileNameOf(pubkey).slice(0, 1).toUpperCase())}</div>`
           : `<div class="about-avatar-placeholder about-avatar-placeholder-anon" aria-hidden="true" title="Profile not resolved (no kind-0 found on the relays we queried)">●</div>`;
@@ -7964,7 +7969,7 @@ const ProjectsPanel = (() => {
         const display = profileNameOf(ev.pubkey);
         const pic = profilePictureOf(ev.pubkey);
         const avatar = pic
-          ? `<img class="ann-avatar ann-avatar-img" src="${escapeHtml(pic)}" alt="" referrerpolicy="no-referrer" loading="lazy">`
+          ? `<img class="ann-avatar ann-avatar-img" src="${escapeHtml(proxyImageUrl(pic))}" alt="" referrerpolicy="no-referrer" loading="lazy">`
           : hasResolvedProfileName(ev.pubkey)
             ? `<div class="ann-avatar" aria-hidden="true">${escapeHtml(display.slice(0, 2).toUpperCase())}</div>`
             : `<div class="ann-avatar ann-avatar-anon" aria-hidden="true" title="Profile not resolved">●</div>`;
@@ -14590,7 +14595,7 @@ const ConfigPanel = (() => {
         </div>`
       : '';
     const avatarHtml = profile && profile.picture
-      ? `<img src="${escapeHtml(profile.picture)}" style="width:56px;height:56px;border-radius:50%;object-fit:cover" alt="">`
+      ? `<img src="${escapeHtml(proxyImageUrl(profile.picture))}" style="width:56px;height:56px;border-radius:50%;object-fit:cover" alt="">`
       : pixelAvatar(ident.npub, 56);
 
     const sessionLine = session
@@ -17848,7 +17853,7 @@ AuthScreen = (() => {
 
     if (p.picture) {
       avatarEl.innerHTML =
-        `<img src="${escapeHtml(p.picture)}" alt="" width="32" height="32">`;
+        `<img src="${escapeHtml(proxyImageUrl(p.picture))}" alt="" width="32" height="32">`;
     }
     if (p.name) {
       nameEl.textContent = p.name;
@@ -18412,7 +18417,7 @@ const SetupWizard = (() => {
           ${hasPreview ? `
             <div class="avatar">
               ${state.profile.picture
-                ? `<img src="${escapeHtml(state.profile.picture)}" alt="">`
+                ? `<img src="${escapeHtml(proxyImageUrl(state.profile.picture))}" alt="">`
                 : pixelAvatar(state.npub, 48)}
             </div>
             <div class="meta">
@@ -20055,23 +20060,30 @@ const MailPanel = (() => {
                                  : `${size} B`;
     }
     function renderAttachmentChip(m, a) {
-      const tok = getSessionToken();
-      let href;
+      const name = a.name || (a.blossom?.sha256 || '').slice(0, 12) || 'attachment';
+      let hrefAttr, extraAttrs;
       if (a.blossom) {
         // Blossom-hosted, AES-256-GCM encrypted. Route through the
-        // proxy-decrypt endpoint so the browser sees plaintext.
-        href = `/api/mail/download?id=${encodeURIComponent(m.id)}&sha=${encodeURIComponent(a.blossom.sha256)}${tok ? `&token=${tok}` : ''}`;
+        // proxy-decrypt endpoint so the browser sees plaintext. The
+        // real URL is constructed at click-time by the delegated
+        // handler below (it fetches a one-shot ?dt= download token
+        // first so the long-lived session token never enters the
+        // browser's address bar / history).
+        hrefAttr = '#';
+        extraAttrs = `data-mail-id="${escapeHtml(m.id)}" `
+                   + `data-blossom-sha="${escapeHtml(a.blossom.sha256)}" `
+                   + `data-name="${escapeHtml(name)}"`;
       } else if (a.inlineBase64 != null) {
         // Inline base64 — decode to a data URL for direct download. The
         // bytes were already E2E-encrypted at rest inside the gift wrap;
         // there's nothing to fetch.
-        href = `data:${a.mime};base64,${a.inlineBase64}`;
+        hrefAttr = `data:${a.mime};base64,${a.inlineBase64}`;
+        extraAttrs = `download="${escapeHtml(name)}"`;
       } else {
-        href = '#';
+        hrefAttr = '#';
+        extraAttrs = '';
       }
-      const name = a.name || (a.blossom?.sha256 || '').slice(0, 12) || 'attachment';
-      return `<a class="mail-msg-fileChip" href="${escapeHtml(href)}"
-                 ${a.blossom ? 'target="_blank" rel="noopener noreferrer"' : `download="${escapeHtml(name)}"`}>
+      return `<a class="mail-msg-fileChip" href="${escapeHtml(hrefAttr)}" ${extraAttrs}>
         <span class="mail-att-icon">${ICON_PAPERCLIP}</span>
         <div class="mail-msg-fileMeta">
           <div class="mail-msg-fileName">${escapeHtml(name)} <span class="mail-att-lock" title="end-to-end encrypted">${ICON_LOCK}</span></div>
@@ -20101,6 +20113,35 @@ const MailPanel = (() => {
       </div>`;
     }).join('');
     el.innerHTML = `${head}<div class="mail-msgs">${msgs}</div>`;
+    // Delegated click handler for Blossom attachments — mint a single-
+    // use download token at click time and open the URL with ?dt= so
+    // the long-lived session token never enters browser history.
+    // Inline base64 chips (data: URLs) bypass this — they don't need
+    // any auth.
+    el.addEventListener('click', async (ev) => {
+      const chip = ev.target.closest && ev.target.closest('.mail-msg-fileChip[data-blossom-sha]');
+      if (!chip) return;
+      ev.preventDefault();
+      const mailId = chip.getAttribute('data-mail-id');
+      const sha    = chip.getAttribute('data-blossom-sha');
+      if (!mailId || !sha) return;
+      try {
+        const r = await api('/api/auth/download-token', { method: 'POST' });
+        let url = `/api/mail/download?id=${encodeURIComponent(mailId)}`
+                + `&sha=${encodeURIComponent(sha)}`;
+        if (r && r.token) {
+          url += `&dt=${encodeURIComponent(r.token)}`;
+        } else if (!r || r.mode !== 'unauthenticated') {
+          // Anything other than a token or the localhost-exempt "no
+          // token needed" signal is a real failure.
+          toast('Download failed', 'Could not mint download token. Try signing in again.', 'err');
+          return;
+        }
+        window.open(url, '_blank', 'noopener,noreferrer');
+      } catch (e) {
+        toast('Download failed', String(e && e.message || e), 'err');
+      }
+    });
     const moveSel = $('mail-thread-move');
     if (moveSel) {
       moveSel.addEventListener('change', async () => {

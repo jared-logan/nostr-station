@@ -10,6 +10,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { atomicWriteJson } from './atomic-write.js';
 
 export interface Identity {
   npub:       string;       // bech32 "npub1..." or 64-char hex
@@ -226,8 +227,7 @@ export function setAppRelaysEnabled(enabled: boolean): { ok: true; appRelaysEnab
 }
 
 export function writeIdentity(ident: Identity): void {
-  fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(configPath(), JSON.stringify(ident, null, 2), { mode: 0o600 });
+  atomicWriteJson(configPath(), ident, { mode: 0o600 });
 }
 
 // ── Validators ────────────────────────────────────────────────────────────
@@ -336,6 +336,27 @@ export function setNpub(npub: string): { ok: boolean; error?: string; npub?: str
   ident.npub = npub;
   writeIdentity(ident);
   return { ok: true, npub };
+}
+
+// First-time ownership claim — atomic check-and-set for the bootstrap
+// path. The dashboard's /api/identity/set route hits this when no owner
+// is configured yet. Without the in-flight flag two concurrent requests
+// (both passing CSRF — only possible from the user's own browser today
+// but defense-in-depth) could each read `!npub`, both write, and the
+// last write wins. The check-then-write window is microseconds but
+// real; this closes it without needing OS-level locking.
+let _bootstrapInFlight = false;
+export function bootstrapIdentity(npub: string): { ok: boolean; error?: string; npub?: string } {
+  if (_bootstrapInFlight) return { ok: false, error: 'bootstrap already in progress' };
+  _bootstrapInFlight = true;
+  try {
+    if (readIdentity().npub) {
+      return { ok: false, error: 'station already configured' };
+    }
+    return setNpub(npub);
+  } finally {
+    _bootstrapInFlight = false;
+  }
 }
 
 export function setSetupComplete(complete: boolean): void {

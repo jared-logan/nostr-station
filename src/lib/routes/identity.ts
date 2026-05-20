@@ -23,8 +23,10 @@
  */
 import http from 'http';
 import { WebSocket } from 'ws';
+import { MAX_WS_PAYLOAD } from '../ws-limits.js';
 import { readIdentity, addReadRelay, removeReadRelay,
   setNpub as setIdentityNpub,
+  bootstrapIdentity,
   setSetupComplete, isNpubOrHex, isNsec,
   DEFAULT_READ_RELAYS, hexToNpub, npubToHex,
   getGraspServers, addGraspServer, removeGraspServer,
@@ -85,7 +87,7 @@ function fetchKind0FromRelay(relayUrl: string, hex: string, timeoutMs: number): 
       resolve(ev);
     };
     let ws: WebSocket;
-    try { ws = new WebSocket(relayUrl); }
+    try { ws = new WebSocket(relayUrl, { maxPayload: MAX_WS_PAYLOAD }); }
     catch { resolve(null); return; }
 
     const timer = setTimeout(() => finish(null), timeoutMs);
@@ -206,7 +208,7 @@ function fetchKind0BatchFromRelay(
       resolve(out);
     };
     let ws: WebSocket;
-    try { ws = new WebSocket(relayUrl); }
+    try { ws = new WebSocket(relayUrl, { maxPayload: MAX_WS_PAYLOAD }); }
     catch { resolve(out); return; }
     const timer = setTimeout(finish, timeoutMs);
     const subId = 'ns-profiles-' + Math.random().toString(36).slice(2, 8);
@@ -440,7 +442,21 @@ export async function handleIdentity(
     }
     let npubResult: { ok: boolean; error?: string; npub?: string } | null = null;
     if (hasNpub) {
-      npubResult = setIdentityNpub(String(parsed.npub || '').trim());
+      const claim = String(parsed.npub || '').trim();
+      // Bootstrap vs rotation: the only path that reaches this handler
+      // unauthenticated is when no npub is configured yet (see the
+      // bootstrap exemption in web-server.ts). Use bootstrapIdentity
+      // for that path so the check-then-write is atomic at the process
+      // level — concurrent claims can't both succeed and last-write-win.
+      // Authed rotation (npub already set) keeps the existing setNpub
+      // path; no race exists there since the session caller is the
+      // single user.
+      const existing = readIdentity().npub;
+      if (!existing) {
+        npubResult = bootstrapIdentity(claim);
+      } else {
+        npubResult = setIdentityNpub(claim);
+      }
       if (npubResult.ok) bustProfileCache();
     }
     if (hasSetup) {
@@ -449,7 +465,11 @@ export async function handleIdentity(
     const ok = !npubResult || npubResult.ok;
     const body: any = { ok };
     if (npubResult) { if (npubResult.npub) body.npub = npubResult.npub; if (npubResult.error) body.error = npubResult.error; }
-    res.writeHead(ok ? 200 : 400, { 'Content-Type': 'application/json' });
+    // 409 when bootstrap lost the race; 400 for actual input errors.
+    const status = ok ? 200
+      : (npubResult?.error === 'bootstrap already in progress'
+         || npubResult?.error === 'station already configured') ? 409 : 400;
+    res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
     return true;
   }

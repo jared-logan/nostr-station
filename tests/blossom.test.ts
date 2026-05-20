@@ -232,7 +232,7 @@ test('BlossomServer: PUT from unrecognized pubkey is rejected 403', async () => 
   }
 });
 
-test('BlossomServer: OPTIONS returns 204 with CORS headers', async () => {
+test('BlossomServer: OPTIONS echoes loopback Origin (refuses cross-origin)', async () => {
   const port = 18480 + Math.floor(Math.random() * 100);
   const server = new BlossomServer({
     port, host: '127.0.0.1',
@@ -243,9 +243,29 @@ test('BlossomServer: OPTIONS returns 204 with CORS headers', async () => {
   });
   await server.start();
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/anything`, { method: 'OPTIONS' });
-    assert.equal(r.status, 204);
-    assert.equal(r.headers.get('access-control-allow-origin'), '*');
+    // Loopback origin: ACAO is echoed back so a scaffolded app at
+    // localhost:5173 can still fetch blobs.
+    const okOrigin = `http://localhost:5173`;
+    const ok = await fetch(`http://127.0.0.1:${port}/anything`, {
+      method: 'OPTIONS', headers: { Origin: okOrigin },
+    });
+    assert.equal(ok.status, 204);
+    assert.equal(ok.headers.get('access-control-allow-origin'), okOrigin);
+    assert.equal(ok.headers.get('vary'), 'Origin');
+
+    // Cross-origin attacker: no ACAO header in response → browser CORS
+    // layer refuses to expose body to the page.
+    const evil = await fetch(`http://127.0.0.1:${port}/anything`, {
+      method: 'OPTIONS', headers: { Origin: 'http://evil.com' },
+    });
+    assert.equal(evil.status, 204);
+    assert.equal(evil.headers.get('access-control-allow-origin'), null);
+
+    // No-Origin (CLI client): no ACAO needed; CLI clients aren't
+    // subject to SOP.
+    const cli = await fetch(`http://127.0.0.1:${port}/anything`, { method: 'OPTIONS' });
+    assert.equal(cli.status, 204);
+    assert.equal(cli.headers.get('access-control-allow-origin'), null);
   } finally {
     await server.stop();
   }

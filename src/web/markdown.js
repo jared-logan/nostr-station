@@ -25,6 +25,40 @@
 // the dashboard never displays untrusted content unsanitised even
 // if a vendor file fails to load.
 
+/**
+ * Route external image URLs through the dashboard's /api/img-proxy
+ * endpoint. With CSP `img-src 'self' data:` (Section I2 of the
+ * security plan), raw https:// <img src=> tags are refused — every
+ * external image (avatars, hero pictures, inline images in markdown)
+ * must be proxied so the bytes arrive over the dashboard origin.
+ *
+ * Pass-through (no proxy):
+ *   - data: URLs (inline-encoded bytes — already on the origin)
+ *   - blob: URLs
+ *   - Same-origin or relative paths
+ *   - Loopback hosts (covers in-process Blossom + nsite subdomains)
+ *   - http:// URLs (the proxy refuses them; leave as direct load so
+ *     the legacy image just silently fails instead of returning a
+ *     proxy error — preserves prior UI behavior on these edge cases)
+ */
+export function proxyImageUrl(u) {
+  if (!u) return u;
+  const s = String(u).trim();
+  if (!s) return s;
+  if (s.startsWith('data:') || s.startsWith('blob:')) return s;
+  if (s.startsWith('/') && !s.startsWith('//'))       return s;
+  try {
+    const parsed = new URL(s, (typeof location !== 'undefined' && location.href) || 'http://127.0.0.1');
+    if (typeof location !== 'undefined' && parsed.origin === location.origin) return s;
+    const h = parsed.hostname;
+    if (h === '127.0.0.1' || h === 'localhost' || h === '::1' || h.endsWith('.localhost')) return s;
+    if (parsed.protocol !== 'https:') return s;
+    return `/api/img-proxy?u=${encodeURIComponent(parsed.toString())}`;
+  } catch {
+    return s;
+  }
+}
+
 let markedConfigured = false;
 
 function ensureMarkedConfigured() {
@@ -46,6 +80,15 @@ function ensureMarkedConfigured() {
     renderer: {
       code({ text, lang }) {
         return renderCodeBlock(text, lang);
+      },
+      // Rewrite image src through the dashboard's image proxy so
+      // CSP img-src 'self' data: blocks raw https:// loads. marked
+      // v15+ passes { href, title, text } for image tokens.
+      image({ href, title, text }) {
+        const proxied = proxyImageUrl(href || '');
+        const t = title ? ` title="${escapeHtml(title)}"` : '';
+        const a = text  ? ` alt="${escapeHtml(text)}"`    : '';
+        return `<img src="${escapeHtml(proxied)}"${a}${t}>`;
       },
     },
   });

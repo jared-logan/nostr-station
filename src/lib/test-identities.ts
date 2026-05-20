@@ -41,6 +41,7 @@ import { execFileSync } from 'node:child_process';
 import WebSocket from 'ws';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { nip19 } from 'nostr-tools';
+import { MAX_WS_PAYLOAD } from './ws-limits.js';
 import type { Project } from './projects.js';
 import { CONFIG_DIRNAME, userConfigDirFor, ensureUserConfigDir } from './project-config.js';
 import { getWhitelistRef, getInprocRelayPort } from './routes/_shared.js';
@@ -334,7 +335,7 @@ export async function publishIdentityProfile(
   }
 
   return new Promise((resolve) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: MAX_WS_PAYLOAD });
     const settled = { done: false };
     const settle = (r: { ok: true; eventId: string } | { ok: false; reason: string }) => {
       if (settled.done) return;

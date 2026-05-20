@@ -29,6 +29,7 @@ import os from 'os';
 import path from 'path';
 import WebSocket from 'ws';
 import { findBin } from './detect.js';
+import { MAX_WS_PAYLOAD } from './ws-limits.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -547,7 +548,7 @@ export async function queryRelaysDirect(opts: RelayQueryOptions): Promise<RelayQ
 
     for (const relayUrl of opts.relays) {
       let ws: WebSocket;
-      try { ws = new WebSocket(relayUrl); }
+      try { ws = new WebSocket(relayUrl, { maxPayload: MAX_WS_PAYLOAD }); }
       catch { closedCount++; continue; }
       sockets.push(ws);
 

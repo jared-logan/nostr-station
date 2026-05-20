@@ -17,6 +17,7 @@
 import http from 'http';
 import { WebSocket } from 'ws';
 import { readIdentity, npubToHex } from '../identity.js';
+import { MAX_WS_PAYLOAD } from '../ws-limits.js';
 import { safeHttpUrl } from '../url-safety.js';
 
 const DITTO_THEME_KIND = 16767;
@@ -39,7 +40,7 @@ function fetchDittoThemeFromRelay(
       resolve(ev);
     };
     let ws: WebSocket;
-    try { ws = new WebSocket(relayUrl); }
+    try { ws = new WebSocket(relayUrl, { maxPayload: MAX_WS_PAYLOAD }); }
     catch { resolve(null); return; }
 
     const timer = setTimeout(() => finish(null), timeoutMs);

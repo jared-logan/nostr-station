@@ -24,6 +24,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { atomicWriteJson } from './atomic-write.js';
 
 const DIR  = path.join(os.homedir(), '.nostr-station');
 const FILE = path.join(DIR, 'bunker-client.json');
@@ -57,12 +58,10 @@ export function readSavedBunkerClient(ownerNpub: string): SavedBunkerClient | nu
 
 export function writeSavedBunkerClient(s: SavedBunkerClient): void {
   try {
-    fs.mkdirSync(DIR, { recursive: true });
-    fs.writeFileSync(FILE, JSON.stringify(s, null, 2), { mode: 0o600 });
-    // Defensive chmod — writeFileSync's mode only applies to CREATE, not
-    // overwrite. If the file already existed with looser perms we want to
-    // tighten it.
-    try { fs.chmodSync(FILE, 0o600); } catch {}
+    // atomicWriteJson handles mkdir-with-0o700, atomic rename, and
+    // defensive chmod-on-overwrite in one place — replaces the prior
+    // mkdir + writeFileSync + manual chmod dance.
+    atomicWriteJson(FILE, s, { mode: 0o600 });
   } catch { /* best-effort — failure here only costs us silent re-auth */ }
 }
 

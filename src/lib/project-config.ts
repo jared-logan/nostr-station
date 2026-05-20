@@ -43,6 +43,7 @@ import path from 'path';
 import { execFileSync } from 'child_process';
 import type { Project } from './projects.js';
 import type { Template, PermissionMode } from './templates.js';
+import { atomicWriteText, atomicWriteJson } from './atomic-write.js';
 
 export const CONFIG_DIRNAME = '.nostr-station';
 
@@ -413,32 +414,39 @@ export function ensureUserConfigDir(project: Project): string {
   return dir;
 }
 
+// Project-tree files (mode 0o644). These live under .nostr-station/
+// inside the project directory and are intended to commit with the
+// repo, so they need world-readable mode — other tools (git, IDE
+// previews) read them. atomic-write defaults to 0o600 so we pass
+// mode explicitly.
 export function writeSystemPromptOverride(project: Project, content: string): void {
   const dir = ensureConfigDir(project);
   if (!dir) throw new Error('project has no path');
-  fs.writeFileSync(path.join(dir, SYSTEM_PROMPT_FILE), content);
+  atomicWriteText(path.join(dir, SYSTEM_PROMPT_FILE), content, { mode: 0o644, dirMode: 0o755 });
 }
 
 export function writeProjectContextOverlay(project: Project, content: string): void {
   const dir = ensureConfigDir(project);
   if (!dir) throw new Error('project has no path');
-  fs.writeFileSync(path.join(dir, PROJECT_CONTEXT_FILE), content);
+  atomicWriteText(path.join(dir, PROJECT_CONTEXT_FILE), content, { mode: 0o644, dirMode: 0o755 });
 }
 
 export function writeProjectTemplate(project: Project, record: ProjectTemplateRecord): void {
   const dir = ensureConfigDir(project);
   if (!dir) throw new Error('project has no path');
-  fs.writeFileSync(path.join(dir, TEMPLATE_FILE), JSON.stringify(record, null, 2));
+  atomicWriteJson(path.join(dir, TEMPLATE_FILE), record, { mode: 0o644, dirMode: 0o755 });
 }
 
+// User-config files (mode 0o600). These live under ~/.config/
+// nostr-station/projects/<id>/ — private, never committed.
 export function writeProjectPermissions(project: Project, permissions: ProjectPermissions): void {
   const dir = ensureUserConfigDir(project);
-  fs.writeFileSync(path.join(dir, PERMISSIONS_FILE), JSON.stringify(permissions, null, 2));
+  atomicWriteJson(path.join(dir, PERMISSIONS_FILE), permissions, { mode: 0o600 });
 }
 
 export function writeProjectChatOverride(project: Project, override: ProjectChatOverride): void {
   const dir = ensureUserConfigDir(project);
-  fs.writeFileSync(path.join(dir, CHAT_FILE), JSON.stringify(override, null, 2));
+  atomicWriteJson(path.join(dir, CHAT_FILE), override, { mode: 0o600 });
 }
 
 // ── Public deletes (for "clear override" UI) ──────────────────────────────

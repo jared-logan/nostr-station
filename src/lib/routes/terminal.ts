@@ -34,6 +34,7 @@ import { getProject } from '../projects.js';
 import { allocatePort as allocateDevServerPort } from '../dev-server-registry.js';
 import { getSession, localhostExempt } from '../auth.js';
 import { readBody, CLI_SPAWN } from './_shared.js';
+import { MAX_WS_PAYLOAD } from '../ws-limits.js';
 
 export async function handleTerminal(
   req: http.IncomingMessage,
@@ -143,7 +144,7 @@ export function mountTerminalWebSocket(
   },
 ): void {
   const { allowedHosts, isLoopbackUrl } = ctx;
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD });
 
   server.on('upgrade', (req, socket, head) => {
     const url = req.url || '';

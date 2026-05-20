@@ -58,7 +58,7 @@ import {
   issueChallenge, consumeChallenge, createSession,
   deleteSession, extractBearer, verifyNip98, authStatus,
   isPublicApi, requireSession, expectedDashboardUrl,
-  loadSessions, persistSessions,
+  loadSessions, persistSessions, issueDownloadToken,
 } from './auth.js';
 import {
   startUpdatePoller, stopUpdatePoller, getUpdateStatus,
@@ -83,6 +83,8 @@ import {
   type CmdSpec,
 } from './routes/_shared.js';
 import { readStationContext, stationContextPath } from './ai-context.js';
+import { atomicWriteText } from './atomic-write.js';
+import { handleImgProxy } from './img-proxy.js';
 import { seedStationContext, USER_REGION_BEGIN, USER_REGION_END } from './editor.js';
 import { handleProjects } from './routes/projects.js';
 import { handleBlossomConfig } from './routes/blossom-config.js';
@@ -848,6 +850,39 @@ export async function startWebServer(port: number): Promise<http.Server> {
         return;
       }
 
+      // POST /api/auth/download-token — mint a short-lived single-use
+      // token for <a target="_blank"> / <a download> URLs (currently
+      // just mail attachments). The dashboard's session token is too
+      // long-lived to safely embed in URLs that enter browser history.
+      // See auth.ts issueDownloadToken / consumeDownloadToken.
+      //
+      // When the dashboard is in the localhost-exempt mode (wizard
+      // phase OR requireAuth:false), requireSession() returns a
+      // synthetic session token of 'localhost-exempt' that doesn't
+      // live in the sessions Map. In that mode the user's downloads
+      // also don't need a token — the localhost-exempt path will
+      // re-authorize them on arrival. Return mode:'unauthenticated'
+      // so the client opens the URL bare.
+      if (url === '/api/auth/download-token' && method === 'POST') {
+        const session = requireSession(req, res);
+        if (!session) return;
+        if (session.token === 'localhost-exempt') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ mode: 'unauthenticated' }));
+          return;
+        }
+        const tok = extractBearer(req);
+        const dt  = tok ? issueDownloadToken(tok) : null;
+        if (!dt) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'session no longer valid' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(dt));
+        return;
+      }
+
       if (url === '/api/auth/session' && method === 'GET') {
         const sess = requireSession(req, res);
         if (!sess) return;
@@ -993,8 +1028,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
         }
         const filePath = stationContextPath();
         try {
-          fs.mkdirSync(path.dirname(filePath), { recursive: true });
-          fs.writeFileSync(filePath, content, { mode: 0o644 });
+          atomicWriteText(filePath, content, { mode: 0o644 });
         } catch (e: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: e?.message || 'write failed' }));
@@ -1018,6 +1052,17 @@ export async function startWebServer(port: number): Promise<http.Server> {
           return;
         }
         await proxyChat(req, res, cfg);
+        return;
+      }
+
+      // Image proxy — fetches an external https URL server-side and
+      // streams the bytes back through the dashboard origin. The
+      // dashboard's CSP after this PR is `img-src 'self' data:`, so
+      // every external avatar / inline image must route through here.
+      // See src/lib/img-proxy.ts for size limits / content-type
+      // allowlist / cache behavior.
+      if (url === '/api/img-proxy' && method === 'GET') {
+        await handleImgProxy(req, res);
         return;
       }
 

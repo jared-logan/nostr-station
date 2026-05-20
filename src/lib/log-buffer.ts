@@ -18,6 +18,26 @@ export interface LogLine {
 
 type Listener = (line: LogLine) => void;
 
+// Strip ANSI escape sequences (CSI + OSC) and other control bytes
+// from log line text. Lines that include attacker-controlled content
+// (a connecting client's request body, a relay's wire frame echoed in
+// an error message, a subprocess's stderr piped through) could
+// otherwise inject terminal-clearing or hyperlink-spoofing escapes
+// when a developer tails the SSE stream via `curl /api/logs/relay`
+// piped to a terminal. The dashboard's HTML Logs panel renders these
+// as text so isn't affected, but the terminal-tail use case is real
+// and the strip is cheap.
+function stripEscapes(s: string): string {
+  return s
+    // CSI sequences: ESC [ <params> <final>
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    // OSC sequences: ESC ] <body> (BEL | ESC \)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    // Lone control bytes (0x00-0x1F minus tab/lf/cr, plus DEL).
+    // Tab, LF, CR pass through — they're useful in multi-line traces.
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+}
+
 export class LogBuffer {
   private ring:      LogLine[]   = [];
   private capacity:  number;
@@ -28,7 +48,7 @@ export class LogBuffer {
   }
 
   push(level: LogLine['level'], text: string): void {
-    const line: LogLine = { ts: Date.now(), level, text };
+    const line: LogLine = { ts: Date.now(), level, text: stripEscapes(text) };
     this.ring.push(line);
     if (this.ring.length > this.capacity) this.ring.shift();
     for (const l of this.listeners) {
