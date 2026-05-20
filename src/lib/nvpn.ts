@@ -301,18 +301,35 @@ async function probeNvpnStatusUncached(): Promise<NvpnStatus> {
 async function runStatusProbe(
   binPath: string, asRoot: boolean,
 ): Promise<{ raw: NvpnStatusJson | null; error: string | null }> {
-  // --config pins the lookup against $HOME/$XDG_CONFIG_HOME drift.
-  // Without this, sudo / mismatched-user invocations fall through to
-  // 4.x's silent config-snapshot mode (status_source: "config").
-  const args = buildNvpnArgs(['status', '--json']);
+  let cmdBin: string;
+  let cmdArgs: string[];
+  if (asRoot) {
+    // -H is the load-bearing flag here. Without it `sudo` preserves
+    // the dashboard user's $HOME, and nvpn reads the user-side config
+    // at /home/<dashboard-user>/.config/nvpn/ — the phantom that the
+    // PR-#162 installer fix removes for new installs, but which
+    // existing VMs still have on disk. -H flips $HOME to root's
+    // (/root) so nvpn finds /root/.config/nvpn/ where the
+    // service-installed daemon actually lives.
+    //
+    // We also DON'T pass --config here. buildNvpnArgs injects a
+    // --config /home/<user>/.config/nvpn/config.toml derived from
+    // os.homedir() on the dashboard process — which on the root
+    // re-probe is wrong by construction. Let nvpn auto-detect from
+    // the post-`sudo -H` $HOME instead.
+    cmdBin  = 'sudo';
+    cmdArgs = ['-H', '-n', binPath, 'status', '--json'];
+  } else {
+    // User-mode probe: --config pins the lookup against $HOME drift,
+    // covering edge cases where $XDG_CONFIG_HOME is set or HOME got
+    // re-rooted via a launcher script.
+    cmdBin  = binPath;
+    cmdArgs = buildNvpnArgs(['status', '--json']);
+  }
   try {
-    const { stdout } = asRoot
-      ? await execa('sudo', ['-n', binPath, ...args], {
-          timeout: STATUS_TIMEOUT_MS, stdio: 'pipe',
-        })
-      : await execa(binPath, args, {
-          timeout: STATUS_TIMEOUT_MS, stdio: 'pipe',
-        });
+    const { stdout } = await execa(cmdBin, cmdArgs, {
+      timeout: STATUS_TIMEOUT_MS, stdio: 'pipe',
+    });
     try { return { raw: JSON.parse(stdout), error: null }; }
     catch (e: any) {
       return { raw: null, error: `unparseable status JSON: ${(e?.message || '').slice(0, 120)}` };
