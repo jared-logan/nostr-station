@@ -200,3 +200,59 @@ If you want to confirm a fresh deployment end-to-end:
    rather than just "offline."
 
 If all six are green, your station is ready to host a mesh.
+
+## nvpn 4.x behavioural notes
+
+The pinned binary jumped from 0.3.12 → 4.0.37 in the 2026-05-19 release.
+Two behaviours changed that aren't bugs but will surprise users coming
+from older docs or older installs.
+
+### Exit-node leak protection (v4.0.1+)
+
+If you set an exit-node via the Settings tab (`nvpn set --exit-node
+<npub>`), the daemon will now **block all outbound internet traffic on
+the host whenever that exit-node is unreachable**. This is the secure
+default — without it, traffic would silently leak around the tunnel
+when the exit-node drops — but it also means a flaky exit-node will
+appear as "the whole box has no internet."
+
+If you're running nostr-station on a headless server and don't actually
+want exit-node routing, **leave exit-node unset**. Clearing it
+afterwards is `nvpn set --exit-node ""` (empty string). You can also
+opt out explicitly with `nvpn set --exit-node-leak-protection false`,
+which restores the pre-4.0.1 "best-effort" behaviour.
+
+### MagicDNS aliases for unnamed peers (v4.0.29+)
+
+Previously, every roster member got an auto-generated `.nvpn` alias
+even when no `[peer_aliases]` entry existed. As of v4.0.29 the daemon
+**no longer invents aliases for unnamed members** — devices without an
+explicit alias resolve only by tunnel IP.
+
+If you rely on `ssh peer.nvpn` shortcuts, set the alias explicitly:
+either via the dashboard's Peers tab (the "alias" button on each peer
+row) or by adding to the `[peer_aliases]` block in
+`~/.config/nvpn/config.toml`:
+
+```toml
+[peer_aliases]
+npub1aaa... = "alice"
+npub1bbb... = "bob"
+```
+
+Existing aliased peers are unaffected.
+
+### CLI surface changes (operator-relevant)
+
+Several CLI verbs were removed in the 4.x redesign. Most users won't
+notice because the dashboard wraps them, but if you've been driving
+nvpn from shell scripts:
+
+| Removed | Replacement |
+|---|---|
+| `nvpn publish-roster` | Each mutation auto-publishes via its own `--publish` flag (now default-on in the dashboard's roster API). |
+| `nvpn netcheck` | Coverage folded into `nvpn doctor --json`. |
+| `nvpn nat-discover` | Daemon runs STUN periodically; see `public_endpoint` / `nat.public_endpoint` in `nvpn status --json`. |
+| `nvpn stats` | The `relay-for-others` mode this counted was dropped from the FIPS mesh redesign. |
+| `nvpn set --relay <url>` (bulk) | No CLI replacement upstream — edit `[[networks]] relays = […]` in `config.toml` directly, or use the native app. The dashboard's GET `/api/nvpn/relays` still reads correctly; mutations return `501 Not Implemented`. |
+| `nvpn init --yes` | Renamed to `nvpn init --force`. The installer was updated in lockstep. |

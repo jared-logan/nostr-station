@@ -542,43 +542,19 @@ export async function pickFreeMagicDnsPort(
   return null;
 }
 
-// Pre-seed the magic-dns-port setting during install. Called after
-// `nvpn init` and before `nvpn service install`, so the daemon's
-// first start picks up our chosen port instead of trying 1053 and
-// logging the fallback line. Best-effort: a probe failure or a
-// missing/different `nvpn set` schema is logged and we fall through.
+// No-op in nvpn 4.x. The `--magic-dns-port` flag was removed from
+// `nvpn set` between 0.3.x and 4.0.x — the daemon picks a free port
+// on its own and the explicit-port hint has no settings entry to
+// land in. Keeping the exported shape so the installer's call site
+// doesn't need a conditional; the log line just changes from
+// "magic-dns-port → 5453" to a one-line "skipped". If a future
+// upstream re-introduces the setting, restore the previous body
+// from git history.
 export async function seedFreeMagicDnsPort(): Promise<ControlResult> {
-  const binPath = findBin('nvpn');
-  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
-
-  // Respect a user-set port. If status JSON already surfaces a
-  // configured magic_dns_port (set by a previous install or a manual
-  // `nvpn set`), don't second-guess it.
-  try {
-    const { stdout } = await execa(binPath, ['status', '--json'], {
-      timeout: STATUS_TIMEOUT_MS, stdio: 'pipe',
-    });
-    const raw = JSON.parse(stdout) as Record<string, unknown>;
-    const configured = raw?.configured_magic_dns_port ?? raw?.magic_dns_port;
-    if (typeof configured === 'number' && configured > 0) {
-      return { ok: true, detail: `magic-dns-port already set to ${configured}` };
-    }
-  } catch { /* status may not be available pre-daemon-start; fall through */ }
-
-  const port = await pickFreeMagicDnsPort();
-  if (port === null) {
-    return { ok: false, detail: 'no free candidate port — letting nvpn pick' };
-  }
-  // Skip the write when 1053 is free — keeping the upstream default
-  // means a future schema change in `nvpn set` doesn't break our
-  // install path, and the daemon's startup log stays identical to a
-  // vanilla install.
-  if (port === MAGIC_DNS_PORT_CANDIDATES[0]) {
-    return { ok: true, detail: `port ${port} free — keeping upstream default` };
-  }
-  const r = await setNvpnSettings({ 'magic-dns-port': port });
-  if (!r.ok) return { ok: false, detail: `set failed: ${r.detail}` };
-  return { ok: true, detail: `magic-dns-port → ${port}` };
+  return {
+    ok: true,
+    detail: 'skipped (nvpn 4.x picks magic-dns-port automatically)',
+  };
 }
 
 export const installNvpnService = (): Promise<ControlResult> => runServiceOp('install');
@@ -904,63 +880,20 @@ export interface NvpnRelaysResult extends ControlResult {
 // node (presence won't publish, peers won't be discovered). The
 // caller wanting to reset should remove relays one at a time and
 // stop before the last.
-export async function setNvpnRelays(relays: string[]): Promise<NvpnRelaysResult> {
-  const binPath = findBin('nvpn');
-  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
-  const cleaned = relays.map(s => String(s).trim()).filter(Boolean);
-  if (cleaned.length === 0) {
-    return { ok: false, detail: 'refusing to clear the entire relay list — keep at least one' };
-  }
-  const bad = cleaned.filter(r => !isValidRelayUrl(r));
-  if (bad.length > 0) {
-    return {
-      ok: false,
-      detail: `invalid relay URL${bad.length > 1 ? 's' : ''}: ${bad.slice(0, 3).join(', ')}` +
-              (bad.length > 3 ? ` (+${bad.length - 3} more)` : ''),
-    };
-  }
-  // De-dup while preserving order — nvpn would probably accept dupes
-  // but the visible state should match what the user intended.
-  const unique: string[] = [];
-  const seen = new Set<string>();
-  for (const r of cleaned) { if (!seen.has(r)) { seen.add(r); unique.push(r); } }
+const RELAY_MUTATION_REMOVED_DETAIL =
+  'relay management was removed from `nvpn set` in 4.x — the native app is the supported surface; '
+  + 'read-only `/api/nvpn/relays` still works against config.toml';
 
-  try {
-    const { stdout } = await execa(binPath, buildSetRelaysArgs(unique), {
-      timeout: 10_000, stdio: 'pipe',
-    });
-    let raw: Record<string, unknown> | null = null;
-    try { raw = JSON.parse(stdout); } catch { /* nvpn may return non-JSON for `set`; treat as best-effort */ }
-    // Best-effort reload so the running daemon picks up the new set
-    // without a Stop/Start cycle.
-    await reloadNvpn().catch(() => null);
-    return { ok: true, detail: `relay list updated (${unique.length})`, relays: unique, raw };
-  } catch (e: any) {
-    return { ok: false, detail: summarizeError(e) };
-  }
+export async function setNvpnRelays(_relays: string[]): Promise<NvpnRelaysResult> {
+  return { ok: false, detail: RELAY_MUTATION_REMOVED_DETAIL };
 }
 
-export async function addNvpnRelay(url: string): Promise<NvpnRelaysResult> {
-  if (!isValidRelayUrl(url)) {
-    return { ok: false, detail: 'invalid relay URL — must be ws:// or wss://' };
-  }
-  const current = readNvpnRelays();
-  if (current.relays.includes(url)) {
-    return { ok: true, detail: 'relay already in list', relays: current.relays };
-  }
-  return setNvpnRelays([...current.relays, url]);
+export async function addNvpnRelay(_url: string): Promise<NvpnRelaysResult> {
+  return { ok: false, detail: RELAY_MUTATION_REMOVED_DETAIL };
 }
 
-export async function removeNvpnRelay(url: string): Promise<NvpnRelaysResult> {
-  const current = readNvpnRelays();
-  if (!current.relays.includes(url)) {
-    return { ok: true, detail: 'relay was not in list', relays: current.relays };
-  }
-  const next = current.relays.filter(r => r !== url);
-  if (next.length === 0) {
-    return { ok: false, detail: 'refusing to remove the last relay — add a replacement first' };
-  }
-  return setNvpnRelays(next);
+export async function removeNvpnRelay(_url: string): Promise<NvpnRelaysResult> {
+  return { ok: false, detail: RELAY_MUTATION_REMOVED_DETAIL };
 }
 
 // ── Alias mutation (config.toml [peer_aliases] table) ──────────────
@@ -1182,18 +1115,14 @@ export interface PublishRosterResult extends ControlResult {
   raw?: Record<string, unknown> | null;
 }
 export async function publishRoster(): Promise<PublishRosterResult> {
-  const binPath = findBin('nvpn');
-  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
-  try {
-    const { stdout } = await execa(binPath, ['publish-roster', '--json'], {
-      timeout: ROSTER_TIMEOUT_MS, stdio: 'pipe',
-    });
-    let raw: Record<string, unknown> | null = null;
-    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
-    return { ok: true, detail: 'roster published', raw };
-  } catch (e: any) {
-    return { ok: false, detail: summarizeError(e) };
-  }
+  // Removed in nvpn 4.x. Each roster mutation now broadcasts inline
+  // via its own `--publish` flag (already the default in our
+  // routes/nvpn.ts handler), so a standalone "republish" verb has no
+  // upstream backing. UI button still works via add/remove paths.
+  return {
+    ok: false,
+    detail: 'publish-roster removed in nvpn 4.x — mutations auto-publish with --publish',
+  };
 }
 
 export interface InviteResult extends ControlResult {
@@ -1350,18 +1279,12 @@ const NETCHECK_TIMEOUT_MS = 8_000;
 const DOCTOR_TIMEOUT_MS   = 30_000;
 
 export async function netcheckNvpn(): Promise<DiagResult> {
-  const binPath = findBin('nvpn');
-  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
-  try {
-    const { stdout } = await execa(binPath, ['netcheck', '--json'], {
-      timeout: NETCHECK_TIMEOUT_MS, stdio: 'pipe',
-    });
-    let raw: Record<string, unknown> | null = null;
-    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
-    return { ok: true, detail: 'netcheck ok', raw };
-  } catch (e: any) {
-    return { ok: false, detail: summarizeError(e) };
-  }
+  // `nvpn netcheck` was removed in 4.x. Coverage folded into
+  // `nvpn doctor --json` — use /api/nvpn/doctor instead.
+  return {
+    ok: false,
+    detail: 'netcheck removed in nvpn 4.x — use doctor (POST /api/nvpn/doctor) for the same coverage',
+  };
 }
 
 export interface DoctorOptions {
@@ -1395,29 +1318,15 @@ export async function doctorNvpn(opts: DoctorOptions = {}): Promise<DoctorResult
   }
 }
 
-export async function natDiscoverNvpn(reflector: string, listenPort?: number): Promise<DiagResult> {
-  const binPath = findBin('nvpn');
-  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
-  const trimmed = String(reflector || '').trim();
-  // host:port — port range 1–65535. We don't try to validate the host
-  // beyond non-empty; nvpn will surface a clearer error than ours.
-  if (!/^[A-Za-z0-9.\-:[\]]+:\d{1,5}$/.test(trimmed)) {
-    return { ok: false, detail: 'reflector must be host:port' };
-  }
-  const args = ['nat-discover', '--reflector', trimmed, '--json'];
-  if (typeof listenPort === 'number' && listenPort > 0 && listenPort < 65536) {
-    args.push('--listen-port', String(listenPort));
-  }
-  try {
-    const { stdout } = await execa(binPath, args, {
-      timeout: 8_000, stdio: 'pipe',
-    });
-    let raw: Record<string, unknown> | null = null;
-    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
-    return { ok: true, detail: 'nat-discover ok', raw };
-  } catch (e: any) {
-    return { ok: false, detail: summarizeError(e) };
-  }
+export async function natDiscoverNvpn(_reflector: string, _listenPort?: number): Promise<DiagResult> {
+  // `nvpn nat-discover` was removed in 4.x — replaced by the daemon's
+  // built-in periodic STUN discovery (visible via status JSON's
+  // `public_endpoint` / `nat.public_endpoint`). One-shot probe verb
+  // has no upstream replacement.
+  return {
+    ok: false,
+    detail: 'nat-discover removed in nvpn 4.x — daemon runs STUN discovery automatically; see status JSON',
+  };
 }
 
 // ── Settings (`nvpn set`) ────────────────────────────────────────────────
@@ -1434,19 +1343,19 @@ const SETTABLE_KEYS = new Set([
   'tunnel-ip',
   'endpoint',
   'magic-dns-suffix',
-  // `magic-dns-port` lets users pre-pick a free local port. nvpn defaults
-  // to 1053 and falls back to a random port if that's taken — fine for
-  // function but it surfaces a noisy "preferred port unavailable" line on
-  // every start, and re-roll on restart breaks anything that pinned the
-  // resolver to the prior port.
-  'magic-dns-port',
   'exit-node',
+  // New in 4.0.1: when true, the daemon blocks all internet traffic
+  // while the configured exit-node is unreachable. Settable as boolean
+  // ("true"/"false"); UI exposure is a follow-up.
+  'exit-node-leak-protection',
   'advertise-exit-node',
   'advertise-routes',
   'autoconnect',
-  'relay-for-others',
-  'provide-nat-assist',
   'network-id',
+  // Removed in nvpn 4.0.x: `magic-dns-port` (daemon picks automatically),
+  // `relay-for-others`, `provide-nat-assist`. Bulk `--relay` was also
+  // removed — relay list management moved into config.toml / the native
+  // app; the API surface returns a clear "removed in 4.x" message.
 ]);
 
 export interface SetResult extends ControlResult {
@@ -1480,16 +1389,13 @@ export async function setNvpnSettings(input: Record<string, unknown>): Promise<S
 // for users who flip on `relay-for-others` and want to see traffic
 // they're forwarding.
 export async function statsNvpn(): Promise<DiagResult> {
-  const binPath = findBin('nvpn');
-  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
-  try {
-    const { stdout } = await execa(binPath, ['stats', '--json'], { timeout: 4_000, stdio: 'pipe' });
-    let raw: Record<string, unknown> | null = null;
-    try { raw = JSON.parse(stdout); } catch { /* keep null */ }
-    return { ok: true, detail: 'stats ok', raw };
-  } catch (e: any) {
-    return { ok: false, detail: summarizeError(e) };
-  }
+  // `nvpn stats` was removed in 4.x along with `relay-for-others`
+  // (the setting whose counters this exposed). The whole relay-operator
+  // feature class is gone from upstream as of the FIPS mesh redesign.
+  return {
+    ok: false,
+    detail: 'stats removed in nvpn 4.x (relay-for-others mode dropped in the FIPS mesh redesign)',
+  };
 }
 
 // ── Pure helpers (testable) ─────────────────────────────────────────────

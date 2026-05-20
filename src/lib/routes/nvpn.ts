@@ -311,8 +311,13 @@ export async function handleNvpn(
   }
 
   if (url === '/api/nvpn/roster/publish' && method === 'POST') {
+    // 501 not 500: `publish-roster` was removed from the CLI in
+    // nvpn 4.x — every mutation auto-publishes via the `--publish`
+    // flag (default-on in the routes above). The endpoint stays
+    // wired so the UI gets a recognizable "feature gone" response
+    // rather than a generic 500.
     const r = await publishRoster();
-    await writeJson(res, r.ok ? 200 : 500, r);
+    await writeJson(res, r.ok ? 200 : 501, r);
     return true;
   }
 
@@ -341,28 +346,24 @@ export async function handleNvpn(
     await writeJson(res, 200, { health: snapshot, windowMs: 5 * 60 * 1000 });
     return true;
   }
+  // Relay mutations removed in nvpn 4.x — bulk `nvpn set --relay` is
+  // gone and the per-relay CLI never landed; the native app is the
+  // only writer upstream supports. Read-only GET /api/nvpn/relays
+  // above still works against config.toml. 501 makes the failure
+  // distinct from "bad input" (400) or "broken daemon" (500).
   if (url === '/api/nvpn/relays/add' && method === 'POST') {
-    const body = await parseJsonBody(req);
-    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
-    const r = await addNvpnRelay(typeof body.url === 'string' ? body.url : '');
-    await writeJson(res, r.ok ? 200 : 400, r);
+    const r = await addNvpnRelay('');
+    await writeJson(res, 501, r);
     return true;
   }
   if (url === '/api/nvpn/relays/remove' && method === 'POST') {
-    const body = await parseJsonBody(req);
-    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
-    const r = await removeNvpnRelay(typeof body.url === 'string' ? body.url : '');
-    await writeJson(res, r.ok ? 200 : 400, r);
+    const r = await removeNvpnRelay('');
+    await writeJson(res, 501, r);
     return true;
   }
-  // Bulk replace — useful for "reset to defaults" or paste-a-list flows.
-  // Refuses an empty list at the lib layer to avoid stranding the node.
   if (url === '/api/nvpn/relays/set' && method === 'POST') {
-    const body = await parseJsonBody(req);
-    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
-    const list = Array.isArray(body.relays) ? body.relays : [];
-    const r = await setNvpnRelays(list);
-    await writeJson(res, r.ok ? 200 : 400, r);
+    const r = await setNvpnRelays([]);
+    await writeJson(res, 501, r);
     return true;
   }
 
@@ -466,8 +467,9 @@ export async function handleNvpn(
     return true;
   }
   if (url === '/api/nvpn/netcheck' && method === 'GET') {
+    // 501: `nvpn netcheck` removed in 4.x — folded into `doctor`.
     const r = await netcheckNvpn();
-    await writeJson(res, r.ok ? 200 : 500, r);
+    await writeJson(res, r.ok ? 200 : 501, r);
     return true;
   }
   if (url === '/api/nvpn/doctor' && method === 'POST') {
@@ -482,17 +484,19 @@ export async function handleNvpn(
   // discovery automatically against the daemon's stun_servers list.
   // Route stays here so curl + tooling can drive it.
   if (url === '/api/nvpn/nat-discover' && method === 'POST') {
+    // 501: `nvpn nat-discover` removed in 4.x — STUN runs in-daemon.
     const body = await parseJsonBody(req);
     if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
     const reflector  = typeof body.reflector === 'string' ? body.reflector : '';
     const listenPort = typeof body.listenPort === 'number' ? body.listenPort : undefined;
     const r = await natDiscoverNvpn(reflector, listenPort);
-    await writeJson(res, r.ok ? 200 : 500, r);
+    await writeJson(res, r.ok ? 200 : 501, r);
     return true;
   }
   if (url === '/api/nvpn/stats' && method === 'GET') {
+    // 501: `nvpn stats` removed in 4.x along with relay-for-others.
     const r = await statsNvpn();
-    await writeJson(res, r.ok ? 200 : 500, r);
+    await writeJson(res, r.ok ? 200 : 501, r);
     return true;
   }
 

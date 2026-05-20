@@ -5,6 +5,76 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nvpn 4.0.37 — upstream major-version bump + breaking CLI changes
+
+> **Upstream major.** `mmalmi/nostr-vpn` cut v4.0.0 on 2026-05-07 with a
+> FIPS-mesh redesign (native shells replacing Tauri, shared app-core
+> state/action contract) and then iterated to v4.0.37 by 2026-05-18. We
+> were pinned to v0.3.12 — a 25-release lag across ~6 weeks. The bump
+> lands as a single PR alongside the CLI-compat fences below; UI parity
+> work for newly-exposed features (exit-node leak protection, per-relay
+> enable/disable, service-version mismatch banner, unnamed-peer DNS
+> hint) is deferred to follow-ups.
+
+**Bumped:**
+- `versions.ts` — `nvpn` pin `0.3.12` → `4.0.37`
+- `BINARY_SHA256.nvpn` — rotated all three pinned target digests
+
+**Breaking-but-fenced upstream removals.** Each surfaces as a `501 Not
+Implemented` response with a clear `detail` string explaining the
+removal and pointing at the replacement (where one exists). The
+endpoints stay wired so dashboards / scripts get a recognizable signal
+instead of a generic 500:
+
+- `POST /api/nvpn/roster/publish` — `nvpn publish-roster` was removed;
+  every roster mutation now broadcasts inline via the `--publish` flag
+  (already the default on `/api/nvpn/peers/{add,remove}` and
+  `/api/nvpn/admins/{add,remove}`).
+- `GET /api/nvpn/netcheck` — `nvpn netcheck` was folded into
+  `nvpn doctor --json`. Use `POST /api/nvpn/doctor` for the same
+  coverage.
+- `POST /api/nvpn/nat-discover` — replaced by the daemon's built-in
+  periodic STUN discovery. The result surfaces in `status --json` under
+  `public_endpoint` / `nat.public_endpoint`.
+- `GET /api/nvpn/stats` — `nvpn stats` and the underlying
+  `relay-for-others` mode were dropped from the FIPS mesh redesign.
+- `POST /api/nvpn/relays/{add,remove,set}` — `nvpn set --relay` (bulk
+  replacement) and the per-relay CLI never landed in 4.x; the native
+  app is the only writer upstream supports. `GET /api/nvpn/relays`
+  still reads from `config.toml` and is unaffected.
+
+**`nvpn set` allowlist changes:**
+- Removed: `magic-dns-port` (daemon picks automatically),
+  `relay-for-others`, `provide-nat-assist` (entire relay-operator
+  feature class is gone).
+- Added: `exit-node-leak-protection` (new in upstream v4.0.1 — blocks
+  internet traffic while a selected exit-node is unreachable; settable
+  as `true` / `false`). UI exposure is a follow-up.
+
+**Install-flow fixes:**
+- `nvpn init --yes` → `nvpn init --force` (upstream rename). Stdin-
+  newline fallback retained for transitional installs.
+- `seedFreeMagicDnsPort()` is now a no-op stub — the underlying setting
+  is gone. The installer still calls it for log-symmetry; it returns
+  `skipped (nvpn 4.x picks magic-dns-port automatically)`.
+
+**Behavioural changes worth flagging to users** (documented in
+`docs/nvpn-deployment.md` — no code change required):
+- **Exit-node leak protection** (v4.0.1): if a user configures an
+  exit-node that's unreachable, the host loses internet until it
+  reconnects or the setting is cleared. Headless servers should leave
+  exit-node unset.
+- **MagicDNS aliases** (v4.0.29): roster members without a `.nvpn`
+  name no longer get auto-generated DNS aliases. Set names via the
+  `[peer_aliases]` config block (or via the dashboard's alias button)
+  if you want resolution.
+
+**Rollback contract.** Reverting `versions.ts` to `0.3.12` plus its
+prior `BINARY_SHA256.nvpn` digests is sufficient — the installer's
+hard-fail-on-mismatch contract means a stale 4.0.37 binary on a user's
+machine won't be silently kept; the next Install action re-downloads
+and verifies against the rolled-back digests.
+
 ### Architectural simplification (six-step rewrite)
 
 > **Major.** nostr-station is now a single Node process with an in-process

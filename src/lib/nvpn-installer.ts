@@ -172,12 +172,14 @@ export async function installNostrVpn(
     };
   }
 
-  // nvpn init — best-effort. Upstream subcommand spelling has shifted
-  // between releases; try --yes first, fall back to a stdin-newline.
+  // nvpn init — best-effort. Upstream subcommand spelling shifted in
+  // 4.x: `--yes` was renamed to `--force`. Try the new flag first, fall
+  // back to a stdin-newline (covers older binaries that may linger in
+  // an existing install before the binary is swapped).
   log.step('nvpn init');
   try {
-    await execa(nvpnBin, ['init', '--yes'], { stdio: 'pipe', timeout: 10_000 });
-    log.append('init --yes ok');
+    await execa(nvpnBin, ['init', '--force'], { stdio: 'pipe', timeout: 10_000 });
+    log.append('init --force ok');
   } catch {
     try {
       await execa(nvpnBin, ['init'], {
