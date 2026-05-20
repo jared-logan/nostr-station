@@ -80,6 +80,30 @@ export interface RelayOptions {
 const DEFAULT_PORT = 7777;
 const DEFAULT_HOST = '127.0.0.1';
 
+// Origin allowlist for WebSocket upgrades. Browsers send the `Origin`
+// header on every WS handshake initiated from a page context; Node /
+// CLI clients (nak, project-seed.ts, setup-verify.ts, nostr-query.ts)
+// send no Origin at all. Goal: block cross-origin browser tabs
+// (http://evil.com) from reading the local event store via REQ;
+// preserve every legitimate connector.
+//
+// Port wildcard is intentional. Unlike the dashboard's gate which pins
+// to its own port, the relay must accept loopback Origins from ANY
+// port: scaffolded user apps (Stacks, mkstack, Vite previews) reach
+// the relay via NOSTR_STATION_RELAY from their own dev-server ports
+// (typically 5173, 3000, 8080…). Locking to a single port would break
+// the whole "build apps locally against the relay" loop.
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return u.hostname === '127.0.0.1'
+        || u.hostname === 'localhost'
+        || u.hostname === '[::1]'
+        || u.hostname === '::1';
+  } catch { return false; }
+}
+
 export class Relay {
   readonly store:     EventStore;
   readonly whitelist: WhitelistStore;
@@ -112,7 +136,23 @@ export class Relay {
     // standard Nostr expectations. A bare HTTP GET to the relay port
     // returns NIP-11 metadata.
     this.http = http.createServer((req, res) => this.handleHttp(req, res));
-    this.wss  = new WebSocketServer({ server: this.http });
+    this.wss  = new WebSocketServer({
+      server: this.http,
+      // Reject cross-origin browser tabs at the upgrade handshake. A
+      // missing Origin header means a Node / CLI client (nak, our own
+      // in-process Node WebSockets) — always allowed. A present Origin
+      // must be loopback; anything else (http://evil.com) is hostile.
+      // See isLoopbackOrigin above for the port-wildcard rationale.
+      verifyClient: (info, callback) => {
+        const origin = info.origin || '';
+        if (origin && !isLoopbackOrigin(origin)) {
+          this.log('warn', `rejected WS upgrade — non-loopback origin: ${origin.slice(0, 120)}`);
+          callback(false, 403, 'origin not allowed');
+          return;
+        }
+        callback(true);
+      },
+    });
 
     this.wss.on('connection', (ws, req) => this.handleConnection(ws, req));
 
