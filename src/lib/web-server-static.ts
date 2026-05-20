@@ -89,7 +89,14 @@ export const HTML_SECURITY_HEADERS: Record<string, string> = {
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-    "script-src 'self' 'unsafe-inline'",
+    // script-src no longer allows 'unsafe-inline' — the dashboard's
+    // sole inline <script> (theme-preload) was extracted to a separate
+    // .js file. style-src keeps 'unsafe-inline' because the Ditto
+    // theme path injects dynamic <style> blocks via app.js's
+    // applyDittoStyleBlock() and the theme-preload bootstrap.
+    // Refactoring that to CSS variables only is tracked in the plan
+    // as a follow-up audit.
+    "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "connect-src 'self' ws://127.0.0.1:* ws://localhost:* wss:",
     "img-src 'self' data: https:",
