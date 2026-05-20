@@ -5,6 +5,9 @@
 # What this does, in order:
 #   1. Detect the OS (macOS / Linux). Refuse anything else.
 #   2. Check that git is available — required for the clone/update step.
+#   2b. Check that `make`, a C++ compiler, and `python3` are available —
+#       required for the node-gyp source builds of better-sqlite3 +
+#       node-pty when no platform prebuild is published.
 #   3. Install Node 22+ via nvm if missing or too old. Silent.
 #   4. Clone nostr-station to ~/nostr-station (or fast-forward if already
 #      present), install dependencies, build, and `npm link` so the
@@ -19,7 +22,7 @@
 #
 # What it does NOT do:
 #   - install Docker, OrbStack, or docker-compose
-#   - install Rust / cargo / system build tools
+#   - install Rust / cargo / system build tools (only detects them)
 #   - run sudo or apt-get
 #   - publish or consume an npm registry package
 #
@@ -50,6 +53,48 @@ if ! command -v git >/dev/null 2>&1; then
   echo "  macOS:   xcode-select --install   (provides git)"
   echo "  Debian:  sudo apt-get install -y git"
   echo "  Fedora:  sudo dnf install -y git"
+  exit 1
+fi
+
+# 2b — build toolchain. better-sqlite3 + node-pty are native node modules.
+# When a prebuild matching the host's platform/arch/glibc isn't published
+# (common on freshly-released distros or unusual arch combinations), npm
+# falls back to source compilation via node-gyp, which needs `make`, a
+# C++ compiler, and `python3`. Without these the install dies inside
+# `npm ci` with an error that — even with --silent dropped — reads as a
+# wall of node-gyp output. Detecting up-front gives the user a one-line
+# fix instead of a stack trace to decode.
+missing_build_tools=""
+command -v make    >/dev/null 2>&1 || missing_build_tools+=" make"
+command -v python3 >/dev/null 2>&1 || missing_build_tools+=" python3"
+case "$(uname -s)" in
+  Darwin)
+    # Xcode CLI Tools provide clang/clang++ + make + python3 together,
+    # so any one of them missing means the whole kit is absent.
+    command -v clang++ >/dev/null 2>&1 || command -v c++ >/dev/null 2>&1 \
+      || missing_build_tools+=" clang++"
+    ;;
+  Linux)
+    # build-essential pulls in g++ on Debian/Ubuntu; Fedora's
+    # "Development Tools" group has the equivalent.
+    command -v g++ >/dev/null 2>&1 || command -v c++ >/dev/null 2>&1 \
+      || missing_build_tools+=" g++"
+    ;;
+esac
+
+if [ -n "${missing_build_tools}" ]; then
+  echo "Build tools are required to compile native dependencies"
+  echo "(better-sqlite3 + node-pty) when a prebuild isn't available for"
+  echo "your platform."
+  echo ""
+  echo "Missing:${missing_build_tools}"
+  echo ""
+  echo "Install the toolchain, then re-run this script:"
+  echo "  macOS:   xcode-select --install   (provides clang, make, python3)"
+  echo "  Debian:  sudo apt-get install -y build-essential python3"
+  echo "  Fedora:  sudo dnf groupinstall -y 'Development Tools' && sudo dnf install -y python3"
+  echo "  Alpine:  sudo apk add build-base python3"
+  echo "  Arch:    sudo pacman -S --needed base-devel python"
   exit 1
 fi
 
@@ -116,7 +161,14 @@ log "Installing dependencies…"
 # dirty tree, so a user's first Update click would fail until they
 # manually `git checkout package-lock.json`. `npm ci` strictly
 # installs from the committed lockfile and never writes back.
-npm ci --silent --no-audit --no-fund
+#
+# `--silent` removed deliberately: when a native module build fails
+# (better-sqlite3 / node-pty falling back to source compile), --silent
+# hides the node-gyp output and the user sees only an opaque exit 1.
+# Letting npm's normal logging through means a real install error
+# stays visible. Step 2b above pre-empts the most common cause
+# (missing build tools) so the happy-path output is still tidy.
+npm ci --no-audit --no-fund
 
 log "Building…"
 npm run build --silent
