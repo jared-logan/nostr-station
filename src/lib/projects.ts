@@ -13,6 +13,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { atomicWriteJson } from './atomic-write.js';
 import crypto from 'crypto';
 import { execSync, execFileSync } from 'child_process';
 import { isNpubOrHex, isNsec, isValidRelayUrl } from './identity.js';
@@ -362,8 +363,7 @@ export function hasDevScript(p: Project): boolean {
 }
 
 function writeProjects(projects: Project[]): void {
-  fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(projectsPath(), JSON.stringify(projects, null, 2), { mode: 0o600 });
+  atomicWriteJson(projectsPath(), projects, { mode: 0o600 });
 }
 
 export function getProject(id: string): Project | null {

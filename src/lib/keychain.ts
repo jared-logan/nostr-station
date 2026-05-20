@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import { atomicWriteJson } from './atomic-write.js';
 
 // Static slots:
 //   ai-api-key    — legacy single-provider AI key (pre-multi-provider)
@@ -108,6 +109,13 @@ class LinuxKeyring implements KeychainBackend {
 class EncryptedFileBackend implements KeychainBackend {
   private readonly storageDir: string;
   private readonly filePath:   string;
+  // One-shot warning gate. Previously a corrupted secrets file or a
+  // decipher failure silently looked like "key never stored," which
+  // caused callers (legacy-chat.ts, ai-config.ts migration) to loop
+  // re-prompting the user every request. We still return null so
+  // those callers don't crash, but now a single loud stderr line
+  // tells the user what's actually wrong and how to recover.
+  private static corruptedWarned = false;
 
   constructor(storageDir?: string) {
     this.storageDir = storageDir
@@ -129,14 +137,47 @@ class EncryptedFileBackend implements KeychainBackend {
     ) as Buffer;
   }
 
+  private warnCorrupted(detail: string): void {
+    if (EncryptedFileBackend.corruptedWarned) return;
+    EncryptedFileBackend.corruptedWarned = true;
+    process.stderr.write(
+      `[keychain] WARNING: encrypted secrets file at ${this.filePath} ` +
+      `appears unreadable (${detail}). Stored credentials cannot be ` +
+      `decrypted. To recover: back up the file, remove it, and re-enter ` +
+      `each credential when prompted. Most common cause is /etc/machine-id ` +
+      `or $HOME changing (e.g. moving the file between machines). ` +
+      `(Warning shown once per process.)\n`
+    );
+  }
+
   private readStore(): Record<string, { iv: string; tag: string; data: string }> {
-    try { return JSON.parse(fs.readFileSync(this.filePath, 'utf8')); }
-    catch { return {}; }
+    let raw: string;
+    try { raw = fs.readFileSync(this.filePath, 'utf8'); }
+    catch (e: any) {
+      // ENOENT is the legitimate first-run case — empty store.
+      if (e?.code === 'ENOENT') return {};
+      this.warnCorrupted(`read failed: ${e?.message || e}`);
+      return {};
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        this.warnCorrupted('contents are not a JSON object');
+        return {};
+      }
+      return parsed;
+    } catch (e: any) {
+      this.warnCorrupted(`JSON parse failed: ${e?.message || e}`);
+      return {};
+    }
   }
 
   private writeStore(store: Record<string, { iv: string; tag: string; data: string }>) {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(this.filePath, JSON.stringify(store, null, 2), { mode: 0o600 });
+    // atomicWriteJson handles mkdir-with-0o700 + tmp+rename + mode in
+    // one place. A SIGKILL between read and write previously left the
+    // file truncated; atomic rename guarantees either the prior or
+    // the new contents, never a half-written file.
+    atomicWriteJson(this.filePath, store, { mode: 0o600 });
   }
 
   async store(key: KeychainKey, value: string): Promise<void> {
@@ -167,7 +208,13 @@ class EncryptedFileBackend implements KeychainBackend {
         decipher.update(Buffer.from(entry.data, 'hex')),
         decipher.final(),
       ]).toString('utf8');
-    } catch { return null; }
+    } catch (e: any) {
+      // GCM auth-tag failure means the ciphertext, tag, or derived
+      // key doesn't match. The entry is unrecoverable — surface
+      // loudly so the user knows it's not just "credential missing."
+      this.warnCorrupted(`decryption failed for "${key}": ${e?.message || e}`);
+      return null;
+    }
   }
 
   async delete(key: KeychainKey): Promise<void> {

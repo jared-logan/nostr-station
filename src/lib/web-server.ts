@@ -83,6 +83,7 @@ import {
   type CmdSpec,
 } from './routes/_shared.js';
 import { readStationContext, stationContextPath } from './ai-context.js';
+import { atomicWriteText } from './atomic-write.js';
 import { seedStationContext, USER_REGION_BEGIN, USER_REGION_END } from './editor.js';
 import { handleProjects } from './routes/projects.js';
 import { handleBlossomConfig } from './routes/blossom-config.js';
@@ -993,8 +994,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
         }
         const filePath = stationContextPath();
         try {
-          fs.mkdirSync(path.dirname(filePath), { recursive: true });
-          fs.writeFileSync(filePath, content, { mode: 0o644 });
+          atomicWriteText(filePath, content, { mode: 0o644 });
         } catch (e: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: e?.message || 'write failed' }));

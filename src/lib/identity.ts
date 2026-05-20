@@ -10,6 +10,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { atomicWriteJson } from './atomic-write.js';
 
 export interface Identity {
   npub:       string;       // bech32 "npub1..." or 64-char hex
@@ -226,8 +227,7 @@ export function setAppRelaysEnabled(enabled: boolean): { ok: true; appRelaysEnab
 }
 
 export function writeIdentity(ident: Identity): void {
-  fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(configPath(), JSON.stringify(ident, null, 2), { mode: 0o600 });
+  atomicWriteJson(configPath(), ident, { mode: 0o600 });
 }
 
 // ── Validators ────────────────────────────────────────────────────────────

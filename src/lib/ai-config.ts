@@ -33,6 +33,7 @@ import os from 'os';
 import { execFileSync } from 'child_process';
 import { inferIdFromBaseUrl, keychainAccountFor, PROVIDERS } from './ai-providers.js';
 import { getKeychain } from './keychain.js';
+import { atomicWriteText } from './atomic-write.js';
 
 const CONFIG_DIR  = path.join(os.homedir(), '.nostr-station');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'ai-config.json');
@@ -76,7 +77,12 @@ function emptyConfig(): AiConfig {
 }
 
 function ensureDir(): void {
-  try { fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o755 }); } catch {}
+  // Mode 0o700 — was 0o755 (world-listable). Tightening prevents
+  // other users on a shared box from enumerating which AI providers
+  // the station owner has configured. The config file itself stays
+  // 0o644 since it contains no secrets (keys live in the keychain),
+  // but the wrapping dir doesn't need to be world-readable.
+  try { fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 }); } catch {}
 }
 
 function parseFile(): AiConfig | null {
@@ -99,15 +105,19 @@ export function readAiConfig(): AiConfig {
 }
 
 /**
- * Atomic write — we stage to a temp file in the same directory so an
- * interrupted write doesn't leave a half-parsed JSON that the next read
- * interprets as "no config" and re-migrates.
+ * Atomic write — staged through tmp + rename via the shared
+ * atomic-write helper so an interrupted write doesn't leave a
+ * half-parsed JSON that the next read interprets as "no config" and
+ * re-migrates. Mode 0o644 because this file contains no secrets
+ * (provider keys live in the keychain) — other dev tools can read
+ * it. The dir is 0o700.
  */
 export function writeAiConfig(cfg: AiConfig): void {
-  ensureDir();
-  const tmp = CONFIG_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o644 });
-  fs.renameSync(tmp, CONFIG_FILE);
+  atomicWriteText(
+    CONFIG_FILE,
+    JSON.stringify(cfg, null, 2) + '\n',
+    { mode: 0o644, dirMode: 0o700 },
+  );
 }
 
 /**
