@@ -12656,10 +12656,10 @@ const VpnPanel = (() => {
                      : !status.running   ? 'warn'
                      :                     'ok';
     const tunnel = status.tunnelIp
-      ? `<code class="cmd-inline vpn-strip-tunnel">${escapeHtml(status.tunnelIp)}</code>`
+      ? `<code class="cmd-inline vpn-strip-tunnel" title="Your IP on the nostr-mesh — peers reach you at this address">${escapeHtml(status.tunnelIp)}</code>`
       : '';
     const pid = (status.raw && status.raw.daemon && status.raw.daemon.pid != null)
-      ? `<span class="muted">pid ${escapeHtml(String(status.raw.daemon.pid))}</span>` : '';
+      ? `<span class="muted" title="Daemon process ID — kill / inspect with this">pid ${escapeHtml(String(status.raw.daemon.pid))}</span>` : '';
     // Node identity (4.x lifted npub out of status JSON; server now
     // reads it from config.toml's [nostr] block and surfaces it under
     // `identity.npub`). Truncated display because npub1 strings are
@@ -12667,7 +12667,7 @@ const VpnPanel = (() => {
     // attribute and copyable from the Network tab.
     const npub = status.identity && status.identity.npub;
     const npubBadge = npub
-      ? `<code class="cmd-inline vpn-strip-npub" title="${escapeHtml(npub)}">${escapeHtml(npub.slice(0, 14) + '…' + npub.slice(-4))}</code>`
+      ? `<code class="cmd-inline vpn-strip-npub" title="Your nvpn node identity (Nostr npub): ${escapeHtml(npub)}">${escapeHtml(npub.slice(0, 14) + '…' + npub.slice(-4))}</code>`
       : '';
     // Reality check (issue #56). status.health is the rolled-up surface
     // from nvpnHealthSummary — when it disagrees with the daemon-claimed
@@ -12717,15 +12717,16 @@ const VpnPanel = (() => {
       });
       actions.appendChild(b);
     } else {
-      for (const [action, label, cls] of [
-        ['restart', 'Restart', ''],
-        ['pause',   'Pause',   ''],
-        ['resume',  'Resume',  ''],
-        ['stop',    'Stop',    'danger'],
+      for (const [action, label, cls, tip] of [
+        ['restart', 'Restart', '',       'Stop then start the daemon. Use after binary upgrades or when state looks wedged.'],
+        ['pause',   'Pause',   '',       'Suspend the data plane without killing the daemon. Faster than Stop; resume picks up where you left off.'],
+        ['resume',  'Resume',  '',       'Resume the data plane after a Pause.'],
+        ['stop',    'Stop',    'danger', 'Shut down the daemon. The tunnel goes down until you Start it again.'],
       ]) {
         const b = document.createElement('button');
         if (cls) b.className = cls;
         b.textContent = label;
+        b.title = tip;
         b.addEventListener('click', async (e) => {
           e.preventDefault(); b.disabled = true;
           await callNvpnAction(action, label.toLowerCase());
@@ -12740,6 +12741,7 @@ const VpnPanel = (() => {
     // terminal-side `nvpn set`).
     const refreshBtn = document.createElement('button');
     refreshBtn.textContent = 'Refresh';
+    refreshBtn.title = 'Re-poll the daemon and refresh every tab on this panel. Use after a CLI-side change to see it reflected immediately.';
     refreshBtn.addEventListener('click', async (e) => {
       e.preventDefault(); refreshBtn.disabled = true;
       try { await refresh(); } finally { refreshBtn.disabled = false; }
@@ -12826,7 +12828,17 @@ const VpnPanel = (() => {
         <code class="vpn-kv-val">${escapeHtml(v)}</code>
         ${copy ? '<span class="vpn-kv-copy-slot"></span>' : ''}
       </div>`).join('');
-    return `<div class="vpn-section vpn-kv">${rowsHtml}</div>`;
+    return `
+      <div class="vpn-section">
+        <p class="vpn-section-help">
+          Live state of the local nvpn daemon: your tunnel IP on the mesh,
+          the discovered public endpoint peers dial, and your node identity.
+          The strip above carries the same data in summary form — this view
+          is for when you need the full picture (log path, daemon pid,
+          session status).
+        </p>
+        <div class="vpn-kv">${rowsHtml}</div>
+      </div>`;
   }
   renderStatusBody.wire = () => {
     // Attach copy buttons after innerHTML — the rendered value text is
@@ -12931,6 +12943,13 @@ const VpnPanel = (() => {
 
     return `
       <div class="vpn-section">
+        <p class="vpn-section-help">
+          Your mesh: the active network, its admin-signed roster of
+          participants, and any peers nvpn has currently discovered. Use
+          <strong>Share invite</strong> to onboard a new device,
+          <strong>Import invite</strong> to join someone else's mesh, or
+          add an npub directly below.
+        </p>
         <div class="vpn-kv">
           ${activeRowHtml}
           <div class="vpn-kv-row">
@@ -12948,9 +12967,18 @@ const VpnPanel = (() => {
         </div>
         ${inactiveLine}
         <div class="vpn-net-actions" style="margin-top:14px">
-          <button id="vpn-share-invite" class="primary">Share invite</button>
-          <button id="vpn-import-invite">Import invite</button>
-          <button id="vpn-publish-roster">Publish roster</button>
+          <button id="vpn-share-invite" class="primary"
+                  title="Generate an nvpn:// invite code + QR for onboarding another device into this network">
+            Share invite
+          </button>
+          <button id="vpn-import-invite"
+                  title="Paste an invite code to join the network it represents">
+            Import invite
+          </button>
+          <button id="vpn-publish-roster"
+                  title="Re-broadcast the current roster to Nostr relays — useful when a recent add/remove reported 0 recipients">
+            Publish roster
+          </button>
         </div>
         ${renderJoinRequestsSection()}
         <div class="vpn-meta-peers" style="margin-top:18px">
@@ -12965,10 +12993,13 @@ const VpnPanel = (() => {
               ? '<div class="muted vpn-meta-peer-empty">no peers configured — add one below or import an invite</div>'
               : merged.map(renderPeerRow).join('')}
           </div>
-          <form class="vpn-add-peer" autocomplete="off">
+          <form class="vpn-add-peer" autocomplete="off"
+                title="Add a peer by their npub or 64-char hex pubkey. Defaults to publish-on-add so the network sees them immediately.">
             <input type="text" id="vpn-add-peer-input"
-                   placeholder="npub1… or 64-char hex" spellcheck="false">
-            <label class="vpn-add-peer-publish">
+                   placeholder="npub1… or 64-char hex" spellcheck="false"
+                   title="Peer's Nostr public key — npub1… or 64-char hex">
+            <label class="vpn-add-peer-publish"
+                   title="Broadcast the updated roster to relays immediately. Uncheck to stage the change locally.">
               <input type="checkbox" id="vpn-add-peer-publish" checked>
               publish now
             </label>
@@ -13146,7 +13177,7 @@ const VpnPanel = (() => {
       <div class="item" data-url="${escapeHtml(url)}">
         <span class="url">${escapeHtml(url)}</span>
         <span class="relay-health" data-slot="health"></span>
-        <button class="danger rm-vpn-relay">×</button>
+        <button class="danger rm-vpn-relay" title="Remove ${escapeHtml(url)} from the relay list">×</button>
       </div>`).join('');
     const errorLine = r.found === false
       ? `<div class="key-status-line">${r.configPath
@@ -13166,14 +13197,21 @@ const VpnPanel = (() => {
         <div class="relay-list" id="vpn-relays">
           ${items}
           <div class="add">
-            <input id="vpn-relay-input" placeholder="wss://your-relay.example" autocomplete="off" spellcheck="false">
-            <button id="vpn-relay-paste">paste</button>
-            <button class="primary" id="vpn-relay-add">add</button>
+            <input id="vpn-relay-input" placeholder="wss://your-relay.example" autocomplete="off" spellcheck="false"
+                   title="WebSocket URL (ws:// or wss://) of a Nostr relay">
+            <button id="vpn-relay-paste" title="Paste from clipboard">paste</button>
+            <button class="primary" id="vpn-relay-add" title="Append this relay to nvpn's discovery set">add</button>
           </div>
         </div>
         <div class="keyrow" style="margin-top:6px;justify-content:flex-end;gap:6px">
-          <button id="vpn-relay-recommended">Use recommended</button>
-          <button id="vpn-relay-recheck">Check reachability</button>
+          <button id="vpn-relay-recommended"
+                  title="Replace the current relay list with the dashboard-curated set — useful when configured relays are timing out / WoT-rejecting">
+            Use recommended
+          </button>
+          <button id="vpn-relay-recheck"
+                  title="Re-run an 8s netcheck pass against all configured relays. Result decorates each row.">
+            Check reachability
+          </button>
         </div>
         <div class="key-status-line ${r.relays && r.relays.length ? 'ok' : ''}">
           ${r.relays && r.relays.length
@@ -13472,6 +13510,12 @@ const VpnPanel = (() => {
 
     return `
       <div class="vpn-section vpn-meta-set">
+        <p class="vpn-section-help">
+          Curated subset of <code>nvpn set</code> fields. Blank fields are
+          left untouched on save; only changed fields are written. The
+          daemon picks up edits on the next reload (kicked automatically
+          after each save).
+        </p>
         <div class="vpn-meta-set-body">
           <div class="vpn-meta-set-grid">
             ${fld('node-name', 'node name')}
@@ -13485,7 +13529,10 @@ const VpnPanel = (() => {
             ${exitNodeField}
           </div>
           <div class="vpn-meta-set-actions">
-            <button id="vpn-set-save" class="primary">Save &amp; reload</button>
+            <button id="vpn-set-save" class="primary"
+                    title="Apply non-blank fields via `nvpn set`, then reload the daemon">
+              Save &amp; reload
+            </button>
             <span class="muted vpn-meta-set-hint">
               Saves changes via <code>nvpn set</code> and asks the daemon to reload its config.
             </span>
@@ -13587,27 +13634,38 @@ const VpnPanel = (() => {
         </div>
         ${renderDangerZone()}`;
     }
-    const pill = (label, on, dim = false) => {
+    const pill = (label, on, dim = false, tip = '') => {
       const cls = on ? 'ok' : (dim ? 'muted' : 'warn');
-      return `<span class="vpn-svc-pill vpn-svc-pill-${cls}">${on ? '✓' : '✗'} ${escapeHtml(label)}</span>`;
+      return `<span class="vpn-svc-pill vpn-svc-pill-${cls}" title="${escapeHtml(tip)}">${on ? '✓' : '✗'} ${escapeHtml(label)}</span>`;
     };
     const enabledAtBoot = svc.installed && !svc.disabled;
     const pills = [
-      pill('installed',       svc.installed),
-      pill('enabled at boot', enabledAtBoot, !svc.installed),
-      pill('loaded',          svc.loaded,    !svc.installed),
-      pill('running',         svc.running,   !svc.installed),
+      pill('installed',       svc.installed, false,
+           'A systemd unit (or launchd plist on macOS) exists for the daemon. False = nvpn isn\'t registered with the system supervisor; it can still run in standalone mode.'),
+      pill('enabled at boot', enabledAtBoot, !svc.installed,
+           'The unit is set to auto-start at boot. False with installed=true means the unit exists but won\'t auto-start.'),
+      pill('loaded',          svc.loaded,    !svc.installed,
+           'The supervisor has the unit file parsed and ready. False after install usually means systemctl daemon-reload is needed.'),
+      pill('running',         svc.running,   !svc.installed,
+           'The daemon process is currently alive under supervision. Independent of "loaded" — a unit can be loaded but stopped.'),
     ].join('');
     const actions = [];
     if (svc.disabled) {
-      actions.push('<button id="vpn-svc-enable" class="primary">Enable boot</button>');
+      actions.push('<button id="vpn-svc-enable" class="primary" title="Re-enable auto-start at boot for the system service">Enable boot</button>');
     } else {
-      actions.push('<button id="vpn-svc-disable">Disable boot</button>');
+      actions.push('<button id="vpn-svc-disable" title="Stop the daemon from auto-starting at boot. The unit stays installed; you can re-enable later.">Disable boot</button>');
     }
-    actions.push('<button id="vpn-svc-reinstall">Reinstall</button>');
-    actions.push('<button id="vpn-svc-uninstall" class="danger">Remove service</button>');
+    actions.push('<button id="vpn-svc-reinstall" title="Rewrite the systemd unit / launchd plist. Useful after a binary upgrade so the ExecStart path matches the new install location.">Reinstall</button>');
+    actions.push('<button id="vpn-svc-uninstall" class="danger" title="Remove the system service unit. Binary stays on PATH; config + keypair stay in ~/.config/nvpn/.">Remove service</button>');
     return `
       <div class="vpn-section">
+        <p class="vpn-section-help">
+          System service registration — whether nvpn runs as a managed
+          daemon (systemd on Linux, launchd on macOS) that auto-starts at
+          boot. The pills below are the four states the supervisor reports.
+          For uninstalling the binary itself, see the Danger zone at the
+          bottom.
+        </p>
         <div class="vpn-svc-pills" style="margin-bottom:12px">${pills}</div>
         ${meta.length > 0
           ? `<div class="vpn-kv-row">
@@ -13699,16 +13757,42 @@ const VpnPanel = (() => {
     return `
       <div class="vpn-section">
         <p class="vpn-section-help">
-          Run-on-click diagnostics. Output prints below.
+          Run-on-click diagnostics — each makes a live call to the daemon
+          (sometimes via public STUN servers / Nostr relays), so we never
+          auto-poll. Start with <strong>Test reachability</strong> when
+          peers can't reach you; <strong>doctor</strong> for general
+          health; <strong>repair network</strong> when routes look
+          orphaned from a crashed session.
         </p>
         <div class="vpn-meta-diag-actions">
-          <button id="vpn-diag-netcheck">Run netcheck</button>
-          <button id="vpn-diag-doctor">Run doctor</button>
-          <button id="vpn-diag-doctor-bundle">Save support bundle</button>
-          <button id="vpn-diag-stats">Show stats</button>
-          <button id="vpn-diag-reload">Reload config</button>
-          <button id="vpn-diag-repair">Repair network</button>
-          <button id="vpn-diag-reachability" class="primary">Test reachability</button>
+          <button id="vpn-diag-netcheck"
+                  title="Probe configured Nostr relays + STUN servers. Shows which ones nvpn can reach.">
+            Run netcheck
+          </button>
+          <button id="vpn-diag-doctor"
+                  title="Full health probe — relays, NAT, port mapping, peer state. JSON output below.">
+            Run doctor
+          </button>
+          <button id="vpn-diag-doctor-bundle"
+                  title="Save a doctor report tarball to ~/logs/ for sharing with support / filing an issue">
+            Save support bundle
+          </button>
+          <button id="vpn-diag-stats"
+                  title="Local relay-operator counters (only meaningful when relay-for-others is on)">
+            Show stats
+          </button>
+          <button id="vpn-diag-reload"
+                  title="Ask the daemon to re-read config.toml without restarting. Picks up out-of-band edits.">
+            Reload config
+          </button>
+          <button id="vpn-diag-repair"
+                  title="Clear stale routes / tun interface state left by a crashed session. Brief connectivity blip.">
+            Repair network
+          </button>
+          <button id="vpn-diag-reachability" class="primary"
+                  title="Walks you through a manual external probe — confirms peers can actually reach your public endpoint">
+            Test reachability
+          </button>
         </div>
         <div id="vpn-diag-out" class="vpn-meta-diag-out muted">click an action to run it</div>
       </div>`;
