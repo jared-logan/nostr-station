@@ -84,6 +84,7 @@ import {
 } from './routes/_shared.js';
 import { readStationContext, stationContextPath } from './ai-context.js';
 import { atomicWriteText } from './atomic-write.js';
+import { handleImgProxy } from './img-proxy.js';
 import { seedStationContext, USER_REGION_BEGIN, USER_REGION_END } from './editor.js';
 import { handleProjects } from './routes/projects.js';
 import { handleBlossomConfig } from './routes/blossom-config.js';
@@ -1051,6 +1052,17 @@ export async function startWebServer(port: number): Promise<http.Server> {
           return;
         }
         await proxyChat(req, res, cfg);
+        return;
+      }
+
+      // Image proxy — fetches an external https URL server-side and
+      // streams the bytes back through the dashboard origin. The
+      // dashboard's CSP after this PR is `img-src 'self' data:`, so
+      // every external avatar / inline image must route through here.
+      // See src/lib/img-proxy.ts for size limits / content-type
+      // allowlist / cache behavior.
+      if (url === '/api/img-proxy' && method === 'GET') {
+        await handleImgProxy(req, res);
         return;
       }
 
