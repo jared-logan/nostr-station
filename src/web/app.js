@@ -13530,7 +13530,7 @@ const VpnPanel = (() => {
           </div>
           <div class="vpn-meta-set-actions">
             <button id="vpn-set-save" class="primary"
-                    title="Apply non-blank fields via `nvpn set`, then reload the daemon">
+                    title="Apply non-blank fields via nvpn set, then reload the daemon">
               Save &amp; reload
             </button>
             <span class="muted vpn-meta-set-hint">
