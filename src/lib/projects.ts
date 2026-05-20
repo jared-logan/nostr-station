@@ -324,7 +324,29 @@ export function readProjects(): Project[] {
     const raw = fs.readFileSync(projectsPath(), 'utf8');
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalize).filter((x): x is Project => !!x);
+    return parsed
+      .map(normalize)
+      .filter((x): x is Project => {
+        if (!x) return false;
+        // Defense-in-depth: re-validate persisted paths on read.
+        // Adversarial FS access is explicitly out of the SECURITY.md
+        // threat model, but if someone hand-edits projects.json (or
+        // a future bug writes one) with a `path` that escapes HOME
+        // / projects-root, drop the entry rather than letting it
+        // flow into terminal.spawnSync / git.cwd downstream. We
+        // surface the drop on stderr so the user sees they have a
+        // broken entry to clean up.
+        if (x.path) {
+          try { validateProjectPath(x.path); }
+          catch (e: any) {
+            process.stderr.write(
+              `[projects] dropping entry ${x.id}: invalid path "${x.path}" (${e?.message || e})\n`,
+            );
+            return false;
+          }
+        }
+        return true;
+      });
   } catch {
     return [];
   }
