@@ -33,7 +33,14 @@ if [ ! -f "$CLI" ]; then
 fi
 
 while true; do
-  node "$CLI" "$@"
+  # NOSTR_STATION_LAUNCHER signals the dashboard that this supervisor loop
+  # is wrapping the node process — the in-place update flow then uses the
+  # original exit-75-and-respawn handshake. When the env var is absent
+  # (user is running via `npm run dev` / `node dist/cli.js` directly /
+  # systemd without Restart), the update flow falls back to self-spawning
+  # a fresh detached child before exiting so the dashboard always comes
+  # back regardless of how it was launched. See src/lib/update-check.ts.
+  NOSTR_STATION_LAUNCHER=1 node "$CLI" "$@"
   ec=$?
   if [ "$ec" -eq 75 ]; then
     # Update applied — loop and re-exec. A short pause keeps the

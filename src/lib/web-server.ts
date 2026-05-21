@@ -2114,7 +2114,23 @@ export async function startWebServer(port: number): Promise<http.Server> {
       dropPid();
     });
 
+    // EADDRINUSE retry budget — only used when this process was spawned
+    // by the update flow's self-respawn path (src/lib/update-check.ts).
+    // The parent process exits a few hundred ms after spawning us, so the
+    // first 1–2 listen attempts can hit EADDRINUSE while the kernel
+    // finishes releasing the listening socket. Short backoff covers it
+    // without delaying the unsupervised launch case noticeably.
+    // When the env is absent (fresh boot, user-initiated start) we keep
+    // the original single-attempt behavior so a legitimately-held port
+    // surfaces immediately as "another dashboard is running" in Chat.tsx.
+    const respawning      = process.env.NOSTR_STATION_RESPAWN === '1';
+    let listenRetriesLeft = respawning ? 10 : 0;
     server.on('error', (e: NodeJS.ErrnoException) => {
+      if (e.code === 'EADDRINUSE' && listenRetriesLeft > 0) {
+        listenRetriesLeft--;
+        setTimeout(() => server.listen(port, process.env.DEV_HOST || '127.0.0.1'), 500);
+        return;
+      }
       if (e.code === 'EADDRINUSE') {
         reject(new Error(`Port ${port} is already in use — check: lsof -i :${port}`));
       } else {
