@@ -130,6 +130,27 @@ export class EventStore {
         website      TEXT,
         updated_at   INTEGER NOT NULL
       );
+
+      -- Full-text index over events.content. Contentless (uses events
+      -- as the external content table via the rowid join) so the bytes
+      -- of each content blob live in one place. Tokens are kept in
+      -- events_fts; document recovery (snippet, highlight, etc.) joins
+      -- back to events.content. Triggers below keep the two in sync.
+      CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+        content,
+        content='events',
+        content_rowid='rowid'
+      );
+      CREATE TRIGGER IF NOT EXISTS events_fts_ai AFTER INSERT ON events BEGIN
+        INSERT INTO events_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS events_fts_ad AFTER DELETE ON events BEGIN
+        INSERT INTO events_fts(events_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS events_fts_au AFTER UPDATE OF content ON events BEGIN
+        INSERT INTO events_fts(events_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+        INSERT INTO events_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
     `);
     this.db.pragma('foreign_keys = ON');
 
@@ -184,6 +205,22 @@ export class EventStore {
       CREATE INDEX IF NOT EXISTS idx_tags_lookup_ts
         ON tags(tag_name, tag_value, created_at DESC);
     `);
+
+    // Backfill the FTS index from already-stored events. The triggers
+    // only fire on writes that happen after they exist, so events
+    // ingested before the events_fts virtual table was created need a
+    // one-shot rebuild. We detect by probing events_fts_docsize — an
+    // FTS5 shadow table whose row count reflects actually-indexed
+    // documents. COUNT(*) on the virtual table itself delegates to the
+    // content table and is therefore useless as a populated-or-not
+    // signal. Rebuild is cheap on a 100k-event corpus (a few seconds).
+    const eventCount = (this.db.prepare(`SELECT COUNT(*) AS n FROM events`).get() as { n: number }).n;
+    if (eventCount > 0) {
+      const indexed = (this.db.prepare(`SELECT COUNT(*) AS n FROM events_fts_docsize`).get() as { n: number }).n;
+      if (indexed < eventCount) {
+        this.db.exec(`INSERT INTO events_fts(events_fts) VALUES('rebuild')`);
+      }
+    }
 
     // Backfill profiles from already-stored kind-0 events. Cheap on
     // 100k-event corpora (typically a few thousand kind-0s, sub-second).
@@ -454,6 +491,50 @@ export class EventStore {
   getProfile(pubkey: string): ProfileRecord | null {
     const row = this.stGetProfile.get(pubkey) as ProfileRecord | undefined;
     return row ?? null;
+  }
+
+  // Full-text search over events.content via SQLite's FTS5. Returns
+  // matching events ordered by FTS rank (best first), optionally
+  // narrowed by kind. The query string accepts FTS5 syntax — quoted
+  // phrases, NEAR(), AND/OR/NOT — but callers can pass a plain bag of
+  // words and FTS5 will treat them as an AND of token matches.
+  //
+  // Failure modes (invalid FTS syntax, etc.) bubble up as exceptions
+  // so the route layer can surface them to the user; the dashboard's
+  // search input should pre-escape user input or wrap it in
+  // double-quotes if it wants to feed phrases verbatim.
+  search(query: string, opts: { kinds?: number[]; limit?: number } = {}): NostrEvent[] {
+    const q = query.trim();
+    if (!q) return [];
+    const limit = Math.max(1, Math.min(opts.limit ?? 100, 500));
+    const where: string[] = [`events_fts MATCH ?`];
+    const params: any[]   = [q];
+    if (opts.kinds && opts.kinds.length > 0) {
+      where.push(`e.kind IN (${opts.kinds.map(() => '?').join(',')})`);
+      params.push(...opts.kinds);
+    }
+    const sql = `
+      SELECT e.id, e.pubkey, e.created_at, e.kind, e.content, e.sig, e.tags_json
+        FROM events_fts
+        JOIN events e ON e.rowid = events_fts.rowid
+       WHERE ${where.join(' AND ')}
+       ORDER BY events_fts.rank
+       LIMIT ?
+    `;
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      id: string; pubkey: string; created_at: number; kind: number;
+      content: string; sig: string; tags_json: string;
+    }>;
+    return rows.map(r => ({
+      id:         r.id,
+      pubkey:     r.pubkey,
+      created_at: r.created_at,
+      kind:       r.kind,
+      content:    r.content,
+      sig:        r.sig,
+      tags:       JSON.parse(r.tags_json) as string[][],
+    }));
   }
 
   // Bulk variant for "give me everyone in this thread / feed at once".

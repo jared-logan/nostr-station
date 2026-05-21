@@ -103,6 +103,69 @@ test('store: maxEvents evicts oldest', () => {
   s.close();
 });
 
+test('store: full-text search finds events by content keyword', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  s.add(ev({ id: '1'.repeat(64), kind: 1, content: 'Hello LMDB, how are you?' }));
+  s.add(ev({ id: '2'.repeat(64), kind: 1, content: 'nothing to see here' }));
+  s.add(ev({ id: '3'.repeat(64), kind: 1, content: 'LMDB is a B+tree' }));
+
+  const hits = s.search('LMDB');
+  assert.equal(hits.length, 2);
+  const ids = new Set(hits.map(h => h.id));
+  assert.ok(ids.has('1'.repeat(64)));
+  assert.ok(ids.has('3'.repeat(64)));
+  s.close();
+});
+
+test('store: search can be narrowed by kind', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  s.add(ev({ id: '1'.repeat(64), kind: 1, content: 'apple pie' }));
+  s.add(ev({ id: '2'.repeat(64), kind: 7, content: 'apple sauce' }));
+  const onlyNotes = s.search('apple', { kinds: [1] });
+  assert.equal(onlyNotes.length, 1);
+  assert.equal(onlyNotes[0].id, '1'.repeat(64));
+  s.close();
+});
+
+test('store: search reflects deletions via the FTS sync trigger', () => {
+  const s = new EventStore({ dbPath: tmpDb(), maxEvents: 1 });
+  s.add(ev({ id: '1'.repeat(64), kind: 1, content: 'evictme please', created_at: 100 }));
+  assert.equal(s.search('evictme').length, 1);
+  // Adding a second event triggers eviction of the first.
+  s.add(ev({ id: '2'.repeat(64), kind: 1, content: 'unrelated', created_at: 200 }));
+  assert.equal(s.search('evictme').length, 0, 'FTS row should be removed when the event row is');
+  s.close();
+});
+
+test('store: FTS index backfills from existing events on first migration', () => {
+  // Seed a DB with the events table only (no events_fts) to simulate an
+  // upgrade scenario, then re-open through EventStore to trigger the
+  // rebuild path.
+  const dbPath = tmpDb();
+  const seed   = new Database(dbPath);
+  seed.exec(`
+    CREATE TABLE events (
+      id TEXT PRIMARY KEY, pubkey TEXT NOT NULL, created_at INTEGER NOT NULL,
+      kind INTEGER NOT NULL, content TEXT NOT NULL, sig TEXT NOT NULL,
+      tags_json TEXT NOT NULL
+    );
+    CREATE TABLE tags (
+      event_id TEXT NOT NULL, tag_name TEXT NOT NULL, tag_value TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+    );
+  `);
+  seed.prepare(`INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    'a'.repeat(64), 'p'.repeat(64), 1234, 1, 'searchable archived note', 's'.repeat(128), '[]',
+  );
+  seed.close();
+
+  const s = new EventStore({ dbPath });
+  const hits = s.search('archived');
+  assert.equal(hits.length, 1);
+  s.close();
+});
+
 test('store: kind-0 ingest materializes a profile row', () => {
   const s = new EventStore({ dbPath: tmpDb() });
   const author = 'a'.repeat(64);
