@@ -4002,14 +4002,47 @@ const RelayPanel = (() => {
       const row = document.createElement('div');
       row.className = 'event';
       const ts = new Date((ev.created_at || 0) * 1000);
+      // Resolved profile name when the cache has one (populated below
+      // by resolveProfiles); falls back to the historical 12-char hex
+      // truncation. profileNameOf returns its own npub-truncated form
+      // when no profile is on file, so detect that and prefer the
+      // tighter hex slice for stream rows where space is tight.
+      const resolved = (typeof profileNameOf === 'function' && ev.pubkey)
+        ? profileNameOf(ev.pubkey) : '';
+      const isNpubFallback = /^npub1[0-9a-z]{4,}…[0-9a-z]{4,}$/.test(resolved);
+      const pkLabel = resolved && !isNpubFallback
+        ? resolved
+        : `${(ev.pubkey || '').slice(0, 12)}…`;
       row.innerHTML = `
         <div class="k-tag">${escapeHtml(kindLabel(ev.kind))}</div>
-        <div class="pk">${escapeHtml((ev.pubkey || '').slice(0, 12))}…</div>
+        <div class="pk" title="${escapeHtml(ev.pubkey || '')}">${escapeHtml(pkLabel)}</div>
         <div class="content">${escapeHtml(ev.content || '')}</div>
         <div class="ts">${escapeHtml(isNaN(ts.getTime()) ? '' : ts.toLocaleTimeString())}</div>
       `;
       el.appendChild(row);
     }
+    // Kick off profile resolution for unresolved authors in view, then
+    // re-paint to upgrade truncated hex to names. Cheap when the local
+    // store already has the profile (no network), and the cache dedupes
+    // repeated lookups across events sharing an author.
+    try {
+      if (typeof resolveProfiles === 'function') {
+        const unresolved = [];
+        for (const ev of events) {
+          if (!ev.pubkey || !/^[0-9a-f]{64}$/.test(ev.pubkey)) continue;
+          if (typeof hasResolvedProfileName === 'function' && hasResolvedProfileName(ev.pubkey)) continue;
+          unresolved.push(ev.pubkey);
+        }
+        if (unresolved.length > 0) {
+          resolveProfiles(unresolved).then(() => {
+            // Only repaint if the relay panel is still mounted with the
+            // same event set — avoid stomping on a tab switch.
+            if (!$('relay-events')) return;
+            renderEvents();
+          }).catch(() => {});
+        }
+      }
+    } catch {}
   }
 
   async function refreshRelayStatus() {
@@ -19739,6 +19772,16 @@ const MailPanel = (() => {
 
   function npubShort(hex) {
     if (!hex) return '';
+    // Prefer a resolved profile name from the shared client cache —
+    // populated by resolveProfiles() below after load(), backed by the
+    // local in-process relay's materialized profiles table when
+    // available so most rendered pubkeys resolve without a network
+    // round-trip. Falls back to the historical truncation when no
+    // profile is on file yet.
+    try {
+      const name = (typeof profileNameOf === 'function') ? profileNameOf(hex) : '';
+      if (name && !/^npub1[0-9a-z]{4,}…[0-9a-z]{4,}$/.test(name)) return name;
+    } catch {}
     return `${hex.slice(0, 8)}…${hex.slice(-4)}`;
   }
   function fmtAge(epochS) {
@@ -19778,6 +19821,28 @@ const MailPanel = (() => {
       renderFolders();
       renderThreads();
       updateBadge();
+      // Promote counterparty hex → resolved name + avatar on a follow-up
+      // paint. resolveProfiles consults the shared client cache first
+      // (populated by every dashboard panel that asks for profiles), then
+      // the server's /api/profiles route — which itself reads from the
+      // in-process relay's materialized profiles table before falling
+      // through to remote relays. Net effect: pubkeys we have a kind-0
+      // for upgrade to names in a single microsecond round-trip.
+      try {
+        const counterparties = [
+          ...threads.map(t => t?.counterparty).filter(Boolean),
+          ...requests.map(t => t?.counterparty).filter(Boolean),
+        ];
+        if (counterparties.length > 0 && typeof resolveProfiles === 'function') {
+          resolveProfiles(counterparties).then(() => {
+            // Guard against a tab switch between the kickoff and the
+            // resolution — only repaint if Mail is still the active
+            // panel. Cheap DOM-presence check.
+            const el = $('mail-threads');
+            if (el) renderThreads();
+          }).catch(() => { /* network error — leave npub fallback in place */ });
+        }
+      } catch { /* never let a render-time enhancement break the inbox */ }
       // If a thread is open, reload its messages too — new arrivals are
       // surfaced live by re-rendering from the store.
       if (activeCounter) await loadThread(activeCounter);

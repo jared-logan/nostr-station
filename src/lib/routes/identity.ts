@@ -50,6 +50,7 @@ function proxiedImageUrl(raw: unknown): string | null {
   return signProxyUrl(safe);
 }
 import { readBody } from './_shared.js';
+import { getLocalStore } from '../inproc-store-ref.js';
 
 // ── Profile lookup helpers (kind-0 over ws + 5min memo) ────────────────────
 //
@@ -286,6 +287,34 @@ async function lookupProfilesBatch(
       });
     } else {
       need.push(hex);
+    }
+  }
+
+  // Local-first hydration: the in-process relay materializes kind-0
+  // events into a profiles table at ingest. Pulling from there is
+  // microseconds and works offline. Only pubkeys still unknown after
+  // this fall through to a remote relay query.
+  if (need.length > 0) {
+    const localStore = getLocalStore();
+    if (localStore) {
+      const localProfiles = localStore.getProfiles(need);
+      const stillNeed: string[] = [];
+      const now = Date.now();
+      for (const hex of need) {
+        const p = localProfiles.get(hex);
+        if (!p) { stillNeed.push(hex); continue; }
+        const profile: ProfileLite = { hex, npub: hexToNpub(hex), cachedAt: now };
+        if (p.name)         profile.name        = p.name;
+        if (p.display_name) profile.displayName = p.display_name;
+        if (p.picture)      profile.picture     = p.picture;
+        if (p.nip05)        profile.nip05       = p.nip05;
+        // Seed the route-level cache so subsequent requests skip
+        // even the local-store lookup.
+        PROFILE_CACHE.set(hex, profile);
+        result.set(hex, profile);
+      }
+      need.length = 0;
+      need.push(...stillNeed);
     }
   }
 

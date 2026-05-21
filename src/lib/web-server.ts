@@ -82,6 +82,7 @@ import {
   setWhitelistRef,
   type CmdSpec,
 } from './routes/_shared.js';
+import { setLocalStore } from './inproc-store-ref.js';
 import { readStationContext, stationContextPath } from './ai-context.js';
 import { atomicWriteText } from './atomic-write.js';
 import { handleImgProxy } from './img-proxy.js';
@@ -287,6 +288,7 @@ async function maybeStartInprocRelay(): Promise<void> {
   // so project-scaffold and test-identities (Phase B) can consume
   // without importing the relay layer.
   setInprocRelayPort(port);
+  setLocalStore(r.store);
   setWhitelistRef({
     add:    (hex) => r.whitelist.add(hex),
     remove: (hex) => r.whitelist.remove(hex),
@@ -1219,6 +1221,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
               inprocRelay = null;
               setInprocRelayPort(null);
               setWhitelistRef(null);
+              setLocalStore(null);
             }
           }
           if (action === 'start' || action === 'restart') {
@@ -2094,6 +2097,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // worse than a dropped log line.
       void inprocRelay?.stop().catch(() => {});
       setInprocRelayPort(null);
+      setLocalStore(null);
       void inprocBlossom?.stop().catch(() => {});
       setInprocBlossomPort(null);
       inprocRelay = null;
