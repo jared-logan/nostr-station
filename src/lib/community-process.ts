@@ -34,14 +34,17 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 import { LogBuffer } from './log-buffer.js';
 import {
   type CommunityManifest, type CommunityStatus,
   readCommunityManifest, updateCommunityManifest,
-  communityDir, communityConfigPath,
+  communityDir, communityConfigPath, listCommunities,
 } from './communities.js';
-import { readGrainConfig } from './community-yaml.js';
+import { readGrainConfig, atomicWriteFileSync } from './community-yaml.js';
 import { grainBinPath } from './grain-installer.js';
+import { probeNvpnStatus, readNvpnNetworks } from './nvpn.js';
+import { findBin } from './detect.js';
 
 // =====================================================================
 // Tunables
@@ -169,6 +172,17 @@ export async function startCommunity(id: string): Promise<CommunityRuntimeStatus
     return getCommunityRuntimeStatus(id);
   }
 
+  // Preflight: classify dependency state BEFORE we try to spawn so a
+  // clearly-missing precondition surfaces with a specific error rather
+  // than the generic "spawn failed" / "crashed N times" the runtime
+  // path would otherwise emit.
+  const pre = await preflightDependencies(manifest);
+  if (!pre.ok) {
+    updateCommunityManifest(id, { status: 'error', lastError: pre.reason });
+    s.log.error(`preflight failed: ${pre.reason}`);
+    throw new Error(`preflight failed: ${pre.reason}`);
+  }
+
   s.intendedRunning     = true;
   s.consecutiveFailures = 0;
   s.consecutiveHealthFails = 0;
@@ -176,6 +190,99 @@ export async function startCommunity(id: string): Promise<CommunityRuntimeStatus
 
   await spawnChild(s);
   return getCommunityRuntimeStatus(id);
+}
+
+/**
+ * Classify the dependencies needed to spawn a particular community.
+ * Returns ok+nothing on success, or ok=false with a specific reason
+ * that the UI can map to a banner + action button:
+ *
+ *   - grain-missing       → "Install GRAIN" action
+ *   - nvpn-required       → "Install nvpn" action
+ *   - nvpn-not-running    → "Start nvpn" action
+ *   - network-missing     → "Recreate / rebind network" action
+ *
+ * GRAIN binary presence is checked here AND again inside spawnChild
+ * (race: a user could delete the binary between the two calls). The
+ * spawnChild check has the last word, but the preflight check makes
+ * the error surface look like a precondition error rather than a
+ * crash-loop.
+ */
+export type PreflightFailure =
+  | 'grain-missing'
+  | 'nvpn-required'
+  | 'nvpn-not-running'
+  | 'network-missing';
+
+export interface PreflightResult {
+  ok:      boolean;
+  reason?: string;
+  failure?: PreflightFailure;
+}
+
+export async function preflightDependencies(
+  manifest: CommunityManifest,
+): Promise<PreflightResult> {
+  // 1. GRAIN binary. The supervisor always spawns by absolute path, so
+  //    fs.access is the right probe — findBin would silently succeed
+  //    if some other `grain` shadows ours, which would be confusing.
+  const bin = grainBinPath();
+  try {
+    fs.accessSync(bin, fs.constants.X_OK);
+  } catch {
+    return {
+      ok:       false,
+      failure:  'grain-missing',
+      reason:   `GRAIN binary not found at ${bin}. Install it from the Communities config.`,
+    };
+  }
+
+  // 2. Local-only communities have no further dependencies.
+  if (manifest.privacyMode === 'local') return { ok: true };
+
+  // 3. Private-network: nvpn binary present?
+  if (!findBin('nvpn')) {
+    return {
+      ok:       false,
+      failure:  'nvpn-required',
+      reason:   `Private-network communities need nvpn. Install it, then click Retry.`,
+    };
+  }
+
+  // 4. nvpn daemon up? probeNvpnStatus() is the SWR-cached probe used
+  //    elsewhere — we accept its cached result rather than forcing a
+  //    fresh probe per community on every start, since this loop runs
+  //    once at start-time, not in steady state.
+  const st = await probeNvpnStatus();
+  if (!st.running) {
+    return {
+      ok:       false,
+      failure:  'nvpn-not-running',
+      reason:   `nvpn is installed but its daemon isn't running. Start nvpn, then click Retry.`,
+    };
+  }
+
+  // 5. The community's bound nvpn network must still exist in the
+  //    user's roster. Networks deleted out from under us are the
+  //    leading cause of confusing "won't start" reports.
+  if (!manifest.nvpnNetworkId) {
+    return {
+      ok:       false,
+      failure:  'network-missing',
+      reason:   `This community has no nvpn network bound. Rebind it in Settings.`,
+    };
+  }
+  const networks = readNvpnNetworks();
+  const bound = networks.find((n) => n.networkId === manifest.nvpnNetworkId);
+  if (!bound) {
+    return {
+      ok:       false,
+      failure:  'network-missing',
+      reason:   `nvpn network "${manifest.nvpnNetworkId}" no longer exists. Rebind or recreate.`,
+    };
+  }
+
+  return { ok: true };
 }
 
 /**
@@ -312,6 +419,7 @@ async function spawnChild(s: Supervision): Promise<void> {
   s.child     = child;
   s.startedAt = Date.now();
   updateCommunityManifest(id, { status: 'running', lastError: undefined });
+  if (child.pid) writeGrainPidFile(id, child.pid);
 
   // Line-buffered piping. We don't try to parse log levels from the
   // line text — GRAIN's log format isn't specified contract — so all
@@ -364,6 +472,12 @@ function onChildExit(
   const wasIntended = s.intendedRunning;
   s.child     = null;
   s.startedAt = null;
+  // The pid file is no longer authoritative once the child has
+  // exited; remove it eagerly so the next reconcile pass doesn't
+  // chase a stale PID. (The orphan walk would also clear it after
+  // a /proc miss, but doing it inline keeps the on-disk state
+  // honest in the steady-state lifecycle.)
+  removeGrainPidFile(id);
 
   const exitLabel = signal ? `signal ${signal}` : `code ${code ?? '?'}`;
   s.log.warn(`child exited (${exitLabel})`);
@@ -517,6 +631,203 @@ function ensureShutdownHandler(): void {
   process.once('SIGTERM', () => { handler('SIGTERM'); });
   process.once('SIGINT',  () => { handler('SIGINT');  });
   process.once('beforeExit', () => { handler('beforeExit'); });
+}
+
+// =====================================================================
+// grain.pid file — persisted record of the live PID per community
+
+const PID_FILE = 'grain.pid';
+
+function grainPidPath(id: string): string {
+  return path.join(communityDir(id), PID_FILE);
+}
+
+function writeGrainPidFile(id: string, pid: number): void {
+  // Atomic write so a concurrent reconcile pass never reads a torn
+  // half-written PID number. `pid.toString()` is always short, but
+  // the rename-after-fsync contract is uniform across our file
+  // writes which keeps surprise low.
+  try {
+    atomicWriteFileSync(grainPidPath(id), `${pid}\n`);
+  } catch { /* best-effort */ }
+}
+
+function removeGrainPidFile(id: string): void {
+  try { fs.unlinkSync(grainPidPath(id)); } catch { /* may not exist */ }
+}
+
+function readGrainPidFile(id: string): number | null {
+  try {
+    const raw = fs.readFileSync(grainPidPath(id), 'utf8').trim();
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+// =====================================================================
+// Orphan reconciliation
+
+/**
+ * Cross-platform "is this PID one of our GRAIN children?" probe.
+ *
+ *   - On Linux, read /proc/<pid>/cmdline (null-separated argv).
+ *   - On macOS, fall back to `ps -p <pid> -o command=`.
+ *
+ * A match requires BOTH the resolved grain binary path AND the
+ * community's directory to appear in the cmdline. That second
+ * condition matters: it stops us from accidentally adopting a
+ * grain child that belongs to a different community (e.g. a manual
+ * `grain --data-dir /elsewhere` someone ran by hand).
+ *
+ * Returns false if the PID is dead, belongs to anything else, or
+ * the probe itself failed — caller treats "unknown" the same as
+ * "not ours", because the cost of a false negative (re-spawn a
+ * fresh child) is much lower than a false positive (SIGTERM
+ * someone else's process).
+ */
+export function isGrainProcessForCommunity(pid: number, id: string): boolean {
+  const bin = grainBinPath();
+  const dir = communityDir(id);
+
+  // Cheap liveness check first — a non-existent PID short-circuits
+  // before we touch the filesystem / spawn ps.
+  try { process.kill(pid, 0); }
+  catch { return false; }
+
+  // Linux: /proc/<pid>/cmdline. Argv components are NUL-separated;
+  // join with space for substring matching.
+  if (process.platform === 'linux') {
+    try {
+      const raw = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      const cmdline = raw.replace(/\0/g, ' ');
+      return cmdline.includes(bin) && cmdline.includes(dir);
+    } catch {
+      return false;
+    }
+  }
+
+  // macOS (and any other Unix): synchronous ps. We can't use execa
+  // here because it's async; spawnSync is fine for a one-shot at
+  // boot. `command=` (empty label) returns the bare cmdline.
+  try {
+    const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
+    const out = execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    }).toString();
+    return out.includes(bin) && out.includes(dir);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Boot-time reconciliation pass. For every community on disk:
+ *
+ *   - If `grain.pid` references a live, fingerprint-matching PID:
+ *     SIGTERM it (we own it) and respawn under our supervision so
+ *     stdout/stderr feed our LogBuffer. The brief blip is bounded
+ *     by GRAIN's startup time (sub-second in practice). Critically:
+ *     fingerprint mismatches NEVER trigger SIGTERM — we leave
+ *     unrelated processes alone.
+ *
+ *   - If the pid file is stale (no live process, or live but not
+ *     ours): clear the file and leave the manifest at 'stopped'.
+ *     The dashboard's normal flow (user clicks Start, or autostart
+ *     elsewhere) will respawn fresh.
+ *
+ *   - If status was 'running' on disk but no live process exists:
+ *     reset to 'stopped' so the UI doesn't lie about state across
+ *     a hard-kill of the dashboard.
+ *
+ * Returns a per-id summary the dashboard surfaces in its boot logs
+ * (and tests assert against).
+ */
+export interface ReconcileResult {
+  id:        string;
+  outcome:   'no-pid-file' | 'pid-not-ours' | 'pid-dead' | 'respawned';
+  pid?:      number;
+  note?:     string;
+}
+
+export async function reconcileOrphanedCommunities(): Promise<ReconcileResult[]> {
+  ensureShutdownHandler();
+  ensureHealthcheckLoop();
+  const results: ReconcileResult[] = [];
+  for (const manifest of listCommunities()) {
+    const id  = manifest.id;
+    const pid = readGrainPidFile(id);
+
+    if (pid === null) {
+      // No record of a prior spawn. If the manifest still says
+      // 'running'/'restarting' (a hard-kill of the dashboard left it
+      // there), correct that — the process is definitely dead since
+      // we don't have a pid for it.
+      if (manifest.status === 'running' || manifest.status === 'restarting') {
+        updateCommunityManifest(id, { status: 'stopped' });
+      }
+      results.push({ id, outcome: 'no-pid-file' });
+      continue;
+    }
+
+    if (!isGrainProcessForCommunity(pid, id)) {
+      // The PID is either dead or recycled by something else. The
+      // fingerprint mismatch + "process exists" combination is the
+      // one we MUST treat as "not ours" — sending SIGTERM here
+      // would risk killing an unrelated process the kernel happened
+      // to assign the same PID to.
+      removeGrainPidFile(id);
+      if (manifest.status === 'running' || manifest.status === 'restarting') {
+        updateCommunityManifest(id, { status: 'stopped' });
+      }
+      // Tell the two cases apart in the result so the boot-log line
+      // for a recycled PID looks different from a clean-dead pid.
+      let alive = false;
+      try { process.kill(pid, 0); alive = true; } catch {}
+      results.push({
+        id,
+        outcome: alive ? 'pid-not-ours' : 'pid-dead',
+        pid,
+        note: alive
+          ? `PID ${pid} is alive but its cmdline doesn't match — leaving it alone`
+          : `PID ${pid} is dead; cleared stale pid file`,
+      });
+      continue;
+    }
+
+    // It's our orphan. Take ownership: SIGTERM the old PID, wait for
+    // exit (short timeout because GRAIN closes LMDB cleanly in <1s),
+    // then respawn under fresh supervision so log piping works.
+    const s = supervisions.get(id) ?? createSupervision(manifest);
+    supervisions.set(id, s);
+    s.log.warn(`reconciling orphan: SIGTERM existing PID ${pid}, respawning`);
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+    // Poll for actual exit so the respawn doesn't race a still-
+    // shutting-down LMDB writer.
+    for (let i = 0; i < 50; i++) {
+      try { process.kill(pid, 0); }
+      catch { break; }  // pid no longer exists
+      await sleep(100);
+    }
+    removeGrainPidFile(id);
+    s.intendedRunning     = true;
+    s.consecutiveFailures = 0;
+    s.consecutiveHealthFails = 0;
+    try {
+      await spawnChild(s);
+      results.push({ id, outcome: 'respawned', pid: s.child?.pid });
+    } catch (e: any) {
+      const msg = (e?.message ?? String(e)).slice(0, 240);
+      results.push({ id, outcome: 'respawned', pid, note: `respawn failed: ${msg}` });
+    }
+  }
+  return results;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // =====================================================================

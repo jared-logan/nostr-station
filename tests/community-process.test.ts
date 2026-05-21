@@ -138,14 +138,15 @@ test('startCommunity spawns + sets status=running; stopCommunity SIGTERMs cleanl
 test('startCommunity surfaces an error when the binary is missing', async () => {
   const home = useTempHome();
   const stub = useGrainStub('# never used; we overwrite below');
-  fs.rmSync(stub.binPath);  // delete the stub so spawn ENOENTs
+  fs.rmSync(stub.binPath);  // delete the stub so preflight stat fails
   try {
     _resetSupervisorForTests();
     const m = await createCommunity({
       name: 'missing-bin', privacyMode: 'local', adminPubkey: HEX_64,
     });
-    await assert.rejects(startCommunity(m.id), /spawn failed/);
-    // Manifest reflects the error rather than a stale 'running'.
+    // Preflight runs before spawn now, so the rejection mentions the
+    // precondition rather than the runtime spawn step.
+    await assert.rejects(startCommunity(m.id), /preflight failed.*not found/);
     assert.equal(readCommunityManifest(m.id)!.status, 'error');
   } finally {
     _resetSupervisorForTests();
