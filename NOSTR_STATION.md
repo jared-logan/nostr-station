@@ -342,10 +342,17 @@ derives from there.
    GNOME secret-tool, AES-256-GCM file). All backend ops wrapped in a
    5 s timeout — fresh Linux with a locked GNOME keyring hangs
    indefinitely without it.
-6. **The relay stays minimal.** `src/relay/` implements NIP-01 + NIP-11
-   for a single-user local dev relay. Don't add NIP-42 / NIP-50 /
-   metrics / clustering / multi-tenant features without an explicit
-   discussion — production-grade relays are not what this is for.
+6. **The *in-process* relay stays minimal.** `src/relay/` implements
+   NIP-01 + NIP-11 for a single-user local dev relay. Don't add
+   NIP-42 / NIP-50 / metrics / clustering / multi-tenant features to
+   *that* relay — it's intentionally scoped to the dev loop.
+   The production-relay answer is the **Communities** feature
+   (`src/lib/communities.ts` + `src/lib/community-process.ts`):
+   each community is a supervised GRAIN child process bound to its
+   own nvpn tunnel IP, with per-community LMDB, allowlist, NIP-86
+   admin, and lifecycle. The in-process relay and the Communities
+   subsystem are deliberately separate code paths so a Communities
+   change can never accidentally regress the dev relay.
 7. **Optional tools stay in `nostr-station add`.** Wizard never asks
    about ngit / nak / nsyte / stacks. Auto-installing them on a fresh
    machine is exactly what the simplification deleted.
