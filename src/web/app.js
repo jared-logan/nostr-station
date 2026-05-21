@@ -22354,6 +22354,7 @@ const CommunitiesPanel = (() => {
         </p>
         <div class="empty-state-actions">
           <button class="primary" id="community-empty-create">+ New Community</button>
+          <a class="button" href="https://github.com/jared-logan/nostr-station/blob/main/docs/communities.md" target="_blank" rel="noopener">Learn more</a>
         </div>
       </div>
     `;
