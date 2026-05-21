@@ -27,8 +27,19 @@
     var bgImage = '';
     try {
       if (d.bgImage) {
-        var u = new URL(d.bgImage);
-        if (u.protocol === 'http:' || u.protocol === 'https:') bgImage = d.bgImage;
+        // After J9, /api/ditto/theme pre-signs bgImage with HMAC and
+        // app.js stores the signed `/api/img-proxy?…&s=…` form here.
+        // Accept the same-origin shape directly; also accept raw
+        // http(s) for backward-compat with theme JSON written by a
+        // pre-J9 dashboard before the user re-synced (the bgImage
+        // would 401 at the proxy until the next theme sync but the
+        // preload itself never errors).
+        if (typeof d.bgImage === 'string' && d.bgImage.indexOf('/api/img-proxy?') === 0) {
+          bgImage = d.bgImage;
+        } else {
+          var u = new URL(d.bgImage);
+          if (u.protocol === 'http:' || u.protocol === 'https:') bgImage = d.bgImage;
+        }
       }
     } catch (_) {}
     var bgMode = (d.bgMode === 'contain' || d.bgMode === 'tile') ? d.bgMode : 'cover';
@@ -60,23 +71,12 @@
       rootDecls.push('--bg-hover:      rgba(255, 255, 255, 0.08)');
       rootDecls.push('--border:        rgba(255, 255, 255, 0.16)');
       rootDecls.push('--border-strong: rgba(255, 255, 255, 0.28)');
-      // CSP img-src 'self' data: blocks raw https:// backgrounds, so
-      // route the URL through /api/img-proxy. Inlined here (small)
-      // because theme-preload runs before app.js / markdown.js can
-      // import proxyImageUrl. Keep in sync with markdown.js
-      // proxyImageUrl.
-      var proxiedBg = bgImage;
-      try {
-        var pu = new URL(bgImage, location.href);
-        var ph = pu.hostname;
-        var isLocal = pu.origin === location.origin
-                   || ph === '127.0.0.1' || ph === 'localhost'
-                   || ph === '::1' || /\.localhost$/.test(ph);
-        if (!isLocal && pu.protocol === 'https:') {
-          proxiedBg = '/api/img-proxy?u=' + encodeURIComponent(pu.toString());
-        }
-      } catch (_) {}
-      var safeUrl = proxiedBg.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      // bgImage is either a server-pre-signed /api/img-proxy?…&s=…
+      // URL (the post-J9 happy path) or a raw https:// URL written by
+      // a pre-J9 dashboard. In the latter case the proxy will 401 the
+      // request and the background falls back to the solid color
+      // until the user's next theme sync — acceptable degradation.
+      var safeUrl = bgImage.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       var bodyCss = ':root[data-theme="ditto"] body {' +
         ' background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("' + safeUrl + '");' +
         ' background-color: ' + fallback + ';' +

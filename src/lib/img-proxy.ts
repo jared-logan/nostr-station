@@ -34,6 +34,7 @@
 
 import http from 'http';
 import crypto from 'crypto';
+import { verifyProxySignature } from './img-proxy-sign.js';
 
 const ALLOWED_MIMES = new Set([
   'image/png',
@@ -107,10 +108,24 @@ export async function handleImgProxy(
   const q = url.indexOf('?');
   const params = q >= 0 ? new URLSearchParams(url.slice(q + 1)) : new URLSearchParams();
   const u = params.get('u') || '';
+  const s = params.get('s') || '';
 
   if (!u) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'u (url) parameter required' }));
+    return;
+  }
+
+  // Signature gate: every external URL must have been server-signed via
+  // signProxyUrl() (see src/lib/img-proxy-sign.ts) before the dashboard
+  // emitted it into a JSON response or HTML. Without a valid signature
+  // an XSS payload cannot fabricate a proxy URL pointing at attacker-
+  // controlled hosts. The dashboard's session lifetime is independent
+  // of the signing secret — a server restart invalidates outstanding
+  // signed URLs (clients re-fetch the pre-signed payload).
+  if (!verifyProxySignature(u, s)) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'missing or invalid signature' }));
     return;
   }
 

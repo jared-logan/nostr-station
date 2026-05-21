@@ -3,7 +3,21 @@
 // utilities (toast, modal, copy-button) at the bottom.
 
 import { previewRetryDecision } from './preview-retry.js';
-import { renderMarkdown, renderCodeBlock, proxyImageUrl } from './markdown.js';
+import { renderMarkdown, renderCodeBlock, proxyImageUrl, startMarkdownImageObserver } from './markdown.js';
+
+// Async-sign external markdown image URLs after every renderMarkdown
+// mount. With CSP img-src 'self' data: + /api/img-proxy signature
+// gating, inline markdown <img> tags need a server-signed src URL.
+// The marked renderer emits data-raw-src placeholders; the observer
+// batches them to /api/img-proxy/sign and fills in src as responses
+// arrive. See src/web/markdown.js for the protocol.
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startMarkdownImageObserver, { once: true });
+  } else {
+    startMarkdownImageObserver();
+  }
+}
 
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -91,6 +105,11 @@ const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
 // the two characters that can break out of a double-quoted CSS string.
 function escCssUrl(u) { return String(u).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
 function isSafeImageUrl(u) {
+  if (typeof u !== 'string' || !u) return false;
+  // Server-emitted signed proxy URLs are relative paths. Accept the
+  // exact /api/img-proxy?… shape (the server vetted the upstream URL
+  // before signing; the signature gate refuses anything else).
+  if (u.startsWith('/api/img-proxy?')) return true;
   try {
     const p = new URL(u);
     return p.protocol === 'http:' || p.protocol === 'https:';
