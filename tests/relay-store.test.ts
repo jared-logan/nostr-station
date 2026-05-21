@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { EventStore } from '../src/relay/store.ts';
 import type { NostrEvent } from '../src/relay/types.ts';
 
@@ -99,5 +100,49 @@ test('store: maxEvents evicts oldest', () => {
   assert.equal(s.count(), 3);
   const remaining = s.query({}).map(e => e.created_at).sort((a, b) => a - b);
   assert.deepEqual(remaining, [1002, 1003, 1004]);
+  s.close();
+});
+
+test('store: migrates a legacy tags-without-created_at schema in place', () => {
+  // Build a database with the pre-migration schema: tags has no
+  // created_at column. Seed one event + one tag row so we can verify
+  // the backfill populates created_at from the joined events row.
+  const dbPath = tmpDb();
+  const seed   = new Database(dbPath);
+  seed.exec(`
+    CREATE TABLE events (
+      id TEXT PRIMARY KEY, pubkey TEXT NOT NULL, created_at INTEGER NOT NULL,
+      kind INTEGER NOT NULL, content TEXT NOT NULL, sig TEXT NOT NULL,
+      tags_json TEXT NOT NULL
+    );
+    CREATE TABLE tags (
+      event_id TEXT NOT NULL, tag_name TEXT NOT NULL, tag_value TEXT NOT NULL,
+      FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+    );
+  `);
+  const evId = 'e'.repeat(64);
+  seed.prepare(`INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    evId, 'p'.repeat(64), 1234, 1, 'x', 's'.repeat(128), '[]',
+  );
+  seed.prepare(`INSERT INTO tags VALUES (?, ?, ?)`).run(evId, 'e', 'target');
+  seed.close();
+
+  // Open the store — migration should run on construction.
+  const s = new EventStore({ dbPath });
+
+  // The .bak file was written before the schema mutation.
+  assert.equal(fs.existsSync(dbPath + '.bak'), true);
+
+  // tags.created_at now exists and has been backfilled from events.created_at.
+  const check = new Database(dbPath, { readonly: true });
+  const cols  = check.prepare('PRAGMA table_info(tags)').all() as Array<{ name: string }>;
+  assert.equal(cols.some(c => c.name === 'created_at'), true);
+  const row = check.prepare('SELECT created_at FROM tags').get() as { created_at: number };
+  assert.equal(row.created_at, 1234);
+  check.close();
+
+  // The store is usable post-migration — a tag query still returns the row.
+  const out = s.query({ '#e': ['target'] } as any);
+  assert.equal(out.length, 1);
   s.close();
 });

@@ -83,9 +83,10 @@ export class EventStore {
       CREATE INDEX IF NOT EXISTS idx_events_kind       ON events(kind);
 
       CREATE TABLE IF NOT EXISTS tags (
-        event_id  TEXT NOT NULL,
-        tag_name  TEXT NOT NULL,
-        tag_value TEXT NOT NULL,
+        event_id   TEXT NOT NULL,
+        tag_name   TEXT NOT NULL,
+        tag_value  TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_tags_lookup ON tags(tag_name, tag_value);
@@ -93,7 +94,57 @@ export class EventStore {
     `);
     this.db.pragma('foreign_keys = ON');
 
+    this.migrate(dbPath);
+
     this.prepareStatements();
+  }
+
+  // One-shot migration step for databases created before the composite
+  // index work. Detects the absence of tags.created_at and, if needed:
+  //   1. Writes a best-effort .bak copy alongside the live db so a user
+  //      who hits a corner case can recover via `mv relay.db.bak relay.db`.
+  //   2. Wraps the ALTER + backfill in a single transaction so an
+  //      interrupted migration leaves the old schema intact rather than
+  //      a half-populated created_at column.
+  // The composite indexes themselves are added via CREATE INDEX IF NOT
+  // EXISTS below the migration block — safe on both fresh and migrated
+  // databases.
+  private migrate(dbPath: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(tags)`).all() as Array<{ name: string }>;
+    const hasCreatedAt = cols.some(c => c.name === 'created_at');
+
+    if (!hasCreatedAt) {
+      try {
+        const bakPath = `${dbPath}.bak`;
+        if (fs.existsSync(dbPath) && !fs.existsSync(bakPath)) {
+          fs.copyFileSync(dbPath, bakPath);
+        }
+      } catch {
+        // Best-effort backup: a failed copy (e.g. disk full) should not
+        // block the migration — the transaction below still gives
+        // all-or-nothing semantics on the live db.
+      }
+
+      const run = this.db.transaction(() => {
+        this.db.exec(`ALTER TABLE tags ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0`);
+        this.db.exec(`
+          UPDATE tags
+             SET created_at = (SELECT created_at FROM events WHERE events.id = tags.event_id)
+           WHERE created_at = 0
+        `);
+      });
+      run();
+    }
+
+    // Composite indexes — additive, idempotent. The two leading-column
+    // single-column indexes (idx_events_pubkey, idx_tags_lookup) are
+    // kept for queries that don't constrain the trailing columns.
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_events_pubkey_kind_ts
+        ON events(pubkey, kind, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tags_lookup_ts
+        ON tags(tag_name, tag_value, created_at DESC);
+    `);
   }
 
   private prepareStatements(): void {
@@ -102,7 +153,7 @@ export class EventStore {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     this.stInsertTag = this.db.prepare(
-      `INSERT INTO tags (event_id, tag_name, tag_value) VALUES (?, ?, ?)`,
+      `INSERT INTO tags (event_id, tag_name, tag_value, created_at) VALUES (?, ?, ?, ?)`,
     );
     this.stHasEvent = this.db.prepare(`SELECT 1 FROM events WHERE id = ? LIMIT 1`);
     this.stDeleteByKindAuthor = this.db.prepare(
@@ -143,7 +194,7 @@ export class EventStore {
         // via #x filters per NIP-01. Long-named tags are still stored in
         // tags_json on the event row, just not in the indexed table.
         if (t[0] && t[0].length === 1 && typeof t[1] === 'string') {
-          this.stInsertTag.run(e.id, t[0], t[1]);
+          this.stInsertTag.run(e.id, t[0], t[1], e.created_at);
         }
       }
     });
