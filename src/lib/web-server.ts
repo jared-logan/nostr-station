@@ -599,6 +599,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // signed against a forged `u` tag. Since the dashboard only ever
       // listens on loopback, any other Host value is either a
       // misconfiguration or an attack — either way, refuse.
+      // nostr-station binds to loopback and expects no reverse proxy. We do
+      // NOT honor `x-forwarded-host`, `x-forwarded-for`, `x-forwarded-proto`,
+      // or RFC 7239 `forwarded` anywhere — the rebinding defense and every
+      // security-relevant URL (NIP-98 `u`-tag at auth.ts:481) are derived
+      // from the bound port, never from these attacker-controlled headers.
+      // If reverse-proxy support is added later, re-audit before reading any
+      // of them.
       const hostHeader = String(req.headers['host'] || '').toLowerCase();
 
       // ── H1a: Nsite per-origin subdomain dispatch ──────────────────────

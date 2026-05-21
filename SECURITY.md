@@ -96,3 +96,43 @@ Opt-out paths if this isn't your threat model:
   arrive on the phone, but each one requires an explicit tap.
 
 A first-class toggle is tracked as a follow-up.
+
+### Local network attacks
+
+Any browser tab on the user's machine can issue
+`fetch('http://127.0.0.1:<N>')` and time the response to enumerate which
+local ports answer. This is a platform-level affordance that no application
+running on `127.0.0.1` can fully prevent — we document the posture rather
+than claim a fix.
+
+**What's discoverable from a hostile tab:**
+- That nostr-station is running (dashboard on `127.0.0.1:3000`,
+  in-process relay on `127.0.0.1:7777`, in-process Blossom on
+  `127.0.0.1:8081` — all by default).
+- That arbitrary other services on the user's machine are listening.
+
+**What's NOT exfiltratable from those ports:**
+- **Dashboard reads.** Every `/api/*` request goes through the loopback
+  Host gate (`src/lib/web-server.ts:636`) and the CSRF Origin/Referer
+  gate on mutations (`src/lib/web-server.ts:649`). A cross-origin tab
+  cannot read the JSON response body of a session-authed endpoint
+  (browsers enforce same-origin reads regardless), and cannot mutate
+  state without forging a same-origin Referer (impossible from a
+  cross-origin tab).
+- **Relay WebSockets.** The in-process relay refuses any WS upgrade
+  whose `Origin` header isn't a loopback origin
+  (`src/relay/index.ts:152–155`). A hostile tab cannot open a relay
+  subscription and read events.
+- **Image / WS proxies.** Both reject private and loopback targets
+  via `isPrivateOrLoopbackHost` (`src/lib/nsite-resolver.ts:881`,
+  mirrored in `src/lib/img-proxy.ts:68`), so an attacker cannot pivot
+  through our own server to scan localhost.
+
+**Mitigation tracking:** the W3C *Private Network Access* spec
+(<https://wicg.github.io/private-network-access/>) is the upstream fix
+for the discoverability problem. Once stable in Chrome and Firefox we
+will add the `Access-Control-Allow-Private-Network` response header and
+respond to PNA preflights so cross-origin requests from public-network
+pages are blocked before they touch our request handlers. Until then,
+the same-origin and Origin-gate defenses above are the load-bearing
+controls.
