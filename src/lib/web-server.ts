@@ -1301,6 +1301,46 @@ export async function startWebServer(port: number): Promise<http.Server> {
         return;
       }
 
+      // ── Relay content search (FTS5) ───────────────────────────────────
+      // GET /api/relay/search?q=<text>&kinds=1,7&limit=50
+      //
+      // Surfaces EventStore.search() to the Relay panel's search box.
+      // Returns matching events ordered by FTS rank. The relay must be
+      // running — search has no meaning offline since the corpus lives
+      // in the local DB. Errors from malformed FTS5 syntax come back as
+      // 400 so the UI can hint at proper quoting.
+      if (url.startsWith('/api/relay/search') && method === 'GET') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        const u = new URL(url, 'http://localhost');
+        const q = (u.searchParams.get('q') || '').trim();
+        if (!q) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ events: [], total: 0 }));
+          return;
+        }
+        const kinds = (u.searchParams.get('kinds') || '')
+          .split(',').map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+        const limit = Math.max(1, Math.min(parseInt(u.searchParams.get('limit') || '50', 10) || 50, 200));
+        try {
+          const events = inprocRelay.store.search(q, {
+            kinds: kinds.length ? kinds : undefined,
+            limit,
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ events, total: events.length }));
+        } catch (e: any) {
+          // FTS5 throws on malformed MATCH expressions ("syntax error
+          // near …") — pass that back so the user can adjust their query.
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+        }
+        return;
+      }
+
       // ── Relay sqlite DB stats ─────────────────────────────────────────
       // Used by the Relay panel's database section (app.js:1908). Sums the
       // sqlite main file plus its WAL/SHM sidecars so a relay under active

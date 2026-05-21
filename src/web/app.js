@@ -4182,6 +4182,73 @@ const RelayPanel = (() => {
     } catch { toast('Clipboard read blocked', 'paste manually', 'warn'); }
   });
 
+  // ── Full-text search over the local corpus ──────────────────────────────
+  //
+  // Calls /api/relay/search, which routes to EventStore.search() (FTS5
+  // over events.content). Results render with the same author-resolution
+  // pipeline as the live event stream so cached pubkeys show as names.
+  async function runRelaySearch() {
+    const inputEl  = $('relay-search-input');
+    const resultEl = $('relay-search-results');
+    const statusEl = $('relay-search-status');
+    if (!inputEl || !resultEl) return;
+    const q = inputEl.value.trim();
+    if (!q) {
+      resultEl.innerHTML = `<div class="empty-state">Enter a keyword to search the local corpus.</div>`;
+      if (statusEl) statusEl.textContent = '';
+      return;
+    }
+    if (statusEl) statusEl.textContent = 'searching…';
+    try {
+      const r = await api('/api/relay/search?q=' + encodeURIComponent(q) + '&limit=100', undefined, { silent: true });
+      const hits = Array.isArray(r?.events) ? r.events : [];
+      if (statusEl) statusEl.textContent = `${hits.length} match${hits.length === 1 ? '' : 'es'}`;
+      if (hits.length === 0) {
+        resultEl.innerHTML = `<div class="empty-state">No matches for <code>${escapeHtml(q)}</code>.</div>`;
+        return;
+      }
+      resultEl.innerHTML = '';
+      for (const ev of hits) {
+        const row = document.createElement('div');
+        row.className = 'event';
+        const ts = new Date((ev.created_at || 0) * 1000);
+        const resolved = (typeof profileNameOf === 'function' && ev.pubkey) ? profileNameOf(ev.pubkey) : '';
+        const isNpubFallback = /^npub1[0-9a-z]{4,}…[0-9a-z]{4,}$/.test(resolved);
+        const pkLabel = resolved && !isNpubFallback ? resolved : `${(ev.pubkey || '').slice(0, 12)}…`;
+        row.innerHTML = `
+          <div class="k-tag">${escapeHtml(kindLabel(ev.kind))}</div>
+          <div class="pk" title="${escapeHtml(ev.pubkey || '')}">${escapeHtml(pkLabel)}</div>
+          <div class="content">${escapeHtml(ev.content || '')}</div>
+          <div class="ts">${escapeHtml(isNaN(ts.getTime()) ? '' : ts.toLocaleTimeString())}</div>
+        `;
+        resultEl.appendChild(row);
+      }
+      // Promote unresolved authors to names on a follow-up paint.
+      try {
+        if (typeof resolveProfiles === 'function') {
+          const need = [];
+          for (const ev of hits) {
+            if (!ev.pubkey || !/^[0-9a-f]{64}$/.test(ev.pubkey)) continue;
+            if (typeof hasResolvedProfileName === 'function' && hasResolvedProfileName(ev.pubkey)) continue;
+            need.push(ev.pubkey);
+          }
+          if (need.length > 0) {
+            resolveProfiles(need).then(() => { if ($('relay-search-results')) runRelaySearch(); }).catch(() => {});
+          }
+        }
+      } catch {}
+    } catch (e) {
+      // Bad FTS syntax surfaces here — keep the input populated so the
+      // user can fix it. Common case: unbalanced quotes.
+      resultEl.innerHTML = `<div class="empty-state">Search failed: ${escapeHtml(e?.message || e)}<div class="hint">FTS5 syntax: quote phrases ("two words"), boolean ops (AND/OR/NOT) must be uppercase.</div></div>`;
+      if (statusEl) statusEl.textContent = 'error';
+    }
+  }
+  $('relay-search-go').addEventListener('click', runRelaySearch);
+  $('relay-search-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runRelaySearch();
+  });
+
   // ── Database ops ───────────────────────────────────────────────────────
 
   $('relay-db-wipe').addEventListener('click', async () => {
