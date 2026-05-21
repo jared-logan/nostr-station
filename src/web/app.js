@@ -21193,10 +21193,16 @@ const NsitePanel = (() => {
   }
 
   // Listen for postMessage from the iframe's injected reporter. The
-  // iframe is in an opaque origin so event.origin is "null" — we
-  // authenticate the message by shape + siteId match (the iframe
-  // received the siteId from us when we set its src). Mounted once at
-  // panel-init so it survives multiple Go() navigations.
+  // iframe's sandbox keeps `allow-same-origin`, so it runs at its real
+  // `http://<sid>.nsite.localhost:<port>` origin (NOT opaque/"null").
+  // We authenticate the message by both:
+  //   1. event.origin matches the per-sid subdomain origin we'd have
+  //      set as the iframe src (any other framed origin — same-origin
+  //      dashboard code, a different nsite, a malicious top-level
+  //      window — gets dropped here);
+  //   2. m.siteId is one of the siteIds we have an open tab for
+  //      (routes the report to the right tab's bucket).
+  // Mounted once at panel-init so it survives multiple Go() navigations.
   //
   // Each filter rejection logs WHY in the top-context console (visible
   // without switching frames in devtools) so a "Diagnostics never
@@ -21206,6 +21212,10 @@ const NsitePanel = (() => {
   // script entry → if it's missing, the script never ran (CSP block,
   // injection miss); if it's present, the panel-side log tells us
   // whether the message arrived and matched the active siteId.
+  function nsiteOriginForSid(siteId) {
+    const port = window.location.port ? `:${window.location.port}` : '';
+    return `${window.location.protocol}//${siteId}.nsite.localhost${port}`;
+  }
   function mountReporterListener() {
     if (els._reporterMounted) return;
     els._reporterMounted = true;
@@ -21215,8 +21225,17 @@ const NsitePanel = (() => {
       if (typeof m.type !== 'string' || !m.type.startsWith('nsite-')) return;
       // From here on the message is shaped like one of ours — worth
       // logging whether the siteId matches the active resolve.
-      if (typeof m.siteId !== 'string') {
-        try { console.warn('[nsite-report parent] drop: missing siteId', m); } catch (_) {}
+      if (typeof m.siteId !== 'string' || !/^[a-f0-9]{16}$/.test(m.siteId)) {
+        try { console.warn('[nsite-report parent] drop: missing/invalid siteId', m); } catch (_) {}
+        return;
+      }
+      // Origin gate: the message MUST come from the per-sid subdomain
+      // we'd have set as that iframe's src. siteId is 16-hex (checked
+      // above) so the interpolation cannot expand to an arbitrary
+      // origin chosen by the sender.
+      const expectedOrigin = nsiteOriginForSid(m.siteId);
+      if (event.origin !== expectedOrigin) {
+        try { console.warn('[nsite-report parent] drop: origin mismatch', { origin: event.origin, expected: expectedOrigin }); } catch (_) {}
         return;
       }
       // Find the tab whose snapshot owns this siteId. With multiple tabs
