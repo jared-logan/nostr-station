@@ -292,6 +292,13 @@ export function gatherStatus(): ServiceStatus[] {
   const stacksBin  = stacksPath !== null;
   const stacksV    = stacksPath ? cmd(`${stacksPath} --version 2>/dev/null`) : null;
 
+  // grain ships without a --version flag (exits non-zero on unknown
+  // args), so we report bare "installed" rather than running it. The
+  // findBin probe walks ~/.nostr-station/bin (added in detect.ts) so
+  // our managed install shows up without special-casing.
+  const grainPath = findBin('grain');
+  const grainBin  = grainPath !== null;
+
   const claudeBin   = claudePath !== null;
   const opencodeBin = opencodePath !== null;
   const nakBin      = nakPath !== null;
@@ -307,6 +314,7 @@ export function gatherStatus(): ServiceStatus[] {
   const opencodeState: ServiceState = opencodeBin ? 'ok' : 'err';
   const nakState:      ServiceState = nakBin ? 'ok' : 'err';
   const stacksState:   ServiceState = stacksBin ? 'ok' : 'err';
+  const grainState:    ServiceState = grainBin ? 'ok' : 'err';
 
   return [
     // Services — daemons or scheduled jobs with a runtime state.
@@ -320,6 +328,7 @@ export function gatherStatus(): ServiceStatus[] {
     { id: 'opencode',  label: 'opencode',    value: opencodeV ?? (opencodeBin ? 'installed' : 'not installed'),                              ok: opencodeBin,  state: opencodeState, kind: 'binary' },
     { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState,      kind: 'binary' },
     { id: 'stacks',    label: 'Stacks',      value: stacksV  ?? (stacksBin ? 'installed' : 'not installed'),                               ok: stacksBin,    state: stacksState,   kind: 'binary' },
+    { id: 'grain',     label: 'grain',       value: grainBin ? 'installed' : 'not installed',                                              ok: grainBin,     state: grainState,    kind: 'binary' },
   ];
 }
 

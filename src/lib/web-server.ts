@@ -49,6 +49,7 @@ import {
 } from './nvpn.js';
 import { installNak } from './nak-installer.js';
 import { installNgit } from './ngit-installer.js';
+import { installGrain } from './grain-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 import {
   readIdentity, setSetupComplete, isNsec,
@@ -1525,9 +1526,25 @@ export async function startWebServer(port: number): Promise<http.Server> {
           return;
         }
 
+        if (slug === 'grain') {
+          try {
+            const result = await installGrain((line) => emit({ line, stream: 'stdout' }), { force });
+            if (!result.ok && result.detail) {
+              emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
+            }
+            emit({ done: true, code: result.ok ? 0 : (result.warn ? 0 : 1) });
+          } catch (e: any) {
+            emit({ line: String(e?.message || e), stream: 'stderr' });
+            emit({ done: true, code: -1 });
+          }
+          cachedGatherStatus.invalidate();
+          try { res.end(); } catch {}
+          return;
+        }
+
         const tool = getTool(slug);
         if (!tool) {
-          const supported = ['nak', 'ngit', ...Object.keys(TOOLS)].sort();
+          const supported = ['nak', 'ngit', 'grain', ...Object.keys(TOOLS)].sort();
           emit({
             line:   `'${slug}' is not a known optional tool. Supported: ${supported.join(', ')}.`,
             stream: 'stderr',
