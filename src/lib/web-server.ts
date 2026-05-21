@@ -102,6 +102,7 @@ import { handleStatus } from './routes/status.js';
 import { runScratchGc } from './scratch-gc.js';
 import { handleAi } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
+import { mountRelayProxyWebSocket } from './routes/relay-proxy.js';
 import { handleNvpn } from './routes/nvpn.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
@@ -2023,6 +2024,12 @@ export async function startWebServer(port: number): Promise<http.Server> {
     // for H1 (DNS rebinding) and H2 (CSRF) checks. See the route module
     // for the full URL grammar + control-frame protocol.
     mountTerminalWebSocket(server, { allowedHosts, isLoopbackUrl });
+
+    // ── Relay-proxy WebSocket (extracted to routes/relay-proxy.ts) ────
+    // Browser-side stats/following lookups used to open wss:// connections
+    // directly; they now route through this proxy so the dashboard's CSP
+    // connect-src can drop `wss:`. Same H1 + H2 + auth gates as terminal.
+    mountRelayProxyWebSocket(server, { allowedHosts, isLoopbackUrl });
 
     // PID file management (B3): write once we're bound, drop on graceful
     // exit. The file lets `nostr-station uninstall` refuse to nuke services

@@ -412,6 +412,28 @@ const SESSION_EXPIRES_KEY = 'ns-session-expires';
 const SESSION_SOURCE_KEY  = 'ns-session-source';
 
 function getSessionToken() { return localStorage.getItem(SESSION_KEY); }
+
+// Wrap an external Nostr relay URL (ws:// or wss://) so the browser
+// connects through the dashboard's relay proxy instead of opening a
+// direct WebSocket. The proxy bridges to the upstream relay over its
+// own outbound WS, which lets the dashboard's CSP drop the `wss:`
+// connect-src token (see src/lib/routes/relay-proxy.ts). Loopback
+// targets (the in-process relay, the local terminal WS) bypass the
+// proxy — they're already same-origin to the dashboard's CSP.
+function relayProxyUrl(target) {
+  try {
+    const t = new URL(target);
+    const host = t.hostname;
+    if (host === '127.0.0.1' || host === 'localhost' || host === '::1'
+        || host.endsWith('.localhost')) {
+      return target;
+    }
+  } catch { return target; }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const tok = encodeURIComponent(getSessionToken() || '');
+  const u   = encodeURIComponent(target);
+  return `${proto}//${location.host}/api/relay-proxy?u=${u}&token=${tok}`;
+}
 function getSessionSource() { return localStorage.getItem(SESSION_SOURCE_KEY); }
 function setSessionToken(token, expiresAt, source) {
   localStorage.setItem(SESSION_KEY, token);
@@ -14719,7 +14741,7 @@ const ConfigPanel = (() => {
       let pendingRelays = relays.length;
       relays.forEach(url => {
         let ws;
-        try { ws = new WebSocket(url); }
+        try { ws = new WebSocket(relayProxyUrl(url)); }
         catch { onRelayDone(null); return; }
         const subId = 'cnt-' + Math.random().toString(36).slice(2, 8);
         let settled = false;
@@ -14812,7 +14834,7 @@ const ConfigPanel = (() => {
       };
       relays.forEach(url => {
         let ws;
-        try { ws = new WebSocket(url); }
+        try { ws = new WebSocket(relayProxyUrl(url)); }
         catch { remaining--; finalize(); return; }
         const subId = 'flw-' + Math.random().toString(36).slice(2, 8);
         let done = false;
