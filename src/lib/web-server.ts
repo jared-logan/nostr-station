@@ -106,6 +106,7 @@ import { handleAi } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { mountRelayProxyWebSocket } from './routes/relay-proxy.js';
 import { handleNvpn } from './routes/nvpn.js';
+import { handleCommunities } from './routes/communities.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
 import { getInboxWorker } from './mail/inbox.js';
@@ -1980,6 +1981,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // /api/nvpn/install-service. Drives the Status panel's start/stop
       // buttons and the Logs panel's nostr-vpn meta strip.
       if (await handleNvpn(req, res, fullUrl, method)) return;
+
+      // ── Communities (routes/communities.ts) ────────────────────────────
+      // /api/communities/* — list/create/start/stop/restart/delete +
+      // member CRUD + SSE log tail. Backs the Communities sidebar
+      // panel; mirrors the section-handler shape used by every other
+      // /api section above.
+      if (await handleCommunities(req, res, fullUrl, method)) return;
 
       // ── Mail (routes/mail.ts) ──────────────────────────────────────────
       // NIP-17 mail panel: read-only inbox + thread view. Send + compose
