@@ -44,7 +44,7 @@ import { getProject, type Project } from '../projects.js';
 import { isValidRelayUrl, getGraspServers } from '../identity.js';
 import { findBin } from '../detect.js';
 import {
-  queryRelays,
+  queryRelaysDirect as queryRelays,
   getCached,
   setCached,
   getTags,

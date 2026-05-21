@@ -299,6 +299,25 @@
           </div>
         </details>
 
+        <details class="events-collapse" id="relay-search-collapse">
+          <summary>
+            <span class="events-collapse-title">Search corpus</span>
+            <span class="events-collapse-count" id="relay-search-status"></span>
+          </summary>
+          <div class="relay-search">
+            <div class="add-row">
+              <input id="relay-search-input" placeholder="keyword, &quot;exact phrase&quot;, term1 AND term2" autocomplete="off" spellcheck="false">
+              <button class="primary" id="relay-search-go">search</button>
+            </div>
+            <div class="events" id="relay-search-results">
+              <div class="empty-state">
+                Search across every event the relay has cached locally.
+                <div class="hint">Full-text over event content. Try a keyword, or a quoted phrase.</div>
+              </div>
+            </div>
+          </div>
+        </details>
+
         <div class="whitelist-manager" id="relay-whitelist">
           <h4>Whitelist</h4>
           <div id="relay-whitelist-items"></div>

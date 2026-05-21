@@ -44,6 +44,7 @@ import {
 // relays, leaving Feed / Notifications / Profile blank for many users.
 // queryRelaysDirect has the same signature, so the swap is API-neutral.
 import { queryRelaysDirect as queryRelays, type NostrEvent } from '../nostr-query.js';
+import { getLocalStore } from '../inproc-store-ref.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { publishEventToRelays } from './repo.js';
 import { safeHttpUrl } from '../url-safety.js';
@@ -288,6 +289,39 @@ async function fetchProfiles(pubkeys: string[]): Promise<Map<string, ProfileLite
     } else {
       need.push(hex);
     }
+  }
+  if (need.length === 0) return out;
+
+  // Local-first hydration: the in-process relay materialized kind-0
+  // events into a profiles table at ingest (src/relay/store.ts).
+  // Resolving from there is microseconds and works offline. Only the
+  // pubkeys we still don't know about after this fall through to a
+  // remote relay query.
+  const localStore = getLocalStore();
+  if (localStore) {
+    const localProfiles = localStore.getProfiles(need);
+    const stillNeed: string[] = [];
+    for (const hex of need) {
+      const p = localProfiles.get(hex);
+      if (!p) { stillNeed.push(hex); continue; }
+      const lite: ProfileLite = { hex, npub: hexToNpub(hex), cachedAt: now };
+      if (p.name)         lite.name        = p.name;
+      if (p.display_name) lite.displayName = p.display_name;
+      if (p.about)        lite.about       = p.about;
+      if (p.nip05)        lite.nip05       = p.nip05;
+      if (p.picture) {
+        const safe = safeHttpUrl(p.picture);
+        if (safe) lite.picture = signProxyUrl(safe) ?? undefined;
+      }
+      if (p.banner) {
+        const safe = safeHttpUrl(p.banner);
+        if (safe) lite.banner = signProxyUrl(safe) ?? undefined;
+      }
+      profileCache.set(hex, lite);
+      out.set(hex, lite);
+    }
+    need.length = 0;
+    need.push(...stillNeed);
   }
   if (need.length === 0) return out;
 

@@ -40,6 +40,24 @@ function dTagValue(tags: string[][]): string {
   return t?.[1] ?? '';
 }
 
+// Decoded kind-0 profile metadata, materialized at ingest so the
+// dashboard never re-parses JSON when rendering pubkeys. Mirrors the
+// shape of nostrdb's profile flatbuffer record (name, display_name,
+// nip05, picture, lud16, about, banner, website) without committing
+// to its on-disk format.
+export interface ProfileRecord {
+  pubkey:       string;
+  name:         string | null;
+  display_name: string | null;
+  nip05:        string | null;
+  picture:      string | null;
+  lud16:        string | null;
+  about:        string | null;
+  banner:       string | null;
+  website:      string | null;
+  updated_at:   number;
+}
+
 export class EventStore {
   private db: Database.Database;
   private maxEvents: number;
@@ -55,6 +73,8 @@ export class EventStore {
   private stDeleteByKindAuthorD!:Database.Statement;
   private stCount!:              Database.Statement;
   private stEvictOldest!:        Database.Statement;
+  private stUpsertProfile!:      Database.Statement;
+  private stGetProfile!:         Database.Statement;
 
   constructor(opts: StoreOptions = {}) {
     const dbPath = opts.dbPath ?? DEFAULT_DB_PATH;
@@ -83,17 +103,169 @@ export class EventStore {
       CREATE INDEX IF NOT EXISTS idx_events_kind       ON events(kind);
 
       CREATE TABLE IF NOT EXISTS tags (
-        event_id  TEXT NOT NULL,
-        tag_name  TEXT NOT NULL,
-        tag_value TEXT NOT NULL,
+        event_id   TEXT NOT NULL,
+        tag_name   TEXT NOT NULL,
+        tag_value  TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_tags_lookup ON tags(tag_name, tag_value);
       CREATE INDEX IF NOT EXISTS idx_tags_event  ON tags(event_id);
+
+      -- Decoded kind-0 profile metadata, one row per pubkey, updated on
+      -- ingest. Deliberately NOT FK'd to events.id: profiles outlive
+      -- the underlying kind-0 events when those get evicted by the
+      -- maxEvents cap, so the dashboard still resolves pubkeys to names
+      -- for senders/authors we have history on but haven't refreshed
+      -- recently.
+      CREATE TABLE IF NOT EXISTS profiles (
+        pubkey       TEXT PRIMARY KEY,
+        name         TEXT,
+        display_name TEXT,
+        nip05        TEXT,
+        picture      TEXT,
+        lud16        TEXT,
+        about        TEXT,
+        banner       TEXT,
+        website      TEXT,
+        updated_at   INTEGER NOT NULL
+      );
+
+      -- Full-text index over events.content. Contentless (uses events
+      -- as the external content table via the rowid join) so the bytes
+      -- of each content blob live in one place. Tokens are kept in
+      -- events_fts; document recovery (snippet, highlight, etc.) joins
+      -- back to events.content. Triggers below keep the two in sync.
+      CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+        content,
+        content='events',
+        content_rowid='rowid'
+      );
+      CREATE TRIGGER IF NOT EXISTS events_fts_ai AFTER INSERT ON events BEGIN
+        INSERT INTO events_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS events_fts_ad AFTER DELETE ON events BEGIN
+        INSERT INTO events_fts(events_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS events_fts_au AFTER UPDATE OF content ON events BEGIN
+        INSERT INTO events_fts(events_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+        INSERT INTO events_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
     `);
     this.db.pragma('foreign_keys = ON');
 
+    this.migrate(dbPath);
+
     this.prepareStatements();
+  }
+
+  // One-shot migration step for databases created before the composite
+  // index work. Detects the absence of tags.created_at and, if needed:
+  //   1. Writes a best-effort .bak copy alongside the live db so a user
+  //      who hits a corner case can recover via `mv relay.db.bak relay.db`.
+  //   2. Wraps the ALTER + backfill in a single transaction so an
+  //      interrupted migration leaves the old schema intact rather than
+  //      a half-populated created_at column.
+  // The composite indexes themselves are added via CREATE INDEX IF NOT
+  // EXISTS below the migration block — safe on both fresh and migrated
+  // databases.
+  private migrate(dbPath: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(tags)`).all() as Array<{ name: string }>;
+    const hasCreatedAt = cols.some(c => c.name === 'created_at');
+
+    if (!hasCreatedAt) {
+      try {
+        const bakPath = `${dbPath}.bak`;
+        if (fs.existsSync(dbPath) && !fs.existsSync(bakPath)) {
+          fs.copyFileSync(dbPath, bakPath);
+        }
+      } catch {
+        // Best-effort backup: a failed copy (e.g. disk full) should not
+        // block the migration — the transaction below still gives
+        // all-or-nothing semantics on the live db.
+      }
+
+      const run = this.db.transaction(() => {
+        this.db.exec(`ALTER TABLE tags ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0`);
+        this.db.exec(`
+          UPDATE tags
+             SET created_at = (SELECT created_at FROM events WHERE events.id = tags.event_id)
+           WHERE created_at = 0
+        `);
+      });
+      run();
+    }
+
+    // Composite indexes — additive, idempotent. The two leading-column
+    // single-column indexes (idx_events_pubkey, idx_tags_lookup) are
+    // kept for queries that don't constrain the trailing columns.
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_events_pubkey_kind_ts
+        ON events(pubkey, kind, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tags_lookup_ts
+        ON tags(tag_name, tag_value, created_at DESC);
+    `);
+
+    // Backfill the FTS index from already-stored events. The triggers
+    // only fire on writes that happen after they exist, so events
+    // ingested before the events_fts virtual table was created need a
+    // one-shot rebuild. We detect by probing events_fts_docsize — an
+    // FTS5 shadow table whose row count reflects actually-indexed
+    // documents. COUNT(*) on the virtual table itself delegates to the
+    // content table and is therefore useless as a populated-or-not
+    // signal. Rebuild is cheap on a 100k-event corpus (a few seconds).
+    const eventCount = (this.db.prepare(`SELECT COUNT(*) AS n FROM events`).get() as { n: number }).n;
+    if (eventCount > 0) {
+      const indexed = (this.db.prepare(`SELECT COUNT(*) AS n FROM events_fts_docsize`).get() as { n: number }).n;
+      if (indexed < eventCount) {
+        this.db.exec(`INSERT INTO events_fts(events_fts) VALUES('rebuild')`);
+      }
+    }
+
+    // Backfill profiles from already-stored kind-0 events. Cheap on
+    // 100k-event corpora (typically a few thousand kind-0s, sub-second).
+    // Skipped once profiles is non-empty so subsequent boots are no-ops.
+    const profileCount = (this.db.prepare(`SELECT COUNT(*) AS n FROM profiles`).get() as { n: number }).n;
+    if (profileCount === 0) {
+      const kind0s = this.db.prepare(
+        `SELECT pubkey, created_at, content FROM events WHERE kind = 0`,
+      ).all() as Array<{ pubkey: string; created_at: number; content: string }>;
+      if (kind0s.length > 0) {
+        const upsert = this.db.prepare(
+          `INSERT INTO profiles (pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(pubkey) DO UPDATE SET
+             name=excluded.name, display_name=excluded.display_name, nip05=excluded.nip05,
+             picture=excluded.picture, lud16=excluded.lud16, about=excluded.about,
+             banner=excluded.banner, website=excluded.website, updated_at=excluded.updated_at
+           WHERE excluded.updated_at > profiles.updated_at`,
+        );
+        const run = this.db.transaction(() => {
+          for (const row of kind0s) {
+            let raw: any;
+            try { raw = JSON.parse(row.content); } catch { continue; }
+            if (!raw || typeof raw !== 'object') continue;
+            const s = (k: string): string | null => {
+              const v = raw[k];
+              return typeof v === 'string' && v.length > 0 ? v : null;
+            };
+            upsert.run(
+              row.pubkey,
+              s('name'),
+              s('display_name') ?? s('displayName'),
+              s('nip05'),
+              s('picture'),
+              s('lud16') ?? s('lud06'),
+              s('about'),
+              s('banner'),
+              s('website'),
+              row.created_at,
+            );
+          }
+        });
+        run();
+      }
+    }
   }
 
   private prepareStatements(): void {
@@ -102,7 +274,7 @@ export class EventStore {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     this.stInsertTag = this.db.prepare(
-      `INSERT INTO tags (event_id, tag_name, tag_value) VALUES (?, ?, ?)`,
+      `INSERT INTO tags (event_id, tag_name, tag_value, created_at) VALUES (?, ?, ?, ?)`,
     );
     this.stHasEvent = this.db.prepare(`SELECT 1 FROM events WHERE id = ? LIMIT 1`);
     this.stDeleteByKindAuthor = this.db.prepare(
@@ -124,6 +296,57 @@ export class EventStore {
          SELECT id FROM events ORDER BY created_at ASC LIMIT ?
        )`,
     );
+    // Newer kind-0 events overwrite older metadata; older ones are
+    // dropped via the WHERE clause so an out-of-order replay of a stale
+    // profile event can't clobber a fresh one.
+    this.stUpsertProfile = this.db.prepare(
+      `INSERT INTO profiles (pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(pubkey) DO UPDATE SET
+         name         = excluded.name,
+         display_name = excluded.display_name,
+         nip05        = excluded.nip05,
+         picture      = excluded.picture,
+         lud16        = excluded.lud16,
+         about        = excluded.about,
+         banner       = excluded.banner,
+         website      = excluded.website,
+         updated_at   = excluded.updated_at
+       WHERE excluded.updated_at > profiles.updated_at`,
+    );
+    this.stGetProfile = this.db.prepare(
+      `SELECT pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at
+         FROM profiles WHERE pubkey = ? LIMIT 1`,
+    );
+  }
+
+  // Pull display fields out of a kind-0 event's content. Defensive: any
+  // parse failure or unexpected shape returns null so a malformed profile
+  // event can never break ingest. Field names follow the common pattern
+  // documented in NIP-24 (some clients use display_name, others
+  // displayName — accept both).
+  private decodeProfile(ev: NostrEvent): ProfileRecord | null {
+    let raw: unknown;
+    try { raw = JSON.parse(ev.content); }
+    catch { return null; }
+    if (!raw || typeof raw !== 'object') return null;
+    const o = raw as Record<string, unknown>;
+    const s = (k: string): string | null => {
+      const v = o[k];
+      return typeof v === 'string' && v.length > 0 ? v : null;
+    };
+    return {
+      pubkey:       ev.pubkey,
+      name:         s('name'),
+      display_name: s('display_name') ?? s('displayName'),
+      nip05:        s('nip05'),
+      picture:      s('picture'),
+      lud16:        s('lud16') ?? s('lud06'),
+      about:        s('about'),
+      banner:       s('banner'),
+      website:      s('website'),
+      updated_at:   ev.created_at,
+    };
   }
 
   // Returns true if the event was stored (or already existed), false on
@@ -143,7 +366,20 @@ export class EventStore {
         // via #x filters per NIP-01. Long-named tags are still stored in
         // tags_json on the event row, just not in the indexed table.
         if (t[0] && t[0].length === 1 && typeof t[1] === 'string') {
-          this.stInsertTag.run(e.id, t[0], t[1]);
+          this.stInsertTag.run(e.id, t[0], t[1], e.created_at);
+        }
+      }
+      // Materialize kind-0 profiles inside the same transaction as the
+      // event insert so a crash mid-insert leaves events and profiles
+      // consistent. The upsert's WHERE clause discards out-of-order
+      // older events automatically.
+      if (e.kind === 0) {
+        const p = this.decodeProfile(e);
+        if (p) {
+          this.stUpsertProfile.run(
+            p.pubkey, p.name, p.display_name, p.nip05, p.picture,
+            p.lud16, p.about, p.banner, p.website, p.updated_at,
+          );
         }
       }
     });
@@ -249,6 +485,107 @@ export class EventStore {
     return (this.stCount.get() as { n: number }).n;
   }
 
+  // Look up a materialized profile for one pubkey. Returns null when
+  // we've never ingested a kind-0 for that key — callers should fall
+  // back to a truncated npub render.
+  getProfile(pubkey: string): ProfileRecord | null {
+    const row = this.stGetProfile.get(pubkey) as ProfileRecord | undefined;
+    return row ?? null;
+  }
+
+  // Full-text search over events.content via SQLite's FTS5. Returns
+  // matching events ordered by FTS rank (best first), optionally
+  // narrowed by kind. The query string accepts FTS5 syntax — quoted
+  // phrases, NEAR(), AND/OR/NOT — but callers can pass a plain bag of
+  // words and FTS5 will treat them as an AND of token matches.
+  //
+  // Failure modes (invalid FTS syntax, etc.) bubble up as exceptions
+  // so the route layer can surface them to the user; the dashboard's
+  // search input should pre-escape user input or wrap it in
+  // double-quotes if it wants to feed phrases verbatim.
+  search(query: string, opts: { kinds?: number[]; limit?: number } = {}): NostrEvent[] {
+    const q = query.trim();
+    if (!q) return [];
+    const limit = Math.max(1, Math.min(opts.limit ?? 100, 500));
+    const where: string[] = [`events_fts MATCH ?`];
+    const params: any[]   = [q];
+    if (opts.kinds && opts.kinds.length > 0) {
+      where.push(`e.kind IN (${opts.kinds.map(() => '?').join(',')})`);
+      params.push(...opts.kinds);
+    }
+    const sql = `
+      SELECT e.id, e.pubkey, e.created_at, e.kind, e.content, e.sig, e.tags_json
+        FROM events_fts
+        JOIN events e ON e.rowid = events_fts.rowid
+       WHERE ${where.join(' AND ')}
+       ORDER BY events_fts.rank
+       LIMIT ?
+    `;
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      id: string; pubkey: string; created_at: number; kind: number;
+      content: string; sig: string; tags_json: string;
+    }>;
+    return rows.map(r => ({
+      id:         r.id,
+      pubkey:     r.pubkey,
+      created_at: r.created_at,
+      kind:       r.kind,
+      content:    r.content,
+      sig:        r.sig,
+      tags:       JSON.parse(r.tags_json) as string[][],
+    }));
+  }
+
+  // Prefix-match profiles by name / display_name for compose-time
+  // @-mention autocomplete. Case-insensitive, prefix-only (the
+  // dominant autocomplete pattern; substring matching is left to the
+  // events-content FTS5 path). Mirrors the spirit of nostrdb's
+  // NDB_DB_PROFILE_SEARCH composite-key prefix lookup without the
+  // extra index — at our profile counts (<10k typical) a simple
+  // LIKE 'prefix%' over a NOCASE-indexed column is sub-millisecond.
+  //
+  // Ordering: profiles with a name field rank above display-name-only
+  // matches (so "alice" beats someone whose display_name is "Alice in
+  // …"), then by updated_at DESC so newer / more active profiles win
+  // ties.
+  searchProfiles(prefix: string, limit: number = 10): ProfileRecord[] {
+    const q = prefix.trim().toLowerCase();
+    if (!q) return [];
+    const lim  = Math.max(1, Math.min(limit, 50));
+    // Escape LIKE meta-chars so a literal % or _ in the user's input
+    // doesn't widen the match. SQLite's ESCAPE clause uses a single
+    // backslash by convention.
+    const escaped = q.replace(/[\\%_]/g, '\\$&');
+    const like = `${escaped}%`;
+    const rows = this.db.prepare(
+      `SELECT pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at
+         FROM profiles
+        WHERE (name         IS NOT NULL AND lower(name)         LIKE ? ESCAPE '\\')
+           OR (display_name IS NOT NULL AND lower(display_name) LIKE ? ESCAPE '\\')
+        ORDER BY
+          (name IS NOT NULL AND lower(name) LIKE ? ESCAPE '\\') DESC,
+          updated_at DESC
+        LIMIT ?`,
+    ).all(like, like, like, lim) as ProfileRecord[];
+    return rows;
+  }
+
+  // Bulk variant for "give me everyone in this thread / feed at once".
+  // Returns a Map keyed by pubkey so callers can do O(1) lookups while
+  // rendering. Missing pubkeys are simply absent from the map.
+  getProfiles(pubkeys: string[]): Map<string, ProfileRecord> {
+    const out = new Map<string, ProfileRecord>();
+    if (pubkeys.length === 0) return out;
+    const placeholders = pubkeys.map(() => '?').join(',');
+    const rows = this.db.prepare(
+      `SELECT pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at
+         FROM profiles WHERE pubkey IN (${placeholders})`,
+    ).all(...pubkeys) as ProfileRecord[];
+    for (const r of rows) out.set(r.pubkey, r);
+    return out;
+  }
+
   // Stream every event in created_at ASC order. Yields one at a time via
   // better-sqlite3's iterator so a relay with hundreds of thousands of
   // events doesn't have to fit in memory during /api/relay/database/export.
@@ -279,6 +616,7 @@ export class EventStore {
   // sits inside the dashboard process, callers just keep using it.
   wipe(): void {
     this.db.exec('DELETE FROM events');
+    this.db.exec('DELETE FROM profiles');
     this.db.exec('VACUUM');
   }
 

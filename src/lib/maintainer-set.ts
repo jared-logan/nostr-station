@@ -34,7 +34,7 @@
  *   - name / description / web / hashtags come from the 30617 with
  *     the latest created_at across the verified set.
  */
-import { queryRelays, getTags, type NostrEvent } from './nostr-query.js';
+import { queryRelaysDirect as queryRelays, getTags, type NostrEvent } from './nostr-query.js';
 import { isValidRelayUrl, getGraspServers } from './identity.js';
 
 const MAX_DEPTH    = 3;            // hard cap on graph walks

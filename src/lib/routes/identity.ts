@@ -50,6 +50,7 @@ function proxiedImageUrl(raw: unknown): string | null {
   return signProxyUrl(safe);
 }
 import { readBody } from './_shared.js';
+import { getLocalStore } from '../inproc-store-ref.js';
 
 // ── Profile lookup helpers (kind-0 over ws + 5min memo) ────────────────────
 //
@@ -286,6 +287,34 @@ async function lookupProfilesBatch(
       });
     } else {
       need.push(hex);
+    }
+  }
+
+  // Local-first hydration: the in-process relay materializes kind-0
+  // events into a profiles table at ingest. Pulling from there is
+  // microseconds and works offline. Only pubkeys still unknown after
+  // this fall through to a remote relay query.
+  if (need.length > 0) {
+    const localStore = getLocalStore();
+    if (localStore) {
+      const localProfiles = localStore.getProfiles(need);
+      const stillNeed: string[] = [];
+      const now = Date.now();
+      for (const hex of need) {
+        const p = localProfiles.get(hex);
+        if (!p) { stillNeed.push(hex); continue; }
+        const profile: ProfileLite = { hex, npub: hexToNpub(hex), cachedAt: now };
+        if (p.name)         profile.name        = p.name;
+        if (p.display_name) profile.displayName = p.display_name;
+        if (p.picture)      profile.picture     = p.picture;
+        if (p.nip05)        profile.nip05       = p.nip05;
+        // Seed the route-level cache so subsequent requests skip
+        // even the local-store lookup.
+        PROFILE_CACHE.set(hex, profile);
+        result.set(hex, profile);
+      }
+      need.length = 0;
+      need.push(...stillNeed);
     }
   }
 
@@ -635,6 +664,51 @@ export async function handleIdentity(
     } catch (e: any) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: String(e.message || e) }));
+    }
+    return true;
+  }
+
+  // ── Profile autocomplete ───────────────────────────────────────────────
+  //
+  // GET /api/profiles/autocomplete?q=<prefix>&limit=<n>
+  //   Prefix-match against the local profiles table (kind-0 metadata
+  //   materialized at ingest). Powers @-mention dropdowns in the issue,
+  //   issue-comment, and PR-comment composers — type "@al", get a list
+  //   of profiles whose name or display_name starts with that prefix.
+  //   Hits 0 remote relays; serves entirely from the in-process store.
+  if (url.startsWith('/api/profiles/autocomplete') && method === 'GET') {
+    const u = new URL(url, 'http://localhost');
+    const q = (u.searchParams.get('q') || '').trim();
+    const limit = Math.max(1, Math.min(parseInt(u.searchParams.get('limit') || '10', 10) || 10, 25));
+    if (!q) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ matches: [] }));
+      return true;
+    }
+    const localStore = getLocalStore();
+    if (!localStore) {
+      // No relay running → no local profiles to draw from. Return an
+      // empty result rather than 503 so the composer dropdown stays
+      // silent instead of erroring on every keystroke.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ matches: [] }));
+      return true;
+    }
+    try {
+      const profiles = localStore.searchProfiles(q, limit);
+      const matches = profiles.map(p => ({
+        pubkey:       p.pubkey,
+        npub:         hexToNpub(p.pubkey),
+        name:         p.name,
+        display_name: p.display_name,
+        nip05:        p.nip05,
+        picture:      p.picture ? (signProxyUrl(safeHttpUrl(p.picture) || '') ?? null) : null,
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ matches }));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e?.message || e) }));
     }
     return true;
   }

@@ -82,6 +82,7 @@ import {
   setWhitelistRef,
   type CmdSpec,
 } from './routes/_shared.js';
+import { setLocalStore } from './inproc-store-ref.js';
 import { readStationContext, stationContextPath } from './ai-context.js';
 import { atomicWriteText } from './atomic-write.js';
 import { handleImgProxy } from './img-proxy.js';
@@ -287,6 +288,7 @@ async function maybeStartInprocRelay(): Promise<void> {
   // so project-scaffold and test-identities (Phase B) can consume
   // without importing the relay layer.
   setInprocRelayPort(port);
+  setLocalStore(r.store);
   setWhitelistRef({
     add:    (hex) => r.whitelist.add(hex),
     remove: (hex) => r.whitelist.remove(hex),
@@ -1219,6 +1221,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
               inprocRelay = null;
               setInprocRelayPort(null);
               setWhitelistRef(null);
+              setLocalStore(null);
             }
           }
           if (action === 'start' || action === 'restart') {
@@ -1293,6 +1296,46 @@ export async function startWebServer(port: number): Promise<http.Server> {
           res.end(JSON.stringify({ ok: true }));
         } catch (e: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+        }
+        return;
+      }
+
+      // ── Relay content search (FTS5) ───────────────────────────────────
+      // GET /api/relay/search?q=<text>&kinds=1,7&limit=50
+      //
+      // Surfaces EventStore.search() to the Relay panel's search box.
+      // Returns matching events ordered by FTS rank. The relay must be
+      // running — search has no meaning offline since the corpus lives
+      // in the local DB. Errors from malformed FTS5 syntax come back as
+      // 400 so the UI can hint at proper quoting.
+      if (url.startsWith('/api/relay/search') && method === 'GET') {
+        if (!inprocRelay) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'relay is not running' }));
+          return;
+        }
+        const u = new URL(url, 'http://localhost');
+        const q = (u.searchParams.get('q') || '').trim();
+        if (!q) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ events: [], total: 0 }));
+          return;
+        }
+        const kinds = (u.searchParams.get('kinds') || '')
+          .split(',').map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+        const limit = Math.max(1, Math.min(parseInt(u.searchParams.get('limit') || '50', 10) || 50, 200));
+        try {
+          const events = inprocRelay.store.search(q, {
+            kinds: kinds.length ? kinds : undefined,
+            limit,
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ events, total: events.length }));
+        } catch (e: any) {
+          // FTS5 throws on malformed MATCH expressions ("syntax error
+          // near …") — pass that back so the user can adjust their query.
+          res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
         }
         return;
@@ -2094,6 +2137,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // worse than a dropped log line.
       void inprocRelay?.stop().catch(() => {});
       setInprocRelayPort(null);
+      setLocalStore(null);
       void inprocBlossom?.stop().catch(() => {});
       setInprocBlossomPort(null);
       inprocRelay = null;

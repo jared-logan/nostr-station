@@ -52,7 +52,7 @@ import { findBin } from '../detect.js';
 import { isValidRelayUrl, getGraspServers, readIdentity } from '../identity.js';
 import { safeHttpUrl } from '../url-safety.js';
 import {
-  queryRelays,
+  queryRelaysDirect as queryRelays,
   getCached,
   setCached,
   clearCache,
