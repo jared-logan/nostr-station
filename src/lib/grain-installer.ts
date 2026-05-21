@@ -42,7 +42,16 @@ export type { InstallResult, ProgressCallback };
 // Communities supervisor spawns it from. Exported so callers don't
 // reinvent the path string (a typo here would surface as "binary not
 // found" at supervise time, not at install time).
+//
+// Tests can override the path via the NOSTR_STATION_GRAIN_BIN env var
+// — used to point the supervisor at a stub shell script that
+// simulates clean exits / crashes / long-running children, without
+// requiring a real GRAIN binary on the test machine. The variable
+// is intentionally not documented for end-users: this is for test
+// machinery only.
 export function grainBinPath(): string {
+  const override = process.env.NOSTR_STATION_GRAIN_BIN;
+  if (override) return override;
   return path.join(os.homedir(), '.nostr-station', 'bin', 'grain');
 }
 
