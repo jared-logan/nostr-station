@@ -272,6 +272,37 @@ export async function handleCommunities(
     return true;
   }
 
+  // PATCH detail — accepts { name?, description? } only. Port / privacy
+  // mode / admin pubkey are immutable at this stage: changing them
+  // would require coordinated state changes across the supervisor,
+  // the nvpn roster, and the GRAIN config, which the plan defers.
+  if (route.action === undefined && method === 'PATCH') {
+    const existing = readCommunityManifest(id);
+    if (!existing) { sendError(res, 404, 'community not found'); return true; }
+    let raw: any;
+    try { raw = JSON.parse(await readBody(req)); }
+    catch { sendError(res, 400, 'invalid JSON body'); return true; }
+    const patch: { name?: string; description?: string } = {};
+    if (raw.name !== undefined) {
+      const n = String(raw.name).trim();
+      if (!n)                 { sendError(res, 400, '`name` must be non-empty'); return true; }
+      if (n.length > 60)      { sendError(res, 400, '`name` must be ≤ 60 chars'); return true; }
+      patch.name = n;
+    }
+    if (raw.description !== undefined) {
+      const d = String(raw.description);
+      if (d.length > 200)     { sendError(res, 400, '`description` must be ≤ 200 chars'); return true; }
+      patch.description = d;
+    }
+    if (Object.keys(patch).length === 0) {
+      sendError(res, 400, 'nothing to update — pass `name` and/or `description`');
+      return true;
+    }
+    updateCommunityManifest(id, patch);
+    sendJson(res, 200, { ok: true, community: shapeCommunity(id) });
+    return true;
+  }
+
   // DELETE — stop the supervisor (best-effort) then remove the dir.
   if (route.action === undefined && method === 'DELETE') {
     const exists = readCommunityManifest(id);

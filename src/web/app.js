@@ -22686,6 +22686,10 @@ const CommunitiesPanel = (() => {
   }
 
   // ── Tab: Settings ───────────────────────────────────────────────
+  // Editable name + description (Save → PATCH /api/communities/:id).
+  // Port / privacy / admin pubkey stay immutable for this iteration
+  // — changing them would need coordinated rewrites we're not
+  // ready to ship.
   function renderTabSettings(host, c) {
     host.innerHTML = `
       <div class="form-field">
@@ -22696,15 +22700,42 @@ const CommunitiesPanel = (() => {
         <span class="form-label">Description</span>
         <textarea id="cs-desc" maxlength="200" rows="2">${escapeHtml(c.description || '')}</textarea>
       </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:14px">
+        <button id="cs-save" class="primary">Save</button>
+      </div>
       <div class="form-help">
-        Editing settings is read-only at this stage; the PATCH endpoint
-        lands with the settings-edit flow in a follow-up commit. The
-        Delete button below is wired and irreversible.
+        Port, privacy mode, and admin pubkey are immutable for now —
+        changing them would need a coordinated rewrite across the
+        supervisor, the nvpn roster, and the GRAIN config.
       </div>
       <div class="community-detail-danger">
         <button data-detail-action="delete" class="danger">Delete community…</button>
       </div>
     `;
+    $('cs-save')?.addEventListener('click', async () => {
+      const name = $('cs-name')?.value?.trim();
+      const desc = $('cs-desc')?.value ?? '';
+      if (!name) { window.Toasts?.error?.('Name cannot be empty.'); return; }
+      try {
+        await api(`/api/communities/${c.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ name, description: desc }),
+        });
+        await fetchList();
+        const refreshed = communities.find((x) => x.id === c.id);
+        if (refreshed) {
+          titleEl.textContent = refreshed.name;
+          subtitleEl.textContent = refreshed.description || '';
+          window.Toasts?.info?.('Saved');
+          // Re-render to pick up the new values; the rest of the tab strip
+          // stays in place because we're already on Settings.
+          renderTabSettings(host, refreshed);
+        }
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
     host.querySelector('[data-detail-action="delete"]')?.addEventListener('click', async () => {
       if (!confirm(`Permanently delete "${c.name}" and all its data?\n\nThis cannot be undone.`)) return;
       try {

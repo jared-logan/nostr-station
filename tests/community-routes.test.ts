@@ -47,6 +47,14 @@ test('parseRoute: query string is stripped before matching', () => {
   );
 });
 
+test('parseRoute: detail path matches GET / PATCH / DELETE alike (action stays undefined)', () => {
+  // The route table dispatches on (method, action) — same id-only
+  // route serves GET (detail), PATCH (rename), and DELETE (remove),
+  // so parseRoute returning { id, action: undefined } is the
+  // expected shape for all three.
+  assert.deepEqual(parseRoute(`/api/communities/${ID}`), { id: ID });
+});
+
 test('parseRoute: foreign paths return null (not an empty match)', () => {
   assert.equal(parseRoute('/api/communities/xyz/start'), null,
     'invalid id format must not match');
