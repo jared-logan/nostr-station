@@ -2248,6 +2248,27 @@ export async function startWebServer(port: number): Promise<http.Server> {
         }
       }
 
+      // Communities supervisor — reconcile any GRAIN children that
+      // survived a dashboard hard-kill, then re-supervise our own
+      // orphans. Best-effort: a missing communities subsystem (no
+      // dir on disk yet for solo-dev users) just yields an empty
+      // result and we move on. Never blocks dashboard startup.
+      void (async () => {
+        try {
+          const mod = await import('./community-process.js');
+          const results = await mod.reconcileOrphanedCommunities();
+          for (const r of results) {
+            if (r.outcome === 'respawned') {
+              process.stderr.write(`[communities] re-supervised ${r.id} (pid ${r.pid ?? '?'})\n`);
+            } else if (r.outcome === 'pid-not-ours' && r.note) {
+              process.stderr.write(`[communities] ${r.id}: ${r.note}\n`);
+            }
+          }
+        } catch (e: any) {
+          process.stderr.write(`[communities] reconcile failed: ${e?.message || e}\n`);
+        }
+      })();
+
       // Wire the in-process Blossom handle through to the mail route so
       // /api/mail/attachment can upload without going through the public
       // HTTP layer (we're inside the dashboard's authenticated session
