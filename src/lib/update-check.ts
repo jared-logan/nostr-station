@@ -392,7 +392,7 @@ export async function applyUpdate(emit: SseEmit): Promise<void> {
     // lands the user back in authenticated.
     persistSessions();
     setTimeout(() => {
-      process.exit(UPDATE_RESTART_EXIT_CODE);
+      scheduleRespawnAndExit();
     }, 300);
   } finally {
     status.applying = false;
@@ -402,6 +402,63 @@ export async function applyUpdate(emit: SseEmit): Promise<void> {
 async function rollback(root: string, sha: string, emit: SseEmit): Promise<void> {
   emit({ phase: 'rollback', line: `rolling back to ${sha.slice(0, 7)}`, stream: 'stderr' });
   await runStep({ bin: 'git', args: ['reset', '--hard', sha] }, root, emit);
+}
+
+/**
+ * Hand the next process generation a fresh dashboard, then exit.
+ *
+ * The original implementation only did `process.exit(75)` and relied on
+ * `bin/nostr-station.sh` to respawn node. That works for users on the
+ * shipped launcher but silently strands anyone running the dashboard via
+ * `npm run dev`, `node dist/cli.js` directly, a foreground orb shell, or
+ * a systemd unit without `Restart=on-failure` — the process exits, the
+ * supervisor (if any) sees the non-zero code and quits, and `localhost:3000`
+ * stays dead until the user manually restarts.
+ *
+ * The launcher script now exports `NOSTR_STATION_LAUNCHER=1`, so when
+ * that env is present we preserve the exit-75 path verbatim — same
+ * well-tested behavior. When absent we self-spawn a detached child
+ * carrying the same argv, then exit cleanly. The child inherits stdio
+ * so the user keeps the same terminal experience; `detached: true +
+ * unref()` decouples it from our event loop so we can exit immediately.
+ * `NOSTR_STATION_RESPAWN=1` is set on the child so `startWebServer` (in
+ * web-server.ts) knows to retry briefly on EADDRINUSE while the parent
+ * releases the port.
+ *
+ * If `spawn()` itself throws synchronously (rare: ENOENT on argv0, etc.),
+ * we fall back to exit 75 so a launcher — if one IS present and just
+ * didn't set the env — still gets the original signal.
+ */
+function scheduleRespawnAndExit(): void {
+  if (process.env.NOSTR_STATION_LAUNCHER === '1') {
+    process.exit(UPDATE_RESTART_EXIT_CODE);
+    return;
+  }
+  try {
+    // process.execArgv carries loader hooks (e.g. tsx's --import /
+    // --require pair when the user is running via `npm run dev`). Without
+    // forwarding it, a respawned child can't import `.ts` / `.tsx` files
+    // and crashes on the first import — silently stranding the user.
+    // For built `dist/cli.js` deployments execArgv is typically empty,
+    // so this branch is a no-op there.
+    const args = [...process.execArgv, ...process.argv.slice(1)];
+    const child = spawn(process.execPath, args, {
+      detached: true,
+      stdio: 'inherit',
+      cwd: process.cwd(),
+      env: { ...process.env, NOSTR_STATION_RESPAWN: '1' },
+    });
+    child.unref();
+    // Clean exit so a stale supervisor (or none at all) doesn't try to
+    // respawn a second copy on top of the child we just spawned.
+    process.exit(0);
+  } catch (e) {
+    process.stderr.write(
+      `[update] self-respawn spawn() failed: ${(e as Error).message}\n` +
+      `[update] falling back to exit ${UPDATE_RESTART_EXIT_CODE} — start the dashboard manually if no supervisor is configured\n`,
+    );
+    process.exit(UPDATE_RESTART_EXIT_CODE);
+  }
 }
 
 // ── SSE wrapper ─────────────────────────────────────────────────────────────
