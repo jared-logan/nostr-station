@@ -10741,3 +10741,27 @@ a.client-mention {
   white-space: pre;
   margin: 0;
 }
+
+/* Config → Communities section rows. Three-column layout: label
+   (fixed) / value (flex) / actions (fixed). Echoes .pcfg-row but
+   we keep them separate so future config-section refinements don't
+   accidentally affect projects-config. */
+.cfg-row {
+  display: grid;
+  grid-template-columns: 160px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.cfg-row:first-child { border-top: 0; }
+.cfg-row-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.cfg-row-value  { font-size: 13px; color: var(--text); line-height: 1.5; }
+.cfg-row-value .ok    { color: var(--ok, #3DDC84); }
+.cfg-row-value .warn  { color: var(--warn, #E0A800); }
+.cfg-row-actions { display: flex; gap: 6px; }

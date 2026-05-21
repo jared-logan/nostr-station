@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import { findBin, hasBin } from '../lib/detect.js';
 import { HEARTBEAT_FILE } from '../lib/watchdog.js';
+import { listCommunities, listCommunityMembers } from '../lib/communities.js';
 
 interface StatusProps { json: boolean; }
 
@@ -333,11 +334,52 @@ export function gatherStatus(): ServiceStatus[] {
 }
 
 // Pure JSON serializer — also reused by cli.tsx for --json so Ink never mounts.
+//
+// Output shape:
+//   {
+//     "Relay":   { ok, value },
+//     ...
+//     "communities": [ { id, name, port, status, memberCount, ... }, ... ]
+//   }
+//
+// Communities are listed as a top-level array (not a row) because they
+// are zero-or-many, not the single "is this service up" pattern the
+// other rows follow. `nostr-station status | jq '.communities'`
+// returns a clean view; absent when none exist so the JSON stays
+// terse for the solo-dev common case.
 export function formatStatusJson(rows: ServiceStatus[]): string {
-  return JSON.stringify(
-    Object.fromEntries(rows.map(x => [x.label, { ok: x.ok, value: x.value }])),
-    null, 2,
-  );
+  const out: Record<string, unknown> =
+    Object.fromEntries(rows.map(x => [x.label, { ok: x.ok, value: x.value }]));
+  try {
+    const cs = gatherCommunitiesStatus();
+    if (cs.length > 0) out.communities = cs;
+  } catch { /* communities subsystem optional — never break status */ }
+  return JSON.stringify(out, null, 2);
+}
+
+/**
+ * Per-community summary surfaced in `nostr-station status --json`.
+ * Pure file read — never touches the supervisor, never blocks on I/O
+ * beyond fs.readFileSync. Skipped silently when the communities dir
+ * doesn't exist yet (the common case for solo-dev users).
+ */
+function gatherCommunitiesStatus(): Array<{
+  id:           string;
+  name:         string;
+  port:         number;
+  status:       string;
+  privacyMode:  string;
+  memberCount:  number;
+}> {
+  const list = listCommunities();
+  return list.map((c) => ({
+    id:          c.id,
+    name:        c.name,
+    port:        c.port,
+    status:      c.status ?? 'stopped',
+    privacyMode: c.privacyMode,
+    memberCount: listCommunityMembers(c.id).length,
+  }));
 }
 
 export const Status: React.FC<StatusProps> = ({ json }) => {

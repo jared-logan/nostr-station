@@ -2038,6 +2038,15 @@ const StatusPanel = {
             <span class="muted">loading…</span>
           </div>
         </a>
+        <a class="dash-card" href="#communities" data-card="communities" title="Managed GRAIN private relays.">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Communities</span>
+            <span class="dash-card-cta">Open →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-communities">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
         <a class="dash-card" href="#chat" data-card="ai">
           <div class="dash-card-head">
             <span class="dash-card-label">AI · Chat</span>
@@ -2055,7 +2064,61 @@ const StatusPanel = {
     this._fillProjectsCard();
     this._fillRelayCard();
     this._fillBlossomCard();
+    this._fillCommunitiesCard();
     this._fillAiCard();
+  },
+
+  // Communities quick-glance card. Two states:
+  //   0 communities → no-nag teaser + inline "+ New Community" CTA
+  //   1+ communities → "<n> hosted" + a status dot summing health
+  // Click anywhere on the card opens the Communities panel; clicking
+  // the inline CTA opens the create wizard directly.
+  async _fillCommunitiesCard() {
+    const el = $('dash-card-communities');
+    if (!el) return;
+    try {
+      const r = await api('/api/communities').catch(() => ({ communities: [] }));
+      const list = Array.isArray(r?.communities) ? r.communities : [];
+      if (list.length === 0) {
+        el.innerHTML = `
+          <div class="muted" style="margin-bottom:6px">Run a relay for your family or friends</div>
+          <button class="primary" id="dash-community-create" style="font-size:11px;padding:4px 10px">+ New Community</button>
+        `;
+        // The card itself navigates to #communities on click; stop the
+        // CTA from bubbling so it goes through the wizard path instead.
+        $('dash-community-create')?.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          location.hash = '#communities';
+          // Defer so the panel mounts before we open the wizard on top.
+          setTimeout(() => { CommunitiesPanel.openWizard(); }, 50);
+        });
+        return;
+      }
+      // Sum status across all communities for the dot color.
+      let anyError = false, anyWarn = false;
+      for (const c of list) {
+        if (c.status === 'error') anyError = true;
+        else if (c.status === 'unhealthy' || c.status === 'restarting') anyWarn = true;
+      }
+      const dotCls = anyError ? 'community-dot-err'
+                  :  anyWarn  ? 'community-dot-warn'
+                  :  list.some((c) => c.status === 'running') ? 'community-dot-ok'
+                  :  'community-dot-idle';
+      const top = list.slice(0, 2)
+        .map((c) => `<div style="font-size:11px"><span class="community-dot ${dotCls === 'community-dot-err' && c.status === 'error' ? 'community-dot-err' : ''}"></span> ${(c.name || '').slice(0, 24)}</div>`)
+        .join('');
+      el.innerHTML = `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+          <span class="community-dot ${dotCls}"></span>
+          <strong>${list.length}</strong>
+          <span class="muted">${list.length === 1 ? 'hosted' : 'hosted'}</span>
+        </div>
+        ${top}
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">unavailable</span>`;
+    }
   },
 
   async _fillIdentityCard() {
@@ -15052,6 +15115,19 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
+      <!-- Communities — managed GRAIN private relays. Shows install
+           state of the grain binary, the explicit nvpn dependency
+           rule for private-network mode, and a feature toggle. -->
+      <details class="config-section cfg-collapsible" id="cfg-communities-section">
+        <summary>
+          <h3>Communities</h3>
+          <span class="cfg-summary-meta" id="cfg-communities-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-communities-body">
+          <div class="muted">loading…</div>
+        </div>
+      </details>
+
       <!-- nsite section. Mirrors Titan Browser's Settings tab: content
            relays, profile-discovery relays, Blossom fallback servers,
            and the NSIT name indexer pubkey. Body filled lazily by JS. -->
@@ -15662,9 +15738,96 @@ const ConfigPanel = (() => {
     // it round-trips to /api/blossom-config — failures degrade to a
     // muted "not running" line with an enable button.
     paintBlossomConfigSection();
+    paintCommunitiesConfigSection();
     paintMailConfigSection();
     paintWatchdogConfigSection();
     paintNsiteConfigSection();
+  }
+
+  // ── Communities section ────────────────────────────────────────────
+  // Three rows:
+  //   1. grain binary state + install/reinstall action
+  //   2. nvpn dependency (read-only — explains the relationship; the
+  //      action sits in the nvpn tab where it belongs)
+  //   3. counts (hosted / running) for at-a-glance triage
+  async function paintCommunitiesConfigSection() {
+    const body    = $('cfg-communities-body');
+    const summary = $('cfg-communities-summary');
+    if (!body) return;
+
+    let statusRows = null;
+    try { statusRows = await api('/api/status', undefined, { silent: true }); }
+    catch { /* keep statusRows null; render unavailable below */ }
+    let communities = [];
+    try {
+      const r = await api('/api/communities', undefined, { silent: true });
+      communities = Array.isArray(r?.communities) ? r.communities : [];
+    } catch { /* empty list */ }
+
+    const grainRow = statusRows?.rows?.find?.((r) => r.id === 'grain')
+                   ?? statusRows?.find?.((r) => r.id === 'grain')
+                   ?? null;
+    const grainInstalled = !!grainRow?.ok;
+    const nvpnRow  = statusRows?.rows?.find?.((r) => r.id === 'vpn')
+                   ?? statusRows?.find?.((r) => r.id === 'vpn')
+                   ?? null;
+    const nvpnOk   = !!nvpnRow?.ok;
+    const hosted   = communities.length;
+    const running  = communities.filter((c) => c.status === 'running').length;
+
+    if (summary) {
+      summary.textContent = !grainInstalled
+        ? 'grain not installed'
+        : hosted === 0
+          ? 'grain ready · no communities yet'
+          : `${running}/${hosted} running`;
+    }
+
+    body.innerHTML = `
+      <div class="cfg-row">
+        <div class="cfg-row-label">grain binary</div>
+        <div class="cfg-row-value">
+          ${grainInstalled
+            ? `<span class="ok">installed</span> at ~/.nostr-station/bin/grain`
+            : `<span class="warn">not installed</span>`}
+        </div>
+        <div class="cfg-row-actions">
+          <button id="cfg-grain-install">${grainInstalled ? 'Reinstall' : 'Install grain'}</button>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <div class="cfg-row-label">Dependencies</div>
+        <div class="cfg-row-value">
+          Private-network communities also need <strong>nvpn</strong>.
+          ${nvpnOk
+            ? `<span class="ok">nvpn is running</span> — private-network mode is available.`
+            : `<span class="warn">nvpn isn't running</span> — only local-only communities can start. Open the nostr-vpn panel to fix.`}
+        </div>
+        <div class="cfg-row-actions">
+          <a href="#vpn" class="link">Open nvpn →</a>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <div class="cfg-row-label">Hosted</div>
+        <div class="cfg-row-value">
+          ${hosted} ${hosted === 1 ? 'community' : 'communities'}
+          ${hosted > 0 ? ` · ${running} running` : ''}
+        </div>
+        <div class="cfg-row-actions">
+          <a href="#communities" class="link">Open Communities →</a>
+        </div>
+      </div>
+    `;
+    $('cfg-grain-install')?.addEventListener('click', () => {
+      // Reuse the existing tools-install SSE flow used for nak/ngit so
+      // the user sees the same install console + log line stream.
+      if (window.Updates?.openToolInstall) {
+        window.Updates.openToolInstall('grain', grainInstalled ? { force: true } : {});
+      } else {
+        // Fallback for builds where the helper isn't on Updates:
+        location.hash = '#status';
+      }
+    });
   }
 
   // ── nsite section ─────────────────────────────────────────────────────
