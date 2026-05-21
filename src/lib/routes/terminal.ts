@@ -148,6 +148,11 @@ export function mountTerminalWebSocket(
 
   server.on('upgrade', (req, socket, head) => {
     const url = req.url || '';
+    // Only act on /api/terminal/ws/* URLs — other upgrade handlers (e.g.
+    // relay-proxy in routes/relay-proxy.ts) own different path prefixes
+    // and need a chance to claim the upgrade. Returning silently here
+    // lets other handlers see the same `upgrade` event.
+    if (!url.startsWith('/api/terminal/')) return;
     const match = url.match(/^\/api\/terminal\/ws\/([a-f0-9]{16,})(?:\?.*)?$/);
     if (!match) {
       socket.destroy();

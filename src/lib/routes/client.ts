@@ -47,6 +47,7 @@ import { queryRelaysDirect as queryRelays, type NostrEvent } from '../nostr-quer
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { publishEventToRelays } from './repo.js';
 import { safeHttpUrl } from '../url-safety.js';
+import { signProxyUrl } from '../img-proxy-sign.js';
 import { readBody } from './_shared.js';
 import { findBin } from '../detect.js';
 
@@ -324,8 +325,17 @@ async function fetchProfiles(pubkeys: string[]): Promise<Map<string, ProfileLite
     // Sanitize picture + banner at cache time so callers can render
     // <img src> without re-checking schemes. Same defense-in-depth
     // against javascript: / data: smuggling in user-controlled URLs.
-    if (profile.picture) profile.picture = safeHttpUrl(profile.picture) || undefined;
-    if (profile.banner)  profile.banner  = safeHttpUrl(profile.banner)  || undefined;
+    // Then pre-sign as a /api/img-proxy URL so the dashboard's CSP
+    // img-src 'self' is satisfied and the proxy's signature gate
+    // accepts the request (see src/lib/img-proxy-sign.ts).
+    if (profile.picture) {
+      const safe = safeHttpUrl(profile.picture);
+      profile.picture = safe ? (signProxyUrl(safe) ?? undefined) : undefined;
+    }
+    if (profile.banner) {
+      const safe = safeHttpUrl(profile.banner);
+      profile.banner = safe ? (signProxyUrl(safe) ?? undefined) : undefined;
+    }
     profileCache.set(hex, profile);
     out.set(hex, profile);
   }

@@ -85,6 +85,7 @@ import {
 import { readStationContext, stationContextPath } from './ai-context.js';
 import { atomicWriteText } from './atomic-write.js';
 import { handleImgProxy } from './img-proxy.js';
+import { signProxyUrl } from './img-proxy-sign.js';
 import { seedStationContext, USER_REGION_BEGIN, USER_REGION_END } from './editor.js';
 import { handleProjects } from './routes/projects.js';
 import { handleBlossomConfig } from './routes/blossom-config.js';
@@ -102,6 +103,7 @@ import { handleStatus } from './routes/status.js';
 import { runScratchGc } from './scratch-gc.js';
 import { handleAi } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
+import { mountRelayProxyWebSocket } from './routes/relay-proxy.js';
 import { handleNvpn } from './routes/nvpn.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
@@ -599,6 +601,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // signed against a forged `u` tag. Since the dashboard only ever
       // listens on loopback, any other Host value is either a
       // misconfiguration or an attack — either way, refuse.
+      // nostr-station binds to loopback and expects no reverse proxy. We do
+      // NOT honor `x-forwarded-host`, `x-forwarded-for`, `x-forwarded-proto`,
+      // or RFC 7239 `forwarded` anywhere — the rebinding defense and every
+      // security-relevant URL (NIP-98 `u`-tag at auth.ts:481) are derived
+      // from the bound port, never from these attacker-controlled headers.
+      // If reverse-proxy support is added later, re-audit before reading any
+      // of them.
       const hostHeader = String(req.headers['host'] || '').toLowerCase();
 
       // ── H1a: Nsite per-origin subdomain dispatch ──────────────────────
@@ -1063,6 +1072,47 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // allowlist / cache behavior.
       if (url === '/api/img-proxy' && method === 'GET') {
         await handleImgProxy(req, res);
+        return;
+      }
+
+      // Session-authed batch signer for proxy URLs that the browser
+      // discovers at render time — primarily markdown image hrefs
+      // extracted from kind-30023 articles, README files, comment
+      // bodies, etc. The dashboard pre-signs profile pictures /
+      // banners / Ditto theme background at JSON-emission time, so
+      // this endpoint exists for the residual surface where the URL
+      // isn't known until the browser parses content. Session-gated
+      // because the auth middleware ran above (`/api/img-proxy/sign`
+      // is NOT in PUBLIC_API_PREFIXES). XSS-in-session can still call
+      // this — see src/lib/img-proxy-sign.ts threat-model comment for
+      // the documented residual.
+      if (url === '/api/img-proxy/sign' && method === 'POST') {
+        let parsed: any = {};
+        try { parsed = JSON.parse(await readBody(req)); }
+        catch { res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'bad json' })); return; }
+        const inputs: unknown = parsed?.urls;
+        if (!Array.isArray(inputs)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'urls: array required' }));
+          return;
+        }
+        // Cap per-call so a misbehaving client can't ask us to sign
+        // thousands of URLs in one shot. Real markdown renders carry
+        // a handful of images per body; 64 covers worst-case README
+        // pages comfortably.
+        if (inputs.length > 64) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'too many urls (max 64)' }));
+          return;
+        }
+        const signed: Record<string, string | null> = {};
+        for (const raw of inputs) {
+          if (typeof raw !== 'string') continue;
+          signed[raw] = signProxyUrl(raw);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ signed }));
         return;
       }
 
@@ -2016,6 +2066,12 @@ export async function startWebServer(port: number): Promise<http.Server> {
     // for H1 (DNS rebinding) and H2 (CSRF) checks. See the route module
     // for the full URL grammar + control-frame protocol.
     mountTerminalWebSocket(server, { allowedHosts, isLoopbackUrl });
+
+    // ── Relay-proxy WebSocket (extracted to routes/relay-proxy.ts) ────
+    // Browser-side stats/following lookups used to open wss:// connections
+    // directly; they now route through this proxy so the dashboard's CSP
+    // connect-src can drop `wss:`. Same H1 + H2 + auth gates as terminal.
+    mountRelayProxyWebSocket(server, { allowedHosts, isLoopbackUrl });
 
     // PID file management (B3): write once we're bound, drop on graceful
     // exit. The file lets `nostr-station uninstall` refuse to nuke services

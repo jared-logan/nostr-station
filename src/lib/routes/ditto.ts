@@ -19,6 +19,7 @@ import { WebSocket } from 'ws';
 import { readIdentity, npubToHex } from '../identity.js';
 import { MAX_WS_PAYLOAD } from '../ws-limits.js';
 import { safeHttpUrl } from '../url-safety.js';
+import { signProxyUrl } from '../img-proxy-sign.js';
 
 const DITTO_THEME_KIND = 16767;
 const RELAY_TIMEOUT_MS = 5000;
@@ -185,6 +186,13 @@ export async function handleDitto(
         return true;
       }
 
+      // Pre-sign bgImage so the dashboard's <img>/CSS background renders
+      // it via /api/img-proxy without a separate signing roundtrip. The
+      // client stashes this in localStorage as nostr-station:ditto-theme
+      // and theme-preload.js uses it as-is on next boot — a process
+      // restart invalidates the signature, but the app.js re-fetch loop
+      // refreshes the stored value on every theme sync.
+      const signedBg = parsed.bgImage ? signProxyUrl(parsed.bgImage) : null;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         found: true,
@@ -192,7 +200,7 @@ export async function handleDitto(
         primary:    parsed.primary,
         background: parsed.background,
         text:       parsed.text,
-        bgImage:    parsed.bgImage,
+        bgImage:    signedBg ?? parsed.bgImage,
         bgMode:     parsed.bgMode,
         publishedAt: parsed.publishedAt,
       }));

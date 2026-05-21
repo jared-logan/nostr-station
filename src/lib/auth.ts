@@ -442,7 +442,13 @@ const PUBLIC_API_PREFIXES = [
 ];
 
 export function isPublicApi(urlPath: string): boolean {
-  return PUBLIC_API_PREFIXES.some(p => urlPath === p || urlPath.startsWith(p));
+  // Trailing-slash entries are intentional prefix matches (e.g.
+  // /api/auth/bunker-session/<id>); other entries are exact-match only
+  // so a new subpath under a public root (e.g. /api/img-proxy/sign)
+  // doesn't accidentally inherit the public posture of its parent.
+  return PUBLIC_API_PREFIXES.some(p =>
+    urlPath === p || (p.endsWith('/') && urlPath.startsWith(p)),
+  );
 }
 
 export function requireSession(

@@ -37,6 +37,18 @@ import {
   deriveGitIdentity,
 } from '../git-identity.js';
 import { safeHttpUrl } from '../url-safety.js';
+import { signProxyUrl } from '../img-proxy-sign.js';
+
+// Server-side helper: sanitize a raw attacker-controlled URL (kind-0
+// `picture` / `banner`) through the scheme allowlist, then return a
+// pre-signed /api/img-proxy URL the browser can drop straight into an
+// <img src=>. Loopback / non-http(s) inputs return null (caller omits
+// the field; client renders absent state).
+function proxiedImageUrl(raw: unknown): string | null {
+  const safe = safeHttpUrl(raw);
+  if (!safe) return null;
+  return signProxyUrl(safe);
+}
 import { readBody } from './_shared.js';
 
 // ── Profile lookup helpers (kind-0 over ws + 5min memo) ────────────────────
@@ -578,7 +590,7 @@ export async function handleIdentity(
       // Scheme-gate the attacker-controlled `picture` URL so a hostile
       // kind-0 can't land `javascript:` / `data:image/svg+xml` into an
       // <img src>. Defense-in-depth alongside the CSP img-src allowlist.
-      const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture), banner: safeHttpUrl((p as any)?.banner) };
+      const sanitized = { ...p, picture: proxiedImageUrl((p as any)?.picture), banner: proxiedImageUrl((p as any)?.banner) };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(sanitized));
     } catch (e: any) {
@@ -597,7 +609,7 @@ export async function handleIdentity(
     }
     try {
       const p = await lookupProfile(ident.npub, ident.readRelays);
-      const sanitized = { ...p, picture: safeHttpUrl((p as any)?.picture), banner: safeHttpUrl((p as any)?.banner) };
+      const sanitized = { ...p, picture: proxiedImageUrl((p as any)?.picture), banner: proxiedImageUrl((p as any)?.banner) };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(sanitized));
     } catch (e: any) {
@@ -617,8 +629,9 @@ export async function handleIdentity(
     }
     try {
       const p = await lookupProfile(ident.npub, ident.readRelays);
+      const sanitized = { ...p, picture: proxiedImageUrl((p as any)?.picture), banner: proxiedImageUrl((p as any)?.banner) };
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(p));
+      res.end(JSON.stringify(sanitized));
     } catch (e: any) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: String(e.message || e) }));
@@ -676,7 +689,13 @@ export async function handleIdentity(
       const profiles: Record<string, any> = {};
       let resolved = 0;
       for (const [k, v] of map) {
-        profiles[k] = v;
+        // Pre-sign picture/banner so the browser embeds /api/img-proxy?…&s=…
+        // directly. Without signing the proxy would refuse the URL at
+        // render time and avatars would 401.
+        const sanitized: any = { ...v };
+        if ('picture' in v) sanitized.picture = proxiedImageUrl((v as any).picture);
+        if ('banner'  in v) sanitized.banner  = proxiedImageUrl((v as any).banner);
+        profiles[k] = sanitized;
         if (v.name || v.displayName) resolved++;
       }
       // Always log when we asked for profiles but got mostly nothing —

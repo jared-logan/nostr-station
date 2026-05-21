@@ -26,26 +26,42 @@
 // if a vendor file fails to load.
 
 /**
- * Route external image URLs through the dashboard's /api/img-proxy
- * endpoint. With CSP `img-src 'self' data:` (Section I2 of the
- * security plan), raw https:// <img src=> tags are refused — every
- * external image (avatars, hero pictures, inline images in markdown)
- * must be proxied so the bytes arrive over the dashboard origin.
+ * Decide how to render an external image URL.
  *
- * Pass-through (no proxy):
- *   - data: URLs (inline-encoded bytes — already on the origin)
- *   - blob: URLs
- *   - Same-origin or relative paths
- *   - Loopback hosts (covers in-process Blossom + nsite subdomains)
- *   - http:// URLs (the proxy refuses them; leave as direct load so
- *     the legacy image just silently fails instead of returning a
- *     proxy error — preserves prior UI behavior on these edge cases)
+ * The dashboard's CSP is `img-src 'self' data:`, so raw https:// loads
+ * are refused — every external image must route through /api/img-proxy
+ * with a server-issued HMAC signature (see src/lib/img-proxy-sign.ts).
+ * Two paths emit signed URLs depending on where the URL came from:
+ *
+ *   - **Server-emitted fields** (profile picture/banner, Ditto theme
+ *     bgImage, ProfileLite in /api/profiles / /api/client/feed). The
+ *     server pre-signs at JSON-emission time and the URL arrives at
+ *     the browser as `/api/img-proxy?u=…&s=…` already. `proxyImageUrl`
+ *     detects the already-signed shape and passes through unchanged.
+ *
+ *   - **Markdown image hrefs** (README content, kind-30023 articles,
+ *     comment bodies). These aren't known to the server at JSON time —
+ *     they appear inside markdown text. The marked.js `image()` renderer
+ *     emits `<img data-raw-src="…">` with NO `src`, then
+ *     `signMarkdownImages()` (scheduled after innerHTML mounts) batches
+ *     the raw URLs to POST /api/img-proxy/sign and fills in `src`.
+ *
+ * Pass-through (no proxy needed):
+ *   - data: / blob: URLs (already self-contained)
+ *   - Same-origin or relative paths (CSP `'self'` allows)
+ *   - Loopback hosts (in-process Blossom, nsite subdomains)
+ *   - http:// (proxy refuses; let the image silently fail rather than
+ *     return a confusing proxy error)
+ *   - Already-signed /api/img-proxy URLs (the server pre-signed)
  */
 export function proxyImageUrl(u) {
   if (!u) return u;
   const s = String(u).trim();
   if (!s) return s;
   if (s.startsWith('data:') || s.startsWith('blob:')) return s;
+  // Already-signed proxy URL emitted by the server (profile JSON,
+  // Ditto theme, etc.) — pass through unchanged.
+  if (s.startsWith('/api/img-proxy?')) return s;
   if (s.startsWith('/') && !s.startsWith('//'))       return s;
   try {
     const parsed = new URL(s, (typeof location !== 'undefined' && location.href) || 'http://127.0.0.1');
@@ -53,10 +69,109 @@ export function proxyImageUrl(u) {
     const h = parsed.hostname;
     if (h === '127.0.0.1' || h === 'localhost' || h === '::1' || h.endsWith('.localhost')) return s;
     if (parsed.protocol !== 'https:') return s;
+    // Caller (e.g. legacy app.js render path) handed us a raw https URL.
+    // Without a server signature the proxy will 401 the request, so the
+    // <img> will show alt text. Surface a console hint once per URL so
+    // missing pre-signing sites are easy to spot during development.
+    if (typeof console !== 'undefined' && console.warn) {
+      warnUnsigned(parsed.toString());
+    }
     return `/api/img-proxy?u=${encodeURIComponent(parsed.toString())}`;
   } catch {
     return s;
   }
+}
+
+const _warnedUrls = new Set();
+function warnUnsigned(u) {
+  if (_warnedUrls.size > 200) return;  // bound the dedupe set
+  if (_warnedUrls.has(u)) return;
+  _warnedUrls.add(u);
+  try { console.warn('[img-proxy] unsigned URL, proxy will 401:', u); } catch (_) {}
+}
+
+/**
+ * Walk a freshly-mounted DOM subtree for `<img data-raw-src>` placeholders
+ * emitted by the marked.js image renderer, batch the raw URLs to
+ * /api/img-proxy/sign, and fill in `src` with the returned signed URLs.
+ *
+ * Fire-and-forget: callers do not await this. Image bytes appear with
+ * a one-roundtrip delay; alt text shows in the interim. A failed sign
+ * call leaves the placeholder unset, so the browser renders the alt
+ * text — the same fallback shape as a missing image.
+ *
+ * Used by app.js wherever renderMarkdown() output is dropped into the
+ * DOM (README preview, patch cover letter, issue/comment bodies, mail
+ * body). Safe to call multiple times on the same subtree — the
+ * `data-signed` flag prevents redundant work.
+ */
+/**
+ * MutationObserver that auto-runs signMarkdownImages on any DOM
+ * subtree containing freshly-mounted `<img data-raw-src>` elements.
+ * Zero callsite changes: every `renderMarkdown` consumer just drops
+ * the HTML into innerHTML the way it did pre-J9, and the observer
+ * picks up the pending images on the next microtask.
+ *
+ * Watches document.body for childList + subtree mutations. Cost is
+ * one (cheap) DOM walk per mutation batch; the per-image data-signed
+ * flag short-circuits redundant work.
+ */
+let _markdownObserver = null;
+export function startMarkdownImageObserver() {
+  if (_markdownObserver) return;
+  if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return;
+  if (!document.body) return;
+  _markdownObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.type !== 'childList') continue;
+      for (const node of m.addedNodes) {
+        if (node.nodeType !== 1) continue;  // Element only
+        // Cheap fast-path: only walk subtrees that actually contain a
+        // data-raw-src node. querySelector short-circuits on first hit.
+        if (node.matches?.('img[data-raw-src]') || node.querySelector?.('img[data-raw-src]')) {
+          signMarkdownImages(node.parentNode || node);
+        }
+      }
+    }
+  });
+  _markdownObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+export function signMarkdownImages(rootEl) {
+  if (!rootEl || !rootEl.querySelectorAll) return;
+  const imgs = rootEl.querySelectorAll('img[data-raw-src]:not([data-signed])');
+  if (!imgs.length) return;
+  const urls = [];
+  const seen = new Set();
+  for (const el of imgs) {
+    const raw = el.getAttribute('data-raw-src') || '';
+    if (raw && !seen.has(raw)) { urls.push(raw); seen.add(raw); }
+  }
+  if (!urls.length) return;
+  const token = (typeof localStorage !== 'undefined'
+    ? localStorage.getItem('ns-session-token')
+    : '') || '';
+  fetch('/api/img-proxy/sign', {
+    method: 'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ urls }),
+  }).then(r => r.ok ? r.json() : null).then(payload => {
+    if (!payload || typeof payload.signed !== 'object') return;
+    const lookup = payload.signed;
+    for (const el of imgs) {
+      const raw = el.getAttribute('data-raw-src') || '';
+      const signed = lookup[raw];
+      if (typeof signed === 'string') {
+        el.setAttribute('src', signed);
+      }
+      el.setAttribute('data-signed', '1');
+    }
+  }).catch(() => {
+    // Network error / 401 — leave placeholders unset, alt text renders.
+  });
 }
 
 let markedConfigured = false;
@@ -81,14 +196,30 @@ function ensureMarkedConfigured() {
       code({ text, lang }) {
         return renderCodeBlock(text, lang);
       },
-      // Rewrite image src through the dashboard's image proxy so
-      // CSP img-src 'self' data: blocks raw https:// loads. marked
-      // v15+ passes { href, title, text } for image tokens.
+      // Emit a placeholder <img> with the RAW URL stashed in
+      // data-raw-src. signMarkdownImages() (called by app.js after
+      // each renderMarkdown mount) batches these to /api/img-proxy/sign
+      // and fills in `src` asynchronously. We can't sign here because
+      // the renderer is synchronous; we can't pre-sign server-side
+      // because the URL only appears mid-markdown parse. marked v15+
+      // passes { href, title, text } for image tokens.
+      //
+      // URLs that aren't candidates for proxying (data:, blob:,
+      // same-origin, loopback) emit a normal <img src=…> via
+      // proxyImageUrl's pass-through path — no signing needed.
       image({ href, title, text }) {
-        const proxied = proxyImageUrl(href || '');
+        const raw = String(href || '');
+        const passthrough = proxyImageUrl(raw);
         const t = title ? ` title="${escapeHtml(title)}"` : '';
         const a = text  ? ` alt="${escapeHtml(text)}"`    : '';
-        return `<img src="${escapeHtml(proxied)}"${a}${t}>`;
+        // If proxyImageUrl returned the raw URL unchanged (pass-through
+        // case — data:, loopback, same-origin), drop it straight into
+        // src. Otherwise it produced an unsigned proxy URL we can't
+        // use; stash the raw URL in data-raw-src for async signing.
+        if (passthrough === raw && !raw.startsWith('/api/img-proxy?')) {
+          return `<img src="${escapeHtml(passthrough)}"${a}${t}>`;
+        }
+        return `<img data-raw-src="${escapeHtml(raw)}"${a}${t}>`;
       },
     },
   });
@@ -103,7 +234,12 @@ const ALLOWED_URI_REGEXP =
   /^(?:(?:https?|mailto|nostr|magnet):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
 
 const PURIFY_CONFIG = {
-  ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'class', 'id', 'name', 'lang', 'target', 'rel', 'colspan', 'rowspan', 'align'],
+  // `data-raw-src` carries the un-signed external URL through DOMPurify
+  // for the async-sign step (see signMarkdownImages). It's a plain
+  // string attribute, not a URI-context attribute, so it's not subject
+  // to ALLOWED_URI_REGEXP — the URL value is never used until
+  // signMarkdownImages re-validates it server-side.
+  ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'class', 'id', 'name', 'lang', 'target', 'rel', 'colspan', 'rowspan', 'align', 'data-raw-src'],
   ALLOWED_URI_REGEXP,
   // Keep <table>, <thead>, etc. (GFM tables) — DOMPurify allows them
   // by default; we just need to be sure ALLOWED_ATTR includes the
