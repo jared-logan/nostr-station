@@ -10606,3 +10606,138 @@ a.client-mention {
   letter-spacing: 0.05em;
 }
 .community-wizard .review-grid .kv-v { color: var(--text-bright); font-size: 13px; }
+
+/* Community detail — tab strip + per-tab content. */
+.community-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 0 0 0;
+  margin: 6px 0 0;
+}
+.community-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.community-tab:hover  { color: var(--text-bright); }
+.community-tab.active { color: var(--text-bright); border-bottom-color: var(--accent); }
+.community-tab-body   { padding-top: 14px; }
+
+/* Status tab — connection card. */
+.community-conn-card {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.community-conn-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0 4px;
+}
+.community-conn-row code {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* Members tab — avatar table + add-member row. */
+.community-members-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.community-members-add input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  color: var(--text-bright);
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+}
+.community-members-add input:focus { outline: none; border-color: var(--accent); }
+.community-members {
+  width: 100%;
+  border-collapse: collapse;
+}
+.community-members th,
+.community-members td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  vertical-align: middle;
+}
+.community-members th {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.community-members tr:hover { background: var(--bg-hover); }
+.community-avatar {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg-hover);
+}
+.community-members .muted { color: var(--muted); font-size: 11px; }
+.empty-state-inline {
+  padding: 18px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  background: var(--bg-card);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+}
+
+/* Moderation tab — placeholder for v1. */
+.community-mod-placeholder {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.community-mod-placeholder ul { margin: 8px 0 0; padding-left: 18px; }
+.community-mod-placeholder li { margin: 4px 0; }
+
+/* Logs tab — tailing pre block. */
+.community-logs-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.community-logs {
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  background: #000;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px;
+  max-height: 480px;
+  overflow-y: auto;
+  white-space: pre;
+  margin: 0;
+}

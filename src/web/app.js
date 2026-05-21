@@ -22260,13 +22260,26 @@ const CommunitiesPanel = (() => {
     if (state.view === 'detail' && state.communityId === id) renderDetail();
   }
 
-  // ── Detail view (Status tab only in this commit) ────────────────
-  function openDetail(id) {
-    state = { view: 'detail', communityId: id, tab: 'status' };
+  // ── Detail view ─────────────────────────────────────────────────
+  // Five tabs: Status / Members / Moderation / Settings / Logs.
+  // renderDetail builds the shared chrome (back link, status banner,
+  // tab strip) and dispatches to the active tab's renderer. Each
+  // renderer is responsible for its own data fetching + DOM.
+  const TABS = [
+    { id: 'status',     label: 'Status'     },
+    { id: 'members',    label: 'Members'    },
+    { id: 'moderation', label: 'Moderation' },
+    { id: 'settings',   label: 'Settings'   },
+    { id: 'logs',       label: 'Logs'       },
+  ];
+
+  function openDetail(id, tab) {
+    state = { view: 'detail', communityId: id, tab: tab || 'status' };
     location.hash = `#communities/${id}`;
     renderDetail();
   }
   function closeDetail() {
+    closeLogsStream();
     state = { view: 'list' };
     location.hash = '#communities';
     renderList();
@@ -22280,6 +22293,7 @@ const CommunitiesPanel = (() => {
     // Hide the list-level head actions while a community is selected;
     // we surface lifecycle in the detail body instead.
     headActions.style.display = 'none';
+    closeLogsStream();
     body.innerHTML = `
       <div class="community-detail">
         <div class="community-detail-head">
@@ -22296,41 +22310,295 @@ const CommunitiesPanel = (() => {
           ${c.uptimeMs ? `<span class="community-detail-uptime">up ${formatUptime(c.uptimeMs)}</span>` : ''}
           ${c.lastError ? `<div class="community-detail-error">${escapeHtml(c.lastError)}</div>` : ''}
         </div>
-        <div class="community-detail-meta">
-          <div><span class="kv-k">Port</span><span class="kv-v">:${c.port}</span></div>
-          <div><span class="kv-k">Members</span><span class="kv-v">${c.memberCount || 0}</span></div>
-          <div><span class="kv-k">Mode</span><span class="kv-v">${c.privacyMode === 'private-network' ? 'Private (nvpn)' : 'Local only'}</span></div>
-          ${c.nvpnNetworkId ? `<div><span class="kv-k">Network</span><span class="kv-v">${escapeHtml(c.nvpnNetworkId)}</span></div>` : ''}
-          <div><span class="kv-k">Admin npub</span><span class="kv-v community-mono">${escapeHtml(c.adminPubkey.slice(0,8))}…</span></div>
+        <div class="community-tabs" role="tablist">
+          ${TABS.map((t) => `
+            <button class="community-tab${state.tab === t.id ? ' active' : ''}" data-tab="${t.id}" role="tab" aria-selected="${state.tab === t.id}">${t.label}</button>
+          `).join('')}
         </div>
-        <div class="community-detail-footnote">
-          The Status, Members, Moderation, Settings, and Logs tabs land in the next iteration.
-        </div>
-        <div class="community-detail-danger">
-          <button data-action="delete" data-id="${c.id}" class="danger">Delete community…</button>
-        </div>
+        <div class="community-tab-body" id="community-tab-body"></div>
       </div>
     `;
     $('community-back')?.addEventListener('click', closeDetail);
     body.querySelectorAll('[data-action]').forEach((btn) => {
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
-        const action = btn.getAttribute('data-action');
-        const id     = btn.getAttribute('data-id');
-        if (action === 'delete') {
-          if (!confirm(`Permanently delete "${c.name}" and all its data?\n\nThis cannot be undone.`)) return;
-          try {
-            await api(`/api/communities/${id}`, { method: 'DELETE' });
-            await fetchList();
-            closeDetail();
-          } catch (e) {
-            if (window.Toasts) window.Toasts.error(e?.message || String(e));
-          }
-          return;
-        }
-        await onCardAction(action, id);
+        await onCardAction(btn.getAttribute('data-action'), btn.getAttribute('data-id'));
       });
     });
+    body.querySelectorAll('.community-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        state.tab = tab.getAttribute('data-tab');
+        closeLogsStream();
+        // Re-render tab strip's active state without rebuilding the
+        // whole detail (avoids a flash on every tab switch).
+        body.querySelectorAll('.community-tab').forEach((t) => {
+          const active = t.getAttribute('data-tab') === state.tab;
+          t.classList.toggle('active', active);
+          t.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        renderActiveTab(c);
+      });
+    });
+    renderActiveTab(c);
+  }
+
+  function renderActiveTab(c) {
+    const host = $('community-tab-body');
+    if (!host) return;
+    if (state.tab === 'status')     return renderTabStatus(host, c);
+    if (state.tab === 'members')    return renderTabMembers(host, c);
+    if (state.tab === 'moderation') return renderTabModeration(host, c);
+    if (state.tab === 'settings')   return renderTabSettings(host, c);
+    if (state.tab === 'logs')       return renderTabLogs(host, c);
+  }
+
+  // ── Tab: Status ─────────────────────────────────────────────────
+  function renderTabStatus(host, c) {
+    const connHost = c.privacyMode === 'private-network' && c.nvpnTunnelIp
+      ? c.nvpnTunnelIp
+      : '127.0.0.1';
+    const wssUrl = `ws://${connHost}:${c.port}`;
+    host.innerHTML = `
+      <div class="community-detail-meta">
+        <div><span class="kv-k">Port</span><span class="kv-v">:${c.port}</span></div>
+        <div><span class="kv-k">Members</span><span class="kv-v">${c.memberCount || 0}</span></div>
+        <div><span class="kv-k">Mode</span><span class="kv-v">${c.privacyMode === 'private-network' ? 'Private (nvpn)' : 'Local only'}</span></div>
+        ${c.nvpnNetworkId ? `<div><span class="kv-k">Network</span><span class="kv-v community-mono">${escapeHtml(c.nvpnNetworkId)}</span></div>` : ''}
+        <div><span class="kv-k">Admin npub</span><span class="kv-v community-mono">${escapeHtml(c.adminPubkey.slice(0,12))}…</span></div>
+        <div><span class="kv-k">Status</span><span class="kv-v">${c.status}${c.pid ? ` (pid ${c.pid})` : ''}</span></div>
+      </div>
+      <div class="community-conn-card">
+        <div class="kv-k">Connection URL</div>
+        <div class="community-conn-row">
+          <code id="community-wss" class="community-mono">${escapeHtml(wssUrl)}</code>
+          <button id="community-wss-copy">copy</button>
+        </div>
+        <div class="form-help">
+          Share this URL with your members. Add it as a relay in their
+          Nostr client. ${c.privacyMode === 'private-network'
+            ? `They'll also need to join the nvpn network <code>${escapeHtml(c.nvpnNetworkId || '')}</code> first.`
+            : `(Local-only communities are only reachable from this machine.)`}
+        </div>
+      </div>
+    `;
+    $('community-wss-copy')?.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(wssUrl); }
+      catch { /* ignore */ }
+      window.Toasts?.info?.('Connection URL copied');
+    });
+  }
+
+  // ── Tab: Members ────────────────────────────────────────────────
+  // One batch /api/profiles call on mount to fill avatars + display
+  // names; no per-row fetches. Falls back to pixelAvatar(hex) when a
+  // member has no kind-0 yet.
+  async function renderTabMembers(host, c) {
+    host.innerHTML = `
+      <div class="community-members-add">
+        <input id="community-add-input" type="text" placeholder="npub1… or 64-char hex" />
+        <button class="primary" id="community-add-btn">Add member</button>
+      </div>
+      <div id="community-members-table">Loading members…</div>
+    `;
+    $('community-add-btn')?.addEventListener('click', async () => {
+      const raw = $('community-add-input')?.value?.trim() || '';
+      const pk  = normalizePubkey(raw);
+      if (!pk) { window.Toasts?.error?.('That doesn\'t look like an npub or hex pubkey.'); return; }
+      try {
+        await api(`/api/communities/${c.id}/members`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ pubkey: pk }),
+        });
+        await fetchList();
+        const refreshed = communities.find((x) => x.id === c.id);
+        renderTabMembers(host, refreshed || c);
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+
+    let members = [];
+    try {
+      const r = await api(`/api/communities/${c.id}/members`);
+      members = Array.isArray(r?.members) ? r.members : [];
+    } catch { /* empty list below */ }
+
+    const table = $('community-members-table');
+    if (!table) return;
+    if (members.length === 0) {
+      table.innerHTML = `<div class="empty-state-inline">No members yet. Add one above.</div>`;
+      return;
+    }
+
+    // Profile batch fetch — pre-paint with hex fallbacks so the table
+    // appears immediately, then fill in names/avatars asynchronously.
+    table.innerHTML = renderMembersTable(c, members, {});
+    wireMemberRowButtons(host, c);
+    try {
+      const params = new URLSearchParams({ pubkeys: members.join(',') });
+      const r = await api(`/api/profiles?${params.toString()}`);
+      const profiles = r?.profiles || {};
+      table.innerHTML = renderMembersTable(c, members, profiles);
+      wireMemberRowButtons(host, c);
+    } catch { /* keep the fallback table */ }
+  }
+
+  function renderMembersTable(c, members, profiles) {
+    return `
+      <table class="community-members">
+        <thead><tr><th></th><th>Member</th><th>Hex</th><th>Role</th><th></th></tr></thead>
+        <tbody>
+          ${members.map((hex) => {
+            const prof = profiles[hex] || {};
+            const isAdmin = hex === c.adminPubkey;
+            const name = prof.displayName || prof.name || '';
+            const nameCell = name
+              ? `<strong>${escapeHtml(name)}</strong>${prof.nip05 ? `<div class="muted">${escapeHtml(prof.nip05)}</div>` : ''}`
+              : `<span class="muted">no profile yet</span>`;
+            const avatar = prof.picture
+              ? `<img class="community-avatar" src="${prof.picture}" alt="" loading="lazy" onerror="this.outerHTML='${pixelAvatar(hex, 28).replace(/'/g, '&#39;')}'"/>`
+              : pixelAvatar(hex, 28);
+            const removeBtn = isAdmin
+              ? `<span class="muted" title="The admin can't be removed from their own allowlist">admin</span>`
+              : `<button data-remove="${hex}" class="link danger">remove</button>`;
+            return `
+              <tr>
+                <td>${avatar}</td>
+                <td>${nameCell}</td>
+                <td class="community-mono">${hex.slice(0, 12)}…</td>
+                <td>${isAdmin ? 'admin' : 'member'}</td>
+                <td>${removeBtn}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  function wireMemberRowButtons(host, c) {
+    host.querySelectorAll('[data-remove]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const hex = btn.getAttribute('data-remove');
+        if (!confirm(`Remove ${hex.slice(0, 12)}… from this community?`)) return;
+        try {
+          await api(`/api/communities/${c.id}/members/${hex}`, { method: 'DELETE' });
+          await fetchList();
+          const refreshed = communities.find((x) => x.id === c.id);
+          renderTabMembers($('community-tab-body'), refreshed || c);
+        } catch (e) {
+          window.Toasts?.error?.(e?.message || String(e));
+        }
+      });
+    });
+  }
+
+  // ── Tab: Moderation (banword editor only in this commit) ────────
+  // Banwords are a direct YAML edit (GRAIN hot-reloads on file change),
+  // not a NIP-86 call. Per-event / per-pubkey bans live behind NIP-86
+  // and need silent-sign delegation to be ergonomic — that lands when
+  // the delegation toggle is wired.
+  function renderTabModeration(host, c) {
+    host.innerHTML = `
+      <div class="community-moderation">
+        <p class="form-help">
+          Moderation tools land in stages. For now you can pause /
+          resume the community above; banned-pubkey and banned-word
+          management arrive with the NIP-86 silent-sign delegation
+          flow.
+        </p>
+        <div class="community-mod-placeholder">
+          <strong>Coming next:</strong>
+          <ul>
+            <li>Banned pubkeys (NIP-86 banpubkey / allowpubkey)</li>
+            <li>Banned words (blacklist.yml hot-reload)</li>
+            <li>Rate-limit presets (Relaxed / Strict / Family-friendly)</li>
+            <li>Allowed kinds (chip list)</li>
+            <li>Storage cap (with a 90%/100% banner)</li>
+          </ul>
+        </div>
+      </div>
+    `;
+  }
+
+  // ── Tab: Settings ───────────────────────────────────────────────
+  function renderTabSettings(host, c) {
+    host.innerHTML = `
+      <div class="form-field">
+        <span class="form-label">Name</span>
+        <input id="cs-name" type="text" maxlength="60" value="${escapeHtml(c.name)}" />
+      </div>
+      <div class="form-field">
+        <span class="form-label">Description</span>
+        <textarea id="cs-desc" maxlength="200" rows="2">${escapeHtml(c.description || '')}</textarea>
+      </div>
+      <div class="form-help">
+        Editing settings is read-only at this stage; the PATCH endpoint
+        lands with the settings-edit flow in a follow-up commit. The
+        Delete button below is wired and irreversible.
+      </div>
+      <div class="community-detail-danger">
+        <button data-detail-action="delete" class="danger">Delete community…</button>
+      </div>
+    `;
+    host.querySelector('[data-detail-action="delete"]')?.addEventListener('click', async () => {
+      if (!confirm(`Permanently delete "${c.name}" and all its data?\n\nThis cannot be undone.`)) return;
+      try {
+        await api(`/api/communities/${c.id}`, { method: 'DELETE' });
+        await fetchList();
+        closeDetail();
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+  }
+
+  // ── Tab: Logs (SSE tail) ────────────────────────────────────────
+  // Subscribes to /api/communities/:id/logs. The first frame is a
+  // ring-buffer replay; subsequent frames are single new lines. We
+  // tear down the EventSource on tab switch / detail close to avoid
+  // accumulating zombie connections.
+  function renderTabLogs(host, c) {
+    host.innerHTML = `
+      <div class="community-logs-head">
+        <label class="form-field-inline">
+          <input id="community-logs-autoscroll" type="checkbox" checked />
+          <span>auto-scroll</span>
+        </label>
+        <button id="community-logs-clear">clear</button>
+      </div>
+      <pre id="community-logs-tail" class="community-logs"></pre>
+    `;
+    const tail = $('community-logs-tail');
+    const auto = $('community-logs-autoscroll');
+    $('community-logs-clear')?.addEventListener('click', () => { if (tail) tail.textContent = ''; });
+
+    const url = `/api/communities/${c.id}/logs`;
+    try {
+      logsSse = new EventSource(url, { withCredentials: true });
+      logsSse.onmessage = (ev) => {
+        if (!tail) return;
+        try {
+          const data = JSON.parse(ev.data);
+          if (Array.isArray(data.lines)) {
+            for (const line of data.lines) {
+              const ts = new Date(line.ts).toISOString().slice(11, 19);
+              const lvl = (line.level || 'info').padEnd(5);
+              tail.textContent += `[${ts}] ${lvl} ${line.text}\n`;
+            }
+            if (auto?.checked) tail.scrollTop = tail.scrollHeight;
+          }
+        } catch { /* skip malformed frame */ }
+      };
+      logsSse.onerror = () => { /* EventSource auto-retries; nothing to do */ };
+    } catch (e) {
+      tail.textContent = `Could not open log stream: ${e?.message || e}\n`;
+    }
+  }
+
+  function closeLogsStream() {
+    if (logsSse) { try { logsSse.close(); } catch {} logsSse = null; }
   }
 
   // ── Create wizard ───────────────────────────────────────────────
