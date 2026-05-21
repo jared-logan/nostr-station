@@ -103,6 +103,122 @@ test('store: maxEvents evicts oldest', () => {
   s.close();
 });
 
+test('store: kind-0 ingest materializes a profile row', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  const author = 'a'.repeat(64);
+  s.add(ev({
+    id: 'p1'.padEnd(64, '0'),
+    pubkey: author,
+    kind: 0,
+    created_at: 1_700_000_000,
+    content: JSON.stringify({
+      name: 'alice', display_name: 'Alice', nip05: 'alice@example.com',
+      picture: 'https://example.com/a.png', lud16: 'alice@ln.example',
+      about: 'Hi.', website: 'https://alice.example',
+    }),
+  }));
+  const p = s.getProfile(author);
+  assert.ok(p, 'expected a profile row');
+  assert.equal(p!.name,         'alice');
+  assert.equal(p!.display_name, 'Alice');
+  assert.equal(p!.nip05,        'alice@example.com');
+  assert.equal(p!.picture,      'https://example.com/a.png');
+  assert.equal(p!.updated_at,   1_700_000_000);
+  s.close();
+});
+
+test('store: a malformed kind-0 does not break ingest', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  // Not JSON at all — common in spammy / fuzzed events.
+  const r = s.add(ev({
+    id:      'b'.repeat(64),
+    pubkey:  'c'.repeat(64),
+    kind:    0,
+    content: 'not-json',
+  }));
+  assert.equal(r.stored, true);
+  assert.equal(s.getProfile('c'.repeat(64)), null);
+  s.close();
+});
+
+test('store: newer kind-0 overwrites older profile, stale events are ignored', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  const author = 'd'.repeat(64);
+  s.add(ev({
+    id: '1'.repeat(64), pubkey: author, kind: 0, created_at: 100,
+    content: JSON.stringify({ name: 'old' }),
+  }));
+  s.add(ev({
+    id: '2'.repeat(64), pubkey: author, kind: 0, created_at: 200,
+    content: JSON.stringify({ name: 'new' }),
+  }));
+  assert.equal(s.getProfile(author)!.name, 'new');
+
+  // A stale event arriving after the fresher one must not clobber it.
+  // (The replaceable-event path also deletes the older row from
+  // `events`, but the profiles upsert is what we're guarding here.)
+  s.add(ev({
+    id: '3'.repeat(64), pubkey: author, kind: 0, created_at: 50,
+    content: JSON.stringify({ name: 'stale' }),
+  }));
+  assert.equal(s.getProfile(author)!.name, 'new');
+  s.close();
+});
+
+test('store: getProfiles returns a Map keyed by pubkey, missing entries absent', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  const a = 'a'.repeat(64);
+  const b = 'b'.repeat(64);
+  const c = 'c'.repeat(64);
+  s.add(ev({ id: '1'.repeat(64), pubkey: a, kind: 0, content: JSON.stringify({ name: 'A' }) }));
+  s.add(ev({ id: '2'.repeat(64), pubkey: b, kind: 0, content: JSON.stringify({ name: 'B' }) }));
+  const m = s.getProfiles([a, b, c]);
+  assert.equal(m.size, 2);
+  assert.equal(m.get(a)!.name, 'A');
+  assert.equal(m.get(b)!.name, 'B');
+  assert.equal(m.has(c), false);
+  s.close();
+});
+
+test('store: backfills profiles from existing kind-0 events on first open', () => {
+  // Seed a fresh DB with kind-0 events via a previous EventStore, then
+  // drop the profiles table to simulate an upgrade-from-old-version
+  // scenario where kind-0s already exist but profiles is empty.
+  const dbPath = tmpDb();
+  {
+    const s = new EventStore({ dbPath });
+    s.add(ev({
+      id: '1'.repeat(64), pubkey: 'a'.repeat(64), kind: 0, created_at: 500,
+      content: JSON.stringify({ name: 'first' }),
+    }));
+    s.close();
+  }
+  // Forcibly clear profiles (the prior session already populated them).
+  const wipe = new Database(dbPath);
+  wipe.exec('DROP TABLE profiles');
+  wipe.close();
+
+  // Reopen — backfill should re-derive the profile from the kind-0 event.
+  const s2 = new EventStore({ dbPath });
+  const p  = s2.getProfile('a'.repeat(64));
+  assert.equal(p?.name, 'first');
+  assert.equal(p?.updated_at, 500);
+  s2.close();
+});
+
+test('store: wipe clears profiles alongside events', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  s.add(ev({
+    id: '1'.repeat(64), pubkey: 'a'.repeat(64), kind: 0,
+    content: JSON.stringify({ name: 'x' }),
+  }));
+  assert.ok(s.getProfile('a'.repeat(64)));
+  s.wipe();
+  assert.equal(s.getProfile('a'.repeat(64)), null);
+  assert.equal(s.count(), 0);
+  s.close();
+});
+
 test('store: migrates a legacy tags-without-created_at schema in place', () => {
   // Build a database with the pre-migration schema: tags has no
   // created_at column. Seed one event + one tag row so we can verify

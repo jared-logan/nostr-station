@@ -40,6 +40,24 @@ function dTagValue(tags: string[][]): string {
   return t?.[1] ?? '';
 }
 
+// Decoded kind-0 profile metadata, materialized at ingest so the
+// dashboard never re-parses JSON when rendering pubkeys. Mirrors the
+// shape of nostrdb's profile flatbuffer record (name, display_name,
+// nip05, picture, lud16, about, banner, website) without committing
+// to its on-disk format.
+export interface ProfileRecord {
+  pubkey:       string;
+  name:         string | null;
+  display_name: string | null;
+  nip05:        string | null;
+  picture:      string | null;
+  lud16:        string | null;
+  about:        string | null;
+  banner:       string | null;
+  website:      string | null;
+  updated_at:   number;
+}
+
 export class EventStore {
   private db: Database.Database;
   private maxEvents: number;
@@ -55,6 +73,8 @@ export class EventStore {
   private stDeleteByKindAuthorD!:Database.Statement;
   private stCount!:              Database.Statement;
   private stEvictOldest!:        Database.Statement;
+  private stUpsertProfile!:      Database.Statement;
+  private stGetProfile!:         Database.Statement;
 
   constructor(opts: StoreOptions = {}) {
     const dbPath = opts.dbPath ?? DEFAULT_DB_PATH;
@@ -91,6 +111,25 @@ export class EventStore {
       );
       CREATE INDEX IF NOT EXISTS idx_tags_lookup ON tags(tag_name, tag_value);
       CREATE INDEX IF NOT EXISTS idx_tags_event  ON tags(event_id);
+
+      -- Decoded kind-0 profile metadata, one row per pubkey, updated on
+      -- ingest. Deliberately NOT FK'd to events.id: profiles outlive
+      -- the underlying kind-0 events when those get evicted by the
+      -- maxEvents cap, so the dashboard still resolves pubkeys to names
+      -- for senders/authors we have history on but haven't refreshed
+      -- recently.
+      CREATE TABLE IF NOT EXISTS profiles (
+        pubkey       TEXT PRIMARY KEY,
+        name         TEXT,
+        display_name TEXT,
+        nip05        TEXT,
+        picture      TEXT,
+        lud16        TEXT,
+        about        TEXT,
+        banner       TEXT,
+        website      TEXT,
+        updated_at   INTEGER NOT NULL
+      );
     `);
     this.db.pragma('foreign_keys = ON');
 
@@ -145,6 +184,51 @@ export class EventStore {
       CREATE INDEX IF NOT EXISTS idx_tags_lookup_ts
         ON tags(tag_name, tag_value, created_at DESC);
     `);
+
+    // Backfill profiles from already-stored kind-0 events. Cheap on
+    // 100k-event corpora (typically a few thousand kind-0s, sub-second).
+    // Skipped once profiles is non-empty so subsequent boots are no-ops.
+    const profileCount = (this.db.prepare(`SELECT COUNT(*) AS n FROM profiles`).get() as { n: number }).n;
+    if (profileCount === 0) {
+      const kind0s = this.db.prepare(
+        `SELECT pubkey, created_at, content FROM events WHERE kind = 0`,
+      ).all() as Array<{ pubkey: string; created_at: number; content: string }>;
+      if (kind0s.length > 0) {
+        const upsert = this.db.prepare(
+          `INSERT INTO profiles (pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(pubkey) DO UPDATE SET
+             name=excluded.name, display_name=excluded.display_name, nip05=excluded.nip05,
+             picture=excluded.picture, lud16=excluded.lud16, about=excluded.about,
+             banner=excluded.banner, website=excluded.website, updated_at=excluded.updated_at
+           WHERE excluded.updated_at > profiles.updated_at`,
+        );
+        const run = this.db.transaction(() => {
+          for (const row of kind0s) {
+            let raw: any;
+            try { raw = JSON.parse(row.content); } catch { continue; }
+            if (!raw || typeof raw !== 'object') continue;
+            const s = (k: string): string | null => {
+              const v = raw[k];
+              return typeof v === 'string' && v.length > 0 ? v : null;
+            };
+            upsert.run(
+              row.pubkey,
+              s('name'),
+              s('display_name') ?? s('displayName'),
+              s('nip05'),
+              s('picture'),
+              s('lud16') ?? s('lud06'),
+              s('about'),
+              s('banner'),
+              s('website'),
+              row.created_at,
+            );
+          }
+        });
+        run();
+      }
+    }
   }
 
   private prepareStatements(): void {
@@ -175,6 +259,57 @@ export class EventStore {
          SELECT id FROM events ORDER BY created_at ASC LIMIT ?
        )`,
     );
+    // Newer kind-0 events overwrite older metadata; older ones are
+    // dropped via the WHERE clause so an out-of-order replay of a stale
+    // profile event can't clobber a fresh one.
+    this.stUpsertProfile = this.db.prepare(
+      `INSERT INTO profiles (pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(pubkey) DO UPDATE SET
+         name         = excluded.name,
+         display_name = excluded.display_name,
+         nip05        = excluded.nip05,
+         picture      = excluded.picture,
+         lud16        = excluded.lud16,
+         about        = excluded.about,
+         banner       = excluded.banner,
+         website      = excluded.website,
+         updated_at   = excluded.updated_at
+       WHERE excluded.updated_at > profiles.updated_at`,
+    );
+    this.stGetProfile = this.db.prepare(
+      `SELECT pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at
+         FROM profiles WHERE pubkey = ? LIMIT 1`,
+    );
+  }
+
+  // Pull display fields out of a kind-0 event's content. Defensive: any
+  // parse failure or unexpected shape returns null so a malformed profile
+  // event can never break ingest. Field names follow the common pattern
+  // documented in NIP-24 (some clients use display_name, others
+  // displayName — accept both).
+  private decodeProfile(ev: NostrEvent): ProfileRecord | null {
+    let raw: unknown;
+    try { raw = JSON.parse(ev.content); }
+    catch { return null; }
+    if (!raw || typeof raw !== 'object') return null;
+    const o = raw as Record<string, unknown>;
+    const s = (k: string): string | null => {
+      const v = o[k];
+      return typeof v === 'string' && v.length > 0 ? v : null;
+    };
+    return {
+      pubkey:       ev.pubkey,
+      name:         s('name'),
+      display_name: s('display_name') ?? s('displayName'),
+      nip05:        s('nip05'),
+      picture:      s('picture'),
+      lud16:        s('lud16') ?? s('lud06'),
+      about:        s('about'),
+      banner:       s('banner'),
+      website:      s('website'),
+      updated_at:   ev.created_at,
+    };
   }
 
   // Returns true if the event was stored (or already existed), false on
@@ -195,6 +330,19 @@ export class EventStore {
         // tags_json on the event row, just not in the indexed table.
         if (t[0] && t[0].length === 1 && typeof t[1] === 'string') {
           this.stInsertTag.run(e.id, t[0], t[1], e.created_at);
+        }
+      }
+      // Materialize kind-0 profiles inside the same transaction as the
+      // event insert so a crash mid-insert leaves events and profiles
+      // consistent. The upsert's WHERE clause discards out-of-order
+      // older events automatically.
+      if (e.kind === 0) {
+        const p = this.decodeProfile(e);
+        if (p) {
+          this.stUpsertProfile.run(
+            p.pubkey, p.name, p.display_name, p.nip05, p.picture,
+            p.lud16, p.about, p.banner, p.website, p.updated_at,
+          );
         }
       }
     });
@@ -300,6 +448,29 @@ export class EventStore {
     return (this.stCount.get() as { n: number }).n;
   }
 
+  // Look up a materialized profile for one pubkey. Returns null when
+  // we've never ingested a kind-0 for that key — callers should fall
+  // back to a truncated npub render.
+  getProfile(pubkey: string): ProfileRecord | null {
+    const row = this.stGetProfile.get(pubkey) as ProfileRecord | undefined;
+    return row ?? null;
+  }
+
+  // Bulk variant for "give me everyone in this thread / feed at once".
+  // Returns a Map keyed by pubkey so callers can do O(1) lookups while
+  // rendering. Missing pubkeys are simply absent from the map.
+  getProfiles(pubkeys: string[]): Map<string, ProfileRecord> {
+    const out = new Map<string, ProfileRecord>();
+    if (pubkeys.length === 0) return out;
+    const placeholders = pubkeys.map(() => '?').join(',');
+    const rows = this.db.prepare(
+      `SELECT pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at
+         FROM profiles WHERE pubkey IN (${placeholders})`,
+    ).all(...pubkeys) as ProfileRecord[];
+    for (const r of rows) out.set(r.pubkey, r);
+    return out;
+  }
+
   // Stream every event in created_at ASC order. Yields one at a time via
   // better-sqlite3's iterator so a relay with hundreds of thousands of
   // events doesn't have to fit in memory during /api/relay/database/export.
@@ -330,6 +501,7 @@ export class EventStore {
   // sits inside the dashboard process, callers just keep using it.
   wipe(): void {
     this.db.exec('DELETE FROM events');
+    this.db.exec('DELETE FROM profiles');
     this.db.exec('VACUUM');
   }
 
