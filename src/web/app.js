@@ -9034,6 +9034,207 @@ const ProjectsPanel = (() => {
     return { nip05: p.nip05, verified: p.nip05Verified };
   }
 
+  // ── @-mention autocomplete ──────────────────────────────────────────────
+  //
+  // Wires a small dropdown to a <textarea> that pops up when the user
+  // types '@<chars>'. Queries /api/profiles/autocomplete (served from
+  // the in-process relay's materialized kind-0 profiles table), shows
+  // up to 10 matches, and on selection inserts a NIP-27 nostr:npub1…
+  // URI replacing the @-fragment. Keyboard nav: ↑/↓ move, Enter/Tab
+  // accept, Esc dismiss. Mouse: click to accept.
+  //
+  // Designed for ngit's three composer surfaces (new issue, issue
+  // comment, PR comment) but is fully composer-agnostic — call
+  // attachMentionAutocomplete(textareaEl) on any <textarea> and it
+  // attaches its own listeners + dropdown.
+  function attachMentionAutocomplete(textarea) {
+    if (!textarea || textarea.__mentionWired) return;
+    textarea.__mentionWired = true;
+
+    let dropdown      = null;   // DOM node, lazily created
+    let matches       = [];     // current match list
+    let selectedIdx   = 0;
+    let currentToken  = null;   // { start: <int>, end: <int>, query: <string> }
+    let lastQuery     = null;   // dedupe in-flight queries
+    let abortCtrl     = null;   // AbortController for the live query
+
+    function ensureDropdown() {
+      if (dropdown) return dropdown;
+      dropdown = document.createElement('div');
+      dropdown.className = 'mention-dropdown';
+      // Inline styles so the panel works regardless of which CSS
+      // surface is loaded — keeps the feature self-contained.
+      dropdown.style.cssText = [
+        'position:absolute', 'z-index:1000',
+        'background:var(--bg-card, #141418)',
+        'border:1px solid var(--border, #1f1f25)',
+        'border-radius:6px', 'box-shadow:0 4px 12px rgba(0,0,0,0.35)',
+        'max-height:240px', 'overflow-y:auto', 'min-width:240px',
+        'font-size:13px', 'display:none',
+      ].join(';');
+      document.body.appendChild(dropdown);
+      return dropdown;
+    }
+
+    function hideDropdown() {
+      if (dropdown) dropdown.style.display = 'none';
+      matches = [];
+      currentToken = null;
+    }
+
+    function positionDropdown() {
+      if (!dropdown) return;
+      const r = textarea.getBoundingClientRect();
+      // Position immediately below the textarea, aligned to its left.
+      // Pixel-perfect at-caret positioning would need a mirror-div
+      // hack; for the typical composer textareas (200-500px wide)
+      // below-the-textarea is clear and predictable.
+      dropdown.style.left = `${window.scrollX + r.left}px`;
+      dropdown.style.top  = `${window.scrollY + r.bottom + 2}px`;
+      dropdown.style.width = `${Math.max(r.width, 240)}px`;
+    }
+
+    function renderDropdown() {
+      const dd = ensureDropdown();
+      if (matches.length === 0) {
+        hideDropdown();
+        return;
+      }
+      dd.innerHTML = matches.map((m, i) => {
+        const label = m.display_name || m.name || (m.npub ? `${m.npub.slice(0, 12)}…` : '');
+        const sub   = [m.nip05 || '', m.name && m.display_name ? `@${m.name}` : '']
+          .filter(Boolean).join(' · ');
+        const sel = i === selectedIdx ? 'background:var(--bg-hover, #1a1a20);' : '';
+        const avatar = m.picture
+          ? `<img src="${escapeHtml(m.picture)}" style="width:24px;height:24px;border-radius:50%;object-fit:cover;flex:0 0 24px" loading="lazy" referrerpolicy="no-referrer">`
+          : `<div style="width:24px;height:24px;border-radius:50%;background:var(--border, #1f1f25);flex:0 0 24px;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:11px">${escapeHtml((label || '?').slice(0, 1).toUpperCase())}</div>`;
+        return `<div class="mention-row" data-idx="${i}" style="padding:6px 10px;display:flex;gap:8px;align-items:center;cursor:pointer;${sel}">
+          ${avatar}
+          <div style="min-width:0;flex:1">
+            <div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(label)}</div>
+            ${sub ? `<div style="font-size:11px;color:var(--muted, #5a5a6a);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(sub)}</div>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+      positionDropdown();
+      dd.style.display = 'block';
+      // Click-to-pick handler (event delegation per render).
+      for (const row of dd.querySelectorAll('.mention-row')) {
+        row.addEventListener('mousedown', (e) => {
+          // mousedown not click — click fires AFTER the textarea
+          // blurs, by which point the dropdown has been hidden.
+          e.preventDefault();
+          const idx = parseInt(row.getAttribute('data-idx'), 10);
+          selectMatch(idx);
+        });
+      }
+    }
+
+    // Find the @-token that the caret is currently inside, if any.
+    // Returns { start, end, query } or null.
+    function detectToken() {
+      const value = textarea.value;
+      const pos   = textarea.selectionStart;
+      if (pos !== textarea.selectionEnd) return null;
+      // Walk backwards from the caret to find an '@' bordered by
+      // either start-of-string or whitespace.
+      let i = pos;
+      while (i > 0) {
+        const ch = value[i - 1];
+        if (ch === '@') {
+          const before = i >= 2 ? value[i - 2] : '';
+          if (i === 1 || /\s/.test(before)) {
+            return { start: i - 1, end: pos, query: value.slice(i, pos) };
+          }
+          return null;
+        }
+        // Stop if we hit a whitespace or punctuation that ends the
+        // token. Permitted token chars: word chars, digits, dash,
+        // underscore, period (for nip05-ish prefixes).
+        if (!/[\w.\-]/.test(ch)) return null;
+        i--;
+      }
+      return null;
+    }
+
+    async function fetchMatches(query) {
+      if (lastQuery === query) return;
+      lastQuery = query;
+      if (abortCtrl) { try { abortCtrl.abort(); } catch {} }
+      abortCtrl = ('AbortController' in window) ? new AbortController() : null;
+      try {
+        const r = await fetch('/api/profiles/autocomplete?q=' + encodeURIComponent(query) + '&limit=10', {
+          headers: { 'Accept': 'application/json' },
+          signal:  abortCtrl?.signal,
+          credentials: 'same-origin',
+        });
+        if (!r.ok) return;
+        const body = await r.json();
+        // A second keystroke may have moved the caret away from the
+        // token by the time the response lands; bail if so.
+        const tok = detectToken();
+        if (!tok || tok.query !== query) return;
+        matches     = Array.isArray(body?.matches) ? body.matches : [];
+        selectedIdx = 0;
+        renderDropdown();
+      } catch { /* aborted or network blip — leave the dropdown as-is */ }
+    }
+
+    function selectMatch(idx) {
+      const m = matches[idx];
+      if (!m || !m.npub || !currentToken) { hideDropdown(); return; }
+      const value = textarea.value;
+      const insert = `nostr:${m.npub}`;
+      // Replace @<query> with the URI plus a trailing space so the
+      // next thing the user types is naturally separated.
+      const newValue = value.slice(0, currentToken.start) + insert + ' ' + value.slice(currentToken.end);
+      const caretAt = currentToken.start + insert.length + 1;
+      textarea.value = newValue;
+      textarea.setSelectionRange(caretAt, caretAt);
+      // Fire input so any consumers (autosize, dirty-tracking) see the
+      // change. matched on `input` event below.
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      hideDropdown();
+      textarea.focus();
+    }
+
+    function onInput() {
+      const tok = detectToken();
+      if (!tok) { hideDropdown(); return; }
+      currentToken = tok;
+      // Show immediately with cached results if any, then refresh.
+      if (matches.length > 0) renderDropdown();
+      fetchMatches(tok.query);
+    }
+
+    function onKeydown(e) {
+      if (!dropdown || dropdown.style.display === 'none' || matches.length === 0) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        selectedIdx = (selectedIdx + 1) % matches.length;
+        renderDropdown();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        selectedIdx = (selectedIdx - 1 + matches.length) % matches.length;
+        renderDropdown();
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        selectMatch(selectedIdx);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        hideDropdown();
+      }
+    }
+
+    textarea.addEventListener('input',   onInput);
+    textarea.addEventListener('keydown', onKeydown);
+    textarea.addEventListener('blur',    () => setTimeout(hideDropdown, 100));
+    // Reposition on scroll/resize so the dropdown follows the textarea
+    // when the surrounding scroll container moves.
+    window.addEventListener('scroll', () => { if (dropdown?.style.display === 'block') positionDropdown(); }, true);
+    window.addEventListener('resize', () => { if (dropdown?.style.display === 'block') positionDropdown(); });
+  }
+
   // Cache the latest proposals payload per project so re-rendering the
   // tab (e.g. after a Download finishes) doesn't refetch unless the
   // user explicitly asks via the Refresh button.
@@ -9982,6 +10183,7 @@ const ProjectsPanel = (() => {
     foot.appendChild(cancel); foot.appendChild(spacer); foot.appendChild(submit);
 
     const modal = openModal({ title: 'New issue', subtitle: p.name, body, footer: foot });
+    attachMentionAutocomplete(body.querySelector('.ni-body'));
     cancel.addEventListener('click', () => modal.close());
     submit.addEventListener('click', () => {
       const title = body.querySelector('.ni-title').value.trim();
@@ -10149,6 +10351,7 @@ const ProjectsPanel = (() => {
         <button class="primary comment-submit">Reply</button>
       </div>
     `;
+    attachMentionAutocomplete(container.querySelector('.comment-input'));
     container.querySelector('.comment-submit').addEventListener('click', () => {
       const text = container.querySelector('.comment-input').value.trim();
       if (!text) { toast('Empty comment', 'write something first', 'err'); return; }

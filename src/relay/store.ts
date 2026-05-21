@@ -537,6 +537,40 @@ export class EventStore {
     }));
   }
 
+  // Prefix-match profiles by name / display_name for compose-time
+  // @-mention autocomplete. Case-insensitive, prefix-only (the
+  // dominant autocomplete pattern; substring matching is left to the
+  // events-content FTS5 path). Mirrors the spirit of nostrdb's
+  // NDB_DB_PROFILE_SEARCH composite-key prefix lookup without the
+  // extra index — at our profile counts (<10k typical) a simple
+  // LIKE 'prefix%' over a NOCASE-indexed column is sub-millisecond.
+  //
+  // Ordering: profiles with a name field rank above display-name-only
+  // matches (so "alice" beats someone whose display_name is "Alice in
+  // …"), then by updated_at DESC so newer / more active profiles win
+  // ties.
+  searchProfiles(prefix: string, limit: number = 10): ProfileRecord[] {
+    const q = prefix.trim().toLowerCase();
+    if (!q) return [];
+    const lim  = Math.max(1, Math.min(limit, 50));
+    // Escape LIKE meta-chars so a literal % or _ in the user's input
+    // doesn't widen the match. SQLite's ESCAPE clause uses a single
+    // backslash by convention.
+    const escaped = q.replace(/[\\%_]/g, '\\$&');
+    const like = `${escaped}%`;
+    const rows = this.db.prepare(
+      `SELECT pubkey, name, display_name, nip05, picture, lud16, about, banner, website, updated_at
+         FROM profiles
+        WHERE (name         IS NOT NULL AND lower(name)         LIKE ? ESCAPE '\\')
+           OR (display_name IS NOT NULL AND lower(display_name) LIKE ? ESCAPE '\\')
+        ORDER BY
+          (name IS NOT NULL AND lower(name) LIKE ? ESCAPE '\\') DESC,
+          updated_at DESC
+        LIMIT ?`,
+    ).all(like, like, like, lim) as ProfileRecord[];
+    return rows;
+  }
+
   // Bulk variant for "give me everyone in this thread / feed at once".
   // Returns a Map keyed by pubkey so callers can do O(1) lookups while
   // rendering. Missing pubkeys are simply absent from the map.

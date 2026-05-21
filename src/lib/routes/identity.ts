@@ -668,6 +668,51 @@ export async function handleIdentity(
     return true;
   }
 
+  // ── Profile autocomplete ───────────────────────────────────────────────
+  //
+  // GET /api/profiles/autocomplete?q=<prefix>&limit=<n>
+  //   Prefix-match against the local profiles table (kind-0 metadata
+  //   materialized at ingest). Powers @-mention dropdowns in the issue,
+  //   issue-comment, and PR-comment composers — type "@al", get a list
+  //   of profiles whose name or display_name starts with that prefix.
+  //   Hits 0 remote relays; serves entirely from the in-process store.
+  if (url.startsWith('/api/profiles/autocomplete') && method === 'GET') {
+    const u = new URL(url, 'http://localhost');
+    const q = (u.searchParams.get('q') || '').trim();
+    const limit = Math.max(1, Math.min(parseInt(u.searchParams.get('limit') || '10', 10) || 10, 25));
+    if (!q) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ matches: [] }));
+      return true;
+    }
+    const localStore = getLocalStore();
+    if (!localStore) {
+      // No relay running → no local profiles to draw from. Return an
+      // empty result rather than 503 so the composer dropdown stays
+      // silent instead of erroring on every keystroke.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ matches: [] }));
+      return true;
+    }
+    try {
+      const profiles = localStore.searchProfiles(q, limit);
+      const matches = profiles.map(p => ({
+        pubkey:       p.pubkey,
+        npub:         hexToNpub(p.pubkey),
+        name:         p.name,
+        display_name: p.display_name,
+        nip05:        p.nip05,
+        picture:      p.picture ? (signProxyUrl(safeHttpUrl(p.picture) || '') ?? null) : null,
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ matches }));
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e?.message || e) }));
+    }
+    return true;
+  }
+
   // ── Batched profile lookup ─────────────────────────────────────────────
   //
   // GET /api/profiles?pubkeys=hex1,hex2,...&relays=wss://a,wss://b

@@ -269,6 +269,58 @@ test('store: backfills profiles from existing kind-0 events on first open', () =
   s2.close();
 });
 
+test('store: searchProfiles does case-insensitive prefix matching on name/display_name', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  s.add(ev({
+    id: '1'.repeat(64), pubkey: 'a'.repeat(64), kind: 0, created_at: 100,
+    content: JSON.stringify({ name: 'alice', display_name: 'Alice Cooper' }),
+  }));
+  s.add(ev({
+    id: '2'.repeat(64), pubkey: 'b'.repeat(64), kind: 0, created_at: 200,
+    content: JSON.stringify({ name: 'bob', display_name: 'Bob the Builder' }),
+  }));
+  s.add(ev({
+    id: '3'.repeat(64), pubkey: 'c'.repeat(64), kind: 0, created_at: 300,
+    content: JSON.stringify({ name: 'alistair', display_name: 'Al' }),
+  }));
+
+  // Prefix matches both alice and alistair, name-leading first.
+  const al = s.searchProfiles('al');
+  const names = al.map(p => p.name);
+  assert.ok(names.includes('alice'),    'alice should match');
+  assert.ok(names.includes('alistair'), 'alistair should match');
+
+  // Case insensitive.
+  const AL = s.searchProfiles('AL');
+  assert.equal(AL.length, al.length);
+
+  // Display-name-only match (Bob has display "Bob the Builder", typing "bo" matches name "bob").
+  const bo = s.searchProfiles('bo');
+  assert.equal(bo.length, 1);
+  assert.equal(bo[0].name, 'bob');
+
+  // Empty / whitespace returns empty.
+  assert.equal(s.searchProfiles('').length, 0);
+  assert.equal(s.searchProfiles('  ').length, 0);
+
+  s.close();
+});
+
+test('store: searchProfiles escapes LIKE wildcards in user input', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  s.add(ev({
+    id: '1'.repeat(64), pubkey: 'a'.repeat(64), kind: 0,
+    content: JSON.stringify({ name: 'aliens' }),
+  }));
+  // A literal '%' from the user should NOT widen the match — without
+  // escaping, '%' is a wildcard and 'ali%' would match anything starting
+  // with 'ali'. With escaping it only matches a name actually containing '%'.
+  const noLiteralPercent = s.searchProfiles('ali%');
+  assert.equal(noLiteralPercent.length, 0,
+    'literal % should not act as a wildcard');
+  s.close();
+});
+
 test('store: wipe clears profiles alongside events', () => {
   const s = new EventStore({ dbPath: tmpDb() });
   s.add(ev({
