@@ -44,7 +44,7 @@ const parseDiff = parseDiffRaw as any;
 import { getProject, type Project } from '../projects.js';
 import { isValidRelayUrl, getGraspServers } from '../identity.js';
 import {
-  queryRelays,
+  queryRelaysDirect as queryRelays,
   getCached,
   setCached,
   getTagValue,
