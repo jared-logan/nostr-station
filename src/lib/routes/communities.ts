@@ -38,9 +38,12 @@ import {
   createCommunity, deleteCommunityDir,
   addCommunityMember, removeCommunityMember,
   listCommunityMembers,
+  addCommunityBanword, removeCommunityBanword, listCommunityBanwords,
+  listCommunityBannedPubkeys,
   updateCommunityManifest,
   type CreateCommunityInput,
 } from '../communities.js';
+import { banPubkey, unbanPubkey } from '../community-admin.js';
 import {
   startCommunity, stopCommunity, restartCommunity,
   getCommunityRuntimeStatus, getCommunityLog,
@@ -52,8 +55,10 @@ import { readNvpnRoster, probeNvpnStatus } from '../nvpn.js';
 
 interface CommunityRoute {
   id?:     string;
-  action?: 'start' | 'stop' | 'restart' | 'members' | 'logs';
+  action?: 'start' | 'stop' | 'restart' | 'members' | 'logs' | 'banwords' | 'bans';
   memberHex?: string;
+  banword?:  string;
+  bannedHex?: string;
 }
 
 /**
@@ -76,8 +81,17 @@ function parseRoute(url: string): CommunityRoute | null {
   if (tail === 'restart')   return { id, action: 'restart' };
   if (tail === 'members')   return { id, action: 'members' };
   if (tail === 'logs')      return { id, action: 'logs' };
+  if (tail === 'banwords')  return { id, action: 'banwords' };
+  if (tail === 'bans')      return { id, action: 'bans' };
   const mm = tail.match(/^members\/([0-9a-f]{64})$/);
   if (mm) return { id, action: 'members', memberHex: mm[1] };
+  // Banwords: URL-encoded since words can contain anything. Cap at
+  // 200 chars to avoid pathological paths; decoder runs in the
+  // handler.
+  const bw = tail.match(/^banwords\/(.{1,200})$/);
+  if (bw) return { id, action: 'banwords', banword: bw[1] };
+  const bn = tail.match(/^bans\/([0-9a-f]{64})$/);
+  if (bn) return { id, action: 'bans', bannedHex: bn[1] };
   return null;
 }
 
@@ -411,6 +425,98 @@ export async function handleCommunities(
     if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
     const members = removeCommunityMember(id, route.memberHex);
     sendJson(res, 200, { ok: true, members });
+    return true;
+  }
+
+  // ── Banwords (blacklist.yml hot-reload, no NIP-86) ──────────────
+  // Storage-side edit only. GRAIN hot-reloads blacklist.yml within
+  // ~2s of the write, so the new word is enforced without a restart.
+  if (route.action === 'banwords' && method === 'GET') {
+    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
+    sendJson(res, 200, { ok: true, banwords: listCommunityBanwords(id) });
+    return true;
+  }
+  if (route.action === 'banwords' && method === 'POST') {
+    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
+    let raw: any;
+    try { raw = JSON.parse(await readBody(req)); }
+    catch { sendError(res, 400, 'invalid JSON body'); return true; }
+    const word = String(raw?.word ?? '').trim();
+    if (!word) { sendError(res, 400, '`word` is required'); return true; }
+    if (word.length > 200) { sendError(res, 400, '`word` must be ≤ 200 chars'); return true; }
+    try {
+      const banwords = addCommunityBanword(id, word);
+      sendJson(res, 200, { ok: true, banwords });
+    } catch (e: any) {
+      sendError(res, 400, (e?.message ?? 'add failed').slice(0, 240));
+    }
+    return true;
+  }
+  if (route.action === 'banwords' && route.banword && method === 'DELETE') {
+    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
+    // The path-encoded form is the source of truth; the YAML store
+    // normalizes again on its end so a mismatched case won't no-op.
+    let word: string;
+    try { word = decodeURIComponent(route.banword); }
+    catch { sendError(res, 400, 'malformed banword in URL'); return true; }
+    const banwords = removeCommunityBanword(id, word);
+    sendJson(res, 200, { ok: true, banwords });
+    return true;
+  }
+
+  // ── Bans (NIP-86 banpubkey / allowpubkey) ──────────────────────
+  // These verbs prompt the user's Amber signer per call. The silent-
+  // sign delegation toggle that buffers the prompt for 8h lives with
+  // the Moderation tab UI in a follow-up — for now every ban is one
+  // tap. The endpoint surfaces both the storage view (blacklist.yml's
+  // pubkeys field, updated by GRAIN on a successful banpubkey RPC)
+  // and the NIP-86 call result.
+  if (route.action === 'bans' && method === 'GET') {
+    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
+    sendJson(res, 200, { ok: true, bannedPubkeys: listCommunityBannedPubkeys(id) });
+    return true;
+  }
+  if (route.action === 'bans' && method === 'POST') {
+    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
+    let raw: any;
+    try { raw = JSON.parse(await readBody(req)); }
+    catch { sendError(res, 400, 'invalid JSON body'); return true; }
+    const pubkey = String(raw?.pubkey ?? '').toLowerCase();
+    if (!HEX_64.test(pubkey)) {
+      sendError(res, 400, '`pubkey` must be 64-char lowercase hex');
+      return true;
+    }
+    const reason = String(raw?.reason ?? '').slice(0, 200);
+    try {
+      const r = await banPubkey(id, pubkey, reason);
+      if (!r.ok) {
+        sendError(res, 502, r.detail || 'banpubkey RPC failed');
+        return true;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        bannedPubkeys: listCommunityBannedPubkeys(id),
+      });
+    } catch (e: any) {
+      sendError(res, 400, (e?.message ?? 'ban failed').slice(0, 240));
+    }
+    return true;
+  }
+  if (route.action === 'bans' && route.bannedHex && method === 'DELETE') {
+    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
+    try {
+      const r = await unbanPubkey(id, route.bannedHex);
+      if (!r.ok) {
+        sendError(res, 502, r.detail || 'allowpubkey RPC failed');
+        return true;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        bannedPubkeys: listCommunityBannedPubkeys(id),
+      });
+    } catch (e: any) {
+      sendError(res, 400, (e?.message ?? 'unban failed').slice(0, 240));
+    }
     return true;
   }
 

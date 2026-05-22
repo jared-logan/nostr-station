@@ -64,6 +64,26 @@ test('parseRoute: foreign paths return null (not an empty match)', () => {
   assert.equal(parseRoute(`/api/communities/${ID}/unknown-action`), null);
 });
 
+test('parseRoute: banwords list + per-word', () => {
+  assert.deepEqual(parseRoute(`/api/communities/${ID}/banwords`),
+    { id: ID, action: 'banwords' });
+  assert.deepEqual(parseRoute(`/api/communities/${ID}/banwords/spam`),
+    { id: ID, action: 'banwords', banword: 'spam' });
+  assert.deepEqual(parseRoute(`/api/communities/${ID}/banwords/${encodeURIComponent('bad phrase')}`),
+    { id: ID, action: 'banwords', banword: 'bad%20phrase' });
+});
+
+test('parseRoute: bans list + per-pubkey', () => {
+  assert.deepEqual(parseRoute(`/api/communities/${ID}/bans`),
+    { id: ID, action: 'bans' });
+  assert.deepEqual(parseRoute(`/api/communities/${ID}/bans/${HEX}`),
+    { id: ID, action: 'bans', bannedHex: HEX });
+});
+
+test('parseRoute: bans/:hex rejects non-hex', () => {
+  assert.equal(parseRoute(`/api/communities/${ID}/bans/not-a-hex`), null);
+});
+
 // ---------------------------------------------------------------------
 // validateCreatePayload
 

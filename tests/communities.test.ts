@@ -15,6 +15,8 @@ import {
   createCommunity, listCommunities, readCommunityManifest,
   updateCommunityManifest, deleteCommunityDir,
   addCommunityMember, removeCommunityMember, listCommunityMembers,
+  addCommunityBanword, removeCommunityBanword, listCommunityBanwords,
+  listCommunityBannedPubkeys,
   allocateCommunityPort, newCommunityId,
   communityDir, communityManifestPath, communityDataDir,
 } from '../src/lib/communities.ts';
@@ -269,6 +271,71 @@ test('createCommunity refuses duplicate id (defensive collision check)', async (
     // so this test mostly proves the defensive throw rather than a
     // real collision; the path is still worth covering.
     assert.ok(true);
+  } finally {
+    home.restore();
+  }
+});
+
+// ---------------------------------------------------------------------
+// Banwords (blacklist.yml hot-reload, no NIP-86)
+
+test('listCommunityBanwords starts empty for a fresh community', async () => {
+  const home = useTempHome();
+  try {
+    const m = await createCommunity({ name: 'x', privacyMode: 'local', adminPubkey: HEX_64 });
+    assert.deepEqual(listCommunityBanwords(m.id), []);
+  } finally {
+    home.restore();
+  }
+});
+
+test('addCommunityBanword is idempotent + trims + lowercases', async () => {
+  const home = useTempHome();
+  try {
+    const m = await createCommunity({ name: 'x', privacyMode: 'local', adminPubkey: HEX_64 });
+    addCommunityBanword(m.id, '  Spam  ');
+    addCommunityBanword(m.id, 'SPAM');
+    addCommunityBanword(m.id, 'spam');
+    const words = listCommunityBanwords(m.id);
+    assert.deepEqual(words, ['spam'], 'all variants should collapse to one lowercase entry');
+  } finally {
+    home.restore();
+  }
+});
+
+test('addCommunityBanword rejects empty/whitespace-only', async () => {
+  const home = useTempHome();
+  try {
+    const m = await createCommunity({ name: 'x', privacyMode: 'local', adminPubkey: HEX_64 });
+    assert.throws(() => addCommunityBanword(m.id, ''),      /non-empty/);
+    assert.throws(() => addCommunityBanword(m.id, '   '),   /non-empty/);
+  } finally {
+    home.restore();
+  }
+});
+
+test('removeCommunityBanword is idempotent + matches normalized form', async () => {
+  const home = useTempHome();
+  try {
+    const m = await createCommunity({ name: 'x', privacyMode: 'local', adminPubkey: HEX_64 });
+    addCommunityBanword(m.id, 'spam');
+    addCommunityBanword(m.id, 'badword');
+    // Removing via a mixed-case form should still match (normalized).
+    const after = removeCommunityBanword(m.id, 'SPAM');
+    assert.deepEqual(after, ['badword']);
+    // Re-remove is a no-op.
+    const after2 = removeCommunityBanword(m.id, 'spam');
+    assert.deepEqual(after2, ['badword']);
+  } finally {
+    home.restore();
+  }
+});
+
+test('listCommunityBannedPubkeys starts empty (NIP-86 bans populate it server-side)', async () => {
+  const home = useTempHome();
+  try {
+    const m = await createCommunity({ name: 'x', privacyMode: 'local', adminPubkey: HEX_64 });
+    assert.deepEqual(listCommunityBannedPubkeys(m.id), []);
   } finally {
     home.restore();
   }

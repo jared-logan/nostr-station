@@ -10889,3 +10889,64 @@ a.client-mention {
   cursor: not-allowed;
 }
 .community-wizard .radio-card.disabled strong { color: var(--text-dim); }
+
+/* Community Moderation tab — banwords + banned pubkeys sections,
+   each with its own input + list. */
+.community-moderation {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.community-mod-section h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text-bright);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.community-mod-section .form-help {
+  margin: 0 0 10px;
+}
+.community-mod-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.community-mod-add input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  color: var(--text-bright);
+  font-size: 12px;
+}
+.community-mod-add input:focus { outline: none; border-color: var(--accent); }
+
+/* Banword chip list — each word renders as a deletable pill. */
+.community-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.community-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-bright);
+}
+.community-chip button {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.community-chip button:hover { color: var(--error); }

@@ -23083,32 +23083,171 @@ const CommunitiesPanel = (() => {
     });
   }
 
-  // ── Tab: Moderation (banword editor only in this commit) ────────
-  // Banwords are a direct YAML edit (GRAIN hot-reloads on file change),
-  // not a NIP-86 call. Per-event / per-pubkey bans live behind NIP-86
-  // and need silent-sign delegation to be ergonomic — that lands when
-  // the delegation toggle is wired.
-  function renderTabModeration(host, c) {
+  // ── Tab: Moderation ────────────────────────────────────────────
+  // Two functioning sections (banwords + banned pubkeys), one
+  // "coming soon" callout for rate-limit presets / allowed-kinds
+  // chips / storage cap (those need additional NIP-86 plumbing or
+  // YAML schema work that's not blocking the main moderation flow).
+  //
+  // Banwords are a direct YAML edit — GRAIN hot-reloads on
+  // blacklist.yml changes within ~2s. No NIP-86, no signer prompt.
+  //
+  // Banned pubkeys go through NIP-86 banpubkey, which signs a
+  // kind-27235 NIP-98 event via the saved Amber bunker per call.
+  // Until the silent-sign delegation toggle lands, every ban
+  // prompts the user's signer. The UI surfaces this clearly with
+  // a banner so a flood-triaging moderator isn't surprised.
+  async function renderTabModeration(host, c) {
     host.innerHTML = `
       <div class="community-moderation">
-        <p class="form-help">
-          Moderation tools land in stages. For now you can pause /
-          resume the community above; banned-pubkey and banned-word
-          management arrive with the NIP-86 silent-sign delegation
-          flow.
-        </p>
-        <div class="community-mod-placeholder">
+        <section class="community-mod-section">
+          <h4>Banned words</h4>
+          <p class="form-help">
+            Posts containing any of these words or phrases are rejected
+            at ingest. Edits hot-reload — GRAIN picks up changes within
+            a couple of seconds without a restart.
+          </p>
+          <div class="community-mod-add">
+            <input id="community-banword-input" type="text" maxlength="200" placeholder="word or phrase" />
+            <button class="primary" id="community-banword-add-btn">Add banword</button>
+          </div>
+          <div id="community-banwords-list" class="community-chip-list">loading…</div>
+        </section>
+
+        <section class="community-mod-section">
+          <h4>Banned pubkeys</h4>
+          <p class="form-help">
+            Banning a pubkey calls GRAIN's NIP-86 admin API. Each
+            ban currently prompts your signer (Amber etc.). The
+            silent-sign delegation toggle that buffers prompts for
+            a configurable window is on the next iteration.
+          </p>
+          <div class="community-mod-add">
+            <input id="community-ban-input" type="text" placeholder="npub1… or 64-char hex" />
+            <button class="primary" id="community-ban-add-btn">Ban pubkey</button>
+          </div>
+          <div id="community-bans-list" class="community-bans">loading…</div>
+        </section>
+
+        <section class="community-mod-section community-mod-placeholder">
           <strong>Coming next:</strong>
           <ul>
-            <li>Banned pubkeys (NIP-86 banpubkey / allowpubkey)</li>
-            <li>Banned words (blacklist.yml hot-reload)</li>
             <li>Rate-limit presets (Relaxed / Strict / Family-friendly)</li>
-            <li>Allowed kinds (chip list)</li>
-            <li>Storage cap (with a 90%/100% banner)</li>
+            <li>Allowed-kinds chip list</li>
+            <li>Storage cap slider (with 90%/100% banners)</li>
+            <li>Silent-sign delegation (8h trust window for moderation actions)</li>
           </ul>
-        </div>
+        </section>
       </div>
     `;
+    // Wire banword controls.
+    $('community-banword-add-btn')?.addEventListener('click', async () => {
+      const word = $('community-banword-input')?.value?.trim() || '';
+      if (!word) return;
+      try {
+        await api(`/api/communities/${c.id}/banwords`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ word }),
+        });
+        $('community-banword-input').value = '';
+        await reloadBanwords(c);
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+    // Wire ban-pubkey controls.
+    $('community-ban-add-btn')?.addEventListener('click', async () => {
+      const raw = $('community-ban-input')?.value?.trim() || '';
+      const pk  = normalizePubkey(raw);
+      if (!pk) { window.Toasts?.error?.('Paste an npub or 64-char hex pubkey.'); return; }
+      if (!confirm(`Ban ${pk.slice(0, 12)}…?\n\nYour signer will prompt for the NIP-86 ban event.`)) return;
+      try {
+        await api(`/api/communities/${c.id}/bans`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ pubkey: pk }),
+        });
+        $('community-ban-input').value = '';
+        await reloadBans(c);
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+    // Initial load (parallel — both endpoints are independent).
+    await Promise.all([ reloadBanwords(c), reloadBans(c) ]);
+  }
+
+  async function reloadBanwords(c) {
+    const host = $('community-banwords-list');
+    if (!host) return;
+    try {
+      const r = await api(`/api/communities/${c.id}/banwords`);
+      const list = Array.isArray(r?.banwords) ? r.banwords : [];
+      if (list.length === 0) {
+        host.innerHTML = `<div class="empty-state-inline">No banned words.</div>`;
+        return;
+      }
+      host.innerHTML = list.map((w) => `
+        <span class="community-chip">
+          ${escapeHtml(w)}
+          <button data-banword-remove="${encodeURIComponent(w)}" class="link" aria-label="Remove">×</button>
+        </span>
+      `).join('');
+      host.querySelectorAll('[data-banword-remove]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const w = btn.getAttribute('data-banword-remove');
+          try {
+            await api(`/api/communities/${c.id}/banwords/${w}`, { method: 'DELETE' });
+            await reloadBanwords(c);
+          } catch (e) {
+            window.Toasts?.error?.(e?.message || String(e));
+          }
+        });
+      });
+    } catch (e) {
+      host.innerHTML = `<div class="empty-state-inline">Failed to load: ${escapeHtml(String(e?.message || e))}</div>`;
+    }
+  }
+
+  async function reloadBans(c) {
+    const host = $('community-bans-list');
+    if (!host) return;
+    try {
+      const r = await api(`/api/communities/${c.id}/bans`);
+      const list = Array.isArray(r?.bannedPubkeys) ? r.bannedPubkeys : [];
+      if (list.length === 0) {
+        host.innerHTML = `<div class="empty-state-inline">No banned pubkeys.</div>`;
+        return;
+      }
+      host.innerHTML = `
+        <table class="community-members">
+          <thead><tr><th>Pubkey</th><th></th></tr></thead>
+          <tbody>
+            ${list.map((hex) => `
+              <tr>
+                <td class="community-mono">${escapeHtml(hex.slice(0, 16))}…</td>
+                <td><button data-unban="${hex}" class="link">unban</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+      host.querySelectorAll('[data-unban]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const hex = btn.getAttribute('data-unban');
+          if (!confirm(`Unban ${hex.slice(0, 12)}…?\n\nYour signer will prompt for the NIP-86 allow event.`)) return;
+          try {
+            await api(`/api/communities/${c.id}/bans/${hex}`, { method: 'DELETE' });
+            await reloadBans(c);
+          } catch (e) {
+            window.Toasts?.error?.(e?.message || String(e));
+          }
+        });
+      });
+    } catch (e) {
+      host.innerHTML = `<div class="empty-state-inline">Failed to load: ${escapeHtml(String(e?.message || e))}</div>`;
+    }
   }
 
   // ── Tab: Settings ───────────────────────────────────────────────

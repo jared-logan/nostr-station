@@ -34,6 +34,7 @@ import {
   communityRelayMetadataPath,
   defaultGrainConfig, defaultRelayMetadata,
   readGrainWhitelist, writeGrainWhitelist,
+  readGrainBlacklist, writeGrainBlacklist,
   atomicWriteFileSync,
   writeGrainConfig, writeRelayMetadata,
 } from './community-yaml.js';
@@ -379,6 +380,58 @@ export function removeCommunityMember(id: string, pubkeyHex: string): string[] {
 export function listCommunityMembers(id: string): string[] {
   const wl = readGrainWhitelist(communityWhitelistPath(communityDir(id)));
   return [...wl.pubkeys];
+}
+
+// =====================================================================
+// Banword helpers (blacklist.yml mutations)
+//
+// Banwords are a YAML edit, not a NIP-86 call — GRAIN hot-reloads on
+// blacklist.yml changes within ~2 seconds. Keeping the storage-side
+// mutation here in the CRUD layer mirrors the member helpers above.
+
+/** Read the current banword list. */
+export function listCommunityBanwords(id: string): string[] {
+  const bl = readGrainBlacklist(communityBlacklistPath(communityDir(id)));
+  return [...bl.words];
+}
+
+/**
+ * Add a word/phrase to the banlist. Idempotent: re-adding an
+ * existing entry is a no-op. Trims + lowercases input so
+ * "Spam" / "spam" / " spam " collapse to the same entry.
+ */
+export function addCommunityBanword(id: string, word: string): string[] {
+  const blPath = communityBlacklistPath(communityDir(id));
+  const bl     = readGrainBlacklist(blPath);
+  const w      = word.trim().toLowerCase();
+  if (!w) throw new Error('banword must be non-empty');
+  if (!bl.words.includes(w)) {
+    bl.words.push(w);
+    writeGrainBlacklist(blPath, bl);
+  }
+  return bl.words;
+}
+
+/**
+ * Remove a word/phrase from the banlist. Idempotent: removing a
+ * non-existent entry is a no-op.
+ */
+export function removeCommunityBanword(id: string, word: string): string[] {
+  const blPath = communityBlacklistPath(communityDir(id));
+  const bl     = readGrainBlacklist(blPath);
+  const w      = word.trim().toLowerCase();
+  const next   = bl.words.filter((x) => x !== w);
+  if (next.length !== bl.words.length) {
+    writeGrainBlacklist(blPath, { ...bl, words: next });
+  }
+  return next;
+}
+
+/** Read the current banned-pubkey list (stored in blacklist.yml's
+ *  pubkeys field — NIP-86 bans land here once we wire those routes). */
+export function listCommunityBannedPubkeys(id: string): string[] {
+  const bl = readGrainBlacklist(communityBlacklistPath(communityDir(id)));
+  return [...bl.pubkeys];
 }
 
 // Re-exported so callers that hold the id can read GRAIN configs
