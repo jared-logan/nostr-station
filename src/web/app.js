@@ -22592,7 +22592,6 @@ const CommunitiesPanel = (() => {
   const body         = $('communities-body');
   const newBtn       = $('communities-new');
   const joinBtn      = $('communities-join');
-  const privacyBtn   = $('communities-privacy');
   const titleEl      = $('communities-title');
   const subtitleEl   = $('communities-subtitle');
   const headActions  = $('communities-head-actions');
@@ -22767,74 +22766,6 @@ const CommunitiesPanel = (() => {
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  // ── Privacy disclosure ──────────────────────────────────────────
-  // Expandable "Who can see what?" block shown in the wizard's
-  // privacy step and in the detail Status tab. The copy is deliberately
-  // exhaustive — privacy-conscious users want the long version, not the
-  // marketing version. Renders different content per privacy mode so a
-  // local-only community doesn't get a wall of nvpn-relevant warnings.
-  function privacyDisclosureHtml(mode, opts = {}) {
-    const open = opts.open ? ' open' : '';
-    if (mode === 'local') {
-      return `
-        <details class="privacy-disclosure"${open}>
-          <summary>Who can see what? <span class="chip chip-mode">local mode</span></summary>
-          <div class="privacy-disclosure-body">
-            <table class="privacy-matrix">
-              <thead><tr><th>Audience</th><th>Can reach the relay?</th><th>Can read events?</th><th>Can publish?</th><th>Sees relay name / description?</th></tr></thead>
-              <tbody>
-                <tr><td>You (this machine)</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr>
-                <tr><td>Anyone on your home LAN</td><td>no</td><td>—</td><td>—</td><td>—</td></tr>
-                <tr><td>Anyone on the public internet</td><td>no</td><td>—</td><td>—</td><td>—</td></tr>
-              </tbody>
-            </table>
-            <p>Local-only communities bind to <code>127.0.0.1</code> — only processes on this machine can reach them. No nvpn mesh is involved.</p>
-          </div>
-        </details>
-      `;
-    }
-    // private-network — the trust model is "shared mesh of trusted contacts
-    // + per-community allowlist". Spelling out every leak surface explicitly
-    // so privacy-conscious users can decide if it matches their threat
-    // model, not just trust our adjective ("private").
-    return `
-      <details class="privacy-disclosure"${open}>
-        <summary>Who can see what? <span class="chip chip-mode">private network</span></summary>
-        <div class="privacy-disclosure-body">
-          <table class="privacy-matrix">
-            <thead><tr><th>Audience</th><th>Can reach the relay?</th><th>Can read events?</th><th>Can publish?</th><th>Sees relay name / description?</th></tr></thead>
-            <tbody>
-              <tr><td>You (your devices via the dashboard)</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr>
-              <tr><td>Members of <em>this</em> community</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr>
-              <tr><td>Members of <em>other</em> communities on the same mesh</td><td>yes (port reachable)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td>opaque name only (e.g. <code>private-relay-…</code>); description hidden by default</td></tr>
-              <tr><td>Anyone on your home LAN</td><td>no</td><td>—</td><td>—</td><td>—</td></tr>
-              <tr><td>Anyone on the public internet</td><td>no</td><td>—</td><td>—</td><td>—</td></tr>
-            </tbody>
-          </table>
-          <h4>The mesh is your trust boundary</h4>
-          <p>nvpn supports one active network at a time per host. All of your private-network communities ride on that single mesh. The mesh is the people you've explicitly invited — think of it as "everyone allowed past the front door of your house". Each community is a separate room behind that door with its own guest list.</p>
-          <h4>What a fellow mesh-member can do</h4>
-          <ul>
-            <li>Connect to any community's relay port (TCP-reachable).</li>
-            <li><strong>Cannot</strong> read or publish events in a community they're not in — GRAIN enforces NIP-42 auth + a pubkey allowlist per community.</li>
-            <li>Can probe NIP-11 metadata. By default that returns an opaque relay name (<code>private-relay-&lt;short-hex&gt;</code>) and an empty description — the community's friendly name lives only in your dashboard. You can override this in the community's Settings tab if you don't mind sharing the name.</li>
-            <li>Sees your pubkey via nvpn's signed mesh roster (this is how meshes work — there is no anonymous mesh membership).</li>
-          </ul>
-          <h4>What no one outside the mesh can do</h4>
-          <ul>
-            <li>Reach any community relay (the mesh is the perimeter).</li>
-            <li>Reach the dashboard.</li>
-            <li>See any device on your home LAN — the Communities subsystem refuses to operate on networks where nvpn's <code>advertise-routes</code> is enabled.</li>
-          </ul>
-          <h4>The dashboard is separately gated</h4>
-          <p>Even community members on the same mesh cannot reach the dashboard. The dashboard binds to the mesh tunnel IP only when you opt into Mobile Access, and even then it filters incoming connections by pubkey — only your own devices (paired with the same NIP-46 signer) get through.</p>
-          <h4>Removing a member</h4>
-          <p>Kicking someone from a community removes them from that community's allowlist only. They remain on your underlying mesh and in any other communities they're a member of. To fully eject someone, remove them from the mesh itself in the nvpn panel — that takes them out of every community at once.</p>
-        </div>
-      </details>
-    `;
-  }
-
   async function onCardAction(action, id) {
     try {
       if (action === 'start')   await api(`/api/communities/${id}/start`,   { method: 'POST' });
@@ -22968,7 +22899,6 @@ const CommunitiesPanel = (() => {
             : `(Local-only communities are only reachable from this machine.)`}
         </div>
       </div>
-      ${privacyDisclosureHtml(c.privacyMode)}
     `;
     $('community-wss-copy')?.addEventListener('click', async () => {
       try { await navigator.clipboard.writeText(wssUrl); }
@@ -23227,45 +23157,19 @@ const CommunitiesPanel = (() => {
   // For commit 6 we ship a minimal Members step (paste npubs / hex)
   // without the autocomplete dropdown (the /api/profiles/autocomplete
   // endpoint is on the deferred-from-the-other-branch list).
-  async function openWizard() {
+  function openWizard() {
     const modalRoot = $('modal-root');
     if (!modalRoot) return;
-    // Resolve the dashboard owner's pubkey (hex) up front. Every
-    // community needs an adminPubkey at create time — defaulting to
-    // the dashboard owner — and the wizard's "Add me as a member"
-    // checkbox preloads the same hex. /api/identity/config is the
-    // canonical source (used by ConfigPanel, ProjectsPanel, etc.);
-    // npub→hex via NostrTools.nip19, same as every other panel that
-    // crosses the two encodings.
-    let ownerHex = '';
-    try {
-      const cfg = await api('/api/identity/config');
-      const npub = (cfg?.npub || '').toString();
-      if (npub.startsWith('npub1') && window.NostrTools?.nip19) {
-        const dec = window.NostrTools.nip19.decode(npub);
-        if (dec?.type === 'npub' && typeof dec.data === 'string') {
-          ownerHex = dec.data.toLowerCase();
-        }
-      }
-    } catch { /* identity not yet configured; handled below */ }
-
-    if (!ownerHex) {
-      // Refuse to open with a useful error rather than letting the
-      // user fill out the wizard and hit a 400 at submit time (the
-      // exact regression that prompted this fix).
-      const msg = 'Set up your dashboard identity first — Config → Identity.';
-      window.Toasts?.error?.(msg);
-      if (!window.Toasts) alert(msg);
-      return;
-    }
-
+    const ownerNpub = (window.IdentityDrawer?.getOwnerNpub?.() || '').toString();
+    const ownerHex  = window.NostrTools?.nip19?.decode?.(ownerNpub)?.data ||
+                      (window.identityHexCache || '');
     // Wizard state — purely local to this modal.
     const wstate = {
       step: 1,
       name: '',
       description: '',
       privacyMode: 'local',  // safer default since nvpn might not be running
-      members: [ownerHex],
+      members: ownerHex ? [ownerHex] : [],
       adminPubkey: ownerHex,
       addMeAsMember: true,
     };
@@ -23298,12 +23202,10 @@ const CommunitiesPanel = (() => {
           <label class="form-field">
             <span class="form-label">Name</span>
             <input id="w-name" type="text" maxlength="60" value="${escapeHtml(wstate.name)}" placeholder="Family · Friends · Book Club" />
-            <span class="form-help-inline">Visible to you in the dashboard. Not published in the relay's public metadata — see the privacy details below.</span>
           </label>
           <label class="form-field">
             <span class="form-label">Description (optional)</span>
             <textarea id="w-desc" maxlength="200" rows="2" placeholder="What is this community for?">${escapeHtml(wstate.description)}</textarea>
-            <span class="form-help-inline">Also private — visible only to the dashboard and the people you invite.</span>
           </label>
           <fieldset class="form-field">
             <legend class="form-label">Privacy mode</legend>
@@ -23322,7 +23224,6 @@ const CommunitiesPanel = (() => {
               </div>
             </label>
           </fieldset>
-          ${privacyDisclosureHtml(wstate.privacyMode)}
         `;
       }
       if (wstate.step === 2) {
@@ -23467,38 +23368,6 @@ const CommunitiesPanel = (() => {
   joinBtn?.addEventListener('click', () => {
     if (window.Toasts) window.Toasts.info?.('Join wizard lands with the nvpn integration.');
     else alert('Join wizard lands with the nvpn integration.');
-  });
-  // Privacy & visibility — opens a modal with BOTH disclosure variants
-  // side by side so a user evaluating the feature can see what each
-  // privacy mode exposes before they create anything. Same disclosure
-  // markup as the wizard / detail Status tab — single source of truth.
-  privacyBtn?.addEventListener('click', () => {
-    const modalRoot = $('modal-root');
-    if (!modalRoot) return;
-    modalRoot.innerHTML = `
-      <div class="modal-backdrop" id="privacy-scrim">
-        <div class="modal community-privacy-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-title">
-          <div class="modal-head">
-            <div id="privacy-title" class="title">Communities · privacy &amp; visibility</div>
-            <button class="link" id="privacy-close" aria-label="Close" style="font-size:18px;line-height:1">×</button>
-          </div>
-          <div class="modal-body">
-            <p class="form-help">Two privacy modes are available. The matrices below spell out exactly who sees what under each. Source of truth — these expand by default so nothing about the model is hidden behind a click.</p>
-            ${privacyDisclosureHtml('local',           { open: true })}
-            ${privacyDisclosureHtml('private-network', { open: true })}
-          </div>
-          <div class="modal-foot">
-            <button class="primary" id="privacy-done">Got it</button>
-          </div>
-        </div>
-      </div>
-    `;
-    const close = () => { modalRoot.innerHTML = ''; };
-    $('privacy-close')?.addEventListener('click', close);
-    $('privacy-done')?.addEventListener('click', close);
-    $('privacy-scrim')?.addEventListener('click', (e) => {
-      if (e.target.id === 'privacy-scrim') close();
-    });
   });
   // Delegated handler for the empty-state CTA (the button is rendered
   // dynamically so we attach to body once).
