@@ -10987,3 +10987,24 @@ a.client-mention {
    from hosted communities at a glance. */
 .community-card-joined { border-style: dashed; }
 .community-card-joined:hover { border-color: var(--accent-dim); }
+
+/* GRAIN embedded relay-dashboard iframe — sits below the connection
+   card on the Status tab. Lazy-mounted only when the user clicks
+   "embed". Min-height tall enough that GRAIN's status grid renders
+   without scrolling; max-height capped so it doesn't dominate the
+   tab. Border + radius match the card chrome above so it reads as
+   the same surface. */
+.grain-embed-host {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  overflow: hidden;
+}
+.grain-embed-host iframe {
+  width: 100%;
+  height: 600px;
+  max-height: 70vh;
+  border: none;
+  display: block;
+}

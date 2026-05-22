@@ -23134,7 +23134,16 @@ const CommunitiesPanel = (() => {
     const connHost = c.privacyMode === 'private-network' && c.nvpnTunnelIp
       ? c.nvpnTunnelIp
       : '127.0.0.1';
-    const wssUrl = `ws://${connHost}:${c.port}`;
+    const wssUrl  = `ws://${connHost}:${c.port}`;
+    // GRAIN ships its own web frontend (relay dashboard + event/profile
+    // viewer + client tools) on the SAME port the WebSocket relay listens
+    // on — just GET /. We don't proxy or embed it; we link to it so the
+    // user can choose to use GRAIN's deeper relay-management surface
+    // without leaving the dashboard's supervised-control-plane shell.
+    // Only useful when the relay is running and reachable from the user.
+    const grainUiUrl = `http://${connHost}:${c.port}/`;
+    const grainUiLinkable = c.status === 'running' &&
+                            (c.privacyMode === 'local' || c.nvpnTunnelIp);
     host.innerHTML = `
       <div class="community-detail-meta">
         <div><span class="kv-k">Port</span><span class="kv-v">:${c.port}</span></div>
@@ -23157,8 +23166,58 @@ const CommunitiesPanel = (() => {
             : `(Local-only communities are only reachable from this machine.)`}
         </div>
       </div>
+      <div class="community-conn-card">
+        <div class="kv-k">GRAIN relay dashboard</div>
+        <div class="community-conn-row">
+          <code class="community-mono">${escapeHtml(grainUiUrl)}</code>
+          ${grainUiLinkable
+            ? `<button id="grain-embed-toggle">embed ▾</button>
+               <a href="${escapeHtml(grainUiUrl)}" target="_blank" rel="noopener noreferrer"><button>open ↗</button></a>`
+            : `<button disabled title="Available when the community is running">embed ▾</button>
+               <button disabled>open ↗</button>`}
+        </div>
+        <div class="form-help">
+          GRAIN ships its own web frontend on the relay's HTTP port —
+          relay status, event &amp; profile viewer, key generation, ping.
+          Click <strong>embed</strong> to mount it inline; <strong>open</strong>
+          launches it in a new tab. Embedding depends on the relay's
+          frame policy — if GRAIN blocks iframing, you'll see a blank
+          panel; fall back to <strong>open</strong> in that case.
+          Same-origin proxying lands as a follow-up to make embedding
+          work regardless of GRAIN's headers.
+        </div>
+        <div id="grain-embed-host" class="grain-embed-host" hidden></div>
+      </div>
       ${privacyDisclosureHtml(c.privacyMode)}
     `;
+    // Mount the iframe lazily — only when the user clicks "embed".
+    // sandbox attributes restrict what the embedded page can do:
+    //   allow-scripts        — GRAIN's UI needs JS (websocket, render)
+    //   allow-same-origin    — needed for the embedded page to talk
+    //                          to its own backend (same host:port)
+    //   allow-forms          — relay tools include key-gen / publish
+    //   (no allow-top-navigation) → embedded page can't redirect us
+    //   (no allow-popups)    → no surprise pop-up windows
+    $('grain-embed-toggle')?.addEventListener('click', () => {
+      const host = $('grain-embed-host');
+      if (!host) return;
+      if (host.hidden) {
+        if (!host.dataset.loaded) {
+          const iframe = document.createElement('iframe');
+          iframe.src = grainUiUrl;
+          iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
+          iframe.setAttribute('referrerpolicy', 'no-referrer');
+          iframe.title = `${c.name} — GRAIN relay dashboard`;
+          host.appendChild(iframe);
+          host.dataset.loaded = '1';
+        }
+        host.hidden = false;
+        $('grain-embed-toggle').textContent = 'embed ▴';
+      } else {
+        host.hidden = true;
+        $('grain-embed-toggle').textContent = 'embed ▾';
+      }
+    });
     $('community-wss-copy')?.addEventListener('click', async () => {
       try { await navigator.clipboard.writeText(wssUrl); }
       catch { /* ignore */ }
@@ -23180,14 +23239,23 @@ const CommunitiesPanel = (() => {
     `;
     $('community-add-btn')?.addEventListener('click', async () => {
       const raw = $('community-add-input')?.value?.trim() || '';
-      const pk  = normalizePubkey(raw);
-      if (!pk) { window.Toasts?.error?.('That doesn\'t look like an npub or hex pubkey.'); return; }
+      if (!raw) {
+        window.Toasts?.error?.('Paste an npub or hex pubkey.');
+        return;
+      }
+      // Forward whatever the user typed; the server accepts either
+      // form (npub1… or 64-char hex) and normalizes server-side via
+      // a real nostr-tools import. The previous client-only
+      // normalizePubkey() depended on window.NostrTools which isn't
+      // reliably loaded on this build, so npub1… inputs silently
+      // bailed with the toast — making the button look broken.
       try {
         await api(`/api/communities/${c.id}/members`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ pubkey: pk }),
+          body:    JSON.stringify({ pubkey: raw }),
         });
+        $('community-add-input').value = '';
         await fetchList();
         const refreshed = communities.find((x) => x.id === c.id);
         renderTabMembers(host, refreshed || c);
@@ -23234,17 +23302,27 @@ const CommunitiesPanel = (() => {
             const nameCell = name
               ? `<strong>${escapeHtml(name)}</strong>${prof.nip05 ? `<div class="muted">${escapeHtml(prof.nip05)}</div>` : ''}`
               : `<span class="muted">no profile yet</span>`;
+            // Always render the pixel-avatar fallback first; if a
+            // picture URL is present, an `img` overlay loads on top.
+            // Previously this used inline onerror="…outerHTML=…" with
+            // the pixelAvatar SVG embedded inline — but SVG strings
+            // contain double-quotes that prematurely closed the
+            // onerror attribute, leaking the rest as literal text
+            // ('"/>) next to the avatar. Post-render JS hook in
+            // wireMemberRowButtons handles the load-failure case
+            // cleanly, no attribute-quoting gymnastics.
+            const avatarFallback = pixelAvatar(hex, 28);
             const avatar = prof.picture
-              ? `<img class="community-avatar" src="${prof.picture}" alt="" loading="lazy" onerror="this.outerHTML='${pixelAvatar(hex, 28).replace(/'/g, '&#39;')}'"/>`
-              : pixelAvatar(hex, 28);
+              ? `<span class="community-avatar-slot" data-hex="${escapeHtml(hex)}" data-fallback-svg>${avatarFallback}<img class="community-avatar community-avatar-overlay" data-avatar-img src="${escapeHtml(prof.picture)}" alt="" loading="lazy"/></span>`
+              : avatarFallback;
             const removeBtn = isAdmin
               ? `<span class="muted" title="The admin can't be removed from their own allowlist">admin</span>`
-              : `<button data-remove="${hex}" class="link danger">remove</button>`;
+              : `<button data-remove="${escapeHtml(hex)}" class="link danger">remove</button>`;
             return `
               <tr>
                 <td>${avatar}</td>
                 <td>${nameCell}</td>
-                <td class="community-mono">${hex.slice(0, 12)}…</td>
+                <td class="community-mono">${escapeHtml(hex.slice(0, 12))}…</td>
                 <td>${isAdmin ? 'admin' : 'member'}</td>
                 <td>${removeBtn}</td>
               </tr>
@@ -23256,6 +23334,16 @@ const CommunitiesPanel = (() => {
   }
 
   function wireMemberRowButtons(host, c) {
+    // Post-render avatar handling: each <img data-avatar-img> sits
+    // ON TOP of the pixel-avatar fallback. On load success it stays;
+    // on load failure (broken URL, blocked img-proxy, etc.) we remove
+    // it and the fallback shines through. No HTML-attribute-quoting
+    // games — the SVG fallback's double-quotes can't leak into the
+    // surrounding markup because it's already rendered as DOM, not
+    // string-interpolated into an attribute.
+    host.querySelectorAll('[data-avatar-img]').forEach((img) => {
+      img.addEventListener('error', () => { img.remove(); });
+    });
     host.querySelectorAll('[data-remove]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const hex = btn.getAttribute('data-remove');
@@ -23345,17 +23433,18 @@ const CommunitiesPanel = (() => {
         window.Toasts?.error?.(e?.message || String(e));
       }
     });
-    // Wire ban-pubkey controls.
+    // Wire ban-pubkey controls. Same normalize-on-server pattern as
+    // the Members tab: forward the raw input and let the route
+    // helper decode npub→hex via the real nostr-tools import.
     $('community-ban-add-btn')?.addEventListener('click', async () => {
       const raw = $('community-ban-input')?.value?.trim() || '';
-      const pk  = normalizePubkey(raw);
-      if (!pk) { window.Toasts?.error?.('Paste an npub or 64-char hex pubkey.'); return; }
-      if (!confirm(`Ban ${pk.slice(0, 12)}…?\n\nYour signer will prompt for the NIP-86 ban event.`)) return;
+      if (!raw) { window.Toasts?.error?.('Paste an npub or 64-char hex pubkey.'); return; }
+      if (!confirm(`Ban ${raw.slice(0, 16)}…?\n\nYour signer will prompt for the NIP-86 ban event.`)) return;
       try {
         await api(`/api/communities/${c.id}/bans`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ pubkey: pk }),
+          body:    JSON.stringify({ pubkey: raw }),
         });
         $('community-ban-input').value = '';
         await reloadBans(c);
