@@ -1277,6 +1277,22 @@ const IdentityDrawer = (() => {
     body.appendChild(signing);
 
     // NSITE — hydrated asynchronously from /api/nsite/discover. The
+    // Mobile Access — toggle that controls whether the dashboard binds
+    // to non-loopback interfaces. When ON, the dashboard's HTTP port
+    // becomes reachable from peers on the nvpn mesh; the connection-
+    // time peer-pubkey filter (dashboard-binding.ts) restricts who
+    // actually gets through to the user's own devices (paired with
+    // the same NIP-46 bunker). Persisted to ~/.nostr-station/
+    // mobile-access.json; applied on next dashboard restart.
+    const mobileSec = document.createElement('div');
+    mobileSec.className = 'drawer-section mobile-access-section';
+    mobileSec.innerHTML = `
+      <h4>Mobile access</h4>
+      <div class="body"><span class="spinner"></span><span class="muted" style="margin-left:8px">Loading…</span></div>
+    `;
+    body.appendChild(mobileSec);
+    renderMobileAccessSection(mobileSec);
+
     // section slot is rendered immediately so the drawer doesn't jump
     // when results arrive.
     const nsiteSec = document.createElement('div');
@@ -1526,6 +1542,74 @@ const IdentityDrawer = (() => {
         ProjectDrawer.openAddPrefilled(buildNsiteSeed(d, npub));
       });
     }
+  }
+
+  // ── Mobile Access section ─────────────────────────────────────
+  // Renders the toggle + bind URL + restart-required banner. Lives
+  // inside IdentityDrawer's scope so it can reuse the helpers but
+  // self-contained otherwise — its only external dependency is
+  // /api/mobile-access.
+  async function renderMobileAccessSection(host) {
+    let cfg;
+    try {
+      cfg = await api('/api/mobile-access');
+    } catch (e) {
+      host.innerHTML = `
+        <h4>Mobile access</h4>
+        <div class="body muted">Failed to load: ${escapeHtml(e?.message || String(e))}</div>
+      `;
+      return;
+    }
+    const enabled = !!cfg?.enabled;
+    const bindHost = cfg?.currentBind || '127.0.0.1';
+    // Display URL the user's phone would visit. We use the dashboard's
+    // current page hostname (location.hostname) when the user's already
+    // on the mesh; otherwise fall back to the bind host. The phone
+    // needs to know the actual IP, not "0.0.0.0".
+    const port = location.port || (location.protocol === 'https:' ? 443 : 80);
+    const remoteHint = bindHost === '0.0.0.0'
+      ? `Use your dashboard's nvpn tunnel IP — find it on the nvpn panel.`
+      : `Bound to <code>${escapeHtml(bindHost)}</code> only; flip the toggle to expose to your mesh.`;
+    host.innerHTML = `
+      <h4>Mobile access</h4>
+      <div class="body" style="font-size:12px">
+        <label class="form-field-inline" style="margin:6px 0">
+          <input id="mobile-access-toggle" type="checkbox" ${enabled ? 'checked' : ''}/>
+          <span>Allow reaching the dashboard from peers on your nvpn mesh</span>
+        </label>
+        <div class="form-help" style="margin:6px 0">
+          Only YOUR own devices (paired with the same Amber bunker)
+          actually get through — every other mesh peer hits a hard
+          wall at the connection layer. See
+          <a href="#communities" data-panel="communities">Communities → Privacy &amp; visibility</a>
+          for the full disclosure.
+        </div>
+        <div id="mobile-access-status" class="form-help" style="margin:6px 0">
+          ${remoteHint}
+        </div>
+        ${cfg?.needsRestart ? `
+          <div class="community-card-error" style="margin:8px 0">
+            Toggle saved but not yet applied. Restart the dashboard from Config → About → Restart for changes to take effect.
+          </div>
+        ` : ''}
+      </div>
+    `;
+    const tog = host.querySelector('#mobile-access-toggle');
+    tog?.addEventListener('change', async () => {
+      const next = tog.checked;
+      try {
+        await api('/api/mobile-access', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: next }),
+        });
+        renderMobileAccessSection(host);  // re-render with the restart banner
+      } catch (e) {
+        // Revert the toggle on save failure so the UI doesn't lie.
+        tog.checked = !next;
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
   }
 
   $('identity-chip').addEventListener('click', open);
