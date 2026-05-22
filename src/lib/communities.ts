@@ -31,10 +31,11 @@ import crypto from 'node:crypto';
 import {
   communitiesRoot,
   communityConfigPath, communityWhitelistPath, communityBlacklistPath,
-  defaultGrainConfig,
+  communityRelayMetadataPath,
+  defaultGrainConfig, defaultRelayMetadata,
   readGrainWhitelist, writeGrainWhitelist,
   atomicWriteFileSync,
-  writeGrainConfig,
+  writeGrainConfig, writeRelayMetadata,
 } from './community-yaml.js';
 
 // =====================================================================
@@ -288,6 +289,16 @@ export async function createCommunity(
   writeGrainWhitelist(
     communityWhitelistPath(dir),
     { pubkeys: Array.from(initial) },
+  );
+
+  // Pre-write relay_metadata.json with deliberately-opaque defaults so
+  // GRAIN never auto-generates a NIP-11 payload that includes
+  // identifying information. The friendly community name lives in
+  // community.json (dashboard-only); the NIP-11 face is an
+  // intentionally bland identifier. Users can override via Settings.
+  writeRelayMetadata(
+    communityRelayMetadataPath(dir),
+    defaultRelayMetadata({ adminPubkey: input.adminPubkey }),
   );
 
   // Don't pre-create blacklist.yml — its absence is meaningful (GRAIN
