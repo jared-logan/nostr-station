@@ -22,7 +22,7 @@ if (typeof document !== 'undefined') {
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'blossom', 'projects', 'vpn', 'logs', 'client', 'nsite', 'mail', 'config'];
+const PANELS = ['status', 'chat', 'relay', 'blossom', 'projects', 'vpn', 'logs', 'client', 'nsite', 'mail', 'config', 'communities'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -2038,6 +2038,15 @@ const StatusPanel = {
             <span class="muted">loading…</span>
           </div>
         </a>
+        <a class="dash-card" href="#communities" data-card="communities" title="Managed GRAIN private relays.">
+          <div class="dash-card-head">
+            <span class="dash-card-label">Communities</span>
+            <span class="dash-card-cta">Open →</span>
+          </div>
+          <div class="dash-card-body" id="dash-card-communities">
+            <span class="muted">loading…</span>
+          </div>
+        </a>
         <a class="dash-card" href="#chat" data-card="ai">
           <div class="dash-card-head">
             <span class="dash-card-label">AI · Chat</span>
@@ -2055,7 +2064,61 @@ const StatusPanel = {
     this._fillProjectsCard();
     this._fillRelayCard();
     this._fillBlossomCard();
+    this._fillCommunitiesCard();
     this._fillAiCard();
+  },
+
+  // Communities quick-glance card. Two states:
+  //   0 communities → no-nag teaser + inline "+ New Community" CTA
+  //   1+ communities → "<n> hosted" + a status dot summing health
+  // Click anywhere on the card opens the Communities panel; clicking
+  // the inline CTA opens the create wizard directly.
+  async _fillCommunitiesCard() {
+    const el = $('dash-card-communities');
+    if (!el) return;
+    try {
+      const r = await api('/api/communities').catch(() => ({ communities: [] }));
+      const list = Array.isArray(r?.communities) ? r.communities : [];
+      if (list.length === 0) {
+        el.innerHTML = `
+          <div class="muted" style="margin-bottom:6px">Run a relay for your family or friends</div>
+          <button class="primary" id="dash-community-create" style="font-size:11px;padding:4px 10px">+ New Community</button>
+        `;
+        // The card itself navigates to #communities on click; stop the
+        // CTA from bubbling so it goes through the wizard path instead.
+        $('dash-community-create')?.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          location.hash = '#communities';
+          // Defer so the panel mounts before we open the wizard on top.
+          setTimeout(() => { CommunitiesPanel.openWizard(); }, 50);
+        });
+        return;
+      }
+      // Sum status across all communities for the dot color.
+      let anyError = false, anyWarn = false;
+      for (const c of list) {
+        if (c.status === 'error') anyError = true;
+        else if (c.status === 'unhealthy' || c.status === 'restarting') anyWarn = true;
+      }
+      const dotCls = anyError ? 'community-dot-err'
+                  :  anyWarn  ? 'community-dot-warn'
+                  :  list.some((c) => c.status === 'running') ? 'community-dot-ok'
+                  :  'community-dot-idle';
+      const top = list.slice(0, 2)
+        .map((c) => `<div style="font-size:11px"><span class="community-dot ${dotCls === 'community-dot-err' && c.status === 'error' ? 'community-dot-err' : ''}"></span> ${(c.name || '').slice(0, 24)}</div>`)
+        .join('');
+      el.innerHTML = `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+          <span class="community-dot ${dotCls}"></span>
+          <strong>${list.length}</strong>
+          <span class="muted">${list.length === 1 ? 'hosted' : 'hosted'}</span>
+        </div>
+        ${top}
+      `;
+    } catch {
+      el.innerHTML = `<span class="muted">unavailable</span>`;
+    }
   },
 
   async _fillIdentityCard() {
@@ -15355,6 +15418,19 @@ const ConfigPanel = (() => {
         </div>
       </details>
 
+      <!-- Communities — managed GRAIN private relays. Shows install
+           state of the grain binary, the explicit nvpn dependency
+           rule for private-network mode, and a feature toggle. -->
+      <details class="config-section cfg-collapsible" id="cfg-communities-section">
+        <summary>
+          <h3>Communities</h3>
+          <span class="cfg-summary-meta" id="cfg-communities-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-communities-body">
+          <div class="muted">loading…</div>
+        </div>
+      </details>
+
       <!-- nsite section. Mirrors Titan Browser's Settings tab: content
            relays, profile-discovery relays, Blossom fallback servers,
            and the NSIT name indexer pubkey. Body filled lazily by JS. -->
@@ -15965,9 +16041,96 @@ const ConfigPanel = (() => {
     // it round-trips to /api/blossom-config — failures degrade to a
     // muted "not running" line with an enable button.
     paintBlossomConfigSection();
+    paintCommunitiesConfigSection();
     paintMailConfigSection();
     paintWatchdogConfigSection();
     paintNsiteConfigSection();
+  }
+
+  // ── Communities section ────────────────────────────────────────────
+  // Three rows:
+  //   1. grain binary state + install/reinstall action
+  //   2. nvpn dependency (read-only — explains the relationship; the
+  //      action sits in the nvpn tab where it belongs)
+  //   3. counts (hosted / running) for at-a-glance triage
+  async function paintCommunitiesConfigSection() {
+    const body    = $('cfg-communities-body');
+    const summary = $('cfg-communities-summary');
+    if (!body) return;
+
+    let statusRows = null;
+    try { statusRows = await api('/api/status', undefined, { silent: true }); }
+    catch { /* keep statusRows null; render unavailable below */ }
+    let communities = [];
+    try {
+      const r = await api('/api/communities', undefined, { silent: true });
+      communities = Array.isArray(r?.communities) ? r.communities : [];
+    } catch { /* empty list */ }
+
+    const grainRow = statusRows?.rows?.find?.((r) => r.id === 'grain')
+                   ?? statusRows?.find?.((r) => r.id === 'grain')
+                   ?? null;
+    const grainInstalled = !!grainRow?.ok;
+    const nvpnRow  = statusRows?.rows?.find?.((r) => r.id === 'vpn')
+                   ?? statusRows?.find?.((r) => r.id === 'vpn')
+                   ?? null;
+    const nvpnOk   = !!nvpnRow?.ok;
+    const hosted   = communities.length;
+    const running  = communities.filter((c) => c.status === 'running').length;
+
+    if (summary) {
+      summary.textContent = !grainInstalled
+        ? 'grain not installed'
+        : hosted === 0
+          ? 'grain ready · no communities yet'
+          : `${running}/${hosted} running`;
+    }
+
+    body.innerHTML = `
+      <div class="cfg-row">
+        <div class="cfg-row-label">grain binary</div>
+        <div class="cfg-row-value">
+          ${grainInstalled
+            ? `<span class="ok">installed</span> at ~/.nostr-station/bin/grain`
+            : `<span class="warn">not installed</span>`}
+        </div>
+        <div class="cfg-row-actions">
+          <button id="cfg-grain-install">${grainInstalled ? 'Reinstall' : 'Install grain'}</button>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <div class="cfg-row-label">Dependencies</div>
+        <div class="cfg-row-value">
+          Private-network communities also need <strong>nvpn</strong>.
+          ${nvpnOk
+            ? `<span class="ok">nvpn is running</span> — private-network mode is available.`
+            : `<span class="warn">nvpn isn't running</span> — only local-only communities can start. Open the nostr-vpn panel to fix.`}
+        </div>
+        <div class="cfg-row-actions">
+          <a href="#vpn" class="link">Open nvpn →</a>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <div class="cfg-row-label">Hosted</div>
+        <div class="cfg-row-value">
+          ${hosted} ${hosted === 1 ? 'community' : 'communities'}
+          ${hosted > 0 ? ` · ${running} running` : ''}
+        </div>
+        <div class="cfg-row-actions">
+          <a href="#communities" class="link">Open Communities →</a>
+        </div>
+      </div>
+    `;
+    $('cfg-grain-install')?.addEventListener('click', () => {
+      // Reuse the existing tools-install SSE flow used for nak/ngit so
+      // the user sees the same install console + log line stream.
+      if (window.Updates?.openToolInstall) {
+        window.Updates.openToolInstall('grain', grainInstalled ? { force: true } : {});
+      } else {
+        // Fallback for builds where the helper isn't on Updates:
+        location.hash = '#status';
+      }
+    });
   }
 
   // ── nsite section ─────────────────────────────────────────────────────
@@ -22394,18 +22557,820 @@ const NsitePanel = (() => {
 
 // ── Registry + boot ──────────────────────────────────────────────────────
 
+// ── Communities — managed GRAIN private relays on nvpn meshes ─────────
+//
+// One panel module owns the whole UI for the feature: list + empty
+// state + creation wizard + per-community detail view. Backed by
+// /api/communities/* (see src/lib/routes/communities.ts).
+//
+// View state lives in module-scope so back/forward and re-enter keep
+// the user in place (same pattern as ProjectsPanel.state). The list
+// is refetched every onEnter so a community started/stopped from
+// another tab is reflected immediately; the detail view's tab choice
+// is kept stable.
+const CommunitiesPanel = (() => {
+  const body         = $('communities-body');
+  const newBtn       = $('communities-new');
+  const joinBtn      = $('communities-join');
+  const titleEl      = $('communities-title');
+  const subtitleEl   = $('communities-subtitle');
+  const headActions  = $('communities-head-actions');
+  const badgeEl      = $('communities-badge');
+
+  // { view: 'list' | 'detail', communityId?: string, tab?: string }
+  let state = { view: 'list' };
+  let communities = [];      // last fetched
+  let logsSse  = null;       // SSE for the current detail's Logs tab
+
+  // ── Status dot helpers ──────────────────────────────────────────
+  // Color summary across the whole community set:
+  //   green   — every community is running
+  //   amber   — at least one is restarting/unhealthy but none failed
+  //   red     — at least one is errored
+  //   grey    — none exist yet, or none running
+  function summarizeStatus(list) {
+    if (!list || list.length === 0) return 'grey';
+    let anyError = false, anyWarn = false, anyOk = false;
+    for (const c of list) {
+      if (c.status === 'error')      anyError = true;
+      else if (c.status === 'unhealthy' || c.status === 'restarting') anyWarn = true;
+      else if (c.status === 'running') anyOk = true;
+    }
+    if (anyError) return 'red';
+    if (anyWarn)  return 'amber';
+    if (anyOk)    return 'green';
+    return 'grey';
+  }
+
+  function statusDotHtml(status) {
+    const cls = ({
+      running:    'ok',
+      unhealthy:  'warn',
+      restarting: 'warn',
+      stopped:    'idle',
+      error:      'err',
+    })[status] || 'idle';
+    return `<span class="community-dot community-dot-${cls}" title="${status}"></span>`;
+  }
+
+  function refreshBadge() {
+    if (!badgeEl) return;
+    if (!communities.length) { badgeEl.style.display = 'none'; return; }
+    const summary = summarizeStatus(communities);
+    badgeEl.textContent = String(communities.length);
+    badgeEl.style.display = '';
+    badgeEl.dataset.state = summary;
+  }
+
+  // ── Data fetch ──────────────────────────────────────────────────
+  async function fetchList() {
+    try {
+      const r = await api('/api/communities');
+      communities = Array.isArray(r?.communities) ? r.communities : [];
+    } catch (e) {
+      communities = [];
+    }
+    refreshBadge();
+  }
+
+  // ── List view rendering ─────────────────────────────────────────
+  function renderList() {
+    titleEl.textContent = 'Communities';
+    subtitleEl.textContent = 'Private Nostr relays for the people you actually know.';
+    headActions.style.display = '';
+    if (communities.length === 0) {
+      body.innerHTML = renderEmptyState();
+      return;
+    }
+    body.innerHTML = `
+      <div class="community-grid">
+        ${communities.map(renderCommunityCard).join('')}
+      </div>
+    `;
+    body.querySelectorAll('[data-community-id]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        // Skip if the click went to an action button — those have their own listeners below.
+        if (e.target.closest('[data-action]')) return;
+        const id = el.getAttribute('data-community-id');
+        openDetail(id);
+      });
+    });
+    body.querySelectorAll('[data-action]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const action = btn.getAttribute('data-action');
+        const id     = btn.getAttribute('data-id');
+        await onCardAction(action, id);
+      });
+    });
+  }
+
+  function renderEmptyState() {
+    return `
+      <div class="empty-state community-empty">
+        <div class="empty-state-illustration" aria-hidden="true">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4">
+            <circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.5"/>
+            <path d="M3 19c0-3 3-5 6-5s6 2 6 5"/>
+            <path d="M14 19c0-2 1.5-3.5 3-3.5s3 1.5 3 3.5"/>
+          </svg>
+        </div>
+        <h3>Run a relay for your family, friends, or local group.</h3>
+        <p>
+          A community relay is a private feed — only the members you invite
+          can read or write. It runs on this machine and reaches your members
+          through an nvpn mesh, so nothing about your home network is
+          exposed to them.
+        </p>
+        <p style="opacity:0.7">
+          This is different from the local dev relay one panel over —
+          that's for testing apps you build. Communities are for the
+          people you share posts with.
+        </p>
+        <div class="empty-state-actions">
+          <button class="primary" id="community-empty-create">+ New Community</button>
+          <a class="button" href="https://github.com/jared-logan/nostr-station/blob/main/docs/communities.md" target="_blank" rel="noopener">Learn more</a>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderCommunityCard(c) {
+    const dot   = statusDotHtml(c.status);
+    const stats = [
+      `${c.memberCount || 0} ${c.memberCount === 1 ? 'member' : 'members'}`,
+      c.uptimeMs ? `up ${formatUptime(c.uptimeMs)}` : null,
+    ].filter(Boolean).join(' · ');
+    const portChip = `<span class="chip chip-mono">:${c.port}</span>`;
+    const netChip  = c.privacyMode === 'private-network'
+      ? `<span class="chip">nvpn</span>`
+      : `<span class="chip">local</span>`;
+    const errBanner = c.status === 'error' && c.lastError
+      ? `<div class="community-card-error">${escapeHtml(c.lastError)}</div>`
+      : '';
+    const lifecycleBtn = c.status === 'running'
+      ? `<button data-action="stop"  data-id="${c.id}" title="Stop">stop</button>`
+      : `<button data-action="start" data-id="${c.id}" title="Start" class="primary">start</button>`;
+    return `
+      <article class="community-card" data-community-id="${c.id}">
+        <div class="community-card-head">
+          <div class="community-card-status">${dot}<span class="community-status-label">${c.status}</span></div>
+          <div class="community-card-actions">
+            ${lifecycleBtn}
+          </div>
+        </div>
+        <div class="community-card-body">
+          <h3>${escapeHtml(c.name)}</h3>
+          ${c.description ? `<p>${escapeHtml(c.description)}</p>` : ''}
+          ${errBanner}
+          <div class="community-card-stats">${stats}</div>
+        </div>
+        <div class="community-card-foot">
+          ${portChip}${netChip}
+        </div>
+      </article>
+    `;
+  }
+
+  function formatUptime(ms) {
+    const s = Math.floor(ms / 1000);
+    if (s < 60)        return `${s}s`;
+    if (s < 3600)      return `${Math.floor(s / 60)}m`;
+    if (s < 86400)     return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  async function onCardAction(action, id) {
+    try {
+      if (action === 'start')   await api(`/api/communities/${id}/start`,   { method: 'POST' });
+      if (action === 'stop')    await api(`/api/communities/${id}/stop`,    { method: 'POST' });
+      if (action === 'restart') await api(`/api/communities/${id}/restart`, { method: 'POST' });
+    } catch (e) {
+      if (window.Toasts) window.Toasts.error(e?.message || String(e));
+    }
+    await fetchList();
+    if (state.view === 'list')   renderList();
+    if (state.view === 'detail' && state.communityId === id) renderDetail();
+  }
+
+  // ── Detail view ─────────────────────────────────────────────────
+  // Five tabs: Status / Members / Moderation / Settings / Logs.
+  // renderDetail builds the shared chrome (back link, status banner,
+  // tab strip) and dispatches to the active tab's renderer. Each
+  // renderer is responsible for its own data fetching + DOM.
+  const TABS = [
+    { id: 'status',     label: 'Status'     },
+    { id: 'members',    label: 'Members'    },
+    { id: 'moderation', label: 'Moderation' },
+    { id: 'settings',   label: 'Settings'   },
+    { id: 'logs',       label: 'Logs'       },
+  ];
+
+  function openDetail(id, tab) {
+    state = { view: 'detail', communityId: id, tab: tab || 'status' };
+    location.hash = `#communities/${id}`;
+    renderDetail();
+  }
+  function closeDetail() {
+    closeLogsStream();
+    state = { view: 'list' };
+    location.hash = '#communities';
+    renderList();
+  }
+
+  function renderDetail() {
+    const c = communities.find((x) => x.id === state.communityId);
+    if (!c) { closeDetail(); return; }
+    titleEl.textContent = c.name;
+    subtitleEl.textContent = c.description || '';
+    // Hide the list-level head actions while a community is selected;
+    // we surface lifecycle in the detail body instead.
+    headActions.style.display = 'none';
+    closeLogsStream();
+    body.innerHTML = `
+      <div class="community-detail">
+        <div class="community-detail-head">
+          <button class="link" id="community-back">← Back to communities</button>
+          <div class="community-detail-actions">
+            ${c.status === 'running'
+              ? `<button data-action="stop"    data-id="${c.id}">Stop</button>`
+              : `<button data-action="start"   data-id="${c.id}" class="primary">Start</button>`}
+            <button data-action="restart" data-id="${c.id}">Restart</button>
+          </div>
+        </div>
+        <div class="community-detail-status">
+          ${statusDotHtml(c.status)} <strong>${c.status}</strong>
+          ${c.uptimeMs ? `<span class="community-detail-uptime">up ${formatUptime(c.uptimeMs)}</span>` : ''}
+          ${c.lastError ? `<div class="community-detail-error">${escapeHtml(c.lastError)}</div>` : ''}
+        </div>
+        <div class="community-tabs" role="tablist">
+          ${TABS.map((t) => `
+            <button class="community-tab${state.tab === t.id ? ' active' : ''}" data-tab="${t.id}" role="tab" aria-selected="${state.tab === t.id}">${t.label}</button>
+          `).join('')}
+        </div>
+        <div class="community-tab-body" id="community-tab-body"></div>
+      </div>
+    `;
+    $('community-back')?.addEventListener('click', closeDetail);
+    body.querySelectorAll('[data-action]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        await onCardAction(btn.getAttribute('data-action'), btn.getAttribute('data-id'));
+      });
+    });
+    body.querySelectorAll('.community-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        state.tab = tab.getAttribute('data-tab');
+        closeLogsStream();
+        // Re-render tab strip's active state without rebuilding the
+        // whole detail (avoids a flash on every tab switch).
+        body.querySelectorAll('.community-tab').forEach((t) => {
+          const active = t.getAttribute('data-tab') === state.tab;
+          t.classList.toggle('active', active);
+          t.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        renderActiveTab(c);
+      });
+    });
+    renderActiveTab(c);
+  }
+
+  function renderActiveTab(c) {
+    const host = $('community-tab-body');
+    if (!host) return;
+    if (state.tab === 'status')     return renderTabStatus(host, c);
+    if (state.tab === 'members')    return renderTabMembers(host, c);
+    if (state.tab === 'moderation') return renderTabModeration(host, c);
+    if (state.tab === 'settings')   return renderTabSettings(host, c);
+    if (state.tab === 'logs')       return renderTabLogs(host, c);
+  }
+
+  // ── Tab: Status ─────────────────────────────────────────────────
+  function renderTabStatus(host, c) {
+    const connHost = c.privacyMode === 'private-network' && c.nvpnTunnelIp
+      ? c.nvpnTunnelIp
+      : '127.0.0.1';
+    const wssUrl = `ws://${connHost}:${c.port}`;
+    host.innerHTML = `
+      <div class="community-detail-meta">
+        <div><span class="kv-k">Port</span><span class="kv-v">:${c.port}</span></div>
+        <div><span class="kv-k">Members</span><span class="kv-v">${c.memberCount || 0}</span></div>
+        <div><span class="kv-k">Mode</span><span class="kv-v">${c.privacyMode === 'private-network' ? 'Private (nvpn)' : 'Local only'}</span></div>
+        ${c.nvpnNetworkId ? `<div><span class="kv-k">Network</span><span class="kv-v community-mono">${escapeHtml(c.nvpnNetworkId)}</span></div>` : ''}
+        <div><span class="kv-k">Admin npub</span><span class="kv-v community-mono">${escapeHtml(c.adminPubkey.slice(0,12))}…</span></div>
+        <div><span class="kv-k">Status</span><span class="kv-v">${c.status}${c.pid ? ` (pid ${c.pid})` : ''}</span></div>
+      </div>
+      <div class="community-conn-card">
+        <div class="kv-k">Connection URL</div>
+        <div class="community-conn-row">
+          <code id="community-wss" class="community-mono">${escapeHtml(wssUrl)}</code>
+          <button id="community-wss-copy">copy</button>
+        </div>
+        <div class="form-help">
+          Share this URL with your members. Add it as a relay in their
+          Nostr client. ${c.privacyMode === 'private-network'
+            ? `They'll also need to join the nvpn network <code>${escapeHtml(c.nvpnNetworkId || '')}</code> first.`
+            : `(Local-only communities are only reachable from this machine.)`}
+        </div>
+      </div>
+    `;
+    $('community-wss-copy')?.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(wssUrl); }
+      catch { /* ignore */ }
+      window.Toasts?.info?.('Connection URL copied');
+    });
+  }
+
+  // ── Tab: Members ────────────────────────────────────────────────
+  // One batch /api/profiles call on mount to fill avatars + display
+  // names; no per-row fetches. Falls back to pixelAvatar(hex) when a
+  // member has no kind-0 yet.
+  async function renderTabMembers(host, c) {
+    host.innerHTML = `
+      <div class="community-members-add">
+        <input id="community-add-input" type="text" placeholder="npub1… or 64-char hex" />
+        <button class="primary" id="community-add-btn">Add member</button>
+      </div>
+      <div id="community-members-table">Loading members…</div>
+    `;
+    $('community-add-btn')?.addEventListener('click', async () => {
+      const raw = $('community-add-input')?.value?.trim() || '';
+      const pk  = normalizePubkey(raw);
+      if (!pk) { window.Toasts?.error?.('That doesn\'t look like an npub or hex pubkey.'); return; }
+      try {
+        await api(`/api/communities/${c.id}/members`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ pubkey: pk }),
+        });
+        await fetchList();
+        const refreshed = communities.find((x) => x.id === c.id);
+        renderTabMembers(host, refreshed || c);
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+
+    let members = [];
+    try {
+      const r = await api(`/api/communities/${c.id}/members`);
+      members = Array.isArray(r?.members) ? r.members : [];
+    } catch { /* empty list below */ }
+
+    const table = $('community-members-table');
+    if (!table) return;
+    if (members.length === 0) {
+      table.innerHTML = `<div class="empty-state-inline">No members yet. Add one above.</div>`;
+      return;
+    }
+
+    // Profile batch fetch — pre-paint with hex fallbacks so the table
+    // appears immediately, then fill in names/avatars asynchronously.
+    table.innerHTML = renderMembersTable(c, members, {});
+    wireMemberRowButtons(host, c);
+    try {
+      const params = new URLSearchParams({ pubkeys: members.join(',') });
+      const r = await api(`/api/profiles?${params.toString()}`);
+      const profiles = r?.profiles || {};
+      table.innerHTML = renderMembersTable(c, members, profiles);
+      wireMemberRowButtons(host, c);
+    } catch { /* keep the fallback table */ }
+  }
+
+  function renderMembersTable(c, members, profiles) {
+    return `
+      <table class="community-members">
+        <thead><tr><th></th><th>Member</th><th>Hex</th><th>Role</th><th></th></tr></thead>
+        <tbody>
+          ${members.map((hex) => {
+            const prof = profiles[hex] || {};
+            const isAdmin = hex === c.adminPubkey;
+            const name = prof.displayName || prof.name || '';
+            const nameCell = name
+              ? `<strong>${escapeHtml(name)}</strong>${prof.nip05 ? `<div class="muted">${escapeHtml(prof.nip05)}</div>` : ''}`
+              : `<span class="muted">no profile yet</span>`;
+            const avatar = prof.picture
+              ? `<img class="community-avatar" src="${prof.picture}" alt="" loading="lazy" onerror="this.outerHTML='${pixelAvatar(hex, 28).replace(/'/g, '&#39;')}'"/>`
+              : pixelAvatar(hex, 28);
+            const removeBtn = isAdmin
+              ? `<span class="muted" title="The admin can't be removed from their own allowlist">admin</span>`
+              : `<button data-remove="${hex}" class="link danger">remove</button>`;
+            return `
+              <tr>
+                <td>${avatar}</td>
+                <td>${nameCell}</td>
+                <td class="community-mono">${hex.slice(0, 12)}…</td>
+                <td>${isAdmin ? 'admin' : 'member'}</td>
+                <td>${removeBtn}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  function wireMemberRowButtons(host, c) {
+    host.querySelectorAll('[data-remove]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const hex = btn.getAttribute('data-remove');
+        if (!confirm(`Remove ${hex.slice(0, 12)}… from this community?`)) return;
+        try {
+          await api(`/api/communities/${c.id}/members/${hex}`, { method: 'DELETE' });
+          await fetchList();
+          const refreshed = communities.find((x) => x.id === c.id);
+          renderTabMembers($('community-tab-body'), refreshed || c);
+        } catch (e) {
+          window.Toasts?.error?.(e?.message || String(e));
+        }
+      });
+    });
+  }
+
+  // ── Tab: Moderation (banword editor only in this commit) ────────
+  // Banwords are a direct YAML edit (GRAIN hot-reloads on file change),
+  // not a NIP-86 call. Per-event / per-pubkey bans live behind NIP-86
+  // and need silent-sign delegation to be ergonomic — that lands when
+  // the delegation toggle is wired.
+  function renderTabModeration(host, c) {
+    host.innerHTML = `
+      <div class="community-moderation">
+        <p class="form-help">
+          Moderation tools land in stages. For now you can pause /
+          resume the community above; banned-pubkey and banned-word
+          management arrive with the NIP-86 silent-sign delegation
+          flow.
+        </p>
+        <div class="community-mod-placeholder">
+          <strong>Coming next:</strong>
+          <ul>
+            <li>Banned pubkeys (NIP-86 banpubkey / allowpubkey)</li>
+            <li>Banned words (blacklist.yml hot-reload)</li>
+            <li>Rate-limit presets (Relaxed / Strict / Family-friendly)</li>
+            <li>Allowed kinds (chip list)</li>
+            <li>Storage cap (with a 90%/100% banner)</li>
+          </ul>
+        </div>
+      </div>
+    `;
+  }
+
+  // ── Tab: Settings ───────────────────────────────────────────────
+  // Editable name + description (Save → PATCH /api/communities/:id).
+  // Port / privacy / admin pubkey stay immutable for this iteration
+  // — changing them would need coordinated rewrites we're not
+  // ready to ship.
+  function renderTabSettings(host, c) {
+    host.innerHTML = `
+      <div class="form-field">
+        <span class="form-label">Name</span>
+        <input id="cs-name" type="text" maxlength="60" value="${escapeHtml(c.name)}" />
+      </div>
+      <div class="form-field">
+        <span class="form-label">Description</span>
+        <textarea id="cs-desc" maxlength="200" rows="2">${escapeHtml(c.description || '')}</textarea>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:14px">
+        <button id="cs-save" class="primary">Save</button>
+      </div>
+      <div class="form-help">
+        Port, privacy mode, and admin pubkey are immutable for now —
+        changing them would need a coordinated rewrite across the
+        supervisor, the nvpn roster, and the GRAIN config.
+      </div>
+      <div class="community-detail-danger">
+        <button data-detail-action="delete" class="danger">Delete community…</button>
+      </div>
+    `;
+    $('cs-save')?.addEventListener('click', async () => {
+      const name = $('cs-name')?.value?.trim();
+      const desc = $('cs-desc')?.value ?? '';
+      if (!name) { window.Toasts?.error?.('Name cannot be empty.'); return; }
+      try {
+        await api(`/api/communities/${c.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ name, description: desc }),
+        });
+        await fetchList();
+        const refreshed = communities.find((x) => x.id === c.id);
+        if (refreshed) {
+          titleEl.textContent = refreshed.name;
+          subtitleEl.textContent = refreshed.description || '';
+          window.Toasts?.info?.('Saved');
+          // Re-render to pick up the new values; the rest of the tab strip
+          // stays in place because we're already on Settings.
+          renderTabSettings(host, refreshed);
+        }
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+    host.querySelector('[data-detail-action="delete"]')?.addEventListener('click', async () => {
+      if (!confirm(`Permanently delete "${c.name}" and all its data?\n\nThis cannot be undone.`)) return;
+      try {
+        await api(`/api/communities/${c.id}`, { method: 'DELETE' });
+        await fetchList();
+        closeDetail();
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+  }
+
+  // ── Tab: Logs (SSE tail) ────────────────────────────────────────
+  // Subscribes to /api/communities/:id/logs. The first frame is a
+  // ring-buffer replay; subsequent frames are single new lines. We
+  // tear down the EventSource on tab switch / detail close to avoid
+  // accumulating zombie connections.
+  function renderTabLogs(host, c) {
+    host.innerHTML = `
+      <div class="community-logs-head">
+        <label class="form-field-inline">
+          <input id="community-logs-autoscroll" type="checkbox" checked />
+          <span>auto-scroll</span>
+        </label>
+        <button id="community-logs-clear">clear</button>
+      </div>
+      <pre id="community-logs-tail" class="community-logs"></pre>
+    `;
+    const tail = $('community-logs-tail');
+    const auto = $('community-logs-autoscroll');
+    $('community-logs-clear')?.addEventListener('click', () => { if (tail) tail.textContent = ''; });
+
+    const url = `/api/communities/${c.id}/logs`;
+    try {
+      logsSse = new EventSource(url, { withCredentials: true });
+      logsSse.onmessage = (ev) => {
+        if (!tail) return;
+        try {
+          const data = JSON.parse(ev.data);
+          if (Array.isArray(data.lines)) {
+            for (const line of data.lines) {
+              const ts = new Date(line.ts).toISOString().slice(11, 19);
+              const lvl = (line.level || 'info').padEnd(5);
+              tail.textContent += `[${ts}] ${lvl} ${line.text}\n`;
+            }
+            if (auto?.checked) tail.scrollTop = tail.scrollHeight;
+          }
+        } catch { /* skip malformed frame */ }
+      };
+      logsSse.onerror = () => { /* EventSource auto-retries; nothing to do */ };
+    } catch (e) {
+      tail.textContent = `Could not open log stream: ${e?.message || e}\n`;
+    }
+  }
+
+  function closeLogsStream() {
+    if (logsSse) { try { logsSse.close(); } catch {} logsSse = null; }
+  }
+
+  // ── Create wizard ───────────────────────────────────────────────
+  //
+  // Three-step modal: Purpose & privacy → Members → Review & create.
+  // For commit 6 we ship a minimal Members step (paste npubs / hex)
+  // without the autocomplete dropdown (the /api/profiles/autocomplete
+  // endpoint is on the deferred-from-the-other-branch list).
+  function openWizard() {
+    const modalRoot = $('modal-root');
+    if (!modalRoot) return;
+    const ownerNpub = (window.IdentityDrawer?.getOwnerNpub?.() || '').toString();
+    const ownerHex  = window.NostrTools?.nip19?.decode?.(ownerNpub)?.data ||
+                      (window.identityHexCache || '');
+    // Wizard state — purely local to this modal.
+    const wstate = {
+      step: 1,
+      name: '',
+      description: '',
+      privacyMode: 'local',  // safer default since nvpn might not be running
+      members: ownerHex ? [ownerHex] : [],
+      adminPubkey: ownerHex,
+      addMeAsMember: true,
+    };
+
+    function close() { modalRoot.innerHTML = ''; }
+    function render() {
+      modalRoot.innerHTML = `
+        <div class="modal-backdrop" id="wizard-scrim">
+          <div class="modal community-wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title">
+            <div class="modal-head">
+              <div id="wizard-title" class="title">New community · step ${wstate.step} of 3</div>
+              <button class="link" id="wizard-close" aria-label="Close" style="font-size:18px;line-height:1">×</button>
+            </div>
+            <div class="modal-body" id="wizard-body">${stepBodyHtml()}</div>
+            <div class="modal-foot">
+              ${wstate.step > 1 ? `<button id="wizard-back">Back</button>` : `<span></span>`}
+              ${wstate.step < 3
+                ? `<button class="primary" id="wizard-next">Next</button>`
+                : `<button class="primary" id="wizard-create">Create community</button>`}
+            </div>
+          </div>
+        </div>
+      `;
+      wire();
+    }
+
+    function stepBodyHtml() {
+      if (wstate.step === 1) {
+        return `
+          <label class="form-field">
+            <span class="form-label">Name</span>
+            <input id="w-name" type="text" maxlength="60" value="${escapeHtml(wstate.name)}" placeholder="Family · Friends · Book Club" />
+          </label>
+          <label class="form-field">
+            <span class="form-label">Description (optional)</span>
+            <textarea id="w-desc" maxlength="200" rows="2" placeholder="What is this community for?">${escapeHtml(wstate.description)}</textarea>
+          </label>
+          <fieldset class="form-field">
+            <legend class="form-label">Privacy mode</legend>
+            <label class="radio-card ${wstate.privacyMode === 'local' ? 'selected' : ''}">
+              <input type="radio" name="w-privacy" value="local" ${wstate.privacyMode === 'local' ? 'checked' : ''}/>
+              <div>
+                <strong>Local only</strong>
+                <span>Reachable from this machine only. Good for testing.</span>
+              </div>
+            </label>
+            <label class="radio-card ${wstate.privacyMode === 'private-network' ? 'selected' : ''}">
+              <input type="radio" name="w-privacy" value="private-network" ${wstate.privacyMode === 'private-network' ? 'checked' : ''}/>
+              <div>
+                <strong>Private network <span class="recommended">(coming with nvpn integration)</span></strong>
+                <span>Members connect through an nvpn mesh. Nothing about your home network is exposed to them.</span>
+              </div>
+            </label>
+          </fieldset>
+        `;
+      }
+      if (wstate.step === 2) {
+        const membersText = wstate.members.join('\n');
+        return `
+          <p class="form-help">
+            Add the npubs of people who should be able to read and write
+            in this community. One per line. You can change this later.
+          </p>
+          <label class="form-field">
+            <span class="form-label">Members</span>
+            <textarea id="w-members" rows="6" placeholder="npub1...&#10;hex...">${escapeHtml(membersText)}</textarea>
+          </label>
+          <label class="form-field-inline">
+            <input id="w-add-me" type="checkbox" ${wstate.addMeAsMember ? 'checked' : ''} />
+            <span>Add me as a member (publish to my own community from any device)</span>
+          </label>
+        `;
+      }
+      // Step 3 — review.
+      return `
+        <div class="review-grid">
+          <div><span class="kv-k">Name</span><span class="kv-v">${escapeHtml(wstate.name)}</span></div>
+          ${wstate.description ? `<div><span class="kv-k">Description</span><span class="kv-v">${escapeHtml(wstate.description)}</span></div>` : ''}
+          <div><span class="kv-k">Privacy</span><span class="kv-v">${wstate.privacyMode === 'private-network' ? 'Private (nvpn)' : 'Local only'}</span></div>
+          <div><span class="kv-k">Members</span><span class="kv-v">${wstate.members.length}</span></div>
+        </div>
+        <p class="form-help">
+          Clicking <em>Create community</em> spawns a managed GRAIN
+          relay process on the next free port (≥7778). The relay is
+          bound to loopback for now; private-network binding lands
+          when the nvpn integration ships.
+        </p>
+      `;
+    }
+
+    function wire() {
+      $('wizard-close')?.addEventListener('click', close);
+      // Close only when the click lands on the backdrop itself (not
+      // when it bubbles up from a child) — otherwise typing into a
+      // field could surprise-close the wizard.
+      $('wizard-scrim')?.addEventListener('click', (e) => {
+        if (e.target.id === 'wizard-scrim') close();
+      });
+      $('wizard-back')?.addEventListener('click', () => { wstate.step--; render(); });
+      $('wizard-next')?.addEventListener('click', () => {
+        if (!validateStep()) return;
+        wstate.step++; render();
+      });
+      $('wizard-create')?.addEventListener('click', doCreate);
+      // Step 1 bindings
+      $('w-name')?.addEventListener('input', (e) => { wstate.name = e.target.value; });
+      $('w-desc')?.addEventListener('input', (e) => { wstate.description = e.target.value; });
+      modalRoot.querySelectorAll('input[name="w-privacy"]').forEach((r) => {
+        r.addEventListener('change', (e) => {
+          wstate.privacyMode = e.target.value;
+          render();  // refresh radio-card .selected class
+        });
+      });
+      // Step 2 bindings
+      $('w-members')?.addEventListener('input', (e) => {
+        wstate.members = e.target.value
+          .split(/\s+/).filter(Boolean)
+          .map(normalizePubkey).filter(Boolean);
+      });
+      $('w-add-me')?.addEventListener('change', (e) => { wstate.addMeAsMember = e.target.checked; });
+    }
+
+    function validateStep() {
+      if (wstate.step === 1) {
+        if (!wstate.name.trim()) { alert('Name is required.'); return false; }
+        if (wstate.privacyMode === 'private-network') {
+          alert('Private-network mode arrives with the nvpn integration. For now please pick "Local only".');
+          return false;
+        }
+      }
+      return true;
+    }
+
+    async function doCreate() {
+      const payload = {
+        name:         wstate.name,
+        description:  wstate.description || undefined,
+        privacyMode:  wstate.privacyMode,
+        adminPubkey:  wstate.adminPubkey,
+        memberPubkeys: wstate.members,
+        skipAddAdmin: !wstate.addMeAsMember,
+      };
+      try {
+        const r = await api('/api/communities', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(payload),
+        });
+        close();
+        await fetchList();
+        if (r?.community?.id) openDetail(r.community.id);
+        else                  renderList();
+      } catch (e) {
+        if (window.Toasts) window.Toasts.error(e?.message || String(e));
+        else alert(e?.message || String(e));
+      }
+    }
+
+    render();
+  }
+
+  // ── Pubkey normalization ────────────────────────────────────────
+  // Accepts npub bech32 OR raw hex; lowercases hex; returns null for
+  // malformed entries so they get filtered out cleanly.
+  function normalizePubkey(s) {
+    s = (s || '').trim();
+    if (!s) return null;
+    if (/^[0-9a-fA-F]{64}$/.test(s)) return s.toLowerCase();
+    if (s.startsWith('npub1') && window.NostrTools?.nip19) {
+      try {
+        const dec = window.NostrTools.nip19.decode(s);
+        if (dec.type === 'npub' && typeof dec.data === 'string') return dec.data.toLowerCase();
+      } catch { /* fall through */ }
+    }
+    return null;
+  }
+
+  // ── Lifecycle ───────────────────────────────────────────────────
+  async function onEnter() {
+    await fetchList();
+    // Honor a deep-link of form #communities/<id>
+    const hash = location.hash.replace(/^#/, '');
+    const m = hash.match(/^communities\/([0-9a-f]{12})$/);
+    if (m) {
+      state = { view: 'detail', communityId: m[1], tab: 'status' };
+      renderDetail();
+    } else if (state.view === 'detail') {
+      renderDetail();
+    } else {
+      renderList();
+    }
+  }
+
+  // Wire static buttons once.
+  newBtn?.addEventListener('click', openWizard);
+  joinBtn?.addEventListener('click', () => {
+    if (window.Toasts) window.Toasts.info?.('Join wizard lands with the nvpn integration.');
+    else alert('Join wizard lands with the nvpn integration.');
+  });
+  // Delegated handler for the empty-state CTA (the button is rendered
+  // dynamically so we attach to body once).
+  body?.addEventListener('click', (e) => {
+    if (e.target?.id === 'community-empty-create') openWizard();
+  });
+
+  return { onEnter, openDetail, openWizard };
+})();
+
 const Panels = {
-  status:   StatusPanel,
-  chat:     ChatPanel,
-  relay:    RelayPanel,
-  blossom:  BlossomPanel,
-  projects: ProjectsPanel,
-  vpn:      VpnPanel,
-  logs:     LogsPanel,
-  client:   ClientPanel,
-  nsite:    NsitePanel,
-  mail:     MailPanel,
-  config:   ConfigPanel,
+  status:      StatusPanel,
+  chat:        ChatPanel,
+  relay:       RelayPanel,
+  blossom:     BlossomPanel,
+  projects:    ProjectsPanel,
+  vpn:         VpnPanel,
+  logs:        LogsPanel,
+  client:      ClientPanel,
+  nsite:       NsitePanel,
+  mail:        MailPanel,
+  config:      ConfigPanel,
+  communities: CommunitiesPanel,
 };
 
 // Dashboard boot path — called once auth is confirmed (or the localhost
