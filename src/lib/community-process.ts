@@ -41,9 +41,9 @@ import {
   readCommunityManifest, updateCommunityManifest,
   communityDir, communityConfigPath, listCommunities,
 } from './communities.js';
-import { readGrainConfig, atomicWriteFileSync } from './community-yaml.js';
+import { readGrainConfig, writeGrainConfig, atomicWriteFileSync } from './community-yaml.js';
 import { grainBinPath } from './grain-installer.js';
-import { probeNvpnStatus, readNvpnNetworks } from './nvpn.js';
+import { probeNvpnStatus, readNvpnNetworks, readNvpnRoster } from './nvpn.js';
 import { findBin } from './detect.js';
 
 // =====================================================================
@@ -286,6 +286,74 @@ export async function preflightDependencies(
 }
 
 /**
+ * Resolve the bind host a community should use right now. Runs at
+ * every spawn so the bind tracks the live nvpn state — a user who
+ * switched meshes since the last start gets the new tunnel IP
+ * automatically, not a stale value from disk.
+ *
+ *   local           → 127.0.0.1 (always)
+ *   private-network → the active nvpn tunnel IP, IF the community's
+ *                     bound nvpnNetworkId matches the active network.
+ *                     Mismatch ⇒ explicit refusal with a reason the
+ *                     UI can map to a "switch nvpn network" prompt
+ *                     (rather than silently binding to the wrong mesh).
+ *
+ * Kept distinct from preflightDependencies() because the failure modes
+ * are different: preflight catches "your tools / network aren't ready",
+ * prepareForStart catches "your current nvpn state doesn't match what
+ * this community was bound to". UI surfaces each with a different
+ * recovery action.
+ */
+export type PrepareForStartResult =
+  | { ok: true;  bindHost: string }
+  | { ok: false; reason:   string };
+
+export async function prepareCommunityForStart(
+  manifest: CommunityManifest,
+): Promise<PrepareForStartResult> {
+  if (manifest.privacyMode === 'local') {
+    return { ok: true, bindHost: '127.0.0.1' };
+  }
+
+  // private-network: probe nvpn LIVE (no cached SWR result — the user
+  // may have just clicked Start from a "network not active" error
+  // banner, and we want the freshest answer).
+  const st = await probeNvpnStatus();
+  if (!st.installed) {
+    return { ok: false, reason: 'nvpn is not installed' };
+  }
+  if (!st.running) {
+    return { ok: false, reason: 'nvpn daemon is not running — start it from the nvpn panel and click Retry' };
+  }
+  if (!st.tunnelIp) {
+    return {
+      ok: false,
+      reason: 'nvpn is running but has no tunnel IP yet — let it finish connecting to peers and click Retry',
+    };
+  }
+
+  // Cross-check the community's bound network against the active one.
+  // Under nvpn's one-active-network-at-a-time model, the "active"
+  // network is the first [[networks]] block in config.toml — which
+  // readNvpnRoster().networkId reads. Mismatch means the user switched
+  // mesh and this community can't run until they switch back (or
+  // rebind it to the new mesh).
+  if (manifest.nvpnNetworkId) {
+    const roster = readNvpnRoster();
+    if (roster.networkId && roster.networkId !== manifest.nvpnNetworkId) {
+      return {
+        ok: false,
+        reason:
+          `community is bound to nvpn network "${manifest.nvpnNetworkId}" but ` +
+          `"${roster.networkId}" is currently active — switch nvpn networks or rebind this community`,
+      };
+    }
+  }
+
+  return { ok: true, bindHost: st.tunnelIp };
+}
+
+/**
  * Stop a community. Sends SIGTERM, waits up to 5s for clean exit,
  * SIGKILLs if it ignores. Always updates the manifest's status to
  * 'stopped' (or 'error' on lastError preservation) and clears any
@@ -374,6 +442,48 @@ async function spawnChild(s: Supervision): Promise<void> {
   const id   = s.manifest.id;
   const dir  = communityDir(id);
   const bin  = grainBinPath();
+
+  // Resolve the bind host live each spawn. For private-network mode
+  // the active nvpn tunnel IP can change between sessions (different
+  // network, re-issued IP, etc.), and we'd rather pick up the current
+  // value than a stale cached one. prepareCommunityForStart() either
+  // returns a concrete bind host or a specific reason that surfaces
+  // in the log + manifest.
+  const prep = await prepareCommunityForStart(s.manifest);
+  if (!prep.ok) {
+    s.log.error(`prepare failed: ${prep.reason}`);
+    updateCommunityManifest(id, { status: 'error', lastError: prep.reason });
+    throw new Error(`prepare failed: ${prep.reason}`);
+  }
+
+  // Rewrite config.yml's server.port if the resolved bind differs from
+  // what's on disk. Always atomic so GRAIN's hot-reload-on-file-change
+  // never observes a torn file. Only write when the value actually
+  // changes — keeps a moderator's `git status` quiet on a no-op spawn.
+  const targetBind = `${prep.bindHost}:${s.manifest.port}`;
+  try {
+    const cfg = readGrainConfig(communityConfigPath(dir));
+    if (cfg.server.port !== targetBind) {
+      writeGrainConfig(communityConfigPath(dir), {
+        ...cfg,
+        server: { ...cfg.server, port: targetBind },
+      });
+      s.log.info(`rewrote bind to ${targetBind} (was ${cfg.server.port})`);
+    }
+  } catch (e: any) {
+    const msg = `failed to rewrite config.yml: ${(e?.message ?? '').slice(0, 200)}`;
+    s.log.error(msg);
+    updateCommunityManifest(id, { status: 'error', lastError: msg });
+    throw new Error(msg);
+  }
+
+  // Cache the discovered tunnel IP in the manifest so the UI can render
+  // it without a fresh nvpn probe (and so a `nostr-station status --json`
+  // dump reflects what the relay was actually bound to last spawn).
+  if (s.manifest.privacyMode === 'private-network'
+      && s.manifest.nvpnTunnelIp !== prep.bindHost) {
+    s.manifest = updateCommunityManifest(id, { nvpnTunnelIp: prep.bindHost });
+  }
 
   // GRAIN takes `--data-dir <path>` pointing at the directory that
   // holds config.yml + whitelist.yml + blacklist.yml. CWD doesn't
