@@ -7,7 +7,6 @@ import os from 'os';
 import path from 'path';
 import { findBin, hasBin } from '../lib/detect.js';
 import { HEARTBEAT_FILE } from '../lib/watchdog.js';
-import { listCommunities, listCommunityMembers } from '../lib/communities.js';
 
 interface StatusProps { json: boolean; }
 
@@ -293,13 +292,6 @@ export function gatherStatus(): ServiceStatus[] {
   const stacksBin  = stacksPath !== null;
   const stacksV    = stacksPath ? cmd(`${stacksPath} --version 2>/dev/null`) : null;
 
-  // grain ships without a --version flag (exits non-zero on unknown
-  // args), so we report bare "installed" rather than running it. The
-  // findBin probe walks ~/.nostr-station/bin (added in detect.ts) so
-  // our managed install shows up without special-casing.
-  const grainPath = findBin('grain');
-  const grainBin  = grainPath !== null;
-
   const claudeBin   = claudePath !== null;
   const opencodeBin = opencodePath !== null;
   const nakBin      = nakPath !== null;
@@ -315,7 +307,6 @@ export function gatherStatus(): ServiceStatus[] {
   const opencodeState: ServiceState = opencodeBin ? 'ok' : 'err';
   const nakState:      ServiceState = nakBin ? 'ok' : 'err';
   const stacksState:   ServiceState = stacksBin ? 'ok' : 'err';
-  const grainState:    ServiceState = grainBin ? 'ok' : 'err';
 
   return [
     // Services — daemons or scheduled jobs with a runtime state.
@@ -329,57 +320,15 @@ export function gatherStatus(): ServiceStatus[] {
     { id: 'opencode',  label: 'opencode',    value: opencodeV ?? (opencodeBin ? 'installed' : 'not installed'),                              ok: opencodeBin,  state: opencodeState, kind: 'binary' },
     { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState,      kind: 'binary' },
     { id: 'stacks',    label: 'Stacks',      value: stacksV  ?? (stacksBin ? 'installed' : 'not installed'),                               ok: stacksBin,    state: stacksState,   kind: 'binary' },
-    { id: 'grain',     label: 'grain',       value: grainBin ? 'installed' : 'not installed',                                              ok: grainBin,     state: grainState,    kind: 'binary' },
   ];
 }
 
 // Pure JSON serializer — also reused by cli.tsx for --json so Ink never mounts.
-//
-// Output shape:
-//   {
-//     "Relay":   { ok, value },
-//     ...
-//     "communities": [ { id, name, port, status, memberCount, ... }, ... ]
-//   }
-//
-// Communities are listed as a top-level array (not a row) because they
-// are zero-or-many, not the single "is this service up" pattern the
-// other rows follow. `nostr-station status | jq '.communities'`
-// returns a clean view; absent when none exist so the JSON stays
-// terse for the solo-dev common case.
 export function formatStatusJson(rows: ServiceStatus[]): string {
-  const out: Record<string, unknown> =
-    Object.fromEntries(rows.map(x => [x.label, { ok: x.ok, value: x.value }]));
-  try {
-    const cs = gatherCommunitiesStatus();
-    if (cs.length > 0) out.communities = cs;
-  } catch { /* communities subsystem optional — never break status */ }
-  return JSON.stringify(out, null, 2);
-}
-
-/**
- * Per-community summary surfaced in `nostr-station status --json`.
- * Pure file read — never touches the supervisor, never blocks on I/O
- * beyond fs.readFileSync. Skipped silently when the communities dir
- * doesn't exist yet (the common case for solo-dev users).
- */
-function gatherCommunitiesStatus(): Array<{
-  id:           string;
-  name:         string;
-  port:         number;
-  status:       string;
-  privacyMode:  string;
-  memberCount:  number;
-}> {
-  const list = listCommunities();
-  return list.map((c) => ({
-    id:          c.id,
-    name:        c.name,
-    port:        c.port,
-    status:      c.status ?? 'stopped',
-    privacyMode: c.privacyMode,
-    memberCount: listCommunityMembers(c.id).length,
-  }));
+  return JSON.stringify(
+    Object.fromEntries(rows.map(x => [x.label, { ok: x.ok, value: x.value }])),
+    null, 2,
+  );
 }
 
 export const Status: React.FC<StatusProps> = ({ json }) => {

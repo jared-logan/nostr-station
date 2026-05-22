@@ -19,12 +19,6 @@ function augmentedBinDirs(): string[] {
     // this entry the Status row stays red even after a successful
     // dashboard-driven install.
     `${home}/.opencode/bin`,
-    // Communities feature installs `grain` (and possibly other
-    // Communities-only binaries later) into this dir without sudo. The
-    // Communities supervisor spawns by absolute path; this entry exists
-    // so the Status panel's findBin('grain') probe surfaces the install
-    // state without a special case.
-    `${home}/.nostr-station/bin`,
     '/opt/homebrew/bin',     // Apple Silicon Homebrew
     '/usr/local/bin',        // Intel Homebrew + common manual installs
     '/usr/bin',

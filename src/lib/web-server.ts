@@ -49,7 +49,6 @@ import {
 } from './nvpn.js';
 import { installNak } from './nak-installer.js';
 import { installNgit } from './ngit-installer.js';
-import { installGrain } from './grain-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 import {
   readIdentity, setSetupComplete, isNsec,
@@ -107,7 +106,6 @@ import { handleAi } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { mountRelayProxyWebSocket } from './routes/relay-proxy.js';
 import { handleNvpn } from './routes/nvpn.js';
-import { handleCommunities } from './routes/communities.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
 import { getInboxWorker } from './mail/inbox.js';
@@ -1570,25 +1568,9 @@ export async function startWebServer(port: number): Promise<http.Server> {
           return;
         }
 
-        if (slug === 'grain') {
-          try {
-            const result = await installGrain((line) => emit({ line, stream: 'stdout' }), { force });
-            if (!result.ok && result.detail) {
-              emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
-            }
-            emit({ done: true, code: result.ok ? 0 : (result.warn ? 0 : 1) });
-          } catch (e: any) {
-            emit({ line: String(e?.message || e), stream: 'stderr' });
-            emit({ done: true, code: -1 });
-          }
-          cachedGatherStatus.invalidate();
-          try { res.end(); } catch {}
-          return;
-        }
-
         const tool = getTool(slug);
         if (!tool) {
-          const supported = ['nak', 'ngit', 'grain', ...Object.keys(TOOLS)].sort();
+          const supported = ['nak', 'ngit', ...Object.keys(TOOLS)].sort();
           emit({
             line:   `'${slug}' is not a known optional tool. Supported: ${supported.join(', ')}.`,
             stream: 'stderr',
@@ -2025,13 +2007,6 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // buttons and the Logs panel's nostr-vpn meta strip.
       if (await handleNvpn(req, res, fullUrl, method)) return;
 
-      // ── Communities (routes/communities.ts) ────────────────────────────
-      // /api/communities/* — list/create/start/stop/restart/delete +
-      // member CRUD + SSE log tail. Backs the Communities sidebar
-      // panel; mirrors the section-handler shape used by every other
-      // /api section above.
-      if (await handleCommunities(req, res, fullUrl, method)) return;
-
       // ── Mail (routes/mail.ts) ──────────────────────────────────────────
       // NIP-17 mail panel: read-only inbox + thread view. Send + compose
       // + inbox-relay management arrive in follow-up PRs.
@@ -2291,27 +2266,6 @@ export async function startWebServer(port: number): Promise<http.Server> {
           process.stderr.write(`[nvpn] log tailer failed to start: ${e?.message || e}\n`);
         }
       }
-
-      // Communities supervisor — reconcile any GRAIN children that
-      // survived a dashboard hard-kill, then re-supervise our own
-      // orphans. Best-effort: a missing communities subsystem (no
-      // dir on disk yet for solo-dev users) just yields an empty
-      // result and we move on. Never blocks dashboard startup.
-      void (async () => {
-        try {
-          const mod = await import('./community-process.js');
-          const results = await mod.reconcileOrphanedCommunities();
-          for (const r of results) {
-            if (r.outcome === 'respawned') {
-              process.stderr.write(`[communities] re-supervised ${r.id} (pid ${r.pid ?? '?'})\n`);
-            } else if (r.outcome === 'pid-not-ours' && r.note) {
-              process.stderr.write(`[communities] ${r.id}: ${r.note}\n`);
-            }
-          }
-        } catch (e: any) {
-          process.stderr.write(`[communities] reconcile failed: ${e?.message || e}\n`);
-        }
-      })();
 
       // Wire the in-process Blossom handle through to the mail route so
       // /api/mail/attachment can upload without going through the public
