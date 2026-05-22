@@ -10765,3 +10765,114 @@ a.client-mention {
 .cfg-row-value .ok    { color: var(--ok, #3DDC84); }
 .cfg-row-value .warn  { color: var(--warn, #E0A800); }
 .cfg-row-actions { display: flex; gap: 6px; }
+
+/* Community privacy disclosure — expandable "who can see what" block.
+   Used in the wizard's privacy step, the detail Status tab, and the
+   list-view "Privacy & visibility" modal. Same markup everywhere. */
+.privacy-disclosure {
+  margin-top: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.privacy-disclosure > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+  background: var(--bg-card);
+}
+.privacy-disclosure > summary::-webkit-details-marker { display: none; }
+.privacy-disclosure > summary::before {
+  content: '▸';
+  display: inline-block;
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 120ms ease;
+  width: 10px;
+}
+.privacy-disclosure[open] > summary::before { transform: rotate(90deg); }
+.privacy-disclosure > summary:hover { color: var(--text-bright); }
+.privacy-disclosure[open] > summary { border-bottom: 1px solid var(--border); }
+.privacy-disclosure-body {
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+.privacy-disclosure-body h4 {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  color: var(--text-bright);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.privacy-disclosure-body h4:first-child { margin-top: 0; }
+.privacy-disclosure-body p  { margin: 0 0 8px; }
+.privacy-disclosure-body ul { margin: 0 0 8px; padding-left: 18px; }
+.privacy-disclosure-body li { margin: 4px 0; }
+.privacy-disclosure-body code {
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* Audience matrix — the row-by-row "who can do what" table. The
+   contrast on the rejected cells uses the existing --error tint so
+   "no" stands out visually without screaming. */
+.privacy-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 14px;
+  font-size: 11px;
+}
+.privacy-matrix th,
+.privacy-matrix td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.privacy-matrix th {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-weight: 500;
+}
+.privacy-matrix tbody tr:hover { background: var(--bg-hover); }
+.privacy-matrix td strong { color: color-mix(in srgb, var(--error) 80%, var(--text-bright)); }
+.privacy-matrix code { font-size: 10px; }
+
+/* The chip next to the disclosure summary — distinguishes which
+   privacy mode the block applies to at a glance. */
+.chip-mode {
+  margin-left: auto;
+  background: var(--accent-soft);
+  color: var(--text-bright);
+  border-color: var(--accent-dim);
+}
+
+/* Inline form-help variant — sits directly under an input rather
+   than as a standalone paragraph. Smaller + dimmer so it reads as
+   meta-guidance, not body copy. */
+.form-help-inline {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* Privacy modal — the standalone "Privacy & visibility" overview.
+   Slightly wider than the wizard so both disclosure variants render
+   without horizontal cramping. */
+.community-privacy-modal { width: min(760px, calc(100vw - 40px)); }
