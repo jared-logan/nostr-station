@@ -24260,6 +24260,35 @@ const CommunitiesPanel = (() => {
 
   // ── Lifecycle ───────────────────────────────────────────────────
   async function onEnter() {
+    // Feature-gate check first. The panel can be reached via
+    // #communities URL hash even when the sidebar entry is hidden
+    // (browser-restore of the last-active panel, or the user typing
+    // the hash directly). Without this check, the panel mounts,
+    // calls /api/communities + /api/communities/joined unconditionally,
+    // and the second call surfaces as a 403 toast every navigation —
+    // exactly the bug we're fixing here.
+    let gate;
+    try { gate = await api('/api/communities-feature').catch(() => null); }
+    catch { gate = null; }
+    if (!gate?.usable) {
+      titleEl.textContent = 'Communities';
+      subtitleEl.textContent = 'Experimental feature — not yet enabled.';
+      headActions.style.display = 'none';
+      body.innerHTML = `
+        <div class="empty-state community-empty">
+          <h3>Communities is disabled.</h3>
+          <p>
+            Managed allowlist-gated relays for friends + family. This is
+            an experimental feature with documented trade-offs around
+            network exposure and privacy. Enable it from
+            <a href="#config" data-panel="config">Config → Communities</a>
+            and walk through the first-use warning before any of the
+            wizard / member / moderation surfaces become available.
+          </p>
+        </div>
+      `;
+      return;
+    }
     await fetchList();
     // Honor a deep-link of form #communities/<id>
     const hash = location.hash.replace(/^#/, '');
