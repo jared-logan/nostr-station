@@ -12932,6 +12932,15 @@ const VpnPanel = (() => {
   let lastRoster       = null;  // GET /api/nvpn/roster
   let lastRelays       = null;  // GET /api/nvpn/relays
   let lastNetworks     = null;  // GET /api/nvpn/networks  (full [[networks]] list)
+  // Communities cross-reference: which communities are bound to which
+  // nvpn networks. Refreshed alongside the rest of the panel data so
+  // the "Communities using this mesh" line below the active-network
+  // row stays accurate without a separate poll. Under Path B every
+  // private-network community is bound to the (single) active network,
+  // so in practice this list is "all private-network communities" —
+  // but we still index by networkId for correctness if Path A ever
+  // returns.
+  let lastCommunities  = null;
   let lastDeployment   = null;  // GET /api/nvpn/deployment-context
   let lastSplitBrain   = null;  // GET /api/nvpn/split-brain
   let lastJoinRequests = null;  // GET /api/nvpn/join-requests
@@ -13171,7 +13180,7 @@ const VpnPanel = (() => {
   // whole panel — each sub-tab handles missing data with its own
   // empty-state.
   async function refresh() {
-    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs] = await Promise.all([
+    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs, communities] = await Promise.all([
       api('/api/nvpn/status').catch(() => null),
       api('/api/nvpn/service/status').catch(() => null),
       api('/api/nvpn/roster').catch(() => null),
@@ -13180,6 +13189,7 @@ const VpnPanel = (() => {
       api('/api/nvpn/deployment-context', undefined, { silent: true }).catch(() => null),
       api('/api/nvpn/split-brain', undefined, { silent: true }).catch(() => null),
       api('/api/nvpn/join-requests', undefined, { silent: true }).catch(() => null),
+      api('/api/communities', undefined, { silent: true }).catch(() => null),
     ]);
     lastStatus       = s;
     lastService      = svc;
@@ -13189,6 +13199,7 @@ const VpnPanel = (() => {
     lastDeployment   = deployment;
     lastSplitBrain   = splitBrain;
     lastJoinRequests = joinReqs;
+    lastCommunities  = communities;
     renderDeploymentBanner();
     renderStaleStatusBanner();
     renderSplitBrainBanner();
@@ -13348,6 +13359,29 @@ const VpnPanel = (() => {
           <span class="vpn-kv-val">${escapeHtml(activeName)}</span>
         </div>`
       : '';
+
+    // "Communities using this mesh" — surfaces the cross-reference
+    // between this active nvpn network and any private-network
+    // communities bound to it. Honest framing for Path B's shared
+    // mesh: communities don't get their own network; they share the
+    // user's active mesh. Each entry deep-links to the community's
+    // detail view so the user can jump directly. Stays hidden when
+    // there are no communities here — keeps the panel quiet for
+    // the solo-dev case.
+    const allCommunities = Array.isArray(lastCommunities?.communities)
+      ? lastCommunities.communities : [];
+    const meshCommunities = allCommunities.filter((c) =>
+      c.privacyMode === 'private-network' &&
+      (!c.nvpnNetworkId || c.nvpnNetworkId === networkId));
+    const communitiesLine = (networkId && meshCommunities.length > 0)
+      ? `<div class="vpn-section-footer vpn-mesh-communities" style="margin-top:6px">
+          Communities using this mesh: ${meshCommunities.map((c) => `
+            <a href="#communities/${escapeHtml(c.id)}" class="vpn-community-link">
+              <span class="community-dot community-dot-${(c.status === 'running' ? 'ok' : c.status === 'error' ? 'err' : c.status === 'unhealthy' || c.status === 'restarting' ? 'warn' : 'idle')}"></span>
+              ${escapeHtml(c.name)}
+            </a>`).join(' · ')}
+        </div>`
+      : '';
     const inactiveLine = inactiveNets.length > 0
       ? `<div class="vpn-section-footer muted" style="margin-top:6px">
           Also configured: ${inactiveNets.map(n => {
@@ -13383,6 +13417,7 @@ const VpnPanel = (() => {
           </div>
         </div>
         ${inactiveLine}
+        ${communitiesLine}
         <div class="vpn-net-actions" style="margin-top:14px">
           <button id="vpn-share-invite" class="primary"
                   title="Generate an nvpn:// invite code + QR for onboarding another device into this network">

@@ -10950,3 +10950,24 @@ a.client-mention {
   padding: 0 4px;
 }
 .community-chip button:hover { color: var(--error); }
+
+/* nvpn panel — "Communities using this mesh" cross-reference line.
+   Lists private-network communities bound to the active mesh, each
+   linking to its detail view. Status dot inline so a moderator can
+   see at-a-glance health without leaving the nvpn panel. */
+.vpn-mesh-communities { font-size: 11px; }
+.vpn-community-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 2px;
+  padding: 2px 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-bright);
+  text-decoration: none;
+  font-size: 11px;
+}
+.vpn-community-link:hover { border-color: var(--accent); }
+.vpn-community-link .community-dot { width: 6px; height: 6px; }
