@@ -11123,3 +11123,23 @@ a.client-mention {
   color: var(--error, #E85555);
   background: color-mix(in srgb, var(--error, #E85555) 12%, transparent);
 }
+
+/* Dashboard access via mesh — toggle moved from the Identity drawer
+   into the nvpn panel's Network tab, sitting next to mesh-membership
+   controls. Uses the existing vpn-meta-peers-head label style so it
+   reads as a sibling section, not a stand-alone surface. */
+.vpn-dashboard-access {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.vpn-dashboard-access-body {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.vpn-dashboard-access-body code {
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
