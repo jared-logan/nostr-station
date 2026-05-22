@@ -110,6 +110,9 @@ import { handleNvpn } from './routes/nvpn.js';
 import { handleCommunities } from './routes/communities.js';
 import { attachDashboardBindingFilter } from './dashboard-binding.js';
 import { readMobileAccessConfig, writeMobileAccessConfig, dashboardBindHost } from './mobile-access.js';
+import {
+  readCommunitiesFeatureConfig, writeCommunitiesFeatureConfig, isCommunitiesUsable,
+} from './communities-feature.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
 import { getInboxWorker } from './mail/inbox.js';
@@ -2032,6 +2035,73 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // member CRUD + SSE log tail. Backs the Communities sidebar
       // panel; mirrors the section-handler shape used by every other
       // /api section above.
+      // ── Communities feature gate ────────────────────────────────────
+      // Experimental opt-in flag. The /api/communities/* routes are
+      // gated behind explicit user opt-in + first-use acknowledgement.
+      // The /api/communities-feature endpoint is the management surface
+      // for the gate itself — always available so the Config panel can
+      // read state and flip the toggle.
+      if (url === '/api/communities-feature' && method === 'GET') {
+        if (!requireSession(req, res)) return;
+        const cfg = readCommunitiesFeatureConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:               true,
+          enabled:          cfg.enabled,
+          acknowledged:     cfg.acknowledgedAt !== null,
+          acknowledgedAt:   cfg.acknowledgedAt,
+          usable:           cfg.enabled && cfg.acknowledgedAt !== null,
+        }));
+        return;
+      }
+      if (url === '/api/communities-feature' && method === 'POST') {
+        if (!requireSession(req, res)) return;
+        let raw: any;
+        try { raw = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+          return;
+        }
+        const patch: any = {};
+        if (typeof raw?.enabled === 'boolean') patch.enabled = raw.enabled;
+        if (raw?.acknowledge === true) patch.acknowledgedAt = Date.now();
+        const saved = writeCommunitiesFeatureConfig(patch);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:             true,
+          enabled:        saved.enabled,
+          acknowledged:   saved.acknowledgedAt !== null,
+          acknowledgedAt: saved.acknowledgedAt,
+          usable:         saved.enabled && saved.acknowledgedAt !== null,
+        }));
+        return;
+      }
+
+      // Gate the actual /api/communities/* routes behind opt-in.
+      // GET /api/communities is special — the dashboard fetches it
+      // even when the feature is disabled (to render "no communities"
+      // states). Return an empty list + a flag rather than a 403.
+      if (url === '/api/communities' && method === 'GET' && !isCommunitiesUsable()) {
+        if (!requireSession(req, res)) return;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, communities: [], featureEnabled: false }));
+        return;
+      }
+      // Every other /api/communities/* path: 403 with the feature-gate
+      // reason. The UI never reaches these without the gate flag, but
+      // the API layer enforces it anyway in case a script bypasses
+      // the UI.
+      if (url.startsWith('/api/communities') && !isCommunitiesUsable()) {
+        if (!requireSession(req, res)) return;
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:    false,
+          error: 'Communities is an experimental feature. Enable it from Config and acknowledge the warning before use.',
+        }));
+        return;
+      }
+
       if (await handleCommunities(req, res, fullUrl, method)) return;
 
       // ── Mobile Access (toggle) ──────────────────────────────────────────

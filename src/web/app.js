@@ -2127,9 +2127,9 @@ const StatusPanel = {
             <span class="muted">loading…</span>
           </div>
         </a>
-        <a class="dash-card" href="#communities" data-card="communities" title="Managed GRAIN private relays.">
+        <a class="dash-card" href="#communities" data-card="communities" id="dash-card-communities-link" title="Managed GRAIN private relays. (experimental — enable in Config)" hidden>
           <div class="dash-card-head">
-            <span class="dash-card-label">Communities</span>
+            <span class="dash-card-label">Communities <span class="nav-preview-tag">preview</span></span>
             <span class="dash-card-cta">Open →</span>
           </div>
           <div class="dash-card-body" id="dash-card-communities">
@@ -2165,6 +2165,20 @@ const StatusPanel = {
   async _fillCommunitiesCard() {
     const el = $('dash-card-communities');
     if (!el) return;
+    // Feature-gate: don't render the card at all until the user has
+    // opted into Communities + acknowledged the experimental warning.
+    // The card link element starts hidden in the HTML; we reveal it
+    // only when /api/communities-feature reports usable=true.
+    try {
+      const gate = await api('/api/communities-feature').catch(() => null);
+      if (!gate?.usable) {
+        const link = document.getElementById('dash-card-communities-link');
+        if (link) link.hidden = true;
+        return;
+      }
+      const link = document.getElementById('dash-card-communities-link');
+      if (link) link.hidden = false;
+    } catch { return; }
     try {
       const r = await api('/api/communities').catch(() => ({ communities: [] }));
       const list = Array.isArray(r?.communities) ? r.communities : [];
@@ -16177,11 +16191,217 @@ const ConfigPanel = (() => {
   //   2. nvpn dependency (read-only — explains the relationship; the
   //      action sits in the nvpn tab where it belongs)
   //   3. counts (hosted / running) for at-a-glance triage
+  // Experimental-gate UI shown in the Config Communities section
+  // when the feature is disabled OR enabled-but-not-acknowledged.
+  // Lead with the toggle so it's the obvious next click; the
+  // first-use modal handles the acknowledgement step.
+  function renderCommunitiesGateUi(gate) {
+    const enabled = !!gate?.enabled;
+    const ack     = !!gate?.acknowledged;
+    if (!enabled) {
+      return `
+        <div class="cfg-experimental-banner">
+          <strong>Experimental feature, opt-in.</strong>
+          <p>Managed allowlist-gated relays for friends + family on your active nvpn mesh. Real moderation tools via NIP-86; relays bind all interfaces and are gated by the per-relay allowlist, not network perimeter. Enable to see the full deployment-scenario walkthrough before anything ships in your sidebar.</p>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-row-label">Status</div>
+          <div class="cfg-row-value"><span class="warn">disabled</span></div>
+          <div class="cfg-row-actions">
+            <button class="primary" id="cfg-communities-enable">Enable Communities (experimental)</button>
+          </div>
+        </div>
+      `;
+    }
+    // enabled but not acknowledged
+    return `
+      <div class="cfg-experimental-banner">
+        <strong>Enabled — acknowledgement required.</strong>
+        <p>One more step. Walk through the deployment-scenario warnings before any Communities UI appears.</p>
+      </div>
+      <div class="cfg-row">
+        <div class="cfg-row-label">Status</div>
+        <div class="cfg-row-value"><span class="warn">awaiting acknowledgement</span></div>
+        <div class="cfg-row-actions">
+          <button class="primary" id="cfg-communities-acknowledge">Read &amp; acknowledge</button>
+          <button id="cfg-communities-disable-pending">Disable</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function wireCommunitiesGate(gate) {
+    // Enable: flip the flag then open the first-use modal so the
+    // user goes straight from "enable" → "acknowledge" without a
+    // second click to surface the warning.
+    $('cfg-communities-enable')?.addEventListener('click', async () => {
+      try {
+        const r = await api('/api/communities-feature', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: true }),
+        });
+        // After enable but before acknowledge, open the modal.
+        openCommunitiesFirstUseModal(() => {
+          paintCommunitiesConfigSection();
+          // Reveal the sidebar entry + home card if acknowledgement
+          // succeeded inside the modal.
+          api('/api/communities-feature').then((cfg) => {
+            const link = document.getElementById('nav-communities');
+            if (link) link.hidden = !cfg?.usable;
+          }).catch(() => {});
+        });
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+    $('cfg-communities-acknowledge')?.addEventListener('click', () => {
+      openCommunitiesFirstUseModal(() => {
+        paintCommunitiesConfigSection();
+        api('/api/communities-feature').then((cfg) => {
+          const link = document.getElementById('nav-communities');
+          if (link) link.hidden = !cfg?.usable;
+        }).catch(() => {});
+      });
+    });
+    const disable = async () => {
+      if (!confirm('Disable Communities? The sidebar entry and home card will be hidden. Any existing community state stays on disk.')) return;
+      try {
+        await api('/api/communities-feature', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: false }),
+        });
+        const link = document.getElementById('nav-communities');
+        if (link) link.hidden = true;
+        const card = document.getElementById('dash-card-communities-link');
+        if (card) card.hidden = true;
+        paintCommunitiesConfigSection();
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    };
+    $('cfg-communities-disable')?.addEventListener('click', disable);
+    $('cfg-communities-disable-pending')?.addEventListener('click', disable);
+  }
+
+  // First-use modal — the explicit deployment-scenario walkthrough.
+  // User must check "I understand" before the Acknowledge button
+  // enables. Acknowledgement is what flips the sidebar / home-card
+  // to visible.
+  function openCommunitiesFirstUseModal(onAcknowledged) {
+    const modalRoot = $('modal-root');
+    if (!modalRoot) return;
+    modalRoot.innerHTML = `
+      <div class="modal-backdrop" id="cmty-firstuse-scrim">
+        <div class="modal community-firstuse-modal" role="dialog" aria-modal="true" aria-labelledby="cmty-firstuse-title">
+          <div class="modal-head">
+            <div id="cmty-firstuse-title" class="title">Communities (preview) · before you start</div>
+            <button class="link" id="cmty-firstuse-close" aria-label="Close" style="font-size:18px;line-height:1">×</button>
+          </div>
+          <div class="modal-body">
+            <p><strong>This is an experimental feature.</strong> Managed allowlist-gated relays for friends + family on your active nvpn mesh. Real moderation tools via NIP-86. The privacy story is honest but more limited than the original plan promised — read this before opting in.</p>
+
+            <h4>What mesh members can / can't reach</h4>
+            <p>Anyone you invite joins your nostr-vpn mesh. They can reach the nostr-station host on its tunnel IP — and any other service it runs that listens on non-loopback interfaces. They CANNOT reach other devices on your LAN, use you as an exit node, or reach the dashboard (unless you've added them to its trusted-devices list via Mobile Access).</p>
+
+            <h4>Where to run nostr-station</h4>
+            <div class="cmty-deploy-table">
+              <div class="cmty-deploy-row cmty-deploy-good">
+                <span class="cmty-deploy-tag">🟢 Best</span>
+                <div>
+                  <strong>Dedicated machine</strong> — Pi 5 / mini-PC / old laptop / VPS, running only nostr-station.
+                  <em>Why:</em> mesh access ≈ relay access, period. Cleanest threat model.
+                </div>
+              </div>
+              <div class="cmty-deploy-row cmty-deploy-ok">
+                <span class="cmty-deploy-tag">🟡 OK</span>
+                <div>
+                  <strong>Local VM</strong> — UTM / Parallels / VirtualBox isolating nostr-station from your daily-driver host.
+                  <em>Why:</em> host services isolated by virtualization.
+                </div>
+              </div>
+              <div class="cmty-deploy-row cmty-deploy-bad">
+                <span class="cmty-deploy-tag">🔴 Not recommended</span>
+                <div>
+                  <strong>Daily-driver machine</strong> — your work laptop / desktop alongside everything else.
+                  <em>Why:</em> anything you bind to <code>0.0.0.0</code> (Docker daemon, dev servers, file shares, SSH) becomes reachable from mesh members.
+                </div>
+              </div>
+            </div>
+
+            <h4>Audit your exposure</h4>
+            <p>Before inviting people, see what your host actually exposes on non-loopback interfaces:</p>
+            <pre class="community-mono" style="background:var(--bg);padding:8px 10px;border-radius:4px;font-size:11px;overflow-x:auto"><code>ss -tlnp | grep -v '127.0.0.1\|::1\|::'</code></pre>
+            <p class="muted">Anything in that list is reachable from mesh members on the host's tunnel IP.</p>
+
+            <h4>You can change your mind</h4>
+            <p>Disabling the feature later from Config hides the UI but leaves community state on disk — you can re-enable without losing anything.</p>
+
+            <label class="form-field-inline" style="margin:14px 0 0">
+              <input id="cmty-firstuse-check" type="checkbox" />
+              <span>I understand the deployment trade-offs and want to proceed.</span>
+            </label>
+          </div>
+          <div class="modal-foot">
+            <button id="cmty-firstuse-cancel">Cancel</button>
+            <button class="primary" id="cmty-firstuse-ack" disabled>Acknowledge &amp; enable</button>
+          </div>
+        </div>
+      </div>
+    `;
+    const close = () => { modalRoot.innerHTML = ''; };
+    $('cmty-firstuse-close')?.addEventListener('click', close);
+    $('cmty-firstuse-cancel')?.addEventListener('click', close);
+    $('cmty-firstuse-scrim')?.addEventListener('click', (e) => {
+      if (e.target.id === 'cmty-firstuse-scrim') close();
+    });
+    const check = $('cmty-firstuse-check');
+    const ack   = $('cmty-firstuse-ack');
+    check?.addEventListener('change', () => {
+      if (ack) ack.disabled = !check.checked;
+    });
+    ack?.addEventListener('click', async () => {
+      try {
+        await api('/api/communities-feature', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ acknowledge: true }),
+        });
+        close();
+        if (typeof onAcknowledged === 'function') onAcknowledged();
+        window.Toasts?.info?.('Communities enabled. Find it in the sidebar.');
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+  }
+
   async function paintCommunitiesConfigSection() {
     const body    = $('cfg-communities-body');
     const summary = $('cfg-communities-summary');
     if (!body) return;
 
+    // Always probe the feature gate first. The Communities Config
+    // section is the user's entry point to the experimental opt-in,
+    // so the section renders even when disabled — but with a
+    // different shape (toggle + warning vs the operational rows).
+    let gate;
+    try { gate = await api('/api/communities-feature', undefined, { silent: true }); }
+    catch { gate = { enabled: false, acknowledged: false, usable: false }; }
+
+    if (!gate.usable) {
+      if (summary) {
+        summary.textContent = gate.enabled
+          ? 'experimental · acknowledgement required'
+          : 'experimental · disabled';
+      }
+      body.innerHTML = renderCommunitiesGateUi(gate);
+      wireCommunitiesGate(gate);
+      return;
+    }
+
+    // ── Feature is usable; render the operational state. ──────────
     let statusRows = null;
     try { statusRows = await api('/api/status', undefined, { silent: true }); }
     catch { /* keep statusRows null; render unavailable below */ }
@@ -16204,13 +16424,23 @@ const ConfigPanel = (() => {
 
     if (summary) {
       summary.textContent = !grainInstalled
-        ? 'grain not installed'
+        ? 'experimental · grain not installed'
         : hosted === 0
-          ? 'grain ready · no communities yet'
-          : `${running}/${hosted} running`;
+          ? 'experimental · grain ready · no communities yet'
+          : `experimental · ${running}/${hosted} running`;
     }
 
     body.innerHTML = `
+      <div class="cfg-row cfg-row-toggle">
+        <div class="cfg-row-label">Feature</div>
+        <div class="cfg-row-value">
+          <span class="ok">enabled</span> — experimental;
+          see <em>Privacy &amp; visibility</em> from the Communities panel for full disclosure
+        </div>
+        <div class="cfg-row-actions">
+          <button id="cfg-communities-disable">Disable</button>
+        </div>
+      </div>` + `
       <div class="cfg-row">
         <div class="cfg-row-label">grain binary</div>
         <div class="cfg-row-value">
@@ -23856,34 +24086,22 @@ const CommunitiesPanel = (() => {
       return;
     }
 
-    // Probe nvpn state up front so the privacy step can render the
-    // "Private network" radio correctly. Three states:
-    //   - nvpn down            → radio disabled, "Start nvpn first"
-    //   - nvpn up, no network  → radio disabled, "Join a network first"
-    //   - nvpn up + network    → radio enabled, shows active network id
-    // The probe runs once at open; we don't re-poll across step changes.
-    // Users who fix the underlying state can close + reopen the wizard.
-    let nvpnState = { installed: false, running: false, networkId: null, tunnelIp: null };
-    try {
-      const r = await api('/api/nvpn/status');
-      nvpnState = {
-        installed: !!r?.installed,
-        running:   !!r?.running,
-        networkId: r?.networkId || r?.raw?.network_id || null,
-        tunnelIp:  r?.tunnelIp || r?.raw?.tunnel_ip || null,
-      };
-    } catch { /* keep defaults — radio shows install-nvpn hint */ }
-
     // Wizard state — purely local to this modal.
+    // privacyMode is HARD-CODED to 'local' for the experimental ship.
+    // "Private network" mode (mesh-tunnel-IP binding) isn't deliverable
+    // without GRAIN's `server.host` config field — pending upstream.
+    // The data-model + supervisor still understand private-network for
+    // forward compat, but the wizard only creates allowlist-gated
+    // local-mode relays. Existing private-network manifests from prior
+    // testing keep working; the wizard just doesn't make new ones.
     const wstate = {
       step: 1,
       name: '',
       description: '',
-      privacyMode: 'local',  // safer default since nvpn might not be running
+      privacyMode: 'local',
       members: [ownerHex],
       adminPubkey: ownerHex,
       addMeAsMember: true,
-      nvpn: nvpnState,
     };
 
     function close() { modalRoot.innerHTML = ''; }
@@ -23908,64 +24126,24 @@ const CommunitiesPanel = (() => {
       wire();
     }
 
-    // Privacy radio cards. The "Private network" card has three
-    // visual states depending on the wizard's nvpn probe:
-    //   - nvpn down       → disabled card, "Start nvpn first" hint
-    //   - nvpn up, no net → disabled card, "Join a network first" hint
-    //   - nvpn up + net   → enabled card, shows active network id
-    // Pulled into a helper so the disabled state's HTML stays close to
-    // the hint copy — keeps the render-step body readable.
-    function renderPrivacyRadios(ws) {
-      const nvpnReady = ws.nvpn.installed && ws.nvpn.running && !!ws.nvpn.networkId;
-      const privSelected = ws.privacyMode === 'private-network';
-      let privHint;
-      if (!ws.nvpn.installed) {
-        privHint = 'nvpn isn\'t installed — install it from Config → Communities.';
-      } else if (!ws.nvpn.running) {
-        privHint = 'nvpn isn\'t running — start it from the nvpn panel, then reopen this wizard.';
-      } else if (!ws.nvpn.networkId) {
-        privHint = 'nvpn is running but no network is active — join one from the nvpn panel, then reopen this wizard.';
-      } else {
-        privHint = `Will bind to your active mesh (network <code class="community-mono">${escapeHtml(ws.nvpn.networkId.slice(0, 10))}…</code>, tunnel ${escapeHtml(ws.nvpn.tunnelIp || '—')}).`;
-      }
-      return `
-        <fieldset class="form-field">
-          <legend class="form-label">Privacy mode</legend>
-          <label class="radio-card ${ws.privacyMode === 'local' ? 'selected' : ''}">
-            <input type="radio" name="w-privacy" value="local" ${ws.privacyMode === 'local' ? 'checked' : ''}/>
-            <div>
-              <strong>Local only</strong>
-              <span>Reachable from this machine only. Good for testing.</span>
-            </div>
-          </label>
-          <label class="radio-card ${privSelected && nvpnReady ? 'selected' : ''} ${nvpnReady ? '' : 'disabled'}">
-            <input type="radio" name="w-privacy" value="private-network"
-                   ${privSelected && nvpnReady ? 'checked' : ''}
-                   ${nvpnReady ? '' : 'disabled'}/>
-            <div>
-              <strong>Private network ${nvpnReady ? '' : '<span class="recommended">(needs nvpn)</span>'}</strong>
-              <span>${privHint}</span>
-            </div>
-          </label>
-        </fieldset>
-      `;
-    }
-
     function stepBodyHtml() {
       if (wstate.step === 1) {
         return `
+          <div class="community-mode-note">
+            <strong>Allowlist-gated relay</strong>
+            <p>This wizard creates a managed GRAIN relay on your active nvpn mesh, gated by a pubkey allowlist (NIP-42). Members reach it on its tunnel IP; the allowlist is what stops anyone else from reading or publishing. See <em>Privacy &amp; visibility</em> below for the full audience matrix.</p>
+          </div>
           <label class="form-field">
             <span class="form-label">Name</span>
             <input id="w-name" type="text" maxlength="60" value="${escapeHtml(wstate.name)}" placeholder="Family · Friends · Book Club" />
-            <span class="form-help-inline">Visible to you in the dashboard. Not published in the relay's public metadata — see the privacy details below.</span>
+            <span class="form-help-inline">Visible to you in the dashboard. Not published in the relay's public NIP-11 metadata.</span>
           </label>
           <label class="form-field">
             <span class="form-label">Description (optional)</span>
             <textarea id="w-desc" maxlength="200" rows="2" placeholder="What is this community for?">${escapeHtml(wstate.description)}</textarea>
-            <span class="form-help-inline">Also private — visible only to the dashboard and the people you invite.</span>
+            <span class="form-help-inline">Dashboard-only. Not published in the relay's public NIP-11 metadata by default.</span>
           </label>
-          ${renderPrivacyRadios(wstate)}
-          ${privacyDisclosureHtml(wstate.privacyMode)}
+          ${privacyDisclosureHtml('local')}
         `;
       }
       if (wstate.step === 2) {
@@ -24016,15 +24194,10 @@ const CommunitiesPanel = (() => {
         wstate.step++; render();
       });
       $('wizard-create')?.addEventListener('click', doCreate);
-      // Step 1 bindings
+      // Step 1 bindings (privacy radio removed in the experimental
+      // ship — only local-mode is creatable from the wizard).
       $('w-name')?.addEventListener('input', (e) => { wstate.name = e.target.value; });
       $('w-desc')?.addEventListener('input', (e) => { wstate.description = e.target.value; });
-      modalRoot.querySelectorAll('input[name="w-privacy"]').forEach((r) => {
-        r.addEventListener('change', (e) => {
-          wstate.privacyMode = e.target.value;
-          render();  // refresh radio-card .selected class
-        });
-      });
       // Step 2 bindings
       $('w-members')?.addEventListener('input', (e) => {
         wstate.members = e.target.value
@@ -24037,17 +24210,6 @@ const CommunitiesPanel = (() => {
     function validateStep() {
       if (wstate.step === 1) {
         if (!wstate.name.trim()) { alert('Name is required.'); return false; }
-        if (wstate.privacyMode === 'private-network') {
-          // The radio is disabled when nvpn isn't ready, so this check
-          // is belt-and-suspenders for users who flip the field via
-          // devtools. The backend would also reject it; surfacing here
-          // gives a faster, clearer message.
-          const ready = wstate.nvpn.installed && wstate.nvpn.running && !!wstate.nvpn.networkId;
-          if (!ready) {
-            alert('Private-network mode needs an active nvpn network. Fix that and reopen this wizard.');
-            return false;
-          }
-        }
       }
       return true;
     }
@@ -24181,6 +24343,17 @@ function bootDashboard(localhostExempt) {
     refreshHeader();
     refreshHealth();
     Updates.init();
+    // Communities is gated behind an experimental opt-in. The sidebar
+    // entry stays hidden until the user enables the feature in Config
+    // AND acknowledges the first-use warning. Fetch the gate state at
+    // boot; reveal the entry conditionally; the Config panel is what
+    // flips the toggle.
+    api('/api/communities-feature').then((cfg) => {
+      if (cfg?.usable) {
+        const link = document.getElementById('nav-communities');
+        if (link) link.hidden = false;
+      }
+    }).catch(() => { /* feature endpoint missing — leave hidden */ });
     activatePanel(currentPanel());
     // Terminal panel is opt-in per session (user clicks to open) but the
     // capability probe + reconnect-if-live runs during boot so a refreshed

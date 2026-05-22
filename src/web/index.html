@@ -107,9 +107,12 @@
                friend group / family / community). The badge is the sum
                of per-community status dots — green when all running,
                amber when any restarting, red when any failed. -->
-          <a href="#communities" data-panel="communities">
+          <!-- Communities (experimental) — hidden by default; revealed
+               only when the feature is enabled in Config → Experimental
+               AND the user has clicked through the first-use modal. -->
+          <a href="#communities" data-panel="communities" id="nav-communities" hidden>
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.5"/><path d="M3 19c0-3 3-5 6-5s6 2 6 5"/><path d="M14 19c0-2 1.5-3.5 3-3.5s3 1.5 3 3.5"/></svg></span>
-            Communities
+            Communities <span class="nav-preview-tag">preview</span>
             <span class="badge" id="communities-badge" style="display:none">0</span>
           </a>
           <a href="#relay" data-panel="relay">
