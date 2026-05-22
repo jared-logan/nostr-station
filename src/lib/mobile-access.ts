@@ -31,8 +31,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const CONFIG_DIR  = path.join(os.homedir(), '.nostr-station');
-const CONFIG_FILE = path.join(CONFIG_DIR, 'mobile-access.json');
+// Resolved lazily inside each call so tests that override $HOME (via
+// useTempHome() in the test harness) take effect — caching at module
+// load would freeze the path to whatever $HOME was at first import.
+function configDir(): string  { return path.join(os.homedir(), '.nostr-station'); }
+function configFile(): string { return path.join(configDir(), 'mobile-access.json'); }
 
 export interface MobileAccessConfig {
   /** When true, the dashboard binds to 0.0.0.0 on next boot. */
@@ -49,8 +52,8 @@ const DEFAULT: MobileAccessConfig = { enabled: false };
  *  missing / malformed file — fail safe. */
 export function readMobileAccessConfig(): MobileAccessConfig {
   try {
-    if (!fs.existsSync(CONFIG_FILE)) return { ...DEFAULT };
-    const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
+    if (!fs.existsSync(configFile())) return { ...DEFAULT };
+    const raw = fs.readFileSync(configFile(), 'utf8');
     const parsed = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return { ...DEFAULT };
     return {
@@ -64,12 +67,12 @@ export function readMobileAccessConfig(): MobileAccessConfig {
 
 /** Persist a new toggle state. Returns the saved config. */
 export function writeMobileAccessConfig(cfg: MobileAccessConfig): MobileAccessConfig {
-  try { fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 }); } catch {}
+  try { fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 }); } catch {}
   const stamped: MobileAccessConfig = {
     enabled:   cfg.enabled === true,
     updatedAt: Date.now(),
   };
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(stamped, null, 2) + '\n', { mode: 0o600 });
+  fs.writeFileSync(configFile(), JSON.stringify(stamped, null, 2) + '\n', { mode: 0o600 });
   return stamped;
 }
 
