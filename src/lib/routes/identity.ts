@@ -422,26 +422,9 @@ export async function handleIdentity(
 ): Promise<boolean> {
   if (url === '/api/identity/config' && method === 'GET') {
     const ident = readIdentity();
-    // Compute the lowercase-hex form alongside the bech32 npub. The
-    // npub is what users see + paste; hex is what every NIP-86 / NIP-42
-    // / allowlist / API call actually uses on the wire. Returning both
-    // means the dashboard never has to depend on a browser-side bech32
-    // decoder (which can be undefined depending on bundle state — see
-    // the Communities wizard regression that prompted this).
-    let pubkeyHex: string | null = null;
-    if (ident.npub) {
-      const raw = ident.npub.trim();
-      if (/^[0-9a-f]{64}$/i.test(raw)) {
-        pubkeyHex = raw.toLowerCase();
-      } else if (raw.startsWith('npub1')) {
-        try { pubkeyHex = npubToHex(raw).toLowerCase(); }
-        catch { pubkeyHex = null; }
-      }
-    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       npub:         ident.npub,
-      pubkeyHex,    // null until identity is set; never empty-string
       readRelays:   ident.readRelays,
       // graspServers always returns a non-empty list — getGraspServers()
       // falls back to DEFAULT_GRASP_SERVERS when the user hasn't yet

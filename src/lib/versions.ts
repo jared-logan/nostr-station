@@ -21,16 +21,6 @@ export const COMPONENT_VERSIONS: Partial<Record<string, string>> = {
   // Install button always failed at the prereq check. Bump in lockstep
   // with BINARY_SHA256.ngit below.
   'ngit': '2.4.3',
-  // grain: Go relay (https://github.com/0ceanSlim/grain), used by the
-  // Communities feature. One binary per community, supervised by the
-  // dashboard, bound to an nvpn tunnel IP — never installed for solo-
-  // dev use. Per-target tarball; bump in lockstep with BINARY_SHA256.grain
-  // below. Tied to an undocumented quirk of the upstream config: the
-  // `server.port` field accepts `host:port` (passed straight to Go's
-  // http.Server.Addr), which is how we honor the bind-IP security rule.
-  // If a future GRAIN release stops accepting that format, the
-  // supervisor's bind-address probe will catch the regression.
-  'grain': '0.6.0',
 };
 
 // Per-target SHA256 hex digests for binaries we download directly from
@@ -70,15 +60,5 @@ export const BINARY_SHA256: Record<string, Record<string, string>> = {
     'universal-apple-darwin':         '63af6f753ab9ecbe76d1d7d99050823a84237b3709bd814194436b2a34beafe2',
     'x86_64-unknown-linux-gnu.2.17':  '747d7de6c1c4f26818606c6098993e8789271051201b7e3b76baff6fa4b7753b',
     'aarch64-unknown-linux-gnu.2.17': '182c0fe41b57ce995dfe6aa60ea379b7024ef32265675fc88384337970c9573a',
-  },
-  // grain asset filename: grain-{os}-{arch}.tar.gz
-  // os: darwin | linux ;  arch: amd64 | arm64
-  // Digests pulled from
-  // https://github.com/0ceanSlim/grain/releases/download/v0.6.0/checksums.txt
-  grain: {
-    'darwin-amd64': 'c89caf6ae3cc199c41f6ffff5fc3ecc637b7ed13941b356b14c7984bb35bb000',
-    'darwin-arm64': 'b1a13e89be0f954c868923c297473a0cb7eb3776f6b6b39c8da053818c8610bb',
-    'linux-amd64':  'e32b7e69df4b1ac659c776a9866a58d601e2240630016ddfad1e87b9f7677e92',
-    'linux-arm64':  'cf89eae527899858d39ee09b48db7e78f096c869c6af7b955ec94f8b73693d50',
   },
 };
