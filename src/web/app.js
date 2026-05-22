@@ -1277,22 +1277,6 @@ const IdentityDrawer = (() => {
     body.appendChild(signing);
 
     // NSITE — hydrated asynchronously from /api/nsite/discover. The
-    // Mobile Access — toggle that controls whether the dashboard binds
-    // to non-loopback interfaces. When ON, the dashboard's HTTP port
-    // becomes reachable from peers on the nvpn mesh; the connection-
-    // time peer-pubkey filter (dashboard-binding.ts) restricts who
-    // actually gets through to the user's own devices (paired with
-    // the same NIP-46 bunker). Persisted to ~/.nostr-station/
-    // mobile-access.json; applied on next dashboard restart.
-    const mobileSec = document.createElement('div');
-    mobileSec.className = 'drawer-section mobile-access-section';
-    mobileSec.innerHTML = `
-      <h4>Mobile access</h4>
-      <div class="body"><span class="spinner"></span><span class="muted" style="margin-left:8px">Loading…</span></div>
-    `;
-    body.appendChild(mobileSec);
-    renderMobileAccessSection(mobileSec);
-
     // section slot is rendered immediately so the drawer doesn't jump
     // when results arrive.
     const nsiteSec = document.createElement('div');
@@ -1542,74 +1526,6 @@ const IdentityDrawer = (() => {
         ProjectDrawer.openAddPrefilled(buildNsiteSeed(d, npub));
       });
     }
-  }
-
-  // ── Mobile Access section ─────────────────────────────────────
-  // Renders the toggle + bind URL + restart-required banner. Lives
-  // inside IdentityDrawer's scope so it can reuse the helpers but
-  // self-contained otherwise — its only external dependency is
-  // /api/mobile-access.
-  async function renderMobileAccessSection(host) {
-    let cfg;
-    try {
-      cfg = await api('/api/mobile-access');
-    } catch (e) {
-      host.innerHTML = `
-        <h4>Mobile access</h4>
-        <div class="body muted">Failed to load: ${escapeHtml(e?.message || String(e))}</div>
-      `;
-      return;
-    }
-    const enabled = !!cfg?.enabled;
-    const bindHost = cfg?.currentBind || '127.0.0.1';
-    // Display URL the user's phone would visit. We use the dashboard's
-    // current page hostname (location.hostname) when the user's already
-    // on the mesh; otherwise fall back to the bind host. The phone
-    // needs to know the actual IP, not "0.0.0.0".
-    const port = location.port || (location.protocol === 'https:' ? 443 : 80);
-    const remoteHint = bindHost === '0.0.0.0'
-      ? `Use your dashboard's nvpn tunnel IP — find it on the nvpn panel.`
-      : `Bound to <code>${escapeHtml(bindHost)}</code> only; flip the toggle to expose to your mesh.`;
-    host.innerHTML = `
-      <h4>Mobile access</h4>
-      <div class="body" style="font-size:12px">
-        <label class="form-field-inline" style="margin:6px 0">
-          <input id="mobile-access-toggle" type="checkbox" ${enabled ? 'checked' : ''}/>
-          <span>Allow reaching the dashboard from peers on your nvpn mesh</span>
-        </label>
-        <div class="form-help" style="margin:6px 0">
-          Only YOUR own devices (paired with the same Amber bunker)
-          actually get through — every other mesh peer hits a hard
-          wall at the connection layer. See
-          <a href="#communities" data-panel="communities">Communities → Privacy &amp; visibility</a>
-          for the full disclosure.
-        </div>
-        <div id="mobile-access-status" class="form-help" style="margin:6px 0">
-          ${remoteHint}
-        </div>
-        ${cfg?.needsRestart ? `
-          <div class="community-card-error" style="margin:8px 0">
-            Toggle saved but not yet applied. Restart the dashboard from Config → About → Restart for changes to take effect.
-          </div>
-        ` : ''}
-      </div>
-    `;
-    const tog = host.querySelector('#mobile-access-toggle');
-    tog?.addEventListener('change', async () => {
-      const next = tog.checked;
-      try {
-        await api('/api/mobile-access', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ enabled: next }),
-        });
-        renderMobileAccessSection(host);  // re-render with the restart banner
-      } catch (e) {
-        // Revert the toggle on save failure so the UI doesn't lie.
-        tog.checked = !next;
-        window.Toasts?.error?.(e?.message || String(e));
-      }
-    });
   }
 
   $('identity-chip').addEventListener('click', open);
@@ -13016,15 +12932,6 @@ const VpnPanel = (() => {
   let lastRoster       = null;  // GET /api/nvpn/roster
   let lastRelays       = null;  // GET /api/nvpn/relays
   let lastNetworks     = null;  // GET /api/nvpn/networks  (full [[networks]] list)
-  // Communities cross-reference: which communities are bound to which
-  // nvpn networks. Refreshed alongside the rest of the panel data so
-  // the "Communities using this mesh" line below the active-network
-  // row stays accurate without a separate poll. Under Path B every
-  // private-network community is bound to the (single) active network,
-  // so in practice this list is "all private-network communities" —
-  // but we still index by networkId for correctness if Path A ever
-  // returns.
-  let lastCommunities  = null;
   let lastDeployment   = null;  // GET /api/nvpn/deployment-context
   let lastSplitBrain   = null;  // GET /api/nvpn/split-brain
   let lastJoinRequests = null;  // GET /api/nvpn/join-requests
@@ -13264,7 +13171,7 @@ const VpnPanel = (() => {
   // whole panel — each sub-tab handles missing data with its own
   // empty-state.
   async function refresh() {
-    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs, communities] = await Promise.all([
+    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs] = await Promise.all([
       api('/api/nvpn/status').catch(() => null),
       api('/api/nvpn/service/status').catch(() => null),
       api('/api/nvpn/roster').catch(() => null),
@@ -13273,7 +13180,6 @@ const VpnPanel = (() => {
       api('/api/nvpn/deployment-context', undefined, { silent: true }).catch(() => null),
       api('/api/nvpn/split-brain', undefined, { silent: true }).catch(() => null),
       api('/api/nvpn/join-requests', undefined, { silent: true }).catch(() => null),
-      api('/api/communities', undefined, { silent: true }).catch(() => null),
     ]);
     lastStatus       = s;
     lastService      = svc;
@@ -13283,7 +13189,6 @@ const VpnPanel = (() => {
     lastDeployment   = deployment;
     lastSplitBrain   = splitBrain;
     lastJoinRequests = joinReqs;
-    lastCommunities  = communities;
     renderDeploymentBanner();
     renderStaleStatusBanner();
     renderSplitBrainBanner();
@@ -13443,29 +13348,6 @@ const VpnPanel = (() => {
           <span class="vpn-kv-val">${escapeHtml(activeName)}</span>
         </div>`
       : '';
-
-    // "Communities using this mesh" — surfaces the cross-reference
-    // between this active nvpn network and any private-network
-    // communities bound to it. Honest framing for Path B's shared
-    // mesh: communities don't get their own network; they share the
-    // user's active mesh. Each entry deep-links to the community's
-    // detail view so the user can jump directly. Stays hidden when
-    // there are no communities here — keeps the panel quiet for
-    // the solo-dev case.
-    const allCommunities = Array.isArray(lastCommunities?.communities)
-      ? lastCommunities.communities : [];
-    const meshCommunities = allCommunities.filter((c) =>
-      c.privacyMode === 'private-network' &&
-      (!c.nvpnNetworkId || c.nvpnNetworkId === networkId));
-    const communitiesLine = (networkId && meshCommunities.length > 0)
-      ? `<div class="vpn-section-footer vpn-mesh-communities" style="margin-top:6px">
-          Communities using this mesh: ${meshCommunities.map((c) => `
-            <a href="#communities/${escapeHtml(c.id)}" class="vpn-community-link">
-              <span class="community-dot community-dot-${(c.status === 'running' ? 'ok' : c.status === 'error' ? 'err' : c.status === 'unhealthy' || c.status === 'restarting' ? 'warn' : 'idle')}"></span>
-              ${escapeHtml(c.name)}
-            </a>`).join(' · ')}
-        </div>`
-      : '';
     const inactiveLine = inactiveNets.length > 0
       ? `<div class="vpn-section-footer muted" style="margin-top:6px">
           Also configured: ${inactiveNets.map(n => {
@@ -13501,7 +13383,6 @@ const VpnPanel = (() => {
           </div>
         </div>
         ${inactiveLine}
-        ${communitiesLine}
         <div class="vpn-net-actions" style="margin-top:14px">
           <button id="vpn-share-invite" class="primary"
                   title="Generate an nvpn:// invite code + QR for onboarding another device into this network">
@@ -22763,18 +22644,12 @@ const CommunitiesPanel = (() => {
   }
 
   // ── Data fetch ──────────────────────────────────────────────────
-  let joined = [];
   async function fetchList() {
     try {
-      const [hosted, joinedResp] = await Promise.all([
-        api('/api/communities').catch(() => ({ communities: [] })),
-        api('/api/communities/joined').catch(() => ({ joined: [] })),
-      ]);
-      communities = Array.isArray(hosted?.communities) ? hosted.communities : [];
-      joined      = Array.isArray(joinedResp?.joined)  ? joinedResp.joined  : [];
+      const r = await api('/api/communities');
+      communities = Array.isArray(r?.communities) ? r.communities : [];
     } catch (e) {
       communities = [];
-      joined      = [];
     }
     refreshBadge();
   }
@@ -22784,27 +22659,19 @@ const CommunitiesPanel = (() => {
     titleEl.textContent = 'Communities';
     subtitleEl.textContent = 'Private Nostr relays for the people you actually know.';
     headActions.style.display = '';
-    if (communities.length === 0 && joined.length === 0) {
+    if (communities.length === 0) {
       body.innerHTML = renderEmptyState();
       return;
     }
-    // Two sections: "Hosted" (communities you run) + "Joined"
-    // (communities you connect to as a guest). Headers only render
-    // when at least one entry exists in that section — the empty
-    // case is the dedicated empty-state above.
-    const hostedHtml = communities.length > 0
-      ? `<h3 class="community-section-head">Hosted</h3>
-         <div class="community-grid">${communities.map(renderCommunityCard).join('')}</div>`
-      : '';
-    const joinedHtml = joined.length > 0
-      ? `<h3 class="community-section-head">Joined</h3>
-         <div class="community-grid">${joined.map(renderJoinedCard).join('')}</div>`
-      : '';
-    body.innerHTML = hostedHtml + joinedHtml;
+    body.innerHTML = `
+      <div class="community-grid">
+        ${communities.map(renderCommunityCard).join('')}
+      </div>
+    `;
     body.querySelectorAll('[data-community-id]').forEach((el) => {
       el.addEventListener('click', (e) => {
+        // Skip if the click went to an action button — those have their own listeners below.
         if (e.target.closest('[data-action]')) return;
-        if (e.target.closest('[data-joined-action]')) return;
         const id = el.getAttribute('data-community-id');
         openDetail(id);
       });
@@ -22817,62 +22684,6 @@ const CommunitiesPanel = (() => {
         await onCardAction(action, id);
       });
     });
-    body.querySelectorAll('[data-joined-action]').forEach((btn) => {
-      btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const action = btn.getAttribute('data-joined-action');
-        const id     = btn.getAttribute('data-id');
-        await onJoinedAction(action, id);
-      });
-    });
-  }
-
-  function renderJoinedCard(j) {
-    const url = j.relayUrl;
-    return `
-      <article class="community-card community-card-joined" data-joined-id="${j.id}">
-        <div class="community-card-head">
-          <div class="community-card-status">
-            <span class="chip">joined</span>
-          </div>
-          <div class="community-card-actions">
-            <button data-joined-action="copy"  data-id="${j.id}" title="Copy URL">copy</button>
-            <button data-joined-action="leave" data-id="${j.id}" title="Leave">leave</button>
-          </div>
-        </div>
-        <div class="community-card-body">
-          <h3>${escapeHtml(j.name)}</h3>
-          ${j.detectedDescription ? `<p>${escapeHtml(j.detectedDescription)}</p>` : ''}
-          <div class="community-card-stats community-mono">${escapeHtml(url)}</div>
-        </div>
-        <div class="community-card-foot">
-          ${j.detectedName ? `<span class="chip">${escapeHtml(j.detectedName)}</span>` : ''}
-          <span class="chip">joined ${escapeHtml(new Date(j.joinedAt).toLocaleDateString())}</span>
-        </div>
-      </article>
-    `;
-  }
-
-  async function onJoinedAction(action, id) {
-    const entry = joined.find((j) => j.id === id);
-    if (!entry) return;
-    if (action === 'copy') {
-      try { await navigator.clipboard.writeText(entry.relayUrl); }
-      catch { /* ignore */ }
-      window.Toasts?.info?.('Relay URL copied');
-      return;
-    }
-    if (action === 'leave') {
-      if (!confirm(`Leave "${entry.name}"?\n\nThis removes it from your Joined list — it doesn't affect the relay itself or your nvpn mesh membership.`)) return;
-      try {
-        await api(`/api/communities/joined/${entry.id}`, { method: 'DELETE' });
-        await fetchList();
-        renderList();
-      } catch (e) {
-        window.Toasts?.error?.(e?.message || String(e));
-      }
-      return;
-    }
   }
 
   function renderEmptyState() {
@@ -23272,171 +23083,32 @@ const CommunitiesPanel = (() => {
     });
   }
 
-  // ── Tab: Moderation ────────────────────────────────────────────
-  // Two functioning sections (banwords + banned pubkeys), one
-  // "coming soon" callout for rate-limit presets / allowed-kinds
-  // chips / storage cap (those need additional NIP-86 plumbing or
-  // YAML schema work that's not blocking the main moderation flow).
-  //
-  // Banwords are a direct YAML edit — GRAIN hot-reloads on
-  // blacklist.yml changes within ~2s. No NIP-86, no signer prompt.
-  //
-  // Banned pubkeys go through NIP-86 banpubkey, which signs a
-  // kind-27235 NIP-98 event via the saved Amber bunker per call.
-  // Until the silent-sign delegation toggle lands, every ban
-  // prompts the user's signer. The UI surfaces this clearly with
-  // a banner so a flood-triaging moderator isn't surprised.
-  async function renderTabModeration(host, c) {
+  // ── Tab: Moderation (banword editor only in this commit) ────────
+  // Banwords are a direct YAML edit (GRAIN hot-reloads on file change),
+  // not a NIP-86 call. Per-event / per-pubkey bans live behind NIP-86
+  // and need silent-sign delegation to be ergonomic — that lands when
+  // the delegation toggle is wired.
+  function renderTabModeration(host, c) {
     host.innerHTML = `
       <div class="community-moderation">
-        <section class="community-mod-section">
-          <h4>Banned words</h4>
-          <p class="form-help">
-            Posts containing any of these words or phrases are rejected
-            at ingest. Edits hot-reload — GRAIN picks up changes within
-            a couple of seconds without a restart.
-          </p>
-          <div class="community-mod-add">
-            <input id="community-banword-input" type="text" maxlength="200" placeholder="word or phrase" />
-            <button class="primary" id="community-banword-add-btn">Add banword</button>
-          </div>
-          <div id="community-banwords-list" class="community-chip-list">loading…</div>
-        </section>
-
-        <section class="community-mod-section">
-          <h4>Banned pubkeys</h4>
-          <p class="form-help">
-            Banning a pubkey calls GRAIN's NIP-86 admin API. Each
-            ban currently prompts your signer (Amber etc.). The
-            silent-sign delegation toggle that buffers prompts for
-            a configurable window is on the next iteration.
-          </p>
-          <div class="community-mod-add">
-            <input id="community-ban-input" type="text" placeholder="npub1… or 64-char hex" />
-            <button class="primary" id="community-ban-add-btn">Ban pubkey</button>
-          </div>
-          <div id="community-bans-list" class="community-bans">loading…</div>
-        </section>
-
-        <section class="community-mod-section community-mod-placeholder">
+        <p class="form-help">
+          Moderation tools land in stages. For now you can pause /
+          resume the community above; banned-pubkey and banned-word
+          management arrive with the NIP-86 silent-sign delegation
+          flow.
+        </p>
+        <div class="community-mod-placeholder">
           <strong>Coming next:</strong>
           <ul>
+            <li>Banned pubkeys (NIP-86 banpubkey / allowpubkey)</li>
+            <li>Banned words (blacklist.yml hot-reload)</li>
             <li>Rate-limit presets (Relaxed / Strict / Family-friendly)</li>
-            <li>Allowed-kinds chip list</li>
-            <li>Storage cap slider (with 90%/100% banners)</li>
-            <li>Silent-sign delegation (8h trust window for moderation actions)</li>
+            <li>Allowed kinds (chip list)</li>
+            <li>Storage cap (with a 90%/100% banner)</li>
           </ul>
-        </section>
+        </div>
       </div>
     `;
-    // Wire banword controls.
-    $('community-banword-add-btn')?.addEventListener('click', async () => {
-      const word = $('community-banword-input')?.value?.trim() || '';
-      if (!word) return;
-      try {
-        await api(`/api/communities/${c.id}/banwords`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ word }),
-        });
-        $('community-banword-input').value = '';
-        await reloadBanwords(c);
-      } catch (e) {
-        window.Toasts?.error?.(e?.message || String(e));
-      }
-    });
-    // Wire ban-pubkey controls.
-    $('community-ban-add-btn')?.addEventListener('click', async () => {
-      const raw = $('community-ban-input')?.value?.trim() || '';
-      const pk  = normalizePubkey(raw);
-      if (!pk) { window.Toasts?.error?.('Paste an npub or 64-char hex pubkey.'); return; }
-      if (!confirm(`Ban ${pk.slice(0, 12)}…?\n\nYour signer will prompt for the NIP-86 ban event.`)) return;
-      try {
-        await api(`/api/communities/${c.id}/bans`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ pubkey: pk }),
-        });
-        $('community-ban-input').value = '';
-        await reloadBans(c);
-      } catch (e) {
-        window.Toasts?.error?.(e?.message || String(e));
-      }
-    });
-    // Initial load (parallel — both endpoints are independent).
-    await Promise.all([ reloadBanwords(c), reloadBans(c) ]);
-  }
-
-  async function reloadBanwords(c) {
-    const host = $('community-banwords-list');
-    if (!host) return;
-    try {
-      const r = await api(`/api/communities/${c.id}/banwords`);
-      const list = Array.isArray(r?.banwords) ? r.banwords : [];
-      if (list.length === 0) {
-        host.innerHTML = `<div class="empty-state-inline">No banned words.</div>`;
-        return;
-      }
-      host.innerHTML = list.map((w) => `
-        <span class="community-chip">
-          ${escapeHtml(w)}
-          <button data-banword-remove="${encodeURIComponent(w)}" class="link" aria-label="Remove">×</button>
-        </span>
-      `).join('');
-      host.querySelectorAll('[data-banword-remove]').forEach((btn) => {
-        btn.addEventListener('click', async () => {
-          const w = btn.getAttribute('data-banword-remove');
-          try {
-            await api(`/api/communities/${c.id}/banwords/${w}`, { method: 'DELETE' });
-            await reloadBanwords(c);
-          } catch (e) {
-            window.Toasts?.error?.(e?.message || String(e));
-          }
-        });
-      });
-    } catch (e) {
-      host.innerHTML = `<div class="empty-state-inline">Failed to load: ${escapeHtml(String(e?.message || e))}</div>`;
-    }
-  }
-
-  async function reloadBans(c) {
-    const host = $('community-bans-list');
-    if (!host) return;
-    try {
-      const r = await api(`/api/communities/${c.id}/bans`);
-      const list = Array.isArray(r?.bannedPubkeys) ? r.bannedPubkeys : [];
-      if (list.length === 0) {
-        host.innerHTML = `<div class="empty-state-inline">No banned pubkeys.</div>`;
-        return;
-      }
-      host.innerHTML = `
-        <table class="community-members">
-          <thead><tr><th>Pubkey</th><th></th></tr></thead>
-          <tbody>
-            ${list.map((hex) => `
-              <tr>
-                <td class="community-mono">${escapeHtml(hex.slice(0, 16))}…</td>
-                <td><button data-unban="${hex}" class="link">unban</button></td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      `;
-      host.querySelectorAll('[data-unban]').forEach((btn) => {
-        btn.addEventListener('click', async () => {
-          const hex = btn.getAttribute('data-unban');
-          if (!confirm(`Unban ${hex.slice(0, 12)}…?\n\nYour signer will prompt for the NIP-86 allow event.`)) return;
-          try {
-            await api(`/api/communities/${c.id}/bans/${hex}`, { method: 'DELETE' });
-            await reloadBans(c);
-          } catch (e) {
-            window.Toasts?.error?.(e?.message || String(e));
-          }
-        });
-      });
-    } catch (e) {
-      host.innerHTML = `<div class="empty-state-inline">Failed to load: ${escapeHtml(String(e?.message || e))}</div>`;
-    }
   }
 
   // ── Tab: Settings ───────────────────────────────────────────────
@@ -23555,171 +23227,6 @@ const CommunitiesPanel = (() => {
   // For commit 6 we ship a minimal Members step (paste npubs / hex)
   // without the autocomplete dropdown (the /api/profiles/autocomplete
   // endpoint is on the deferred-from-the-other-branch list).
-  // ── Join-an-invitation wizard ───────────────────────────────────
-  //
-  // Two-step (probe → confirm) modal that takes a relay URL the
-  // user received in an invitation, runs a NIP-11 probe to confirm
-  // reachability + show what the relay says about itself, then
-  // commits to a "Joined" entry the panel surfaces alongside
-  // hosted communities.
-  //
-  // Intentionally does NOT auto-join the user's nvpn mesh — that's
-  // an out-of-band step the inviter walks the guest through (or
-  // that the future "Generate invitation" flow on the host side
-  // will spell out). Surfaced explicitly in the wizard copy so the
-  // user doesn't expect the dashboard to manage the mesh side.
-  async function openJoinWizard() {
-    const modalRoot = $('modal-root');
-    if (!modalRoot) return;
-    const jstate = {
-      step: 1,
-      relayUrl: '',
-      name: '',
-      probing: false,
-      probed:  null,   // { detectedName, detectedDescription, error }
-    };
-    function close() { modalRoot.innerHTML = ''; }
-    function render() {
-      modalRoot.innerHTML = `
-        <div class="modal-backdrop" id="join-scrim">
-          <div class="modal community-wizard" role="dialog" aria-modal="true" aria-labelledby="join-title">
-            <div class="modal-head">
-              <div id="join-title" class="title">Join an invitation · step ${jstate.step} of 2</div>
-              <button class="link" id="join-close" aria-label="Close" style="font-size:18px;line-height:1">×</button>
-            </div>
-            <div class="modal-body" id="join-body">${stepBody()}</div>
-            <div class="modal-foot">
-              ${jstate.step > 1 ? `<button id="join-back">Back</button>` : `<span></span>`}
-              ${jstate.step < 2
-                ? `<button class="primary" id="join-next" ${jstate.probing ? 'disabled' : ''}>${jstate.probing ? 'Probing…' : 'Probe relay'}</button>`
-                : `<button class="primary" id="join-confirm">Add to Joined</button>`}
-            </div>
-          </div>
-        </div>
-      `;
-      wire();
-    }
-    function stepBody() {
-      if (jstate.step === 1) {
-        return `
-          <p class="form-help">
-            Paste the relay URL from the invitation (e.g. <code>wss://10.0.0.5:7778</code>).
-            We'll probe the relay's NIP-11 metadata to confirm it's reachable
-            before saving anything.
-          </p>
-          <label class="form-field">
-            <span class="form-label">Relay URL</span>
-            <input id="join-url" type="text" placeholder="wss://…" value="${escapeHtml(jstate.relayUrl)}" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">Friendly name <span class="muted">(your label for it)</span></span>
-            <input id="join-name" type="text" maxlength="60" placeholder="Family · Friends · Book Club" value="${escapeHtml(jstate.name)}" />
-          </label>
-          <details class="privacy-disclosure">
-            <summary>Mesh prerequisite</summary>
-            <div class="privacy-disclosure-body">
-              <p>If the relay is on a private nvpn mesh, you need to join that mesh BEFORE this probe will succeed. Ask the inviter for an nvpn invite (separate from this relay URL) and import it via the nvpn panel.</p>
-              <p>Public relays (anything with a public hostname) don't need an nvpn mesh — just paste the URL.</p>
-            </div>
-          </details>
-        `;
-      }
-      // Step 2 — confirm.
-      const p = jstate.probed || {};
-      if (p.error) {
-        return `
-          <div class="community-card-error">
-            Probe failed: ${escapeHtml(p.error)}
-          </div>
-          <p class="form-help">
-            The relay didn't respond to a NIP-11 probe at <code>${escapeHtml(jstate.relayUrl)}</code>.
-            Common reasons: the URL is wrong, you're not on the right
-            nvpn mesh, or the host has the relay stopped.
-          </p>
-          <p class="form-help">
-            You can still add it to your Joined list if you're sure it's
-            correct — it just won't have detected metadata.
-          </p>
-        `;
-      }
-      return `
-        <div class="review-grid">
-          <div><span class="kv-k">URL</span><span class="kv-v community-mono">${escapeHtml(jstate.relayUrl)}</span></div>
-          <div><span class="kv-k">Your label</span><span class="kv-v">${escapeHtml(jstate.name)}</span></div>
-          ${p.detectedName ? `<div><span class="kv-k">Relay self-name</span><span class="kv-v">${escapeHtml(p.detectedName)}</span></div>` : ''}
-          ${p.detectedDescription ? `<div><span class="kv-k">Relay description</span><span class="kv-v">${escapeHtml(p.detectedDescription)}</span></div>` : ''}
-        </div>
-        <p class="form-help">
-          Joining adds this relay to your dashboard's Communities panel
-          under a Joined section. It does NOT connect your Nostr client
-          for you — you'll get a copy URL + QR for that after adding.
-        </p>
-      `;
-    }
-    function wire() {
-      $('join-close')?.addEventListener('click', close);
-      $('join-scrim')?.addEventListener('click', (e) => {
-        if (e.target.id === 'join-scrim') close();
-      });
-      $('join-back')?.addEventListener('click', () => { jstate.step = 1; render(); });
-      $('join-url')?.addEventListener('input', (e) => { jstate.relayUrl = e.target.value; });
-      $('join-name')?.addEventListener('input', (e) => { jstate.name = e.target.value; });
-      $('join-next')?.addEventListener('click', async () => {
-        if (!/^wss?:\/\//.test(jstate.relayUrl.trim())) {
-          alert('Relay URL must start with ws:// or wss://');
-          return;
-        }
-        if (!jstate.name.trim()) {
-          alert('Give this community a friendly name (for your own reference).');
-          return;
-        }
-        jstate.probing = true; render();
-        try {
-          const r = await api('/api/communities/probe', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ relayUrl: jstate.relayUrl.trim() }),
-          });
-          if (r?.ok) {
-            jstate.probed = {
-              detectedName:        r.nip11?.name,
-              detectedDescription: r.nip11?.description,
-            };
-          } else {
-            jstate.probed = { error: r?.error || 'probe failed' };
-          }
-        } catch (e) {
-          jstate.probed = { error: e?.message || String(e) };
-        }
-        jstate.probing = false;
-        jstate.step = 2;
-        render();
-      });
-      $('join-confirm')?.addEventListener('click', async () => {
-        const p = jstate.probed || {};
-        try {
-          await api('/api/communities/joined', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({
-              name:                jstate.name.trim(),
-              relayUrl:            jstate.relayUrl.trim(),
-              detectedName:        p.detectedName,
-              detectedDescription: p.detectedDescription,
-            }),
-          });
-          close();
-          await fetchList();
-          renderList();
-          window.Toasts?.info?.(`Joined "${jstate.name.trim()}"`);
-        } catch (e) {
-          window.Toasts?.error?.(e?.message || String(e));
-        }
-      });
-    }
-    render();
-  }
-
   async function openWizard() {
     const modalRoot = $('modal-root');
     if (!modalRoot) return;
@@ -23727,60 +23234,30 @@ const CommunitiesPanel = (() => {
     // community needs an adminPubkey at create time — defaulting to
     // the dashboard owner — and the wizard's "Add me as a member"
     // checkbox preloads the same hex. /api/identity/config is the
-    // canonical source (used by ConfigPanel, ProjectsPanel, etc.).
-    //
-    // `cfg.npub` may arrive in EITHER form depending on what the user
-    // pasted into identity setup: raw 64-char hex OR bech32 `npub1...`.
-    // The previous version of this code only accepted `npub1...` and
-    // bailed with "Set up your dashboard identity first" for users
-    // whose identity was stored as hex — a false negative that
-    // looked exactly like "no identity configured". Now we accept
-    // both.
+    // canonical source (used by ConfigPanel, ProjectsPanel, etc.);
+    // npub→hex via NostrTools.nip19, same as every other panel that
+    // crosses the two encodings.
     let ownerHex = '';
     try {
       const cfg = await api('/api/identity/config');
-      const raw = (cfg?.npub || '').toString().trim();
-      if (/^[0-9a-f]{64}$/i.test(raw)) {
-        // Already hex — use as-is, normalize case.
-        ownerHex = raw.toLowerCase();
-      } else if (raw.startsWith('npub1') && window.NostrTools?.nip19) {
-        // bech32 → hex.
-        try {
-          const dec = window.NostrTools.nip19.decode(raw);
-          if (dec?.type === 'npub' && typeof dec.data === 'string') {
-            ownerHex = dec.data.toLowerCase();
-          }
-        } catch { /* malformed npub; falls through to the bail below */ }
+      const npub = (cfg?.npub || '').toString();
+      if (npub.startsWith('npub1') && window.NostrTools?.nip19) {
+        const dec = window.NostrTools.nip19.decode(npub);
+        if (dec?.type === 'npub' && typeof dec.data === 'string') {
+          ownerHex = dec.data.toLowerCase();
+        }
       }
-    } catch { /* identity endpoint failed; handled below */ }
+    } catch { /* identity not yet configured; handled below */ }
 
     if (!ownerHex) {
-      // Genuine "no identity" case — surface a useful message rather
-      // than letting the user fill out the wizard and hit a 400 at
-      // submit time.
+      // Refuse to open with a useful error rather than letting the
+      // user fill out the wizard and hit a 400 at submit time (the
+      // exact regression that prompted this fix).
       const msg = 'Set up your dashboard identity first — Config → Identity.';
       window.Toasts?.error?.(msg);
       if (!window.Toasts) alert(msg);
       return;
     }
-
-    // Probe nvpn state up front so the privacy step can render the
-    // "Private network" radio correctly. Three states:
-    //   - nvpn down            → radio disabled, "Start nvpn first"
-    //   - nvpn up, no network  → radio disabled, "Join a network first"
-    //   - nvpn up + network    → radio enabled, shows active network id
-    // The probe runs once at open; we don't re-poll across step changes.
-    // Users who fix the underlying state can close + reopen the wizard.
-    let nvpnState = { installed: false, running: false, networkId: null, tunnelIp: null };
-    try {
-      const r = await api('/api/nvpn/status');
-      nvpnState = {
-        installed: !!r?.installed,
-        running:   !!r?.running,
-        networkId: r?.networkId || r?.raw?.network_id || null,
-        tunnelIp:  r?.tunnelIp || r?.raw?.tunnel_ip || null,
-      };
-    } catch { /* keep defaults — radio shows install-nvpn hint */ }
 
     // Wizard state — purely local to this modal.
     const wstate = {
@@ -23791,7 +23268,6 @@ const CommunitiesPanel = (() => {
       members: [ownerHex],
       adminPubkey: ownerHex,
       addMeAsMember: true,
-      nvpn: nvpnState,
     };
 
     function close() { modalRoot.innerHTML = ''; }
@@ -23816,49 +23292,6 @@ const CommunitiesPanel = (() => {
       wire();
     }
 
-    // Privacy radio cards. The "Private network" card has three
-    // visual states depending on the wizard's nvpn probe:
-    //   - nvpn down       → disabled card, "Start nvpn first" hint
-    //   - nvpn up, no net → disabled card, "Join a network first" hint
-    //   - nvpn up + net   → enabled card, shows active network id
-    // Pulled into a helper so the disabled state's HTML stays close to
-    // the hint copy — keeps the render-step body readable.
-    function renderPrivacyRadios(ws) {
-      const nvpnReady = ws.nvpn.installed && ws.nvpn.running && !!ws.nvpn.networkId;
-      const privSelected = ws.privacyMode === 'private-network';
-      let privHint;
-      if (!ws.nvpn.installed) {
-        privHint = 'nvpn isn\'t installed — install it from Config → Communities.';
-      } else if (!ws.nvpn.running) {
-        privHint = 'nvpn isn\'t running — start it from the nvpn panel, then reopen this wizard.';
-      } else if (!ws.nvpn.networkId) {
-        privHint = 'nvpn is running but no network is active — join one from the nvpn panel, then reopen this wizard.';
-      } else {
-        privHint = `Will bind to your active mesh (network <code class="community-mono">${escapeHtml(ws.nvpn.networkId.slice(0, 10))}…</code>, tunnel ${escapeHtml(ws.nvpn.tunnelIp || '—')}).`;
-      }
-      return `
-        <fieldset class="form-field">
-          <legend class="form-label">Privacy mode</legend>
-          <label class="radio-card ${ws.privacyMode === 'local' ? 'selected' : ''}">
-            <input type="radio" name="w-privacy" value="local" ${ws.privacyMode === 'local' ? 'checked' : ''}/>
-            <div>
-              <strong>Local only</strong>
-              <span>Reachable from this machine only. Good for testing.</span>
-            </div>
-          </label>
-          <label class="radio-card ${privSelected && nvpnReady ? 'selected' : ''} ${nvpnReady ? '' : 'disabled'}">
-            <input type="radio" name="w-privacy" value="private-network"
-                   ${privSelected && nvpnReady ? 'checked' : ''}
-                   ${nvpnReady ? '' : 'disabled'}/>
-            <div>
-              <strong>Private network ${nvpnReady ? '' : '<span class="recommended">(needs nvpn)</span>'}</strong>
-              <span>${privHint}</span>
-            </div>
-          </label>
-        </fieldset>
-      `;
-    }
-
     function stepBodyHtml() {
       if (wstate.step === 1) {
         return `
@@ -23872,7 +23305,23 @@ const CommunitiesPanel = (() => {
             <textarea id="w-desc" maxlength="200" rows="2" placeholder="What is this community for?">${escapeHtml(wstate.description)}</textarea>
             <span class="form-help-inline">Also private — visible only to the dashboard and the people you invite.</span>
           </label>
-          ${renderPrivacyRadios(wstate)}
+          <fieldset class="form-field">
+            <legend class="form-label">Privacy mode</legend>
+            <label class="radio-card ${wstate.privacyMode === 'local' ? 'selected' : ''}">
+              <input type="radio" name="w-privacy" value="local" ${wstate.privacyMode === 'local' ? 'checked' : ''}/>
+              <div>
+                <strong>Local only</strong>
+                <span>Reachable from this machine only. Good for testing.</span>
+              </div>
+            </label>
+            <label class="radio-card ${wstate.privacyMode === 'private-network' ? 'selected' : ''}">
+              <input type="radio" name="w-privacy" value="private-network" ${wstate.privacyMode === 'private-network' ? 'checked' : ''}/>
+              <div>
+                <strong>Private network <span class="recommended">(coming with nvpn integration)</span></strong>
+                <span>Members connect through an nvpn mesh. Nothing about your home network is exposed to them.</span>
+              </div>
+            </label>
+          </fieldset>
           ${privacyDisclosureHtml(wstate.privacyMode)}
         `;
       }
@@ -23946,15 +23395,8 @@ const CommunitiesPanel = (() => {
       if (wstate.step === 1) {
         if (!wstate.name.trim()) { alert('Name is required.'); return false; }
         if (wstate.privacyMode === 'private-network') {
-          // The radio is disabled when nvpn isn't ready, so this check
-          // is belt-and-suspenders for users who flip the field via
-          // devtools. The backend would also reject it; surfacing here
-          // gives a faster, clearer message.
-          const ready = wstate.nvpn.installed && wstate.nvpn.running && !!wstate.nvpn.networkId;
-          if (!ready) {
-            alert('Private-network mode needs an active nvpn network. Fix that and reopen this wizard.');
-            return false;
-          }
+          alert('Private-network mode arrives with the nvpn integration. For now please pick "Local only".');
+          return false;
         }
       }
       return true;
@@ -24022,7 +23464,10 @@ const CommunitiesPanel = (() => {
 
   // Wire static buttons once.
   newBtn?.addEventListener('click', openWizard);
-  joinBtn?.addEventListener('click', () => openJoinWizard());
+  joinBtn?.addEventListener('click', () => {
+    if (window.Toasts) window.Toasts.info?.('Join wizard lands with the nvpn integration.');
+    else alert('Join wizard lands with the nvpn integration.');
+  });
   // Privacy & visibility — opens a modal with BOTH disclosure variants
   // side by side so a user evaluating the feature can see what each
   // privacy mode exposes before they create anything. Same disclosure

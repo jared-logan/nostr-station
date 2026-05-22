@@ -108,8 +108,6 @@ import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { mountRelayProxyWebSocket } from './routes/relay-proxy.js';
 import { handleNvpn } from './routes/nvpn.js';
 import { handleCommunities } from './routes/communities.js';
-import { attachDashboardBindingFilter } from './dashboard-binding.js';
-import { readMobileAccessConfig, writeMobileAccessConfig, dashboardBindHost } from './mobile-access.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
 import { getInboxWorker } from './mail/inbox.js';
@@ -2034,55 +2032,6 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // /api section above.
       if (await handleCommunities(req, res, fullUrl, method)) return;
 
-      // ── Mobile Access (toggle) ──────────────────────────────────────────
-      // Tiny route, small enough to inline rather than splitting into a
-      // dedicated module. Reads the persisted toggle state (GET) or
-      // writes a new state (POST). Always returns the live bind host
-      // alongside so the UI can show "currently bound to 127.0.0.1,
-      // saved-but-unapplied: 0.0.0.0" if the user toggled but hasn't
-      // restarted yet.
-      if (url === '/api/mobile-access' && method === 'GET') {
-        if (!requireSession(req, res)) return;
-        const cfg = readMobileAccessConfig();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          ok:           true,
-          enabled:      cfg.enabled,
-          updatedAt:    cfg.updatedAt ?? null,
-          currentBind:  dashboardBindHost(),
-          needsRestart: (cfg.enabled ? '0.0.0.0' : '127.0.0.1') !== dashboardBindHost(),
-        }));
-        return;
-      }
-      if (url === '/api/mobile-access' && method === 'POST') {
-        if (!requireSession(req, res)) return;
-        let raw: any;
-        try { raw = JSON.parse(await readBody(req)); }
-        catch {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
-          return;
-        }
-        if (typeof raw?.enabled !== 'boolean') {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: '`enabled` (boolean) required' }));
-          return;
-        }
-        const saved = writeMobileAccessConfig({ enabled: raw.enabled });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          ok:           true,
-          enabled:      saved.enabled,
-          updatedAt:    saved.updatedAt ?? null,
-          currentBind:  dashboardBindHost(),
-          // After a write, the bind on disk and the live bind will
-          // disagree until the user restarts (unless the toggle was
-          // a no-op). The UI surfaces this as "Restart to apply".
-          needsRestart: (saved.enabled ? '0.0.0.0' : '127.0.0.1') !== dashboardBindHost(),
-        }));
-        return;
-      }
-
       // ── Mail (routes/mail.ts) ──────────────────────────────────────────
       // NIP-17 mail panel: read-only inbox + thread view. Send + compose
       // + inbox-relay management arrive in follow-up PRs.
@@ -2245,18 +2194,10 @@ export async function startWebServer(port: number): Promise<http.Server> {
     // surfaces immediately as "another dashboard is running" in Chat.tsx.
     const respawning      = process.env.NOSTR_STATION_RESPAWN === '1';
     let listenRetriesLeft = respawning ? 10 : 0;
-
-    // Dashboard binding peer filter — gates non-loopback inbound
-    // connections by pubkey via the nvpn peer roster. No-op while
-    // the dashboard binds to loopback only (the default); becomes
-    // functionally active when Mobile Access binds to a non-loopback
-    // interface. See dashboard-binding.ts for the security rationale.
-    attachDashboardBindingFilter(server);
-
     server.on('error', (e: NodeJS.ErrnoException) => {
       if (e.code === 'EADDRINUSE' && listenRetriesLeft > 0) {
         listenRetriesLeft--;
-        setTimeout(() => server.listen(port, dashboardBindHost()), 500);
+        setTimeout(() => server.listen(port, process.env.DEV_HOST || '127.0.0.1'), 500);
         return;
       }
       if (e.code === 'EADDRINUSE') {
@@ -2288,7 +2229,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
     // already sync — but `beforeExit` is friendlier to debugging stacks.
     process.once('beforeExit', dropPid);
 
-    server.listen(port, dashboardBindHost(), () => {
+    server.listen(port, process.env.DEV_HOST || '127.0.0.1', () => {
       try {
         writePidFile();
         pidWritten = true;

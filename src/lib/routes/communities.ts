@@ -31,7 +31,6 @@
  */
 
 import http from 'node:http';
-import https from 'node:https';
 import { readBody } from './_shared.js';
 import { requireSession } from '../auth.js';
 import {
@@ -39,29 +38,21 @@ import {
   createCommunity, deleteCommunityDir,
   addCommunityMember, removeCommunityMember,
   listCommunityMembers,
-  addCommunityBanword, removeCommunityBanword, listCommunityBanwords,
-  listCommunityBannedPubkeys,
-  listJoinedCommunities, addJoinedCommunity, removeJoinedCommunity,
-  updateJoinedCommunity,
   updateCommunityManifest,
   type CreateCommunityInput,
 } from '../communities.js';
-import { banPubkey, unbanPubkey } from '../community-admin.js';
 import {
   startCommunity, stopCommunity, restartCommunity,
   getCommunityRuntimeStatus, getCommunityLog,
 } from '../community-process.js';
-import { readNvpnRoster, probeNvpnStatus } from '../nvpn.js';
 
 // =====================================================================
 // URL parsing — small + bounded so we don't pull in a router library
 
 interface CommunityRoute {
   id?:     string;
-  action?: 'start' | 'stop' | 'restart' | 'members' | 'logs' | 'banwords' | 'bans' | 'joined' | 'probe';
+  action?: 'start' | 'stop' | 'restart' | 'members' | 'logs';
   memberHex?: string;
-  banword?:  string;
-  bannedHex?: string;
 }
 
 /**
@@ -74,17 +65,6 @@ function parseRoute(url: string): CommunityRoute | null {
   // Strip query string before splitting.
   const path = url.split('?', 1)[0];
   if (path === '/api/communities' || path === '/api/communities/') return {};
-  // /api/communities/joined[/<id>] — list / add / delete joined communities.
-  // Distinct from the per-community routes below because "joined" isn't
-  // a community id and we don't want to spawn a GRAIN process for it.
-  if (path === '/api/communities/joined' || path === '/api/communities/joined/') {
-    return { action: 'joined' };
-  }
-  const jm = path.match(/^\/api\/communities\/joined\/([0-9a-f]{12})$/);
-  if (jm) return { action: 'joined', id: jm[1] };
-  // /api/communities/probe — NIP-11 probe helper used by the join wizard
-  // before the user commits to adding the relay to their joined list.
-  if (path === '/api/communities/probe') return { action: 'probe' };
   const m = path.match(/^\/api\/communities\/([0-9a-f]{12})(\/.*)?$/);
   if (!m) return null;
   const id = m[1];
@@ -95,17 +75,8 @@ function parseRoute(url: string): CommunityRoute | null {
   if (tail === 'restart')   return { id, action: 'restart' };
   if (tail === 'members')   return { id, action: 'members' };
   if (tail === 'logs')      return { id, action: 'logs' };
-  if (tail === 'banwords')  return { id, action: 'banwords' };
-  if (tail === 'bans')      return { id, action: 'bans' };
   const mm = tail.match(/^members\/([0-9a-f]{64})$/);
   if (mm) return { id, action: 'members', memberHex: mm[1] };
-  // Banwords: URL-encoded since words can contain anything. Cap at
-  // 200 chars to avoid pathological paths; decoder runs in the
-  // handler.
-  const bw = tail.match(/^banwords\/(.{1,200})$/);
-  if (bw) return { id, action: 'banwords', banword: bw[1] };
-  const bn = tail.match(/^bans\/([0-9a-f]{64})$/);
-  if (bn) return { id, action: 'bans', bannedHex: bn[1] };
   return null;
 }
 
@@ -140,48 +111,6 @@ function shapeCommunity(id: string): unknown | null {
     lastError:           runtime.lastError ?? manifest.lastError,
     memberCount:         listCommunityMembers(id).length,
   };
-}
-
-/**
- * Probe a relay's NIP-11 endpoint. NIP-11 spec: GET the relay URL
- * with `Accept: application/nostr+json`; the relay responds with
- * the JSON document. We translate ws:// → http:// and wss:// → https://
- * to hit the same host/port over HTTP.
- *
- * Strict timeout (caller-supplied; default 5s) so a wedged relay
- * doesn't hang the wizard.
- */
-function probeNip11Remote(relayUrl: string, timeoutMs: number): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    let parsed: URL;
-    try { parsed = new URL(relayUrl); }
-    catch (e) { reject(new Error(`invalid relay URL: ${(e as Error).message}`)); return; }
-    const isSecure = parsed.protocol === 'wss:';
-    const httpUrl  = `${isSecure ? 'https' : 'http'}://${parsed.host}/`;
-    const lib      = isSecure ? https : http;
-    const req = lib.request(httpUrl, {
-      method: 'GET',
-      headers: { Accept: 'application/nostr+json' },
-      timeout: timeoutMs,
-    }, (res) => {
-      if ((res.statusCode ?? 0) >= 400) {
-        res.resume();
-        reject(new Error(`NIP-11 returned HTTP ${res.statusCode}`));
-        return;
-      }
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (c) => { body += c; if (body.length > 32_768) { res.destroy(); } });
-      res.on('end', () => {
-        try { resolve(JSON.parse(body) as Record<string, unknown>); }
-        catch (e) { reject(new Error(`NIP-11 response not JSON: ${(e as Error).message}`)); }
-      });
-      res.on('error', (e) => reject(e));
-    });
-    req.on('error',   (e) => reject(e));
-    req.on('timeout', ()  => { req.destroy(); reject(new Error(`probe timed out after ${timeoutMs} ms`)); });
-    req.end();
-  });
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -219,21 +148,12 @@ function validateCreatePayload(raw: any): { ok: true; input: CreateCommunityInpu
     return { ok: false, error: '`adminPubkey` must be 64-char lowercase hex' };
   }
 
-  // nvpnNetworkId is optional in the request body — the route layer
-  // auto-resolves it from the user's active nvpn network when the
-  // wizard didn't pass one. This is the per-Option-B model: every
-  // private-network community on the host shares the single active
-  // nvpn mesh. Validation here ensures the resulting value is a
-  // non-empty string; the auto-resolve step lives in the POST
-  // handler (which has access to nvpn helpers).
   let nvpnNetworkId: string | undefined;
   if (privacyMode === 'private-network') {
-    const explicit = String(raw.nvpnNetworkId ?? '').trim();
-    if (explicit) nvpnNetworkId = explicit;
-    // Empty case left to the POST handler to fill in from the live
-    // nvpn state — surfaces a specific error there if no network is
-    // active, rather than rejecting at the validator level when the
-    // wizard intentionally elided the field.
+    nvpnNetworkId = String(raw.nvpnNetworkId ?? '').trim();
+    if (!nvpnNetworkId) {
+      return { ok: false, error: 'private-network communities require `nvpnNetworkId`' };
+    }
   }
 
   let memberPubkeys: string[] | undefined;
@@ -298,36 +218,8 @@ export async function handleCommunities(
       catch { sendError(res, 400, 'invalid JSON body'); return true; }
       const v = validateCreatePayload(raw);
       if (!v.ok) { sendError(res, 400, v.error); return true; }
-
-      // Auto-resolve nvpnNetworkId for private-network communities
-      // whose wizard didn't pass one. Under nvpn's one-active-
-      // network model (Path B), every private-network community on
-      // this host shares the single active mesh — there's no
-      // selection to make at create time, just discovery. If nvpn
-      // isn't installed / running / has no active network, surface
-      // a specific 400 the wizard can act on (Install nvpn /
-      // Start nvpn / Join a network).
-      const input = { ...v.input };
-      if (input.privacyMode === 'private-network' && !input.nvpnNetworkId) {
-        const st = await probeNvpnStatus();
-        if (!st.installed) {
-          sendError(res, 400, 'private-network mode requires nvpn — install it from Config');
-          return true;
-        }
-        if (!st.running) {
-          sendError(res, 400, 'nvpn is installed but not running — start it from the nvpn panel');
-          return true;
-        }
-        const roster = readNvpnRoster();
-        if (!roster.networkId) {
-          sendError(res, 400, 'nvpn is running but no network is active — join a network first');
-          return true;
-        }
-        input.nvpnNetworkId = roster.networkId;
-      }
-
       try {
-        const m = await createCommunity(input);
+        const m = await createCommunity(v.input);
         sendJson(res, 201, { ok: true, community: shapeCommunity(m.id) });
       } catch (e: any) {
         // The CRUD layer throws Error with a specific message we can
@@ -337,88 +229,6 @@ export async function handleCommunities(
       return true;
     }
     sendError(res, 405, 'method not allowed');
-    return true;
-  }
-
-  // ── Joined communities (separate persistence, not per-dir) ───────
-  if (route.action === 'joined' && !route.id) {
-    if (!requireSession(req, res)) return true;
-    if (method === 'GET') {
-      sendJson(res, 200, { ok: true, joined: listJoinedCommunities() });
-      return true;
-    }
-    if (method === 'POST') {
-      let raw: any;
-      try { raw = JSON.parse(await readBody(req)); }
-      catch { sendError(res, 400, 'invalid JSON body'); return true; }
-      const name     = String(raw?.name ?? '').trim();
-      const relayUrl = String(raw?.relayUrl ?? '').trim();
-      if (!name)     { sendError(res, 400, '`name` is required'); return true; }
-      if (!/^wss?:\/\//.test(relayUrl)) {
-        sendError(res, 400, '`relayUrl` must start with ws:// or wss://');
-        return true;
-      }
-      try {
-        const entry = addJoinedCommunity({
-          name, relayUrl,
-          detectedName:        raw?.detectedName,
-          detectedDescription: raw?.detectedDescription,
-        });
-        sendJson(res, 201, { ok: true, entry });
-      } catch (e: any) {
-        sendError(res, 400, (e?.message ?? 'join failed').slice(0, 240));
-      }
-      return true;
-    }
-    sendError(res, 405, 'method not allowed');
-    return true;
-  }
-  if (route.action === 'joined' && route.id && method === 'DELETE') {
-    if (!requireSession(req, res)) return true;
-    removeJoinedCommunity(route.id);
-    sendJson(res, 200, { ok: true });
-    return true;
-  }
-  if (route.action === 'joined' && route.id && method === 'PATCH') {
-    if (!requireSession(req, res)) return true;
-    let raw: any;
-    try { raw = JSON.parse(await readBody(req)); }
-    catch { sendError(res, 400, 'invalid JSON body'); return true; }
-    const patch: any = {};
-    if (typeof raw?.lastReachedAt === 'number') patch.lastReachedAt = raw.lastReachedAt;
-    if (typeof raw?.detectedName === 'string')  patch.detectedName  = raw.detectedName;
-    if (typeof raw?.detectedDescription === 'string') patch.detectedDescription = raw.detectedDescription;
-    if (typeof raw?.name === 'string' && raw.name.trim()) patch.name = raw.name.trim();
-    const updated = updateJoinedCommunity(route.id, patch);
-    if (!updated) { sendError(res, 404, 'joined community not found'); return true; }
-    sendJson(res, 200, { ok: true, entry: updated });
-    return true;
-  }
-
-  // ── NIP-11 probe helper for the join wizard ──────────────────────
-  // Lets the dashboard fetch a relay's self-description BEFORE the
-  // user commits to adding it to their joined list. Doesn't touch
-  // any persisted state. Strict timeout so a wedged relay doesn't
-  // hang the wizard.
-  if (route.action === 'probe' && method === 'POST') {
-    if (!requireSession(req, res)) return true;
-    let raw: any;
-    try { raw = JSON.parse(await readBody(req)); }
-    catch { sendError(res, 400, 'invalid JSON body'); return true; }
-    const relayUrl = String(raw?.relayUrl ?? '').trim();
-    if (!/^wss?:\/\//.test(relayUrl)) {
-      sendError(res, 400, '`relayUrl` must start with ws:// or wss://');
-      return true;
-    }
-    try {
-      const nip11 = await probeNip11Remote(relayUrl, 5_000);
-      sendJson(res, 200, { ok: true, nip11 });
-    } catch (e: any) {
-      sendJson(res, 200, {
-        ok: false,
-        error: (e?.message ?? 'probe failed').slice(0, 240),
-      });
-    }
     return true;
   }
 
@@ -563,98 +373,6 @@ export async function handleCommunities(
     if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
     const members = removeCommunityMember(id, route.memberHex);
     sendJson(res, 200, { ok: true, members });
-    return true;
-  }
-
-  // ── Banwords (blacklist.yml hot-reload, no NIP-86) ──────────────
-  // Storage-side edit only. GRAIN hot-reloads blacklist.yml within
-  // ~2s of the write, so the new word is enforced without a restart.
-  if (route.action === 'banwords' && method === 'GET') {
-    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
-    sendJson(res, 200, { ok: true, banwords: listCommunityBanwords(id) });
-    return true;
-  }
-  if (route.action === 'banwords' && method === 'POST') {
-    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
-    let raw: any;
-    try { raw = JSON.parse(await readBody(req)); }
-    catch { sendError(res, 400, 'invalid JSON body'); return true; }
-    const word = String(raw?.word ?? '').trim();
-    if (!word) { sendError(res, 400, '`word` is required'); return true; }
-    if (word.length > 200) { sendError(res, 400, '`word` must be ≤ 200 chars'); return true; }
-    try {
-      const banwords = addCommunityBanword(id, word);
-      sendJson(res, 200, { ok: true, banwords });
-    } catch (e: any) {
-      sendError(res, 400, (e?.message ?? 'add failed').slice(0, 240));
-    }
-    return true;
-  }
-  if (route.action === 'banwords' && route.banword && method === 'DELETE') {
-    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
-    // The path-encoded form is the source of truth; the YAML store
-    // normalizes again on its end so a mismatched case won't no-op.
-    let word: string;
-    try { word = decodeURIComponent(route.banword); }
-    catch { sendError(res, 400, 'malformed banword in URL'); return true; }
-    const banwords = removeCommunityBanword(id, word);
-    sendJson(res, 200, { ok: true, banwords });
-    return true;
-  }
-
-  // ── Bans (NIP-86 banpubkey / allowpubkey) ──────────────────────
-  // These verbs prompt the user's Amber signer per call. The silent-
-  // sign delegation toggle that buffers the prompt for 8h lives with
-  // the Moderation tab UI in a follow-up — for now every ban is one
-  // tap. The endpoint surfaces both the storage view (blacklist.yml's
-  // pubkeys field, updated by GRAIN on a successful banpubkey RPC)
-  // and the NIP-86 call result.
-  if (route.action === 'bans' && method === 'GET') {
-    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
-    sendJson(res, 200, { ok: true, bannedPubkeys: listCommunityBannedPubkeys(id) });
-    return true;
-  }
-  if (route.action === 'bans' && method === 'POST') {
-    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
-    let raw: any;
-    try { raw = JSON.parse(await readBody(req)); }
-    catch { sendError(res, 400, 'invalid JSON body'); return true; }
-    const pubkey = String(raw?.pubkey ?? '').toLowerCase();
-    if (!HEX_64.test(pubkey)) {
-      sendError(res, 400, '`pubkey` must be 64-char lowercase hex');
-      return true;
-    }
-    const reason = String(raw?.reason ?? '').slice(0, 200);
-    try {
-      const r = await banPubkey(id, pubkey, reason);
-      if (!r.ok) {
-        sendError(res, 502, r.detail || 'banpubkey RPC failed');
-        return true;
-      }
-      sendJson(res, 200, {
-        ok: true,
-        bannedPubkeys: listCommunityBannedPubkeys(id),
-      });
-    } catch (e: any) {
-      sendError(res, 400, (e?.message ?? 'ban failed').slice(0, 240));
-    }
-    return true;
-  }
-  if (route.action === 'bans' && route.bannedHex && method === 'DELETE') {
-    if (!readCommunityManifest(id)) { sendError(res, 404, 'community not found'); return true; }
-    try {
-      const r = await unbanPubkey(id, route.bannedHex);
-      if (!r.ok) {
-        sendError(res, 502, r.detail || 'allowpubkey RPC failed');
-        return true;
-      }
-      sendJson(res, 200, {
-        ok: true,
-        bannedPubkeys: listCommunityBannedPubkeys(id),
-      });
-    } catch (e: any) {
-      sendError(res, 400, (e?.message ?? 'unban failed').slice(0, 240));
-    }
     return true;
   }
 

@@ -64,45 +64,6 @@ test('parseRoute: foreign paths return null (not an empty match)', () => {
   assert.equal(parseRoute(`/api/communities/${ID}/unknown-action`), null);
 });
 
-test('parseRoute: banwords list + per-word', () => {
-  assert.deepEqual(parseRoute(`/api/communities/${ID}/banwords`),
-    { id: ID, action: 'banwords' });
-  assert.deepEqual(parseRoute(`/api/communities/${ID}/banwords/spam`),
-    { id: ID, action: 'banwords', banword: 'spam' });
-  assert.deepEqual(parseRoute(`/api/communities/${ID}/banwords/${encodeURIComponent('bad phrase')}`),
-    { id: ID, action: 'banwords', banword: 'bad%20phrase' });
-});
-
-test('parseRoute: bans list + per-pubkey', () => {
-  assert.deepEqual(parseRoute(`/api/communities/${ID}/bans`),
-    { id: ID, action: 'bans' });
-  assert.deepEqual(parseRoute(`/api/communities/${ID}/bans/${HEX}`),
-    { id: ID, action: 'bans', bannedHex: HEX });
-});
-
-test('parseRoute: bans/:hex rejects non-hex', () => {
-  assert.equal(parseRoute(`/api/communities/${ID}/bans/not-a-hex`), null);
-});
-
-test('parseRoute: joined collection routes', () => {
-  assert.deepEqual(parseRoute('/api/communities/joined'),  { action: 'joined' });
-  assert.deepEqual(parseRoute('/api/communities/joined/'), { action: 'joined' });
-});
-
-test('parseRoute: joined per-id routes (12-hex)', () => {
-  assert.deepEqual(parseRoute(`/api/communities/joined/${ID}`),
-    { action: 'joined', id: ID });
-});
-
-test('parseRoute: joined per-id rejects non-12-hex', () => {
-  assert.equal(parseRoute('/api/communities/joined/abc'), null);
-  assert.equal(parseRoute('/api/communities/joined/xxxxxxxxxxxx'), null);
-});
-
-test('parseRoute: probe action', () => {
-  assert.deepEqual(parseRoute('/api/communities/probe'), { action: 'probe' });
-});
-
 // ---------------------------------------------------------------------
 // validateCreatePayload
 
@@ -121,29 +82,12 @@ test('validateCreatePayload: minimal local community is valid', () => {
   }
 });
 
-test('validateCreatePayload: private-network without nvpnNetworkId is OK at the validator layer', () => {
-  // Contract change: the validator accepts a missing nvpnNetworkId
-  // for private-network mode. The route handler (POST) auto-resolves
-  // from the active nvpn network at create time — that's the
-  // Option-B "one shared mesh, no selection to make" model. Tests
-  // for the auto-resolve live in tests covering the handler.
+test('validateCreatePayload: private-network requires nvpnNetworkId', () => {
   const v = validateCreatePayload({
     name: 'fam', privacyMode: 'private-network', adminPubkey: ADMIN,
   });
-  assert.equal(v.ok, true);
-  if (v.ok) {
-    assert.equal(v.input.privacyMode, 'private-network');
-    assert.equal(v.input.nvpnNetworkId, undefined);
-  }
-});
-
-test('validateCreatePayload: private-network WITH an explicit nvpnNetworkId passes it through', () => {
-  const v = validateCreatePayload({
-    name: 'fam', privacyMode: 'private-network', adminPubkey: ADMIN,
-    nvpnNetworkId: 'net-abcdef',
-  });
-  assert.equal(v.ok, true);
-  if (v.ok) assert.equal(v.input.nvpnNetworkId, 'net-abcdef');
+  assert.equal(v.ok, false);
+  if (!v.ok) assert.match(v.error, /nvpnNetworkId/);
 });
 
 test('validateCreatePayload: name max 60 chars', () => {
