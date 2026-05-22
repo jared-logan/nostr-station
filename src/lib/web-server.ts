@@ -2079,20 +2079,33 @@ export async function startWebServer(port: number): Promise<http.Server> {
       }
 
       // Gate the actual /api/communities/* routes behind opt-in.
-      // GET /api/communities is special — the dashboard fetches it
-      // even when the feature is disabled (to render "no communities"
-      // states). Return an empty list + a flag rather than a 403.
-      if (url === '/api/communities' && method === 'GET' && !isCommunitiesUsable()) {
+      // Read endpoints (GET /api/communities, GET /api/communities/joined)
+      // return empty results with featureEnabled: false rather than
+      // 403. Reason: the dashboard fetches these unconditionally when
+      // the panel mounts (the panel can be reached via #communities
+      // URL hash even with the sidebar entry hidden) and a 403
+      // surfaces as a noisy toast every navigation. Empty-list +
+      // flag lets the panel render its disabled-state copy cleanly.
+      const urlPath = url.split('?', 1)[0];
+      const isReadOnlyCommunitiesPath =
+        method === 'GET' &&
+        (urlPath === '/api/communities' || urlPath === '/api/communities/joined');
+      if (isReadOnlyCommunitiesPath && !isCommunitiesUsable()) {
         if (!requireSession(req, res)) return;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, communities: [], featureEnabled: false }));
+        if (urlPath === '/api/communities/joined') {
+          res.end(JSON.stringify({ ok: true, joined: [], featureEnabled: false }));
+        } else {
+          res.end(JSON.stringify({ ok: true, communities: [], featureEnabled: false }));
+        }
         return;
       }
       // Every other /api/communities/* path: 403 with the feature-gate
-      // reason. The UI never reaches these without the gate flag, but
-      // the API layer enforces it anyway in case a script bypasses
-      // the UI.
-      if (url.startsWith('/api/communities') && !isCommunitiesUsable()) {
+      // reason. The UI never reaches these in the disabled state (the
+      // panel's gate check below prevents wizard / member / ban
+      // endpoints from being called), but the API layer enforces it
+      // anyway in case a script bypasses the UI.
+      if (urlPath.startsWith('/api/communities') && !isCommunitiesUsable()) {
         if (!requireSession(req, res)) return;
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({

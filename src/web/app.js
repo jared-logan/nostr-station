@@ -1277,24 +1277,15 @@ const IdentityDrawer = (() => {
     body.appendChild(signing);
 
     // NSITE — hydrated asynchronously from /api/nsite/discover. The
-    // Mobile Access — toggle that controls whether the dashboard binds
-    // to non-loopback interfaces. When ON, the dashboard's HTTP port
-    // becomes reachable from peers on the nvpn mesh; the connection-
-    // time peer-pubkey filter (dashboard-binding.ts) restricts who
-    // actually gets through to the user's own devices (paired with
-    // the same NIP-46 bunker). Persisted to ~/.nostr-station/
-    // mobile-access.json; applied on next dashboard restart.
-    const mobileSec = document.createElement('div');
-    mobileSec.className = 'drawer-section mobile-access-section';
-    mobileSec.innerHTML = `
-      <h4>Mobile access</h4>
-      <div class="body"><span class="spinner"></span><span class="muted" style="margin-left:8px">Loading…</span></div>
-    `;
-    body.appendChild(mobileSec);
-    renderMobileAccessSection(mobileSec);
-
     // section slot is rendered immediately so the drawer doesn't jump
     // when results arrive.
+    //
+    // Note: the "Mobile access" toggle used to live here too, but
+    // it was the wrong home — identity is "who am I", not "what
+    // does my dashboard expose". The toggle has moved to the nvpn
+    // panel under "Dashboard access via mesh" alongside the mesh
+    // membership controls that govern who can reach the host in
+    // the first place.
     const nsiteSec = document.createElement('div');
     nsiteSec.className = 'drawer-section nsite-section';
     nsiteSec.innerHTML = `
@@ -1544,73 +1535,10 @@ const IdentityDrawer = (() => {
     }
   }
 
-  // ── Mobile Access section ─────────────────────────────────────
-  // Renders the toggle + bind URL + restart-required banner. Lives
-  // inside IdentityDrawer's scope so it can reuse the helpers but
-  // self-contained otherwise — its only external dependency is
-  // /api/mobile-access.
-  async function renderMobileAccessSection(host) {
-    let cfg;
-    try {
-      cfg = await api('/api/mobile-access');
-    } catch (e) {
-      host.innerHTML = `
-        <h4>Mobile access</h4>
-        <div class="body muted">Failed to load: ${escapeHtml(e?.message || String(e))}</div>
-      `;
-      return;
-    }
-    const enabled = !!cfg?.enabled;
-    const bindHost = cfg?.currentBind || '127.0.0.1';
-    // Display URL the user's phone would visit. We use the dashboard's
-    // current page hostname (location.hostname) when the user's already
-    // on the mesh; otherwise fall back to the bind host. The phone
-    // needs to know the actual IP, not "0.0.0.0".
-    const port = location.port || (location.protocol === 'https:' ? 443 : 80);
-    const remoteHint = bindHost === '0.0.0.0'
-      ? `Use your dashboard's nvpn tunnel IP — find it on the nvpn panel.`
-      : `Bound to <code>${escapeHtml(bindHost)}</code> only; flip the toggle to expose to your mesh.`;
-    host.innerHTML = `
-      <h4>Mobile access</h4>
-      <div class="body" style="font-size:12px">
-        <label class="form-field-inline" style="margin:6px 0">
-          <input id="mobile-access-toggle" type="checkbox" ${enabled ? 'checked' : ''}/>
-          <span>Allow reaching the dashboard from peers on your nvpn mesh</span>
-        </label>
-        <div class="form-help" style="margin:6px 0">
-          Only YOUR own devices (paired with the same Amber bunker)
-          actually get through — every other mesh peer hits a hard
-          wall at the connection layer. See
-          <a href="#communities" data-panel="communities">Communities → Privacy &amp; visibility</a>
-          for the full disclosure.
-        </div>
-        <div id="mobile-access-status" class="form-help" style="margin:6px 0">
-          ${remoteHint}
-        </div>
-        ${cfg?.needsRestart ? `
-          <div class="community-card-error" style="margin:8px 0">
-            Toggle saved but not yet applied. Restart the dashboard from Config → About → Restart for changes to take effect.
-          </div>
-        ` : ''}
-      </div>
-    `;
-    const tog = host.querySelector('#mobile-access-toggle');
-    tog?.addEventListener('change', async () => {
-      const next = tog.checked;
-      try {
-        await api('/api/mobile-access', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ enabled: next }),
-        });
-        renderMobileAccessSection(host);  // re-render with the restart banner
-      } catch (e) {
-        // Revert the toggle on save failure so the UI doesn't lie.
-        tog.checked = !next;
-        window.Toasts?.error?.(e?.message || String(e));
-      }
-    });
-  }
+  // Mobile Access toggle moved to the nvpn panel (Network tab) where
+  // it sits next to the mesh-membership controls it depends on. See
+  // VpnPanel.renderNetworkBody for the new home — "Dashboard access
+  // via mesh" section.
 
   $('identity-chip').addEventListener('click', open);
 
@@ -13556,6 +13484,23 @@ const VpnPanel = (() => {
             <button type="submit" class="primary">Add peer</button>
           </form>
         </div>
+
+        <!-- Dashboard access via mesh — the host-side toggle that
+             controls whether nostr-station's dashboard HTTP port
+             actually listens on the mesh interface. Lives in the
+             nvpn panel because both halves of the "phone reaches my
+             dashboard" use case need to be in the same place: mesh
+             membership (peers above) + dashboard exposure (this
+             section). Previously this lived in the Identity drawer
+             under "Mobile access" which made the dependency invisible. -->
+        <div class="vpn-dashboard-access" id="vpn-dashboard-access" style="margin-top:18px">
+          <div class="vpn-meta-peers-head">
+            <span class="vpn-meta-label">dashboard access via mesh</span>
+          </div>
+          <div class="vpn-dashboard-access-body" id="vpn-dashboard-access-body">
+            <span class="muted">loading…</span>
+          </div>
+        </div>
       </div>`;
   }
   renderNetworkBody.wire = () => {
@@ -13712,7 +13657,81 @@ const VpnPanel = (() => {
         btn.disabled = false;
       });
     });
+
+    // Dashboard access via mesh — fetch the current mobile-access
+    // config + render the toggle UI inline. Async so the rest of the
+    // network body paints first; placeholder shows while loading.
+    renderDashboardAccessSection();
   };
+
+  // Renders the "Dashboard access via mesh" section into the slot
+  // reserved by renderNetworkBody. Same persistence layer as the
+  // (now-removed) Identity-drawer Mobile Access section —
+  // /api/mobile-access — so a user's prior setting carries over
+  // exactly. Re-renders itself on toggle change to surface the
+  // restart-required banner.
+  async function renderDashboardAccessSection() {
+    const host = bodyEl.querySelector('#vpn-dashboard-access-body');
+    if (!host) return;
+    let cfg;
+    try { cfg = await api('/api/mobile-access'); }
+    catch (e) {
+      host.innerHTML = `<span class="muted">Failed to load mobile-access config: ${escapeHtml(e?.message || String(e))}</span>`;
+      return;
+    }
+    const enabled  = !!cfg?.enabled;
+    const bindHost = cfg?.currentBind || '127.0.0.1';
+    const r        = lastStatus && lastStatus.raw ? lastStatus.raw : null;
+    const tunnelIp = (r && typeof r.tunnel_ip === 'string') ? r.tunnel_ip : null;
+    // Compose the URL members would use. When enabled + we know the
+    // tunnel IP, show the concrete URL; otherwise show the bind
+    // address + a hint about why it isn't actionable yet.
+    const port    = location.port || (location.protocol === 'https:' ? 443 : 80);
+    const target  = (enabled && tunnelIp) ? `http://${tunnelIp}:${port}` : null;
+    host.innerHTML = `
+      <p class="form-help" style="margin:6px 0">
+        This toggle controls whether nostr-station's dashboard
+        actually listens on your nvpn mesh interface. The mesh
+        roster above (who can route packets to your host) is the
+        other half — your phone needs to be a mesh peer AND this
+        toggle on for "reach the dashboard from my phone" to work.
+        Only your own pubkey is trusted by default; every other mesh
+        peer hits a hard wall at the connection layer.
+      </p>
+      <label class="form-field-inline" style="margin:6px 0">
+        <input id="vpn-dashboard-toggle" type="checkbox" ${enabled ? 'checked' : ''}/>
+        <span>Allow dashboard access from mesh peers</span>
+      </label>
+      <div class="form-help" style="margin:6px 0">
+        Current bind: <code>${escapeHtml(bindHost)}</code>
+        ${enabled
+          ? (tunnelIp
+              ? ` · dashboard reachable at <code>${escapeHtml(target)}</code>`
+              : ` · mesh tunnel IP not detected yet — start nvpn / wait for the daemon to settle, then refresh`)
+          : ' · loopback only (mesh peers cannot reach the dashboard)'}
+      </div>
+      ${cfg?.needsRestart ? `
+        <div class="community-card-error" style="margin:8px 0">
+          Toggle saved but not yet applied. Restart the dashboard from Config → About → Restart for changes to take effect.
+        </div>
+      ` : ''}
+    `;
+    const tog = host.querySelector('#vpn-dashboard-toggle');
+    tog?.addEventListener('change', async () => {
+      const next = tog.checked;
+      try {
+        await api('/api/mobile-access', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: next }),
+        });
+        renderDashboardAccessSection();  // re-render with the restart banner
+      } catch (e) {
+        tog.checked = !next;  // revert on failure
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+    });
+  }
 
   // Relays sub-tab — discovery relays (where nvpn publishes presence
   // and discovers peers). Read goes straight from config.toml so the
@@ -24260,6 +24279,35 @@ const CommunitiesPanel = (() => {
 
   // ── Lifecycle ───────────────────────────────────────────────────
   async function onEnter() {
+    // Feature-gate check first. The panel can be reached via
+    // #communities URL hash even when the sidebar entry is hidden
+    // (browser-restore of the last-active panel, or the user typing
+    // the hash directly). Without this check, the panel mounts,
+    // calls /api/communities + /api/communities/joined unconditionally,
+    // and the second call surfaces as a 403 toast every navigation —
+    // exactly the bug we're fixing here.
+    let gate;
+    try { gate = await api('/api/communities-feature').catch(() => null); }
+    catch { gate = null; }
+    if (!gate?.usable) {
+      titleEl.textContent = 'Communities';
+      subtitleEl.textContent = 'Experimental feature — not yet enabled.';
+      headActions.style.display = 'none';
+      body.innerHTML = `
+        <div class="empty-state community-empty">
+          <h3>Communities is disabled.</h3>
+          <p>
+            Managed allowlist-gated relays for friends + family. This is
+            an experimental feature with documented trade-offs around
+            network exposure and privacy. Enable it from
+            <a href="#config" data-panel="config">Config → Communities</a>
+            and walk through the first-use warning before any of the
+            wizard / member / moderation surfaces become available.
+          </p>
+        </div>
+      `;
+      return;
+    }
     await fetchList();
     // Honor a deep-link of form #communities/<id>
     const hash = location.hash.replace(/^#/, '');
