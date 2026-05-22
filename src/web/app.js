@@ -23271,6 +23271,24 @@ const CommunitiesPanel = (() => {
       return;
     }
 
+    // Probe nvpn state up front so the privacy step can render the
+    // "Private network" radio correctly. Three states:
+    //   - nvpn down            → radio disabled, "Start nvpn first"
+    //   - nvpn up, no network  → radio disabled, "Join a network first"
+    //   - nvpn up + network    → radio enabled, shows active network id
+    // The probe runs once at open; we don't re-poll across step changes.
+    // Users who fix the underlying state can close + reopen the wizard.
+    let nvpnState = { installed: false, running: false, networkId: null, tunnelIp: null };
+    try {
+      const r = await api('/api/nvpn/status');
+      nvpnState = {
+        installed: !!r?.installed,
+        running:   !!r?.running,
+        networkId: r?.networkId || r?.raw?.network_id || null,
+        tunnelIp:  r?.tunnelIp || r?.raw?.tunnel_ip || null,
+      };
+    } catch { /* keep defaults — radio shows install-nvpn hint */ }
+
     // Wizard state — purely local to this modal.
     const wstate = {
       step: 1,
@@ -23280,6 +23298,7 @@ const CommunitiesPanel = (() => {
       members: [ownerHex],
       adminPubkey: ownerHex,
       addMeAsMember: true,
+      nvpn: nvpnState,
     };
 
     function close() { modalRoot.innerHTML = ''; }
@@ -23304,6 +23323,49 @@ const CommunitiesPanel = (() => {
       wire();
     }
 
+    // Privacy radio cards. The "Private network" card has three
+    // visual states depending on the wizard's nvpn probe:
+    //   - nvpn down       → disabled card, "Start nvpn first" hint
+    //   - nvpn up, no net → disabled card, "Join a network first" hint
+    //   - nvpn up + net   → enabled card, shows active network id
+    // Pulled into a helper so the disabled state's HTML stays close to
+    // the hint copy — keeps the render-step body readable.
+    function renderPrivacyRadios(ws) {
+      const nvpnReady = ws.nvpn.installed && ws.nvpn.running && !!ws.nvpn.networkId;
+      const privSelected = ws.privacyMode === 'private-network';
+      let privHint;
+      if (!ws.nvpn.installed) {
+        privHint = 'nvpn isn\'t installed — install it from Config → Communities.';
+      } else if (!ws.nvpn.running) {
+        privHint = 'nvpn isn\'t running — start it from the nvpn panel, then reopen this wizard.';
+      } else if (!ws.nvpn.networkId) {
+        privHint = 'nvpn is running but no network is active — join one from the nvpn panel, then reopen this wizard.';
+      } else {
+        privHint = `Will bind to your active mesh (network <code class="community-mono">${escapeHtml(ws.nvpn.networkId.slice(0, 10))}…</code>, tunnel ${escapeHtml(ws.nvpn.tunnelIp || '—')}).`;
+      }
+      return `
+        <fieldset class="form-field">
+          <legend class="form-label">Privacy mode</legend>
+          <label class="radio-card ${ws.privacyMode === 'local' ? 'selected' : ''}">
+            <input type="radio" name="w-privacy" value="local" ${ws.privacyMode === 'local' ? 'checked' : ''}/>
+            <div>
+              <strong>Local only</strong>
+              <span>Reachable from this machine only. Good for testing.</span>
+            </div>
+          </label>
+          <label class="radio-card ${privSelected && nvpnReady ? 'selected' : ''} ${nvpnReady ? '' : 'disabled'}">
+            <input type="radio" name="w-privacy" value="private-network"
+                   ${privSelected && nvpnReady ? 'checked' : ''}
+                   ${nvpnReady ? '' : 'disabled'}/>
+            <div>
+              <strong>Private network ${nvpnReady ? '' : '<span class="recommended">(needs nvpn)</span>'}</strong>
+              <span>${privHint}</span>
+            </div>
+          </label>
+        </fieldset>
+      `;
+    }
+
     function stepBodyHtml() {
       if (wstate.step === 1) {
         return `
@@ -23317,23 +23379,7 @@ const CommunitiesPanel = (() => {
             <textarea id="w-desc" maxlength="200" rows="2" placeholder="What is this community for?">${escapeHtml(wstate.description)}</textarea>
             <span class="form-help-inline">Also private — visible only to the dashboard and the people you invite.</span>
           </label>
-          <fieldset class="form-field">
-            <legend class="form-label">Privacy mode</legend>
-            <label class="radio-card ${wstate.privacyMode === 'local' ? 'selected' : ''}">
-              <input type="radio" name="w-privacy" value="local" ${wstate.privacyMode === 'local' ? 'checked' : ''}/>
-              <div>
-                <strong>Local only</strong>
-                <span>Reachable from this machine only. Good for testing.</span>
-              </div>
-            </label>
-            <label class="radio-card ${wstate.privacyMode === 'private-network' ? 'selected' : ''}">
-              <input type="radio" name="w-privacy" value="private-network" ${wstate.privacyMode === 'private-network' ? 'checked' : ''}/>
-              <div>
-                <strong>Private network <span class="recommended">(coming with nvpn integration)</span></strong>
-                <span>Members connect through an nvpn mesh. Nothing about your home network is exposed to them.</span>
-              </div>
-            </label>
-          </fieldset>
+          ${renderPrivacyRadios(wstate)}
           ${privacyDisclosureHtml(wstate.privacyMode)}
         `;
       }
@@ -23407,8 +23453,15 @@ const CommunitiesPanel = (() => {
       if (wstate.step === 1) {
         if (!wstate.name.trim()) { alert('Name is required.'); return false; }
         if (wstate.privacyMode === 'private-network') {
-          alert('Private-network mode arrives with the nvpn integration. For now please pick "Local only".');
-          return false;
+          // The radio is disabled when nvpn isn't ready, so this check
+          // is belt-and-suspenders for users who flip the field via
+          // devtools. The backend would also reject it; surfacing here
+          // gives a faster, clearer message.
+          const ready = wstate.nvpn.installed && wstate.nvpn.running && !!wstate.nvpn.networkId;
+          if (!ready) {
+            alert('Private-network mode needs an active nvpn network. Fix that and reopen this wizard.');
+            return false;
+          }
         }
       }
       return true;

@@ -10876,3 +10876,16 @@ a.client-mention {
    Slightly wider than the wizard so both disclosure variants render
    without horizontal cramping. */
 .community-privacy-modal { width: min(760px, calc(100vw - 40px)); }
+
+/* Disabled state for the privacy-mode radio cards — used when the
+   "Private network" option can't be selected (nvpn missing / down /
+   no active network). Dimmer + non-clickable; the inline hint copy
+   explains why and what to do. */
+.community-wizard .radio-card.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.community-wizard .radio-card.disabled input[type="radio"] {
+  cursor: not-allowed;
+}
+.community-wizard .radio-card.disabled strong { color: var(--text-dim); }

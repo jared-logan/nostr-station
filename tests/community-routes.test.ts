@@ -82,12 +82,29 @@ test('validateCreatePayload: minimal local community is valid', () => {
   }
 });
 
-test('validateCreatePayload: private-network requires nvpnNetworkId', () => {
+test('validateCreatePayload: private-network without nvpnNetworkId is OK at the validator layer', () => {
+  // Contract change: the validator accepts a missing nvpnNetworkId
+  // for private-network mode. The route handler (POST) auto-resolves
+  // from the active nvpn network at create time — that's the
+  // Option-B "one shared mesh, no selection to make" model. Tests
+  // for the auto-resolve live in tests covering the handler.
   const v = validateCreatePayload({
     name: 'fam', privacyMode: 'private-network', adminPubkey: ADMIN,
   });
-  assert.equal(v.ok, false);
-  if (!v.ok) assert.match(v.error, /nvpnNetworkId/);
+  assert.equal(v.ok, true);
+  if (v.ok) {
+    assert.equal(v.input.privacyMode, 'private-network');
+    assert.equal(v.input.nvpnNetworkId, undefined);
+  }
+});
+
+test('validateCreatePayload: private-network WITH an explicit nvpnNetworkId passes it through', () => {
+  const v = validateCreatePayload({
+    name: 'fam', privacyMode: 'private-network', adminPubkey: ADMIN,
+    nvpnNetworkId: 'net-abcdef',
+  });
+  assert.equal(v.ok, true);
+  if (v.ok) assert.equal(v.input.nvpnNetworkId, 'net-abcdef');
 });
 
 test('validateCreatePayload: name max 60 chars', () => {

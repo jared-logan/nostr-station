@@ -45,6 +45,7 @@ import {
   startCommunity, stopCommunity, restartCommunity,
   getCommunityRuntimeStatus, getCommunityLog,
 } from '../community-process.js';
+import { readNvpnRoster, probeNvpnStatus } from '../nvpn.js';
 
 // =====================================================================
 // URL parsing — small + bounded so we don't pull in a router library
@@ -148,12 +149,21 @@ function validateCreatePayload(raw: any): { ok: true; input: CreateCommunityInpu
     return { ok: false, error: '`adminPubkey` must be 64-char lowercase hex' };
   }
 
+  // nvpnNetworkId is optional in the request body — the route layer
+  // auto-resolves it from the user's active nvpn network when the
+  // wizard didn't pass one. This is the per-Option-B model: every
+  // private-network community on the host shares the single active
+  // nvpn mesh. Validation here ensures the resulting value is a
+  // non-empty string; the auto-resolve step lives in the POST
+  // handler (which has access to nvpn helpers).
   let nvpnNetworkId: string | undefined;
   if (privacyMode === 'private-network') {
-    nvpnNetworkId = String(raw.nvpnNetworkId ?? '').trim();
-    if (!nvpnNetworkId) {
-      return { ok: false, error: 'private-network communities require `nvpnNetworkId`' };
-    }
+    const explicit = String(raw.nvpnNetworkId ?? '').trim();
+    if (explicit) nvpnNetworkId = explicit;
+    // Empty case left to the POST handler to fill in from the live
+    // nvpn state — surfaces a specific error there if no network is
+    // active, rather than rejecting at the validator level when the
+    // wizard intentionally elided the field.
   }
 
   let memberPubkeys: string[] | undefined;
@@ -218,8 +228,36 @@ export async function handleCommunities(
       catch { sendError(res, 400, 'invalid JSON body'); return true; }
       const v = validateCreatePayload(raw);
       if (!v.ok) { sendError(res, 400, v.error); return true; }
+
+      // Auto-resolve nvpnNetworkId for private-network communities
+      // whose wizard didn't pass one. Under nvpn's one-active-
+      // network model (Path B), every private-network community on
+      // this host shares the single active mesh — there's no
+      // selection to make at create time, just discovery. If nvpn
+      // isn't installed / running / has no active network, surface
+      // a specific 400 the wizard can act on (Install nvpn /
+      // Start nvpn / Join a network).
+      const input = { ...v.input };
+      if (input.privacyMode === 'private-network' && !input.nvpnNetworkId) {
+        const st = await probeNvpnStatus();
+        if (!st.installed) {
+          sendError(res, 400, 'private-network mode requires nvpn — install it from Config');
+          return true;
+        }
+        if (!st.running) {
+          sendError(res, 400, 'nvpn is installed but not running — start it from the nvpn panel');
+          return true;
+        }
+        const roster = readNvpnRoster();
+        if (!roster.networkId) {
+          sendError(res, 400, 'nvpn is running but no network is active — join a network first');
+          return true;
+        }
+        input.nvpnNetworkId = roster.networkId;
+      }
+
       try {
-        const m = await createCommunity(v.input);
+        const m = await createCommunity(input);
         sendJson(res, 201, { ok: true, community: shapeCommunity(m.id) });
       } catch (e: any) {
         // The CRUD layer throws Error with a specific message we can
