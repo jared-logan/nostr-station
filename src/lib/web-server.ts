@@ -108,6 +108,7 @@ import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { mountRelayProxyWebSocket } from './routes/relay-proxy.js';
 import { handleNvpn } from './routes/nvpn.js';
 import { handleCommunities } from './routes/communities.js';
+import { attachDashboardBindingFilter } from './dashboard-binding.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
 import { getInboxWorker } from './mail/inbox.js';
@@ -2194,6 +2195,14 @@ export async function startWebServer(port: number): Promise<http.Server> {
     // surfaces immediately as "another dashboard is running" in Chat.tsx.
     const respawning      = process.env.NOSTR_STATION_RESPAWN === '1';
     let listenRetriesLeft = respawning ? 10 : 0;
+
+    // Dashboard binding peer filter — gates non-loopback inbound
+    // connections by pubkey via the nvpn peer roster. No-op while
+    // the dashboard binds to loopback only (the default); becomes
+    // functionally active when Mobile Access binds to a non-loopback
+    // interface. See dashboard-binding.ts for the security rationale.
+    attachDashboardBindingFilter(server);
+
     server.on('error', (e: NodeJS.ErrnoException) => {
       if (e.code === 'EADDRINUSE' && listenRetriesLeft > 0) {
         listenRetriesLeft--;
