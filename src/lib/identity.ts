@@ -15,6 +15,17 @@ import { atomicWriteJson } from './atomic-write.js';
 export interface Identity {
   npub:       string;       // bech32 "npub1..." or 64-char hex
   readRelays: string[];     // ws:// or wss:// URLs — the user's "Your Relays" list
+  // Per-relay write list, paired with readRelays to model NIP-65's
+  // per-`r`-tag read/write marker. Semantics when emitting a kind:10002:
+  //   url in both readRelays and writeRelays  → ["r", url]                    (unmarked, both)
+  //   url in readRelays only                  → ["r", url, "read"]
+  //   url in writeRelays only                 → ["r", url, "write"]
+  // Default (legacy installs / undefined) treats every readRelays entry
+  // as both read and write — matches the pre-Item-2 behavior where
+  // there was no write-relay concept. The `relays publish` flow uses
+  // this distinction to mark inbox-only and outbox-only relays
+  // explicitly when emitting the user's NIP-65 event.
+  writeRelays?: string[];
   // User's preferred GRASP servers (git+nostr storage hosts). Pre-populates
   // the per-project Initialize ngit form — same model shakespeare.diy uses
   // (Settings → Nostr → Nostr Git Servers configures globally; per-project
@@ -113,6 +124,14 @@ export function readIdentity(): Identity {
       readRelays: Array.isArray(parsed.readRelays)
                     ? parsed.readRelays.filter((x: any) => typeof x === 'string')
                     : DEFAULT_READ_RELAYS.slice(),
+      // writeRelays is the optional NIP-65 outbox-marker companion to
+      // readRelays. Pre-NIP-65 installs leave this field absent; the
+      // kind:10002 builder treats absent as "every readRelays entry is
+      // also a write relay" so legacy users get sensible unmarked
+      // (both-mode) tags when they first publish.
+      writeRelays: Array.isArray(parsed.writeRelays)
+                    ? parsed.writeRelays.filter((x: any): x is string => typeof x === 'string' && x.length > 0)
+                    : undefined,
       graspServers: Array.isArray(parsed.graspServers)
         ? parsed.graspServers.filter((x: any): x is string => typeof x === 'string' && x.length > 0)
         : undefined,

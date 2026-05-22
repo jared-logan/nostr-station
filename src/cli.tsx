@@ -41,6 +41,30 @@ const [,, command = bareInvocation ? '__welcome__' : 'help', ...args] = process.
 const flag = (f: string) => args.includes(f);
 const arg  = (f: string) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
 
+// Boot the dashboard either via Ink (interactive terminal) or headless
+// (no controlling TTY — systemd, docker without -t, etc.). Ink's cursor-
+// control escapes flood journald when no PTY is attached, so we bypass
+// the React shell entirely and just call startWebServer + print one
+// plain stderr line. The server already registers SIGTERM/SIGINT and
+// keeps the event loop alive itself, so this path stays foreground and
+// shuts down cleanly under systemctl --user stop / docker stop.
+async function bootDashboard(port: number, deepPath: string): Promise<void> {
+  if (process.stdout.isTTY) {
+    render(React.createElement(Chat, { port, path: deepPath }));
+    return;
+  }
+  // Headless path. Lazy-import so a TTY-mode boot doesn't pay for the
+  // web-server module's full transitive graph until it's needed.
+  const { startWebServer } = await import('./lib/web-server.js');
+  try {
+    await startWebServer(port);
+    process.stderr.write(`Dashboard running at http://localhost:${port}${deepPath}\n`);
+  } catch (e: any) {
+    process.stderr.write(`nostr-station: dashboard failed to start: ${e?.message ?? e}\n`);
+    process.exit(1);
+  }
+}
+
 switch (command) {
 
   case 'seed':
@@ -60,16 +84,16 @@ switch (command) {
     break;
 
   case 'chat':
-    render(React.createElement(Chat, {
-      port: arg('--port') ? parseInt(arg('--port')!, 10) : 3000,
-    }));
+    void bootDashboard(arg('--port') ? parseInt(arg('--port')!, 10) : 3000, '');
     break;
 
   case 'serve':
     // Explicit "run the dashboard process" verb. Same behavior as bare
     // invocation — the dashboard server boots the in-process Nostr relay
-    // alongside it (see web-server.ts maybeStartInprocRelay).
-    render(React.createElement(Chat, { port: 3000, path: '/setup' }));
+    // alongside it (see web-server.ts maybeStartInprocRelay). Routes
+    // through bootDashboard so a no-TTY invocation (systemd) skips the
+    // Ink shell that would otherwise spam the journal with cursor escapes.
+    void bootDashboard(3000, '/setup');
     break;
 
   case '__welcome__':
@@ -79,7 +103,7 @@ switch (command) {
     // the Chat component, which boots the dashboard + in-process relay
     // and opens the browser. Foreground; Ctrl+C tears down the whole
     // stack cleanly.
-    render(React.createElement(Chat, { port: 3000, path: '/setup' }));
+    void bootDashboard(3000, '/setup');
     break;
 
   case 'stop':
@@ -213,6 +237,26 @@ switch (command) {
     break;
   }
 
+  case 'relays': {
+    // relays list
+    // relays add <wss://url> [--read] [--write]
+    // relays remove <wss://url>
+    // relays pull [--yes]
+    // relays publish [--yes]
+    //
+    // NIP-65 (kind:10002) relay-list control — distinct from the `relay`
+    // command which manages the in-process relay's event database. The
+    // `s` matters.
+    void (async () => {
+      const { runRelaysCommand } = await import('./commands/Relays.js');
+      const action = args[0] ?? 'help';
+      const sub    = args.slice(1);
+      const code   = await runRelaysCommand({ action, args: sub });
+      process.exit(code);
+    })();
+    break;
+  }
+
   case 'ai': {
     // ai                        → list
     // ai list                   → list
@@ -297,6 +341,7 @@ function printHelp() {
     list                             Same as bare 'add' — list optional tools + install state
     seed                             Publish test events to your relay
     relay                            Export / import the relay event database as JSONL
+    relays                           Manage your NIP-65 (kind:10002) relay list — pull / edit / publish
     publish                          Publish current repo to GitHub + Nostr (ngit) simultaneously
     nsite                            Publish a static site to Nostr via nsyte
     editor                           Re-link NOSTR_STATION.md for a different AI coding tool
@@ -331,6 +376,15 @@ function printHelp() {
     relay import <path>              Ingest a JSONL file into the relay
     relay import <path> --dry-run    Count what would happen without writing
     relay import <path> --no-verify  Skip signature verification (trusted re-imports)
+
+  RELAYS SUBCOMMANDS (NIP-65 — kind:10002 relay list)
+    relays list                      Show local read/write relay lists
+    relays add <wss://url>           Add a relay (read + write, NIP-65 default)
+    relays add <wss://url> --read    Mark read-only (inbox)
+    relays add <wss://url> --write   Mark write-only (outbox)
+    relays remove <wss://url>        Remove from both lists
+    relays pull [--yes]              Fetch your published kind:10002 + diff + apply on confirm
+    relays publish [--yes]           Build kind:10002 from local lists, sign via bunker, broadcast
 
   ADD SUBCOMMANDS (optional tools)
     add                              List available tools with install state
