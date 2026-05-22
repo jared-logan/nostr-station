@@ -49,6 +49,7 @@ import {
 } from './nvpn.js';
 import { installNak } from './nak-installer.js';
 import { installNgit } from './ngit-installer.js';
+import { installGrain } from './grain-installer.js';
 import { hexToNpub, npubToHex } from './identity.js';
 import {
   readIdentity, setSetupComplete, isNsec,
@@ -106,6 +107,12 @@ import { handleAi } from './routes/ai.js';
 import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { mountRelayProxyWebSocket } from './routes/relay-proxy.js';
 import { handleNvpn } from './routes/nvpn.js';
+import { handleCommunities } from './routes/communities.js';
+import { attachDashboardBindingFilter } from './dashboard-binding.js';
+import { readMobileAccessConfig, writeMobileAccessConfig, dashboardBindHost } from './mobile-access.js';
+import {
+  readCommunitiesFeatureConfig, writeCommunitiesFeatureConfig, isCommunitiesUsable,
+} from './communities-feature.js';
 import { handleTemplates } from './routes/templates.js';
 import { handleMail, setMailBlossomAccessor } from './routes/mail.js';
 import { getInboxWorker } from './mail/inbox.js';
@@ -1568,9 +1575,25 @@ export async function startWebServer(port: number): Promise<http.Server> {
           return;
         }
 
+        if (slug === 'grain') {
+          try {
+            const result = await installGrain((line) => emit({ line, stream: 'stdout' }), { force });
+            if (!result.ok && result.detail) {
+              emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
+            }
+            emit({ done: true, code: result.ok ? 0 : (result.warn ? 0 : 1) });
+          } catch (e: any) {
+            emit({ line: String(e?.message || e), stream: 'stderr' });
+            emit({ done: true, code: -1 });
+          }
+          cachedGatherStatus.invalidate();
+          try { res.end(); } catch {}
+          return;
+        }
+
         const tool = getTool(slug);
         if (!tool) {
-          const supported = ['nak', 'ngit', ...Object.keys(TOOLS)].sort();
+          const supported = ['nak', 'ngit', 'grain', ...Object.keys(TOOLS)].sort();
           emit({
             line:   `'${slug}' is not a known optional tool. Supported: ${supported.join(', ')}.`,
             stream: 'stderr',
@@ -2007,6 +2030,129 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // buttons and the Logs panel's nostr-vpn meta strip.
       if (await handleNvpn(req, res, fullUrl, method)) return;
 
+      // ── Communities (routes/communities.ts) ────────────────────────────
+      // /api/communities/* — list/create/start/stop/restart/delete +
+      // member CRUD + SSE log tail. Backs the Communities sidebar
+      // panel; mirrors the section-handler shape used by every other
+      // /api section above.
+      // ── Communities feature gate ────────────────────────────────────
+      // Experimental opt-in flag. The /api/communities/* routes are
+      // gated behind explicit user opt-in + first-use acknowledgement.
+      // The /api/communities-feature endpoint is the management surface
+      // for the gate itself — always available so the Config panel can
+      // read state and flip the toggle.
+      if (url === '/api/communities-feature' && method === 'GET') {
+        if (!requireSession(req, res)) return;
+        const cfg = readCommunitiesFeatureConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:               true,
+          enabled:          cfg.enabled,
+          acknowledged:     cfg.acknowledgedAt !== null,
+          acknowledgedAt:   cfg.acknowledgedAt,
+          usable:           cfg.enabled && cfg.acknowledgedAt !== null,
+        }));
+        return;
+      }
+      if (url === '/api/communities-feature' && method === 'POST') {
+        if (!requireSession(req, res)) return;
+        let raw: any;
+        try { raw = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+          return;
+        }
+        const patch: any = {};
+        if (typeof raw?.enabled === 'boolean') patch.enabled = raw.enabled;
+        if (raw?.acknowledge === true) patch.acknowledgedAt = Date.now();
+        const saved = writeCommunitiesFeatureConfig(patch);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:             true,
+          enabled:        saved.enabled,
+          acknowledged:   saved.acknowledgedAt !== null,
+          acknowledgedAt: saved.acknowledgedAt,
+          usable:         saved.enabled && saved.acknowledgedAt !== null,
+        }));
+        return;
+      }
+
+      // Gate the actual /api/communities/* routes behind opt-in.
+      // GET /api/communities is special — the dashboard fetches it
+      // even when the feature is disabled (to render "no communities"
+      // states). Return an empty list + a flag rather than a 403.
+      if (url === '/api/communities' && method === 'GET' && !isCommunitiesUsable()) {
+        if (!requireSession(req, res)) return;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, communities: [], featureEnabled: false }));
+        return;
+      }
+      // Every other /api/communities/* path: 403 with the feature-gate
+      // reason. The UI never reaches these without the gate flag, but
+      // the API layer enforces it anyway in case a script bypasses
+      // the UI.
+      if (url.startsWith('/api/communities') && !isCommunitiesUsable()) {
+        if (!requireSession(req, res)) return;
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:    false,
+          error: 'Communities is an experimental feature. Enable it from Config and acknowledge the warning before use.',
+        }));
+        return;
+      }
+
+      if (await handleCommunities(req, res, fullUrl, method)) return;
+
+      // ── Mobile Access (toggle) ──────────────────────────────────────────
+      // Tiny route, small enough to inline rather than splitting into a
+      // dedicated module. Reads the persisted toggle state (GET) or
+      // writes a new state (POST). Always returns the live bind host
+      // alongside so the UI can show "currently bound to 127.0.0.1,
+      // saved-but-unapplied: 0.0.0.0" if the user toggled but hasn't
+      // restarted yet.
+      if (url === '/api/mobile-access' && method === 'GET') {
+        if (!requireSession(req, res)) return;
+        const cfg = readMobileAccessConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:           true,
+          enabled:      cfg.enabled,
+          updatedAt:    cfg.updatedAt ?? null,
+          currentBind:  dashboardBindHost(),
+          needsRestart: (cfg.enabled ? '0.0.0.0' : '127.0.0.1') !== dashboardBindHost(),
+        }));
+        return;
+      }
+      if (url === '/api/mobile-access' && method === 'POST') {
+        if (!requireSession(req, res)) return;
+        let raw: any;
+        try { raw = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+          return;
+        }
+        if (typeof raw?.enabled !== 'boolean') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: '`enabled` (boolean) required' }));
+          return;
+        }
+        const saved = writeMobileAccessConfig({ enabled: raw.enabled });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok:           true,
+          enabled:      saved.enabled,
+          updatedAt:    saved.updatedAt ?? null,
+          currentBind:  dashboardBindHost(),
+          // After a write, the bind on disk and the live bind will
+          // disagree until the user restarts (unless the toggle was
+          // a no-op). The UI surfaces this as "Restart to apply".
+          needsRestart: (saved.enabled ? '0.0.0.0' : '127.0.0.1') !== dashboardBindHost(),
+        }));
+        return;
+      }
+
       // ── Mail (routes/mail.ts) ──────────────────────────────────────────
       // NIP-17 mail panel: read-only inbox + thread view. Send + compose
       // + inbox-relay management arrive in follow-up PRs.
@@ -2169,10 +2315,18 @@ export async function startWebServer(port: number): Promise<http.Server> {
     // surfaces immediately as "another dashboard is running" in Chat.tsx.
     const respawning      = process.env.NOSTR_STATION_RESPAWN === '1';
     let listenRetriesLeft = respawning ? 10 : 0;
+
+    // Dashboard binding peer filter — gates non-loopback inbound
+    // connections by pubkey via the nvpn peer roster. No-op while
+    // the dashboard binds to loopback only (the default); becomes
+    // functionally active when Mobile Access binds to a non-loopback
+    // interface. See dashboard-binding.ts for the security rationale.
+    attachDashboardBindingFilter(server);
+
     server.on('error', (e: NodeJS.ErrnoException) => {
       if (e.code === 'EADDRINUSE' && listenRetriesLeft > 0) {
         listenRetriesLeft--;
-        setTimeout(() => server.listen(port, process.env.DEV_HOST || '127.0.0.1'), 500);
+        setTimeout(() => server.listen(port, dashboardBindHost()), 500);
         return;
       }
       if (e.code === 'EADDRINUSE') {
@@ -2204,7 +2358,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
     // already sync — but `beforeExit` is friendlier to debugging stacks.
     process.once('beforeExit', dropPid);
 
-    server.listen(port, process.env.DEV_HOST || '127.0.0.1', () => {
+    server.listen(port, dashboardBindHost(), () => {
       try {
         writePidFile();
         pidWritten = true;
@@ -2266,6 +2420,27 @@ export async function startWebServer(port: number): Promise<http.Server> {
           process.stderr.write(`[nvpn] log tailer failed to start: ${e?.message || e}\n`);
         }
       }
+
+      // Communities supervisor — reconcile any GRAIN children that
+      // survived a dashboard hard-kill, then re-supervise our own
+      // orphans. Best-effort: a missing communities subsystem (no
+      // dir on disk yet for solo-dev users) just yields an empty
+      // result and we move on. Never blocks dashboard startup.
+      void (async () => {
+        try {
+          const mod = await import('./community-process.js');
+          const results = await mod.reconcileOrphanedCommunities();
+          for (const r of results) {
+            if (r.outcome === 'respawned') {
+              process.stderr.write(`[communities] re-supervised ${r.id} (pid ${r.pid ?? '?'})\n`);
+            } else if (r.outcome === 'pid-not-ours' && r.note) {
+              process.stderr.write(`[communities] ${r.id}: ${r.note}\n`);
+            }
+          }
+        } catch (e: any) {
+          process.stderr.write(`[communities] reconcile failed: ${e?.message || e}\n`);
+        }
+      })();
 
       // Wire the in-process Blossom handle through to the mail route so
       // /api/mail/attachment can upload without going through the public

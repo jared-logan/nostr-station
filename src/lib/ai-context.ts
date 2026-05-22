@@ -40,6 +40,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { getProject, projectGitLog, type Project } from './projects.js';
+import { listCommunities, listCommunityMembers } from './communities.js';
 import { readTemplates, type PermissionMode } from './templates.js';
 import {
   readSystemPromptOverride, readProjectContextOverlay,
@@ -274,6 +275,12 @@ When a project is first created, the AI chooses a template from the list below b
 
 {{ stationContext }}
 
+{% endif %}{% if communities %}# Hosted communities
+
+The user runs the following managed GRAIN private relays. When they ask about "the family relay" or "my community", these are the names. Don't volunteer pubkeys; "members" counts are fine.
+
+{% for c in communities %}- **{{ c.name }}** — {{ c.status }} · {{ c.privacyMode }} · {{ c.memberCount }} member{% if c.memberCount === 1 %}{% else %}s{% endif %}
+{% endfor %}
 {% endif %}{% if project %}# Your Tools
 
 You have file-system tools scoped to the active project ({{ cwd }}). Use them
@@ -351,6 +358,16 @@ interface Vars {
   recentCommits:  CommitVar[];
   README:         string | null;
   projectContextOverlay: string | null;
+  // Per-community summaries for the {% if communities %} block in the
+  // default prompt. Names + counts only — no pubkeys, no event
+  // contents. Lets Nori answer "what communities am I hosting?"
+  // without leaking who's in them.
+  communities:    Array<{
+    name:        string;
+    status:      string;
+    privacyMode: string;
+    memberCount: number;
+  }>;
 }
 
 function formatCapabilities(p: Project): string {
@@ -407,7 +424,29 @@ function buildVars(project: Project | null, model?: ModelInfo): Vars {
     recentCommits,
     README,
     projectContextOverlay: overlay,
+    communities:    readCommunitiesForPrompt(),
   };
+}
+
+/**
+ * Read a name/status/count summary of the user's hosted communities
+ * for the system prompt. Never throws — a missing communities subsystem
+ * just yields an empty list and the `{% if communities %}` block is
+ * skipped entirely. NO pubkeys, NO content; just enough for Nori to
+ * answer "what am I hosting?" honestly.
+ */
+function readCommunitiesForPrompt(): Vars['communities'] {
+  try {
+    const list = listCommunities();
+    return list.map((c) => ({
+      name:        c.name,
+      status:      c.status ?? 'stopped',
+      privacyMode: c.privacyMode,
+      memberCount: listCommunityMembers(c.id).length,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 // ── Public entry point ────────────────────────────────────────────────────
