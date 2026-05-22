@@ -10876,3 +10876,114 @@ a.client-mention {
    Slightly wider than the wizard so both disclosure variants render
    without horizontal cramping. */
 .community-privacy-modal { width: min(760px, calc(100vw - 40px)); }
+
+/* Disabled state for the privacy-mode radio cards — used when the
+   "Private network" option can't be selected (nvpn missing / down /
+   no active network). Dimmer + non-clickable; the inline hint copy
+   explains why and what to do. */
+.community-wizard .radio-card.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.community-wizard .radio-card.disabled input[type="radio"] {
+  cursor: not-allowed;
+}
+.community-wizard .radio-card.disabled strong { color: var(--text-dim); }
+
+/* Community Moderation tab — banwords + banned pubkeys sections,
+   each with its own input + list. */
+.community-moderation {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.community-mod-section h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text-bright);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.community-mod-section .form-help {
+  margin: 0 0 10px;
+}
+.community-mod-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.community-mod-add input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  color: var(--text-bright);
+  font-size: 12px;
+}
+.community-mod-add input:focus { outline: none; border-color: var(--accent); }
+
+/* Banword chip list — each word renders as a deletable pill. */
+.community-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.community-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-bright);
+}
+.community-chip button {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.community-chip button:hover { color: var(--error); }
+
+/* nvpn panel — "Communities using this mesh" cross-reference line.
+   Lists private-network communities bound to the active mesh, each
+   linking to its detail view. Status dot inline so a moderator can
+   see at-a-glance health without leaving the nvpn panel. */
+.vpn-mesh-communities { font-size: 11px; }
+.vpn-community-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 2px;
+  padding: 2px 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-bright);
+  text-decoration: none;
+  font-size: 11px;
+}
+.vpn-community-link:hover { border-color: var(--accent); }
+.vpn-community-link .community-dot { width: 6px; height: 6px; }
+
+/* Communities panel — section heads for the "Hosted" / "Joined"
+   split. Subtle so the cards stay the dominant visual element. */
+.community-section-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 16px 0 8px;
+}
+.community-section-head:first-child { margin-top: 0; }
+
+/* Joined card variant — lighter border + accent dot to distinguish
+   from hosted communities at a glance. */
+.community-card-joined { border-style: dashed; }
+.community-card-joined:hover { border-color: var(--accent-dim); }
