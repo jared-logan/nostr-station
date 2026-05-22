@@ -16249,6 +16249,31 @@ const ConfigPanel = (() => {
     `;
   }
 
+  // Disable the Communities feature. Shared between the gate-UI
+  // branch of paintCommunitiesConfigSection (when the feature isn't
+  // usable yet — the "awaiting acknowledgement" state has a Disable
+  // button so the user can back out) AND the operational branch
+  // (when usable, the Feature row has a Disable button). Previously
+  // only wired in the first path, which is why the button in the
+  // usable state did nothing — the bug this fix targets.
+  async function disableCommunitiesFeature() {
+    if (!confirm('Disable Communities? The sidebar entry and home card will be hidden. Any existing community state stays on disk.')) return;
+    try {
+      await api('/api/communities-feature', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ enabled: false }),
+      });
+      const link = document.getElementById('nav-communities');
+      if (link) link.hidden = true;
+      const card = document.getElementById('dash-card-communities-link');
+      if (card) card.hidden = true;
+      paintCommunitiesConfigSection();
+    } catch (e) {
+      window.Toasts?.error?.(e?.message || String(e));
+    }
+  }
+
   function wireCommunitiesGate(gate) {
     // Enable: flip the flag then open the first-use modal so the
     // user goes straight from "enable" → "acknowledge" without a
@@ -16283,25 +16308,8 @@ const ConfigPanel = (() => {
         }).catch(() => {});
       });
     });
-    const disable = async () => {
-      if (!confirm('Disable Communities? The sidebar entry and home card will be hidden. Any existing community state stays on disk.')) return;
-      try {
-        await api('/api/communities-feature', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ enabled: false }),
-        });
-        const link = document.getElementById('nav-communities');
-        if (link) link.hidden = true;
-        const card = document.getElementById('dash-card-communities-link');
-        if (card) card.hidden = true;
-        paintCommunitiesConfigSection();
-      } catch (e) {
-        window.Toasts?.error?.(e?.message || String(e));
-      }
-    };
-    $('cfg-communities-disable')?.addEventListener('click', disable);
-    $('cfg-communities-disable-pending')?.addEventListener('click', disable);
+    $('cfg-communities-disable')?.addEventListener('click', disableCommunitiesFeature);
+    $('cfg-communities-disable-pending')?.addEventListener('click', disableCommunitiesFeature);
   }
 
   // First-use modal — the explicit deployment-scenario walkthrough.
@@ -16494,6 +16502,12 @@ const ConfigPanel = (() => {
         </div>
       </div>
     `;
+    // Wire the Disable button on the Feature row. Same handler the
+    // gate-UI branch above uses — extracted to disableCommunitiesFeature
+    // so both code paths share it without duplication. Without this
+    // wire the button rendered fine but did nothing on click (the bug
+    // this commit targets).
+    $('cfg-communities-disable')?.addEventListener('click', disableCommunitiesFeature);
     $('cfg-grain-install')?.addEventListener('click', () => {
       // Reuse the standard install-SSE modal — same flow nak / ngit /
       // claude-code / opencode use from the Status panel. The
