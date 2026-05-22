@@ -237,6 +237,26 @@ switch (command) {
     break;
   }
 
+  case 'relays': {
+    // relays list
+    // relays add <wss://url> [--read] [--write]
+    // relays remove <wss://url>
+    // relays pull [--yes]
+    // relays publish [--yes]
+    //
+    // NIP-65 (kind:10002) relay-list control — distinct from the `relay`
+    // command which manages the in-process relay's event database. The
+    // `s` matters.
+    void (async () => {
+      const { runRelaysCommand } = await import('./commands/Relays.js');
+      const action = args[0] ?? 'help';
+      const sub    = args.slice(1);
+      const code   = await runRelaysCommand({ action, args: sub });
+      process.exit(code);
+    })();
+    break;
+  }
+
   case 'ai': {
     // ai                        → list
     // ai list                   → list
@@ -321,6 +341,7 @@ function printHelp() {
     list                             Same as bare 'add' — list optional tools + install state
     seed                             Publish test events to your relay
     relay                            Export / import the relay event database as JSONL
+    relays                           Manage your NIP-65 (kind:10002) relay list — pull / edit / publish
     publish                          Publish current repo to GitHub + Nostr (ngit) simultaneously
     nsite                            Publish a static site to Nostr via nsyte
     editor                           Re-link NOSTR_STATION.md for a different AI coding tool
@@ -355,6 +376,15 @@ function printHelp() {
     relay import <path>              Ingest a JSONL file into the relay
     relay import <path> --dry-run    Count what would happen without writing
     relay import <path> --no-verify  Skip signature verification (trusted re-imports)
+
+  RELAYS SUBCOMMANDS (NIP-65 — kind:10002 relay list)
+    relays list                      Show local read/write relay lists
+    relays add <wss://url>           Add a relay (read + write, NIP-65 default)
+    relays add <wss://url> --read    Mark read-only (inbox)
+    relays add <wss://url> --write   Mark write-only (outbox)
+    relays remove <wss://url>        Remove from both lists
+    relays pull [--yes]              Fetch your published kind:10002 + diff + apply on confirm
+    relays publish [--yes]           Build kind:10002 from local lists, sign via bunker, broadcast
 
   ADD SUBCOMMANDS (optional tools)
     add                              List available tools with install state
