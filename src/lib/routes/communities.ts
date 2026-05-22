@@ -52,6 +52,36 @@ import {
   getCommunityRuntimeStatus, getCommunityLog,
 } from '../community-process.js';
 import { readNvpnRoster, probeNvpnStatus } from '../nvpn.js';
+import { npubToHex } from '../identity.js';
+
+// =====================================================================
+// Pubkey normalization
+//
+// Centralized so every endpoint that takes a "pubkey" body field
+// (member add, ban pubkey, etc.) accepts both forms users actually
+// have on hand:
+//   - raw 64-char hex (mixed case)
+//   - bech32 npub1…
+// and returns lowercase hex (or null on either malformed input or
+// a decode failure). Server-side decode is the robust path —
+// browsers can't be trusted to have window.NostrTools loaded, and a
+// "Ban pubkey" / "Add member" button that silently does nothing
+// (the previous client-only normalizePubkey returned null and
+// surfaced nothing visible) is a worse UX than a 400 from the API.
+
+const HEX_64_LOOSE = /^[0-9a-f]{64}$/i;
+
+function normalizePubkeyInput(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s) return null;
+  if (HEX_64_LOOSE.test(s)) return s.toLowerCase();
+  if (s.startsWith('npub1')) {
+    try { return npubToHex(s).toLowerCase(); }
+    catch { return null; }
+  }
+  return null;
+}
 
 // =====================================================================
 // URL parsing — small + bounded so we don't pull in a router library
@@ -545,9 +575,9 @@ export async function handleCommunities(
     let raw: any;
     try { raw = JSON.parse(await readBody(req)); }
     catch { sendError(res, 400, 'invalid JSON body'); return true; }
-    const pubkey = String(raw?.pubkey ?? '').toLowerCase();
-    if (!HEX_64.test(pubkey)) {
-      sendError(res, 400, '`pubkey` must be 64-char lowercase hex');
+    const pubkey = normalizePubkeyInput(raw?.pubkey);
+    if (!pubkey) {
+      sendError(res, 400, '`pubkey` must be an npub1… or 64-char hex string');
       return true;
     }
     const members = addCommunityMember(id, pubkey);
@@ -619,9 +649,9 @@ export async function handleCommunities(
     let raw: any;
     try { raw = JSON.parse(await readBody(req)); }
     catch { sendError(res, 400, 'invalid JSON body'); return true; }
-    const pubkey = String(raw?.pubkey ?? '').toLowerCase();
-    if (!HEX_64.test(pubkey)) {
-      sendError(res, 400, '`pubkey` must be 64-char lowercase hex');
+    const pubkey = normalizePubkeyInput(raw?.pubkey);
+    if (!pubkey) {
+      sendError(res, 400, '`pubkey` must be an npub1… or 64-char hex string');
       return true;
     }
     const reason = String(raw?.reason ?? '').slice(0, 200);
