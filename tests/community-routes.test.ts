@@ -84,6 +84,25 @@ test('parseRoute: bans/:hex rejects non-hex', () => {
   assert.equal(parseRoute(`/api/communities/${ID}/bans/not-a-hex`), null);
 });
 
+test('parseRoute: joined collection routes', () => {
+  assert.deepEqual(parseRoute('/api/communities/joined'),  { action: 'joined' });
+  assert.deepEqual(parseRoute('/api/communities/joined/'), { action: 'joined' });
+});
+
+test('parseRoute: joined per-id routes (12-hex)', () => {
+  assert.deepEqual(parseRoute(`/api/communities/joined/${ID}`),
+    { action: 'joined', id: ID });
+});
+
+test('parseRoute: joined per-id rejects non-12-hex', () => {
+  assert.equal(parseRoute('/api/communities/joined/abc'), null);
+  assert.equal(parseRoute('/api/communities/joined/xxxxxxxxxxxx'), null);
+});
+
+test('parseRoute: probe action', () => {
+  assert.deepEqual(parseRoute('/api/communities/probe'), { action: 'probe' });
+});
+
 // ---------------------------------------------------------------------
 // validateCreatePayload
 

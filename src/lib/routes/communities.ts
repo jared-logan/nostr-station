@@ -31,6 +31,7 @@
  */
 
 import http from 'node:http';
+import https from 'node:https';
 import { readBody } from './_shared.js';
 import { requireSession } from '../auth.js';
 import {
@@ -40,6 +41,8 @@ import {
   listCommunityMembers,
   addCommunityBanword, removeCommunityBanword, listCommunityBanwords,
   listCommunityBannedPubkeys,
+  listJoinedCommunities, addJoinedCommunity, removeJoinedCommunity,
+  updateJoinedCommunity,
   updateCommunityManifest,
   type CreateCommunityInput,
 } from '../communities.js';
@@ -55,7 +58,7 @@ import { readNvpnRoster, probeNvpnStatus } from '../nvpn.js';
 
 interface CommunityRoute {
   id?:     string;
-  action?: 'start' | 'stop' | 'restart' | 'members' | 'logs' | 'banwords' | 'bans';
+  action?: 'start' | 'stop' | 'restart' | 'members' | 'logs' | 'banwords' | 'bans' | 'joined' | 'probe';
   memberHex?: string;
   banword?:  string;
   bannedHex?: string;
@@ -71,6 +74,17 @@ function parseRoute(url: string): CommunityRoute | null {
   // Strip query string before splitting.
   const path = url.split('?', 1)[0];
   if (path === '/api/communities' || path === '/api/communities/') return {};
+  // /api/communities/joined[/<id>] — list / add / delete joined communities.
+  // Distinct from the per-community routes below because "joined" isn't
+  // a community id and we don't want to spawn a GRAIN process for it.
+  if (path === '/api/communities/joined' || path === '/api/communities/joined/') {
+    return { action: 'joined' };
+  }
+  const jm = path.match(/^\/api\/communities\/joined\/([0-9a-f]{12})$/);
+  if (jm) return { action: 'joined', id: jm[1] };
+  // /api/communities/probe — NIP-11 probe helper used by the join wizard
+  // before the user commits to adding the relay to their joined list.
+  if (path === '/api/communities/probe') return { action: 'probe' };
   const m = path.match(/^\/api\/communities\/([0-9a-f]{12})(\/.*)?$/);
   if (!m) return null;
   const id = m[1];
@@ -126,6 +140,48 @@ function shapeCommunity(id: string): unknown | null {
     lastError:           runtime.lastError ?? manifest.lastError,
     memberCount:         listCommunityMembers(id).length,
   };
+}
+
+/**
+ * Probe a relay's NIP-11 endpoint. NIP-11 spec: GET the relay URL
+ * with `Accept: application/nostr+json`; the relay responds with
+ * the JSON document. We translate ws:// → http:// and wss:// → https://
+ * to hit the same host/port over HTTP.
+ *
+ * Strict timeout (caller-supplied; default 5s) so a wedged relay
+ * doesn't hang the wizard.
+ */
+function probeNip11Remote(relayUrl: string, timeoutMs: number): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let parsed: URL;
+    try { parsed = new URL(relayUrl); }
+    catch (e) { reject(new Error(`invalid relay URL: ${(e as Error).message}`)); return; }
+    const isSecure = parsed.protocol === 'wss:';
+    const httpUrl  = `${isSecure ? 'https' : 'http'}://${parsed.host}/`;
+    const lib      = isSecure ? https : http;
+    const req = lib.request(httpUrl, {
+      method: 'GET',
+      headers: { Accept: 'application/nostr+json' },
+      timeout: timeoutMs,
+    }, (res) => {
+      if ((res.statusCode ?? 0) >= 400) {
+        res.resume();
+        reject(new Error(`NIP-11 returned HTTP ${res.statusCode}`));
+        return;
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; if (body.length > 32_768) { res.destroy(); } });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body) as Record<string, unknown>); }
+        catch (e) { reject(new Error(`NIP-11 response not JSON: ${(e as Error).message}`)); }
+      });
+      res.on('error', (e) => reject(e));
+    });
+    req.on('error',   (e) => reject(e));
+    req.on('timeout', ()  => { req.destroy(); reject(new Error(`probe timed out after ${timeoutMs} ms`)); });
+    req.end();
+  });
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -281,6 +337,88 @@ export async function handleCommunities(
       return true;
     }
     sendError(res, 405, 'method not allowed');
+    return true;
+  }
+
+  // ── Joined communities (separate persistence, not per-dir) ───────
+  if (route.action === 'joined' && !route.id) {
+    if (!requireSession(req, res)) return true;
+    if (method === 'GET') {
+      sendJson(res, 200, { ok: true, joined: listJoinedCommunities() });
+      return true;
+    }
+    if (method === 'POST') {
+      let raw: any;
+      try { raw = JSON.parse(await readBody(req)); }
+      catch { sendError(res, 400, 'invalid JSON body'); return true; }
+      const name     = String(raw?.name ?? '').trim();
+      const relayUrl = String(raw?.relayUrl ?? '').trim();
+      if (!name)     { sendError(res, 400, '`name` is required'); return true; }
+      if (!/^wss?:\/\//.test(relayUrl)) {
+        sendError(res, 400, '`relayUrl` must start with ws:// or wss://');
+        return true;
+      }
+      try {
+        const entry = addJoinedCommunity({
+          name, relayUrl,
+          detectedName:        raw?.detectedName,
+          detectedDescription: raw?.detectedDescription,
+        });
+        sendJson(res, 201, { ok: true, entry });
+      } catch (e: any) {
+        sendError(res, 400, (e?.message ?? 'join failed').slice(0, 240));
+      }
+      return true;
+    }
+    sendError(res, 405, 'method not allowed');
+    return true;
+  }
+  if (route.action === 'joined' && route.id && method === 'DELETE') {
+    if (!requireSession(req, res)) return true;
+    removeJoinedCommunity(route.id);
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
+  if (route.action === 'joined' && route.id && method === 'PATCH') {
+    if (!requireSession(req, res)) return true;
+    let raw: any;
+    try { raw = JSON.parse(await readBody(req)); }
+    catch { sendError(res, 400, 'invalid JSON body'); return true; }
+    const patch: any = {};
+    if (typeof raw?.lastReachedAt === 'number') patch.lastReachedAt = raw.lastReachedAt;
+    if (typeof raw?.detectedName === 'string')  patch.detectedName  = raw.detectedName;
+    if (typeof raw?.detectedDescription === 'string') patch.detectedDescription = raw.detectedDescription;
+    if (typeof raw?.name === 'string' && raw.name.trim()) patch.name = raw.name.trim();
+    const updated = updateJoinedCommunity(route.id, patch);
+    if (!updated) { sendError(res, 404, 'joined community not found'); return true; }
+    sendJson(res, 200, { ok: true, entry: updated });
+    return true;
+  }
+
+  // ── NIP-11 probe helper for the join wizard ──────────────────────
+  // Lets the dashboard fetch a relay's self-description BEFORE the
+  // user commits to adding it to their joined list. Doesn't touch
+  // any persisted state. Strict timeout so a wedged relay doesn't
+  // hang the wizard.
+  if (route.action === 'probe' && method === 'POST') {
+    if (!requireSession(req, res)) return true;
+    let raw: any;
+    try { raw = JSON.parse(await readBody(req)); }
+    catch { sendError(res, 400, 'invalid JSON body'); return true; }
+    const relayUrl = String(raw?.relayUrl ?? '').trim();
+    if (!/^wss?:\/\//.test(relayUrl)) {
+      sendError(res, 400, '`relayUrl` must start with ws:// or wss://');
+      return true;
+    }
+    try {
+      const nip11 = await probeNip11Remote(relayUrl, 5_000);
+      sendJson(res, 200, { ok: true, nip11 });
+    } catch (e: any) {
+      sendJson(res, 200, {
+        ok: false,
+        error: (e?.message ?? 'probe failed').slice(0, 240),
+      });
+    }
     return true;
   }
 

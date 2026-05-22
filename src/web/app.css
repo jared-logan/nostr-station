@@ -10971,3 +10971,19 @@ a.client-mention {
 }
 .vpn-community-link:hover { border-color: var(--accent); }
 .vpn-community-link .community-dot { width: 6px; height: 6px; }
+
+/* Communities panel — section heads for the "Hosted" / "Joined"
+   split. Subtle so the cards stay the dominant visual element. */
+.community-section-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 16px 0 8px;
+}
+.community-section-head:first-child { margin-top: 0; }
+
+/* Joined card variant — lighter border + accent dot to distinguish
+   from hosted communities at a glance. */
+.community-card-joined { border-style: dashed; }
+.community-card-joined:hover { border-color: var(--accent-dim); }

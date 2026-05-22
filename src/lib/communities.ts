@@ -434,6 +434,117 @@ export function listCommunityBannedPubkeys(id: string): string[] {
   return [...bl.pubkeys];
 }
 
+// =====================================================================
+// Joined communities — communities the user RECEIVES invitations to,
+// distinct from communities they HOST. Stored as a single
+// joined.json file (small, single-source — no per-entry dir needed
+// because we don't run a GRAIN process for joined communities, the
+// user's Nostr client connects to them directly).
+
+export interface JoinedCommunity {
+  id:        string;     // 12 hex chars
+  name:      string;     // user-supplied friendly name
+  relayUrl:  string;     // ws:// or wss:// URL
+  /** NIP-11 metadata captured at join time — for at-a-glance display
+   *  in the Joined section. Refreshed when the user clicks Refresh. */
+  detectedName?:        string;
+  detectedDescription?: string;
+  /** Last successful NIP-11 probe (ms epoch). null if never reached. */
+  lastReachedAt?:       number;
+  joinedAt:  number;     // ms epoch
+}
+
+function joinedCommunitiesPath(): string {
+  return path.join(communitiesRoot(), 'joined.json');
+}
+
+export function listJoinedCommunities(): JoinedCommunity[] {
+  const file = joinedCommunitiesPath();
+  if (!fs.existsSync(file)) return [];
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Defensive filter — drop entries that don't look like a JoinedCommunity.
+    return parsed.filter((x: any) =>
+      x && typeof x === 'object' &&
+      typeof x.id === 'string' && typeof x.name === 'string' &&
+      typeof x.relayUrl === 'string' && typeof x.joinedAt === 'number'
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeJoinedCommunities(list: JoinedCommunity[]): void {
+  fs.mkdirSync(communitiesRoot(), { recursive: true });
+  atomicWriteFileSync(joinedCommunitiesPath(), JSON.stringify(list, null, 2) + '\n');
+}
+
+export interface AddJoinedInput {
+  name:     string;
+  relayUrl: string;
+  detectedName?:        string;
+  detectedDescription?: string;
+}
+
+export function addJoinedCommunity(input: AddJoinedInput): JoinedCommunity {
+  const name = input.name.trim();
+  if (!name) throw new Error('joined community needs a friendly name');
+  const relayUrl = input.relayUrl.trim();
+  if (!/^wss?:\/\//.test(relayUrl)) {
+    throw new Error('relayUrl must start with ws:// or wss://');
+  }
+  const existing = listJoinedCommunities();
+  // Dedupe by URL — re-joining the same relay updates the existing
+  // entry's name/metadata rather than creating a second row.
+  const idx = existing.findIndex((e) => e.relayUrl === relayUrl);
+  if (idx >= 0) {
+    const updated: JoinedCommunity = {
+      ...existing[idx],
+      name,
+      detectedName:        input.detectedName ?? existing[idx].detectedName,
+      detectedDescription: input.detectedDescription ?? existing[idx].detectedDescription,
+    };
+    existing[idx] = updated;
+    writeJoinedCommunities(existing);
+    return updated;
+  }
+  const entry: JoinedCommunity = {
+    id:        newCommunityId(),
+    name,
+    relayUrl,
+    detectedName:        input.detectedName,
+    detectedDescription: input.detectedDescription,
+    joinedAt:  Date.now(),
+  };
+  existing.push(entry);
+  writeJoinedCommunities(existing);
+  return entry;
+}
+
+export function removeJoinedCommunity(id: string): void {
+  const existing = listJoinedCommunities();
+  const next = existing.filter((e) => e.id !== id);
+  if (next.length !== existing.length) writeJoinedCommunities(next);
+}
+
+export function updateJoinedCommunity(
+  id: string,
+  patch: Partial<Omit<JoinedCommunity, 'id' | 'joinedAt'>>,
+): JoinedCommunity | null {
+  const existing = listJoinedCommunities();
+  const idx = existing.findIndex((e) => e.id === id);
+  if (idx < 0) return null;
+  const updated: JoinedCommunity = {
+    ...existing[idx], ...patch,
+    id: existing[idx].id, joinedAt: existing[idx].joinedAt,
+  };
+  existing[idx] = updated;
+  writeJoinedCommunities(existing);
+  return updated;
+}
+
 // Re-exported so callers that hold the id can read GRAIN configs
 // without learning the full directory layout convention.
 export {

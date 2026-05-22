@@ -22679,12 +22679,18 @@ const CommunitiesPanel = (() => {
   }
 
   // ── Data fetch ──────────────────────────────────────────────────
+  let joined = [];
   async function fetchList() {
     try {
-      const r = await api('/api/communities');
-      communities = Array.isArray(r?.communities) ? r.communities : [];
+      const [hosted, joinedResp] = await Promise.all([
+        api('/api/communities').catch(() => ({ communities: [] })),
+        api('/api/communities/joined').catch(() => ({ joined: [] })),
+      ]);
+      communities = Array.isArray(hosted?.communities) ? hosted.communities : [];
+      joined      = Array.isArray(joinedResp?.joined)  ? joinedResp.joined  : [];
     } catch (e) {
       communities = [];
+      joined      = [];
     }
     refreshBadge();
   }
@@ -22694,19 +22700,27 @@ const CommunitiesPanel = (() => {
     titleEl.textContent = 'Communities';
     subtitleEl.textContent = 'Private Nostr relays for the people you actually know.';
     headActions.style.display = '';
-    if (communities.length === 0) {
+    if (communities.length === 0 && joined.length === 0) {
       body.innerHTML = renderEmptyState();
       return;
     }
-    body.innerHTML = `
-      <div class="community-grid">
-        ${communities.map(renderCommunityCard).join('')}
-      </div>
-    `;
+    // Two sections: "Hosted" (communities you run) + "Joined"
+    // (communities you connect to as a guest). Headers only render
+    // when at least one entry exists in that section — the empty
+    // case is the dedicated empty-state above.
+    const hostedHtml = communities.length > 0
+      ? `<h3 class="community-section-head">Hosted</h3>
+         <div class="community-grid">${communities.map(renderCommunityCard).join('')}</div>`
+      : '';
+    const joinedHtml = joined.length > 0
+      ? `<h3 class="community-section-head">Joined</h3>
+         <div class="community-grid">${joined.map(renderJoinedCard).join('')}</div>`
+      : '';
+    body.innerHTML = hostedHtml + joinedHtml;
     body.querySelectorAll('[data-community-id]').forEach((el) => {
       el.addEventListener('click', (e) => {
-        // Skip if the click went to an action button — those have their own listeners below.
         if (e.target.closest('[data-action]')) return;
+        if (e.target.closest('[data-joined-action]')) return;
         const id = el.getAttribute('data-community-id');
         openDetail(id);
       });
@@ -22719,6 +22733,62 @@ const CommunitiesPanel = (() => {
         await onCardAction(action, id);
       });
     });
+    body.querySelectorAll('[data-joined-action]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const action = btn.getAttribute('data-joined-action');
+        const id     = btn.getAttribute('data-id');
+        await onJoinedAction(action, id);
+      });
+    });
+  }
+
+  function renderJoinedCard(j) {
+    const url = j.relayUrl;
+    return `
+      <article class="community-card community-card-joined" data-joined-id="${j.id}">
+        <div class="community-card-head">
+          <div class="community-card-status">
+            <span class="chip">joined</span>
+          </div>
+          <div class="community-card-actions">
+            <button data-joined-action="copy"  data-id="${j.id}" title="Copy URL">copy</button>
+            <button data-joined-action="leave" data-id="${j.id}" title="Leave">leave</button>
+          </div>
+        </div>
+        <div class="community-card-body">
+          <h3>${escapeHtml(j.name)}</h3>
+          ${j.detectedDescription ? `<p>${escapeHtml(j.detectedDescription)}</p>` : ''}
+          <div class="community-card-stats community-mono">${escapeHtml(url)}</div>
+        </div>
+        <div class="community-card-foot">
+          ${j.detectedName ? `<span class="chip">${escapeHtml(j.detectedName)}</span>` : ''}
+          <span class="chip">joined ${escapeHtml(new Date(j.joinedAt).toLocaleDateString())}</span>
+        </div>
+      </article>
+    `;
+  }
+
+  async function onJoinedAction(action, id) {
+    const entry = joined.find((j) => j.id === id);
+    if (!entry) return;
+    if (action === 'copy') {
+      try { await navigator.clipboard.writeText(entry.relayUrl); }
+      catch { /* ignore */ }
+      window.Toasts?.info?.('Relay URL copied');
+      return;
+    }
+    if (action === 'leave') {
+      if (!confirm(`Leave "${entry.name}"?\n\nThis removes it from your Joined list — it doesn't affect the relay itself or your nvpn mesh membership.`)) return;
+      try {
+        await api(`/api/communities/joined/${entry.id}`, { method: 'DELETE' });
+        await fetchList();
+        renderList();
+      } catch (e) {
+        window.Toasts?.error?.(e?.message || String(e));
+      }
+      return;
+    }
   }
 
   function renderEmptyState() {
@@ -23401,6 +23471,171 @@ const CommunitiesPanel = (() => {
   // For commit 6 we ship a minimal Members step (paste npubs / hex)
   // without the autocomplete dropdown (the /api/profiles/autocomplete
   // endpoint is on the deferred-from-the-other-branch list).
+  // ── Join-an-invitation wizard ───────────────────────────────────
+  //
+  // Two-step (probe → confirm) modal that takes a relay URL the
+  // user received in an invitation, runs a NIP-11 probe to confirm
+  // reachability + show what the relay says about itself, then
+  // commits to a "Joined" entry the panel surfaces alongside
+  // hosted communities.
+  //
+  // Intentionally does NOT auto-join the user's nvpn mesh — that's
+  // an out-of-band step the inviter walks the guest through (or
+  // that the future "Generate invitation" flow on the host side
+  // will spell out). Surfaced explicitly in the wizard copy so the
+  // user doesn't expect the dashboard to manage the mesh side.
+  async function openJoinWizard() {
+    const modalRoot = $('modal-root');
+    if (!modalRoot) return;
+    const jstate = {
+      step: 1,
+      relayUrl: '',
+      name: '',
+      probing: false,
+      probed:  null,   // { detectedName, detectedDescription, error }
+    };
+    function close() { modalRoot.innerHTML = ''; }
+    function render() {
+      modalRoot.innerHTML = `
+        <div class="modal-backdrop" id="join-scrim">
+          <div class="modal community-wizard" role="dialog" aria-modal="true" aria-labelledby="join-title">
+            <div class="modal-head">
+              <div id="join-title" class="title">Join an invitation · step ${jstate.step} of 2</div>
+              <button class="link" id="join-close" aria-label="Close" style="font-size:18px;line-height:1">×</button>
+            </div>
+            <div class="modal-body" id="join-body">${stepBody()}</div>
+            <div class="modal-foot">
+              ${jstate.step > 1 ? `<button id="join-back">Back</button>` : `<span></span>`}
+              ${jstate.step < 2
+                ? `<button class="primary" id="join-next" ${jstate.probing ? 'disabled' : ''}>${jstate.probing ? 'Probing…' : 'Probe relay'}</button>`
+                : `<button class="primary" id="join-confirm">Add to Joined</button>`}
+            </div>
+          </div>
+        </div>
+      `;
+      wire();
+    }
+    function stepBody() {
+      if (jstate.step === 1) {
+        return `
+          <p class="form-help">
+            Paste the relay URL from the invitation (e.g. <code>wss://10.0.0.5:7778</code>).
+            We'll probe the relay's NIP-11 metadata to confirm it's reachable
+            before saving anything.
+          </p>
+          <label class="form-field">
+            <span class="form-label">Relay URL</span>
+            <input id="join-url" type="text" placeholder="wss://…" value="${escapeHtml(jstate.relayUrl)}" />
+          </label>
+          <label class="form-field">
+            <span class="form-label">Friendly name <span class="muted">(your label for it)</span></span>
+            <input id="join-name" type="text" maxlength="60" placeholder="Family · Friends · Book Club" value="${escapeHtml(jstate.name)}" />
+          </label>
+          <details class="privacy-disclosure">
+            <summary>Mesh prerequisite</summary>
+            <div class="privacy-disclosure-body">
+              <p>If the relay is on a private nvpn mesh, you need to join that mesh BEFORE this probe will succeed. Ask the inviter for an nvpn invite (separate from this relay URL) and import it via the nvpn panel.</p>
+              <p>Public relays (anything with a public hostname) don't need an nvpn mesh — just paste the URL.</p>
+            </div>
+          </details>
+        `;
+      }
+      // Step 2 — confirm.
+      const p = jstate.probed || {};
+      if (p.error) {
+        return `
+          <div class="community-card-error">
+            Probe failed: ${escapeHtml(p.error)}
+          </div>
+          <p class="form-help">
+            The relay didn't respond to a NIP-11 probe at <code>${escapeHtml(jstate.relayUrl)}</code>.
+            Common reasons: the URL is wrong, you're not on the right
+            nvpn mesh, or the host has the relay stopped.
+          </p>
+          <p class="form-help">
+            You can still add it to your Joined list if you're sure it's
+            correct — it just won't have detected metadata.
+          </p>
+        `;
+      }
+      return `
+        <div class="review-grid">
+          <div><span class="kv-k">URL</span><span class="kv-v community-mono">${escapeHtml(jstate.relayUrl)}</span></div>
+          <div><span class="kv-k">Your label</span><span class="kv-v">${escapeHtml(jstate.name)}</span></div>
+          ${p.detectedName ? `<div><span class="kv-k">Relay self-name</span><span class="kv-v">${escapeHtml(p.detectedName)}</span></div>` : ''}
+          ${p.detectedDescription ? `<div><span class="kv-k">Relay description</span><span class="kv-v">${escapeHtml(p.detectedDescription)}</span></div>` : ''}
+        </div>
+        <p class="form-help">
+          Joining adds this relay to your dashboard's Communities panel
+          under a Joined section. It does NOT connect your Nostr client
+          for you — you'll get a copy URL + QR for that after adding.
+        </p>
+      `;
+    }
+    function wire() {
+      $('join-close')?.addEventListener('click', close);
+      $('join-scrim')?.addEventListener('click', (e) => {
+        if (e.target.id === 'join-scrim') close();
+      });
+      $('join-back')?.addEventListener('click', () => { jstate.step = 1; render(); });
+      $('join-url')?.addEventListener('input', (e) => { jstate.relayUrl = e.target.value; });
+      $('join-name')?.addEventListener('input', (e) => { jstate.name = e.target.value; });
+      $('join-next')?.addEventListener('click', async () => {
+        if (!/^wss?:\/\//.test(jstate.relayUrl.trim())) {
+          alert('Relay URL must start with ws:// or wss://');
+          return;
+        }
+        if (!jstate.name.trim()) {
+          alert('Give this community a friendly name (for your own reference).');
+          return;
+        }
+        jstate.probing = true; render();
+        try {
+          const r = await api('/api/communities/probe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ relayUrl: jstate.relayUrl.trim() }),
+          });
+          if (r?.ok) {
+            jstate.probed = {
+              detectedName:        r.nip11?.name,
+              detectedDescription: r.nip11?.description,
+            };
+          } else {
+            jstate.probed = { error: r?.error || 'probe failed' };
+          }
+        } catch (e) {
+          jstate.probed = { error: e?.message || String(e) };
+        }
+        jstate.probing = false;
+        jstate.step = 2;
+        render();
+      });
+      $('join-confirm')?.addEventListener('click', async () => {
+        const p = jstate.probed || {};
+        try {
+          await api('/api/communities/joined', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+              name:                jstate.name.trim(),
+              relayUrl:            jstate.relayUrl.trim(),
+              detectedName:        p.detectedName,
+              detectedDescription: p.detectedDescription,
+            }),
+          });
+          close();
+          await fetchList();
+          renderList();
+          window.Toasts?.info?.(`Joined "${jstate.name.trim()}"`);
+        } catch (e) {
+          window.Toasts?.error?.(e?.message || String(e));
+        }
+      });
+    }
+    render();
+  }
+
   async function openWizard() {
     const modalRoot = $('modal-root');
     if (!modalRoot) return;
@@ -23703,10 +23938,7 @@ const CommunitiesPanel = (() => {
 
   // Wire static buttons once.
   newBtn?.addEventListener('click', openWizard);
-  joinBtn?.addEventListener('click', () => {
-    if (window.Toasts) window.Toasts.info?.('Join wizard lands with the nvpn integration.');
-    else alert('Join wizard lands with the nvpn integration.');
-  });
+  joinBtn?.addEventListener('click', () => openJoinWizard());
   // Privacy & visibility — opens a modal with BOTH disclosure variants
   // side by side so a user evaluating the feature can see what each
   // privacy mode exposes before they create anything. Same disclosure

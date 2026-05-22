@@ -17,6 +17,8 @@ import {
   addCommunityMember, removeCommunityMember, listCommunityMembers,
   addCommunityBanword, removeCommunityBanword, listCommunityBanwords,
   listCommunityBannedPubkeys,
+  listJoinedCommunities, addJoinedCommunity, removeJoinedCommunity,
+  updateJoinedCommunity,
   allocateCommunityPort, newCommunityId,
   communityDir, communityManifestPath, communityDataDir,
 } from '../src/lib/communities.ts';
@@ -336,6 +338,135 @@ test('listCommunityBannedPubkeys starts empty (NIP-86 bans populate it server-si
   try {
     const m = await createCommunity({ name: 'x', privacyMode: 'local', adminPubkey: HEX_64 });
     assert.deepEqual(listCommunityBannedPubkeys(m.id), []);
+  } finally {
+    home.restore();
+  }
+});
+
+// ---------------------------------------------------------------------
+// Joined communities (guest-side, distinct from hosted)
+
+test('listJoinedCommunities starts empty', () => {
+  const home = useTempHome();
+  try {
+    assert.deepEqual(listJoinedCommunities(), []);
+  } finally {
+    home.restore();
+  }
+});
+
+test('addJoinedCommunity persists + read-back round-trips', () => {
+  const home = useTempHome();
+  try {
+    const entry = addJoinedCommunity({
+      name: 'Friends', relayUrl: 'wss://10.0.0.5:7778',
+      detectedName: 'private-relay-abc',
+    });
+    assert.match(entry.id, /^[0-9a-f]{12}$/);
+    assert.equal(entry.name, 'Friends');
+    assert.equal(entry.relayUrl, 'wss://10.0.0.5:7778');
+    assert.ok(entry.joinedAt > 0);
+    // Field-by-field check rather than deepEqual — JSON.stringify
+    // drops undefined values, so the persisted entry won't have a
+    // `detectedDescription: undefined` key while the in-memory one
+    // does. The fields that round-trip are the ones that matter.
+    const list = listJoinedCommunities();
+    assert.equal(list.length, 1);
+    assert.equal(list[0].id, entry.id);
+    assert.equal(list[0].name, entry.name);
+    assert.equal(list[0].relayUrl, entry.relayUrl);
+    assert.equal(list[0].joinedAt, entry.joinedAt);
+    assert.equal(list[0].detectedName, 'private-relay-abc');
+  } finally {
+    home.restore();
+  }
+});
+
+test('addJoinedCommunity rejects empty name + invalid URL', () => {
+  const home = useTempHome();
+  try {
+    assert.throws(() => addJoinedCommunity({ name: '', relayUrl: 'wss://x' }), /name/);
+    assert.throws(() => addJoinedCommunity({ name: 'x', relayUrl: 'http://x' }), /ws/);
+    assert.throws(() => addJoinedCommunity({ name: 'x', relayUrl: 'not-a-url' }), /ws/);
+  } finally {
+    home.restore();
+  }
+});
+
+test('addJoinedCommunity dedupes by URL (updates instead of appending)', () => {
+  const home = useTempHome();
+  try {
+    const a = addJoinedCommunity({ name: 'Old name', relayUrl: 'wss://10.0.0.5:7778' });
+    const b = addJoinedCommunity({ name: 'New name', relayUrl: 'wss://10.0.0.5:7778' });
+    assert.equal(b.id, a.id, 'same id — updated in place');
+    assert.equal(b.name, 'New name');
+    const list = listJoinedCommunities();
+    assert.equal(list.length, 1);
+    assert.equal(list[0].name, 'New name');
+  } finally {
+    home.restore();
+  }
+});
+
+test('removeJoinedCommunity is idempotent', () => {
+  const home = useTempHome();
+  try {
+    const entry = addJoinedCommunity({ name: 'X', relayUrl: 'wss://x:1' });
+    removeJoinedCommunity(entry.id);
+    removeJoinedCommunity(entry.id);  // no-op second call
+    assert.deepEqual(listJoinedCommunities(), []);
+  } finally {
+    home.restore();
+  }
+});
+
+test('updateJoinedCommunity preserves id + joinedAt; patches the rest', () => {
+  const home = useTempHome();
+  try {
+    const entry = addJoinedCommunity({ name: 'X', relayUrl: 'wss://x:1' });
+    const updated = updateJoinedCommunity(entry.id, {
+      name: 'Y',
+      detectedName: 'private-relay-z',
+      lastReachedAt: 12345,
+    });
+    assert.ok(updated);
+    assert.equal(updated!.id, entry.id);
+    assert.equal(updated!.joinedAt, entry.joinedAt);
+    assert.equal(updated!.name, 'Y');
+    assert.equal(updated!.detectedName, 'private-relay-z');
+    assert.equal(updated!.lastReachedAt, 12345);
+  } finally {
+    home.restore();
+  }
+});
+
+test('updateJoinedCommunity returns null for unknown id', () => {
+  const home = useTempHome();
+  try {
+    assert.equal(updateJoinedCommunity('not-an-id', { name: 'x' }), null);
+  } finally {
+    home.restore();
+  }
+});
+
+test('listJoinedCommunities filters out malformed entries (defensive)', () => {
+  const home = useTempHome();
+  try {
+    // Forge a joined.json with one valid + one malformed entry to
+    // verify the read-side defensive filter doesn't surface bogus
+    // rows to the UI.
+    fs.mkdirSync(path.join(home.home, 'communities'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home.home, 'communities', 'joined.json'),
+      JSON.stringify([
+        { id: 'a'.repeat(12), name: 'OK', relayUrl: 'wss://x:1', joinedAt: 1 },
+        { id: 'b'.repeat(12), name: 'missing-url', joinedAt: 2 },  // missing relayUrl
+        'not even an object',
+      ]),
+    );
+    const list = listJoinedCommunities();
+    assert.equal(list.length, 1);
+    assert.equal(list[0].name, 'OK');
   } finally {
     home.restore();
   }
