@@ -357,6 +357,33 @@ skip the wizard and drop you straight into the dashboard.
 everything is green. `--json` always exits 0 — the payload is the
 machine-readable signal.
 
+### Always-on (Linux, systemd --user)
+
+For an Ubuntu workstation or Linux server you want to leave running —
+phone client always has a reachable relay, dashboard always up — install
+the user systemd unit:
+
+```
+./scripts/install-systemd-unit.sh           # uses `nostr-station` on PATH
+./scripts/install-systemd-unit.sh /path/to/dist/cli.js
+```
+
+The script writes `~/.config/systemd/user/nostr-station.service`,
+enables linger (so the service survives logout and reboot), and starts
+the unit. Logs go to journald — view with
+`journalctl --user -u nostr-station -f`.
+
+To remove:
+
+```
+./scripts/uninstall-systemd-unit.sh                  # leaves linger alone
+./scripts/uninstall-systemd-unit.sh --revoke-linger  # also revokes linger
+```
+
+The launcher detects a non-TTY stdout (which is what systemd gives you)
+and skips the Ink dashboard renderer, so journald gets one clean
+`Dashboard running at …` line instead of cursor-control escapes.
+
 ### Optional tools
 
 Tools that aren't on the happy path live behind one explicit verb:

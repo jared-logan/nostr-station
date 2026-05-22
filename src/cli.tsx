@@ -41,6 +41,30 @@ const [,, command = bareInvocation ? '__welcome__' : 'help', ...args] = process.
 const flag = (f: string) => args.includes(f);
 const arg  = (f: string) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
 
+// Boot the dashboard either via Ink (interactive terminal) or headless
+// (no controlling TTY — systemd, docker without -t, etc.). Ink's cursor-
+// control escapes flood journald when no PTY is attached, so we bypass
+// the React shell entirely and just call startWebServer + print one
+// plain stderr line. The server already registers SIGTERM/SIGINT and
+// keeps the event loop alive itself, so this path stays foreground and
+// shuts down cleanly under systemctl --user stop / docker stop.
+async function bootDashboard(port: number, deepPath: string): Promise<void> {
+  if (process.stdout.isTTY) {
+    render(React.createElement(Chat, { port, path: deepPath }));
+    return;
+  }
+  // Headless path. Lazy-import so a TTY-mode boot doesn't pay for the
+  // web-server module's full transitive graph until it's needed.
+  const { startWebServer } = await import('./lib/web-server.js');
+  try {
+    await startWebServer(port);
+    process.stderr.write(`Dashboard running at http://localhost:${port}${deepPath}\n`);
+  } catch (e: any) {
+    process.stderr.write(`nostr-station: dashboard failed to start: ${e?.message ?? e}\n`);
+    process.exit(1);
+  }
+}
+
 switch (command) {
 
   case 'seed':
@@ -60,16 +84,16 @@ switch (command) {
     break;
 
   case 'chat':
-    render(React.createElement(Chat, {
-      port: arg('--port') ? parseInt(arg('--port')!, 10) : 3000,
-    }));
+    void bootDashboard(arg('--port') ? parseInt(arg('--port')!, 10) : 3000, '');
     break;
 
   case 'serve':
     // Explicit "run the dashboard process" verb. Same behavior as bare
     // invocation — the dashboard server boots the in-process Nostr relay
-    // alongside it (see web-server.ts maybeStartInprocRelay).
-    render(React.createElement(Chat, { port: 3000, path: '/setup' }));
+    // alongside it (see web-server.ts maybeStartInprocRelay). Routes
+    // through bootDashboard so a no-TTY invocation (systemd) skips the
+    // Ink shell that would otherwise spam the journal with cursor escapes.
+    void bootDashboard(3000, '/setup');
     break;
 
   case '__welcome__':
@@ -79,7 +103,7 @@ switch (command) {
     // the Chat component, which boots the dashboard + in-process relay
     // and opens the browser. Foreground; Ctrl+C tears down the whole
     // stack cleanly.
-    render(React.createElement(Chat, { port: 3000, path: '/setup' }));
+    void bootDashboard(3000, '/setup');
     break;
 
   case 'stop':
