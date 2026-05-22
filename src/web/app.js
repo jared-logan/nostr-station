@@ -23234,25 +23234,37 @@ const CommunitiesPanel = (() => {
     // community needs an adminPubkey at create time — defaulting to
     // the dashboard owner — and the wizard's "Add me as a member"
     // checkbox preloads the same hex. /api/identity/config is the
-    // canonical source (used by ConfigPanel, ProjectsPanel, etc.);
-    // npub→hex via NostrTools.nip19, same as every other panel that
-    // crosses the two encodings.
+    // canonical source (used by ConfigPanel, ProjectsPanel, etc.).
+    //
+    // `cfg.npub` may arrive in EITHER form depending on what the user
+    // pasted into identity setup: raw 64-char hex OR bech32 `npub1...`.
+    // The previous version of this code only accepted `npub1...` and
+    // bailed with "Set up your dashboard identity first" for users
+    // whose identity was stored as hex — a false negative that
+    // looked exactly like "no identity configured". Now we accept
+    // both.
     let ownerHex = '';
     try {
       const cfg = await api('/api/identity/config');
-      const npub = (cfg?.npub || '').toString();
-      if (npub.startsWith('npub1') && window.NostrTools?.nip19) {
-        const dec = window.NostrTools.nip19.decode(npub);
-        if (dec?.type === 'npub' && typeof dec.data === 'string') {
-          ownerHex = dec.data.toLowerCase();
-        }
+      const raw = (cfg?.npub || '').toString().trim();
+      if (/^[0-9a-f]{64}$/i.test(raw)) {
+        // Already hex — use as-is, normalize case.
+        ownerHex = raw.toLowerCase();
+      } else if (raw.startsWith('npub1') && window.NostrTools?.nip19) {
+        // bech32 → hex.
+        try {
+          const dec = window.NostrTools.nip19.decode(raw);
+          if (dec?.type === 'npub' && typeof dec.data === 'string') {
+            ownerHex = dec.data.toLowerCase();
+          }
+        } catch { /* malformed npub; falls through to the bail below */ }
       }
-    } catch { /* identity not yet configured; handled below */ }
+    } catch { /* identity endpoint failed; handled below */ }
 
     if (!ownerHex) {
-      // Refuse to open with a useful error rather than letting the
-      // user fill out the wizard and hit a 400 at submit time (the
-      // exact regression that prompted this fix).
+      // Genuine "no identity" case — surface a useful message rather
+      // than letting the user fill out the wizard and hit a 400 at
+      // submit time.
       const msg = 'Set up your dashboard identity first — Config → Identity.';
       window.Toasts?.error?.(msg);
       if (!window.Toasts) alert(msg);
