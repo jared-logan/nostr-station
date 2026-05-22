@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { verifyEvent } from 'nostr-tools/pure';
 import type { NostrEvent, NostrFilter } from './types.js';
 
 // SQLite-backed event store for the in-process relay.
@@ -24,6 +25,24 @@ export interface StoreOptions {
 
 export const DEFAULT_DB_PATH = path.join(os.homedir(), '.nostr-station', 'data', 'relay.db');
 const DEFAULT_MAX_EVENTS = 100_000;
+
+// Running totals reported during a bulkAdd. `stored` and `duplicate` mirror
+// what add() distinguishes; `invalid` counts events that failed signature
+// verification; `errors` counts events that threw during write (unexpected
+// — db corruption, schema mismatch).
+export interface BulkAddCounts {
+  stored:    number;
+  duplicate: number;
+  invalid:   number;
+  errors:    number;
+}
+
+export interface BulkAddResult extends BulkAddCounts {
+  // Per-rejected-event detail. Capped implicitly by the caller's input
+  // size, but in practice import paths surface only the first N to the
+  // user — large rejection lists are not consumed wholesale.
+  errorDetails: Array<{ id: string; reason: string }>;
+}
 
 // Replaceable event ranges per NIP-01. Inserting a newer event of the
 // same (kind, pubkey) deletes the older one; for parameterized
@@ -607,6 +626,75 @@ export class EventStore {
         tags:       JSON.parse(r.tags_json) as string[][],
       };
     }
+  }
+
+  // Bulk insert a stream of events. Used by `relay import` to ingest a
+  // JSONL backup. Each event flows through the same add() path as a live
+  // EVENT message, so replaceable / parameterized-replaceable semantics,
+  // profile materialization, and LRU eviction all apply identically.
+  //
+  // Verification: enabled by default; rejected events are counted under
+  // `invalid` and reported in `errors`. Pass { verify: false } only when
+  // re-importing data already known to be signed (e.g. an export from
+  // this same relay being restored).
+  //
+  // Dry-run: signature verification and dedupe checks still run, but no
+  // rows are written. Callers should use this to preview an import
+  // before committing — counts in the result reflect what *would* happen.
+  //
+  // Progress: invoked every `progressEvery` events (default 1000) with
+  // running totals so a long import can report incremental status.
+  bulkAdd(
+    events: Iterable<NostrEvent>,
+    opts: {
+      verify?:        boolean;
+      dryRun?:        boolean;
+      onProgress?:    (counts: BulkAddCounts) => void;
+      progressEvery?: number;
+    } = {},
+  ): BulkAddResult {
+    const verify        = opts.verify ?? true;
+    const dryRun        = opts.dryRun ?? false;
+    const progressEvery = Math.max(1, opts.progressEvery ?? 1000);
+
+    const counts: BulkAddCounts = { stored: 0, duplicate: 0, invalid: 0, errors: 0 };
+    const errors: Array<{ id: string; reason: string }> = [];
+    let seen = 0;
+
+    for (const ev of events) {
+      seen++;
+
+      if (verify) {
+        let ok = false;
+        try { ok = verifyEvent(ev as any); } catch { ok = false; }
+        if (!ok) {
+          counts.invalid++;
+          errors.push({ id: ev.id, reason: 'invalid signature' });
+          if (opts.onProgress && seen % progressEvery === 0) opts.onProgress({ ...counts });
+          continue;
+        }
+      }
+
+      try {
+        if (dryRun) {
+          // Mirror add()'s dedupe-by-id behavior without writing.
+          if (this.stHasEvent.get(ev.id)) counts.duplicate++;
+          else counts.stored++;
+        } else {
+          const r = this.add(ev);
+          if (r.duplicate) counts.duplicate++;
+          else counts.stored++;
+        }
+      } catch (e: any) {
+        counts.errors++;
+        errors.push({ id: ev.id, reason: String(e?.message || e) });
+      }
+
+      if (opts.onProgress && seen % progressEvery === 0) opts.onProgress({ ...counts });
+    }
+
+    if (opts.onProgress) opts.onProgress({ ...counts });
+    return { ...counts, errorDetails: errors };
   }
 
   // Empty the relay. The tags table cascades, then VACUUM reclaims pages
