@@ -1672,11 +1672,6 @@ const SERVICE_CTAS = {
   'opencode':  { installSlug: 'opencode',    configHint: 'curl -fsSL https://opencode.ai/install | bash' },
   'nak':       { installSlug: 'nak',   configHint: null },
   'stacks':    { installSlug: 'stacks', configHint: null },
-  // grain — managed by Communities. /api/exec/install/grain dispatches
-  // to installGrain() in src/lib/grain-installer.ts (downloads the
-  // pinned v0.6.0 tarball, sha256-verifies, drops the binary at
-  // ~/.nostr-station/bin/grain). No sudo prompt; no PATH dependency.
-  'grain':     { installSlug: 'grain', configHint: null },
 };
 
 // Human-friendly summary + deep-link target for each service. The summary
@@ -16127,29 +16122,14 @@ const ConfigPanel = (() => {
       </div>
     `;
     $('cfg-grain-install')?.addEventListener('click', () => {
-      // Reuse the standard install-SSE modal — same flow nak / ngit /
-      // claude-code / opencode use from the Status panel. The
-      // `?force=1` query string opts into reinstall (re-downloads even
-      // when the binary is already present); the installer in
-      // src/lib/grain-installer.ts respects the flag.
-      const qs = grainInstalled ? '?force=1' : '';
-      openExecModal({
-        title:    grainInstalled ? 'Reinstall grain' : 'Install grain',
-        subtitle: `Fetching pinned grain release…`,
-        endpoint: `/api/exec/install/grain${qs}`,
-      }).then((r) => {
-        if (r.ok) {
-          window.Toasts?.info?.(grainInstalled ? 'grain reinstalled' : 'grain installed');
-        } else {
-          window.Toasts?.error?.(`grain install exited ${r.code}`);
-        }
-        // Refresh the section + the Status panel so install state is
-        // reflected immediately instead of waiting out the apiCached
-        // TTL.
-        apiInvalidate('/api/status');
-        refreshHealth();
-        paintCommunitiesConfigSection();
-      });
+      // Reuse the existing tools-install SSE flow used for nak/ngit so
+      // the user sees the same install console + log line stream.
+      if (window.Updates?.openToolInstall) {
+        window.Updates.openToolInstall('grain', grainInstalled ? { force: true } : {});
+      } else {
+        // Fallback for builds where the helper isn't on Updates:
+        location.hash = '#status';
+      }
     });
   }
 
