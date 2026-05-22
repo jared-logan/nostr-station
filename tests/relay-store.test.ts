@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import { EventStore } from '../src/relay/store.ts';
 import type { NostrEvent } from '../src/relay/types.ts';
 
@@ -332,6 +333,147 @@ test('store: wipe clears profiles alongside events', () => {
   assert.equal(s.getProfile('a'.repeat(64)), null);
   assert.equal(s.count(), 0);
   s.close();
+});
+
+// Build a real signed event so signature verification accepts it. Used
+// by bulkAdd tests below.
+function signed(opts: { content?: string; kind?: number; created_at?: number } = {}): NostrEvent {
+  const sk = generateSecretKey();
+  return finalizeEvent({
+    kind:       opts.kind ?? 1,
+    content:    opts.content ?? 'hello',
+    tags:       [],
+    created_at: opts.created_at ?? 1_700_000_000,
+  }, sk) as NostrEvent;
+}
+
+test('store: bulkAdd round-trips signed events with default verification', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  const events = [signed({ content: 'one' }), signed({ content: 'two' }), signed({ content: 'three' })];
+  const r = s.bulkAdd(events);
+  assert.equal(r.stored,    3);
+  assert.equal(r.duplicate, 0);
+  assert.equal(r.invalid,   0);
+  assert.equal(r.errors,    0);
+  assert.equal(s.count(),   3);
+  s.close();
+});
+
+test('store: bulkAdd reports duplicates on a second pass without re-storing', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  const events = [signed({ content: 'a' }), signed({ content: 'b' })];
+  s.bulkAdd(events);
+  const second = s.bulkAdd(events);
+  assert.equal(second.stored,    0);
+  assert.equal(second.duplicate, 2);
+  assert.equal(s.count(),        2);
+  s.close();
+});
+
+test('store: bulkAdd rejects events with invalid signatures and reports them', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  const good = signed({ content: 'valid' });
+  // Build `bad` fresh rather than spreading `good`: nostr-tools attaches an
+  // internal verifiedSymbol on events it finalized, and the spread carries
+  // that symbol over so verifyEvent short-circuits on the cached "valid"
+  // result instead of re-running the check.
+  const bad: NostrEvent = {
+    id:         'f'.repeat(64),
+    pubkey:     'a'.repeat(64),
+    created_at: 1_700_000_000,
+    kind:       1,
+    tags:       [],
+    content:    'tampered',
+    sig:        '0'.repeat(128),
+  };
+  const r = s.bulkAdd([good, bad]);
+  assert.equal(r.stored,  1);
+  assert.equal(r.invalid, 1);
+  assert.equal(r.errorDetails.length, 1);
+  assert.equal(r.errorDetails[0].reason, 'invalid signature');
+  assert.equal(s.count(), 1);
+  s.close();
+});
+
+test('store: bulkAdd dryRun verifies and counts but does not write', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  const events = [signed({ content: 'one' }), signed({ content: 'two' })];
+  const r = s.bulkAdd(events, { dryRun: true });
+  assert.equal(r.stored,    2, 'dry-run reports what would be stored');
+  assert.equal(r.duplicate, 0);
+  assert.equal(s.count(),   0, 'dry-run does not write any rows');
+  s.close();
+});
+
+test('store: bulkAdd dryRun marks events already in the store as duplicates', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  const e = signed({ content: 'persisted' });
+  s.add(e);
+  const r = s.bulkAdd([e], { dryRun: true });
+  assert.equal(r.stored,    0);
+  assert.equal(r.duplicate, 1);
+  assert.equal(s.count(),   1);
+  s.close();
+});
+
+test('store: bulkAdd with verify=false skips signature checks', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  // The relay's own iterAll() produces previously-validated events, so
+  // trusted re-imports can opt out of re-verification for speed. Build
+  // the tampered event fresh (no verifiedSymbol carry-over from a real
+  // finalizeEvent call).
+  const tampered: NostrEvent = {
+    id:         'd'.repeat(64),
+    pubkey:     'b'.repeat(64),
+    created_at: 1_700_000_001,
+    kind:       1,
+    tags:       [],
+    content:    'trusted-but-not-actually-verifiable',
+    sig:        '0'.repeat(128),
+  };
+  const r = s.bulkAdd([tampered], { verify: false });
+  assert.equal(r.stored,  1, 'verify=false stores even tampered events');
+  assert.equal(r.invalid, 0);
+  s.close();
+});
+
+test('store: bulkAdd onProgress reports running totals', () => {
+  const s = new EventStore({ dbPath: tmpDb() });
+  const events = Array.from({ length: 25 }, (_, i) => signed({ content: `c${i}` }));
+  const reports: number[] = [];
+  s.bulkAdd(events, { progressEvery: 10, onProgress: c => reports.push(c.stored) });
+  // Two intra-stream reports (at 10, 20) plus one final report at end.
+  assert.ok(reports.length >= 2, `expected at least 2 progress reports, got ${reports.length}`);
+  assert.equal(reports.at(-1), 25, 'final report sums to total stored');
+  s.close();
+});
+
+test('store: bulkAdd integrates with iterAll for a full export → import round-trip', () => {
+  const src = new EventStore({ dbPath: tmpDb() });
+  const events = [
+    signed({ content: 'first',  created_at: 100 }),
+    signed({ content: 'second', created_at: 200 }),
+    signed({ content: 'third',  created_at: 300 }),
+  ];
+  for (const e of events) src.add(e);
+
+  // Export → in-memory JSONL → import into a fresh store.
+  const lines = [...src.iterAll()].map(e => JSON.stringify(e));
+  const reloaded = lines.map(l => JSON.parse(l) as NostrEvent);
+  src.close();
+
+  const dst = new EventStore({ dbPath: tmpDb() });
+  const r = dst.bulkAdd(reloaded);
+  assert.equal(r.stored,  3);
+  assert.equal(r.invalid, 0);
+  // Round-trip integrity: every id present, contents intact.
+  for (const e of events) {
+    const got = dst.query({ ids: [e.id] });
+    assert.equal(got.length, 1, `expected id ${e.id.slice(0, 8)}… to be present`);
+    assert.equal(got[0].content, e.content);
+    assert.equal(got[0].sig,     e.sig);
+  }
+  dst.close();
 });
 
 test('store: migrates a legacy tags-without-created_at schema in place', () => {

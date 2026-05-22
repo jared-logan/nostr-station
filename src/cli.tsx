@@ -196,6 +196,23 @@ switch (command) {
     break;
   }
 
+  case 'relay': {
+    // relay export <path>
+    // relay import <path> [--dry-run] [--no-verify]
+    //
+    // I/O-heavy batch ops, no interactive prompts — plain stdout/stderr
+    // so they pipe and script cleanly. The implementation lives in
+    // commands/Relay.ts as a plain async function (not an Ink component).
+    void (async () => {
+      const { runRelayCommand } = await import('./commands/Relay.js');
+      const action = args[0] ?? 'help';
+      const sub    = args.slice(1);
+      const code   = await runRelayCommand({ action, args: sub });
+      process.exit(code);
+    })();
+    break;
+  }
+
   case 'ai': {
     // ai                        → list
     // ai list                   → list
@@ -279,6 +296,7 @@ function printHelp() {
     add [tool]                       Install an optional tool (ngit, nak, stacks, nsyte) — bare lists them
     list                             Same as bare 'add' — list optional tools + install state
     seed                             Publish test events to your relay
+    relay                            Export / import the relay event database as JSONL
     publish                          Publish current repo to GitHub + Nostr (ngit) simultaneously
     nsite                            Publish a static site to Nostr via nsyte
     editor                           Re-link NOSTR_STATION.md for a different AI coding tool
@@ -307,6 +325,12 @@ function printHelp() {
     nsite publish                    Build check + confirm + upload
     nsite status                     Compare live site with local build
     nsite open [--titan]             Open gateway URL (or copy nsite:// URL)
+
+  RELAY SUBCOMMANDS
+    relay export <path>              Stream every event in the store as JSONL
+    relay import <path>              Ingest a JSONL file into the relay
+    relay import <path> --dry-run    Count what would happen without writing
+    relay import <path> --no-verify  Skip signature verification (trusted re-imports)
 
   ADD SUBCOMMANDS (optional tools)
     add                              List available tools with install state
