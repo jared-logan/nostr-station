@@ -22973,11 +22973,13 @@ const CommunitiesPanel = (() => {
               <thead><tr><th>Audience</th><th>Can reach the relay?</th><th>Can read events?</th><th>Can publish?</th><th>Sees relay name / description?</th></tr></thead>
               <tbody>
                 <tr><td>You (this machine)</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr>
-                <tr><td>Anyone on your home LAN</td><td>no</td><td>—</td><td>—</td><td>—</td></tr>
-                <tr><td>Anyone on the public internet</td><td>no</td><td>—</td><td>—</td><td>—</td></tr>
+                <tr><td>Anyone on your home LAN</td><td>yes (TCP-reachable)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td>yes</td></tr>
+                <tr><td>Anyone on the public internet</td><td>depends on your router (NAT/firewall)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td>depends on the above</td></tr>
               </tbody>
             </table>
-            <p>Local-only communities bind to <code>127.0.0.1</code> — only processes on this machine can reach them. No nvpn mesh is involved.</p>
+            <h4>"Local" means same-machine reach, not loopback isolation</h4>
+            <p>GRAIN binds to <strong>all interfaces</strong> (its config doesn't accept a bind-host parameter — only a port). That means anyone who can route a TCP packet to your host on the community's port can <em>reach</em> the relay. The per-community pubkey allowlist (NIP-42) stops them from reading or publishing, but the connection itself is open.</p>
+            <p>For most home setups your router's NAT is the perimeter — the port is reachable from your LAN but not from the public internet. If you want stricter, configure your host firewall to drop the community's port from non-loopback sources.</p>
           </div>
         </details>
       `;
@@ -22996,29 +22998,32 @@ const CommunitiesPanel = (() => {
               <tr><td>You (your devices via the dashboard)</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr>
               <tr><td>Members of <em>this</em> community</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr>
               <tr><td>Members of <em>other</em> communities on the same mesh</td><td>yes (port reachable)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td>opaque name only (e.g. <code>private-relay-…</code>); description hidden by default</td></tr>
-              <tr><td>Anyone on your home LAN</td><td>no</td><td>—</td><td>—</td><td>—</td></tr>
-              <tr><td>Anyone on the public internet</td><td>no</td><td>—</td><td>—</td><td>—</td></tr>
+              <tr><td>Anyone on your home LAN</td><td>yes (TCP-reachable)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td><strong>no</strong> (NIP-42 + allowlist)</td><td>opaque name only; description hidden by default</td></tr>
+              <tr><td>Anyone on the public internet</td><td>depends on your router (NAT/firewall)</td><td><strong>no</strong></td><td><strong>no</strong></td><td>depends on the above</td></tr>
             </tbody>
           </table>
-          <h4>The mesh is your trust boundary</h4>
+          <h4>GRAIN binds all interfaces — the allowlist is the gate</h4>
+          <p>GRAIN's config doesn't accept a bind-host parameter (only a port), so the relay listens on every interface. The mesh isn't a network-level perimeter the way the original plan described; it's the discovery + routing path your remote members use. The <strong>actual</strong> read/publish gate for every audience is GRAIN's per-community NIP-42 allowlist.</p>
+          <h4>The mesh is your trust boundary <em>for who you onboard</em></h4>
           <p>nvpn supports one active network at a time per host. All of your private-network communities ride on that single mesh. The mesh is the people you've explicitly invited — think of it as "everyone allowed past the front door of your house". Each community is a separate room behind that door with its own guest list.</p>
           <h4>What a fellow mesh-member can do</h4>
           <ul>
-            <li>Connect to any community's relay port (TCP-reachable).</li>
+            <li>Connect to any community's relay port (TCP-reachable — same as for LAN devices).</li>
             <li><strong>Cannot</strong> read or publish events in a community they're not in — GRAIN enforces NIP-42 auth + a pubkey allowlist per community.</li>
             <li>Can probe NIP-11 metadata. By default that returns an opaque relay name (<code>private-relay-&lt;short-hex&gt;</code>) and an empty description — the community's friendly name lives only in your dashboard. You can override this in the community's Settings tab if you don't mind sharing the name.</li>
             <li>Sees your pubkey via nvpn's signed mesh roster (this is how meshes work — there is no anonymous mesh membership).</li>
           </ul>
-          <h4>What no one outside the mesh can do</h4>
+          <h4>What no one outside the mesh + LAN can do</h4>
           <ul>
-            <li>Reach any community relay (the mesh is the perimeter).</li>
-            <li>Reach the dashboard.</li>
-            <li>See any device on your home LAN — the Communities subsystem refuses to operate on networks where nvpn's <code>advertise-routes</code> is enabled.</li>
+            <li>Reach any community relay <em>without first being on a routable network to your host</em>. NAT/firewall is the public perimeter; the mesh is the cross-network reach for remote members.</li>
+            <li>See any device on your home LAN via the mesh — the Communities subsystem refuses to operate on nvpn networks where <code>advertise-routes</code> is enabled.</li>
           </ul>
           <h4>The dashboard is separately gated</h4>
-          <p>Even community members on the same mesh cannot reach the dashboard. The dashboard binds to the mesh tunnel IP only when you opt into Mobile Access, and even then it filters incoming connections by pubkey — only your own devices (paired with the same NIP-46 signer) get through.</p>
+          <p>The dashboard binds to loopback by default, and to all interfaces only when you opt into Mobile Access. The connection-time peer-pubkey filter then drops anyone whose source IP doesn't map to a trusted device pubkey (default: just your own). Mesh members + LAN devices both hit that wall.</p>
           <h4>Removing a member</h4>
           <p>Kicking someone from a community removes them from that community's allowlist only. They remain on your underlying mesh and in any other communities they're a member of. To fully eject someone, remove them from the mesh itself in the nvpn panel — that takes them out of every community at once.</p>
+          <h4>For stricter LAN containment</h4>
+          <p>If you need the relay invisible to LAN devices (not just unable-to-publish), add a host firewall rule restricting the community's port to your mesh tunnel IP. This is outside what we configure for you today; upstreaming a <code>server.host</code> field to GRAIN is the right long-term fix.</p>
         </div>
       </details>
     `;

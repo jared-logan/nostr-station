@@ -248,13 +248,13 @@ export async function createCommunity(
   }
 
   const port = input.port ?? await allocateCommunityPort();
-  const bindHost = input.bindHost
-                ?? (input.privacyMode === 'local' ? '127.0.0.1' : '127.0.0.1');
-  // Note: for private-network mode we INTENTIONALLY default to loopback
-  // on create. The supervisor overwrites the bind to the actual nvpn
-  // tunnel IP once it's discovered, so we never accidentally leave
-  // GRAIN bound to a wider interface during the window between create
-  // and supervisor start.
+  // `bindHost` was historically threaded into config.yml's port value
+  // (e.g. "127.0.0.1:7778"), but GRAIN's strict validator rejects the
+  // host:port form ("must start with ':'"). The bind interface is
+  // no longer a config-side knob — GRAIN listens all-interfaces
+  // unconditionally. The input field is retained for backwards-compat
+  // with the wizard API but no longer affects spawn behavior.
+  void input.bindHost;
 
   fs.mkdirSync(dir, { recursive: true });
   fs.mkdirSync(communityDataDir(id), { recursive: true });
@@ -272,12 +272,15 @@ export async function createCommunity(
   };
   writeCommunityManifest(manifest);
 
-  // Initial GRAIN config — minimum viable so first spawn doesn't need
-  // additional UI steps. Bind address gets rewritten by the supervisor
-  // for private-network communities.
+  // Initial GRAIN config — port-only form (`:<port>`) per GRAIN's
+  // strict validator. No host part: GRAIN binds to ALL interfaces
+  // regardless of what we put in config.yml. Note `bindHost` is no
+  // longer threaded into config — kept in the manifest for
+  // historical reasons but the privacy disclosure copy is now
+  // honest about all-interfaces binding.
   writeGrainConfig(
     communityConfigPath(dir),
-    defaultGrainConfig({ bindHostPort: `${bindHost}:${port}` }),
+    defaultGrainConfig({ port }),
   );
 
   // Initial allowlist: admin + any explicit members. We dedupe and
