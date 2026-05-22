@@ -70,9 +70,12 @@ test('createCommunity (local) writes manifest, config.yml, whitelist.yml, data d
     assert.ok(fs.existsSync(communityWhitelistPath(dir)));
     assert.ok(fs.statSync(communityDataDir(m.id)).isDirectory());
 
-    // GRAIN config bound to loopback at the allocated port:
+    // GRAIN config uses the port-only form its validator requires
+    // ("must start with ':'") — host:port would fail at first spawn.
+    // The relay still listens all-interfaces; that's GRAIN's binding
+    // model and the privacy disclosure copy is honest about it.
     const cfg = readGrainConfig(communityConfigPath(dir));
-    assert.equal(cfg.server.port, `127.0.0.1:${m.port}`);
+    assert.equal(cfg.server.port, `:${m.port}`);
 
     // Admin auto-added to allowlist:
     const wl = readGrainWhitelist(communityWhitelistPath(dir));

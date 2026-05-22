@@ -38,22 +38,25 @@ test('atomicWriteFileSync writes then renames (no torn file)', () => {
   assert.deepEqual(leftovers, []);
 });
 
-test('writeGrainConfig + readGrainConfig round-trip a host:port bind', () => {
+test('defaultGrainConfig writes the port-only form that GRAIN requires', () => {
   const dir  = mkTmp();
   const file = path.join(dir, 'config.yml');
-  const cfg  = defaultGrainConfig({ bindHostPort: '127.0.0.1:7778' });
+  const cfg  = defaultGrainConfig({ port: 7778 });
   writeGrainConfig(file, cfg);
   const back = readGrainConfig(file);
-  assert.equal(back.server.port, '127.0.0.1:7778');
+  // GRAIN's validator rejects "host:port" outright ("must start with ':'")
+  // — pin the format we write to ensure no regression slips back to the
+  // pre-fix host:port form, which would brick first-spawn.
+  assert.equal(back.server.port, ':7778');
 });
 
-test('writeGrainConfig + readGrainConfig preserves IPv6 + leading-colon port', () => {
+test('defaultGrainConfig round-trips an arbitrary port number to ":<port>" form', () => {
   const dir  = mkTmp();
   const file = path.join(dir, 'config.yml');
-  for (const bind of ['[::1]:7778', ':8181', '10.42.0.5:7778']) {
-    writeGrainConfig(file, defaultGrainConfig({ bindHostPort: bind }));
+  for (const port of [7778, 8081, 9000, 65535]) {
+    writeGrainConfig(file, defaultGrainConfig({ port }));
     const back = readGrainConfig(file);
-    assert.equal(back.server.port, bind, `${bind} did not round-trip`);
+    assert.equal(back.server.port, `:${port}`, `port ${port} did not round-trip`);
   }
 });
 
@@ -212,4 +215,54 @@ test('defaultRelayMetadata generates a fresh tag per call (entropy)', () => {
   const a = defaultRelayMetadata({ adminPubkey: 'aa'.repeat(32) });
   const b = defaultRelayMetadata({ adminPubkey: 'aa'.repeat(32) });
   assert.notEqual(a.name, b.name, 'two calls should produce two distinct identifiers');
+});
+
+// ---------------------------------------------------------------------
+// coerceGrainPortValue — migration helper for legacy host:port configs
+//
+// nostr-station ≤ 0.0.7 wrote config.yml with `port: "127.0.0.1:7778"`
+// (host:port form). GRAIN rejects that. The supervisor calls this
+// helper on every spawn to auto-migrate; pin every input shape so a
+// regression here can't silently brick a community dir at startup.
+
+import { coerceGrainPortValue } from '../src/lib/community-yaml.ts';
+
+test('coerceGrainPortValue: already port-only ":<n>" passes through', () => {
+  assert.equal(coerceGrainPortValue(':7778'), ':7778');
+  assert.equal(coerceGrainPortValue(':8081'), ':8081');
+});
+
+test('coerceGrainPortValue: legacy "host:port" strips host', () => {
+  assert.equal(coerceGrainPortValue('127.0.0.1:7778'), ':7778');
+  assert.equal(coerceGrainPortValue('10.42.0.5:9000'), ':9000');
+});
+
+test('coerceGrainPortValue: bracketed IPv6 + port strips host', () => {
+  assert.equal(coerceGrainPortValue('[::1]:7778'),     ':7778');
+  assert.equal(coerceGrainPortValue('[fe80::1]:9000'), ':9000');
+});
+
+test('coerceGrainPortValue: bare integer becomes ":<n>"', () => {
+  assert.equal(coerceGrainPortValue(7778), ':7778');
+  assert.equal(coerceGrainPortValue(80),   ':80');
+});
+
+test('coerceGrainPortValue: returns null for inputs we cannot parse', () => {
+  assert.equal(coerceGrainPortValue(''),             null);
+  assert.equal(coerceGrainPortValue('   '),          null);
+  assert.equal(coerceGrainPortValue('not-a-port'),   null);
+  assert.equal(coerceGrainPortValue(':abc'),         null);
+  assert.equal(coerceGrainPortValue(null),           null);
+  assert.equal(coerceGrainPortValue(undefined),      null);
+  assert.equal(coerceGrainPortValue({}),             null);
+  assert.equal(coerceGrainPortValue('127.0.0.1:abc'), null);
+});
+
+test('coerceGrainPortValue: rejects out-of-range ports', () => {
+  assert.equal(coerceGrainPortValue(0),       null);
+  assert.equal(coerceGrainPortValue(-1),      null);
+  assert.equal(coerceGrainPortValue(65536),   null);
+  assert.equal(coerceGrainPortValue(70000),   null);
+  assert.equal(coerceGrainPortValue('1.2.3.4:0'),     null);
+  assert.equal(coerceGrainPortValue('1.2.3.4:65536'), null);
 });

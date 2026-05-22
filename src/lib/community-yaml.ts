@@ -122,21 +122,59 @@ export function writeGrainConfig(file: string, cfg: GrainConfig): void {
 
 /**
  * Minimum viable GRAIN config produced when we create a new community.
- * Callers override the bind address (set to the nvpn tunnel IP for
- * private-network communities, loopback for local-only) by passing
- * the full `host:port` string.
+ * GRAIN's config validator REJECTS the `host:port` form ("must start
+ * with ':'"). Always write the port-only form (`:7778`) — this is
+ * GRAIN's only supported binding model. Implication: GRAIN listens
+ * on ALL interfaces (Go's net.Listen behavior). Loopback isolation
+ * via config is not deliverable; the privacy disclosure copy reflects
+ * this honestly.
+ *
+ * The `port` parameter is just the port number; we prefix the colon
+ * in the value written to disk.
  *
  * Intentionally bare — additional knobs (rate limits, allowed kinds,
  * storage caps) are layered in via the Moderation tab once the
  * community is running, so first-spawn doesn't accidentally encode an
  * opinion the user hasn't expressed yet.
  */
-export function defaultGrainConfig(opts: { bindHostPort: string }): GrainConfig {
+export function defaultGrainConfig(opts: { port: number }): GrainConfig {
   return {
     server: {
-      port: opts.bindHostPort,
+      port: `:${opts.port}`,
     },
   };
+}
+
+/**
+ * Coerce any `server.port` value to GRAIN's required port-only form.
+ * Accepts:
+ *   - bare ":7778"            → returned unchanged
+ *   - "127.0.0.1:7778"        → coerced to ":7778" (legacy nostr-station)
+ *   - "[::1]:7778"            → coerced to ":7778" (legacy nostr-station)
+ *   - 7778 (number)           → ":7778"
+ * Returns null when no port number can be extracted.
+ *
+ * Used by the supervisor at spawn time to auto-fix community dirs
+ * created by older nostr-station versions that wrote the host:port
+ * form — without this migration they're permanently broken.
+ */
+export function coerceGrainPortValue(raw: unknown): string | null {
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw > 0 && raw < 65536) {
+    return `:${raw}`;
+  }
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (s === '') return null;
+  // Already in port-only form.
+  if (/^:\d+$/.test(s)) return s;
+  // host:port — extract the port after the last colon, drop the host.
+  const i = s.lastIndexOf(':');
+  if (i < 0) return null;
+  const portStr = s.slice(i + 1);
+  if (!/^\d+$/.test(portStr)) return null;
+  const port = Number(portStr);
+  if (port <= 0 || port >= 65536) return null;
+  return `:${port}`;
 }
 
 // =====================================================================

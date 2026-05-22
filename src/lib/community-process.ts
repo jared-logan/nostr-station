@@ -41,7 +41,10 @@ import {
   readCommunityManifest, updateCommunityManifest,
   communityDir, communityConfigPath, listCommunities,
 } from './communities.js';
-import { readGrainConfig, writeGrainConfig, atomicWriteFileSync } from './community-yaml.js';
+import {
+  readGrainConfig, writeGrainConfig, atomicWriteFileSync,
+  coerceGrainPortValue,
+} from './community-yaml.js';
 import { grainBinPath } from './grain-installer.js';
 import { probeNvpnStatus, readNvpnNetworks, readNvpnRoster } from './nvpn.js';
 import { findBin } from './detect.js';
@@ -443,12 +446,10 @@ async function spawnChild(s: Supervision): Promise<void> {
   const dir  = communityDir(id);
   const bin  = grainBinPath();
 
-  // Resolve the bind host live each spawn. For private-network mode
-  // the active nvpn tunnel IP can change between sessions (different
-  // network, re-issued IP, etc.), and we'd rather pick up the current
-  // value than a stale cached one. prepareCommunityForStart() either
-  // returns a concrete bind host or a specific reason that surfaces
-  // in the log + manifest.
+  // Run the dependency preflight (nvpn up etc.) — kept here as a
+  // dedicated step even though the bind-IP rewrite below no longer
+  // depends on its result. Failure surfaces with a specific reason
+  // mapping to a UI recovery action.
   const prep = await prepareCommunityForStart(s.manifest);
   if (!prep.ok) {
     s.log.error(`prepare failed: ${prep.reason}`);
@@ -456,19 +457,25 @@ async function spawnChild(s: Supervision): Promise<void> {
     throw new Error(`prepare failed: ${prep.reason}`);
   }
 
-  // Rewrite config.yml's server.port if the resolved bind differs from
-  // what's on disk. Always atomic so GRAIN's hot-reload-on-file-change
-  // never observes a torn file. Only write when the value actually
-  // changes — keeps a moderator's `git status` quiet on a no-op spawn.
-  const targetBind = `${prep.bindHost}:${s.manifest.port}`;
+  // Auto-migrate config.yml's server.port to GRAIN's required
+  // port-only form. Older nostr-station versions wrote "host:port"
+  // (e.g. "127.0.0.1:7778") which GRAIN's validator REJECTS at
+  // startup ("must start with ':'"). Without this migration,
+  // community dirs created by older builds are permanently broken.
+  // coerceGrainPortValue handles every form we've ever written:
+  // bare ":7778" passes through, "host:port" gets the host stripped,
+  // numeric ports get prefixed. Atomic write so GRAIN's hot-reload
+  // never observes a torn file.
+  const targetPort = `:${s.manifest.port}`;
   try {
     const cfg = readGrainConfig(communityConfigPath(dir));
-    if (cfg.server.port !== targetBind) {
+    const coerced = coerceGrainPortValue(cfg.server.port) ?? targetPort;
+    if (cfg.server.port !== coerced) {
       writeGrainConfig(communityConfigPath(dir), {
         ...cfg,
-        server: { ...cfg.server, port: targetBind },
+        server: { ...cfg.server, port: coerced },
       });
-      s.log.info(`rewrote bind to ${targetBind} (was ${cfg.server.port})`);
+      s.log.info(`migrated server.port "${cfg.server.port}" → "${coerced}" (GRAIN requires port-only form)`);
     }
   } catch (e: any) {
     const msg = `failed to rewrite config.yml: ${(e?.message ?? '').slice(0, 200)}`;
@@ -477,9 +484,12 @@ async function spawnChild(s: Supervision): Promise<void> {
     throw new Error(msg);
   }
 
-  // Cache the discovered tunnel IP in the manifest so the UI can render
-  // it without a fresh nvpn probe (and so a `nostr-station status --json`
-  // dump reflects what the relay was actually bound to last spawn).
+  // Cache the discovered tunnel IP in the manifest so the UI can show
+  // members "this is the address you connect to". Distinct from the
+  // bind interface (which GRAIN ignores per its port-only validator;
+  // it binds to ALL interfaces unconditionally). The tunnel IP is the
+  // mesh-side address members reach via nvpn — same value, different
+  // semantic role now.
   if (s.manifest.privacyMode === 'private-network'
       && s.manifest.nvpnTunnelIp !== prep.bindHost) {
     s.manifest = updateCommunityManifest(id, { nvpnTunnelIp: prep.bindHost });
