@@ -18621,6 +18621,14 @@ AuthScreen = (() => {
   const root = $('auth-root');
   let pollTimer = null;
   let pollAbort = null;
+  // Fires 20s after a QR is painted to surface a fallback link to the
+  // "Paste bunker URL" tab. Most Amber pairings approve within a few
+  // seconds; anything past 20s usually means Amber never received the
+  // connect request (often a relay-routing issue), and the bunker URL
+  // path uses a totally different code path that's more reliable.
+  // Cleared in stopPoll() along with the poll timer so a tab switch /
+  // refresh / successful sign-in doesn't leave a stray timer behind.
+  let troubleTimer = null;
 
   // QR session is pinned for the lifetime of the screen: one POST to
   // /api/auth/bunker-connect per displayed code. Polling, tab switching,
@@ -18653,6 +18661,7 @@ AuthScreen = (() => {
   function stopPoll() {
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     if (pollAbort) { pollAbort.abort(); pollAbort = null; }
+    if (troubleTimer) { clearTimeout(troubleTimer); troubleTimer = null; }
   }
 
   async function render() {
@@ -18970,6 +18979,10 @@ AuthScreen = (() => {
         <div class="auth-status-line" id="auth-qr-status">
           <span class="pulse"></span>Waiting for Amber…
         </div>
+        <div class="auth-qr-hint" id="auth-qr-hint" hidden>
+          Not seeing a prompt in Amber?
+          <a href="#" id="auth-qr-hint-link">Try the bunker URL tab instead →</a>
+        </div>
         <button id="auth-qr-refresh" style="display:none">refresh QR</button>
       </div>
     `;
@@ -18981,6 +18994,22 @@ AuthScreen = (() => {
       stopPoll();
       renderQrTab(body);
     });
+    $('auth-qr-hint-link').addEventListener('click', (e) => {
+      e.preventDefault();
+      // Click the URL tab the same way the user would — keeps the active-
+      // class bookkeeping in one place (the tab-button click handler in
+      // render()) and avoids duplicating the activateTab + class-toggle
+      // dance here.
+      const urlTab = document.querySelector('.auth-tabs button[data-tab="url"]');
+      if (urlTab) urlTab.click();
+    });
+    // Surface the bunker-URL fallback if the QR hasn't paid off within
+    // 20s — most successful Amber pairings approve in < 5s, so 20s of
+    // silence is a strong signal Amber never saw the connect request.
+    troubleTimer = setTimeout(() => {
+      const hint = $('auth-qr-hint');
+      if (hint) hint.hidden = false;
+    }, 20_000);
 
     pollBunkerSession(start.ephemeralPubkey, {
       onTimeout: () => {
