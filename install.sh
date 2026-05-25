@@ -171,7 +171,14 @@ log "Installing dependencies…"
 npm ci --no-audit --no-fund
 
 log "Building…"
-npm run build --silent
+# STATION_SKIP_DITTO=1 short-circuits scripts/fetch-ditto.mjs so the
+# Ditto source build (git clone soapbox-pub/ditto + npm ci on 1k+
+# packages + vite build, typically 3-5 min) doesn't pad the install.
+# The Client panel detects a missing dist/ditto/ at runtime and shows
+# a "Build Ditto now" button that runs the build on demand — users
+# opt into the wait the first time they actually open the panel,
+# rather than every installer paying for it upfront.
+STATION_SKIP_DITTO=1 npm run build --silent
 
 # Wrapper script needs the execute bit. We tracked it as 0755 in git but a
 # fresh clone in some environments (umask 0077, ZIP downloads) lands it

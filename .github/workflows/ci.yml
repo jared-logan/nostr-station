@@ -35,7 +35,13 @@ jobs:
         run: npm test
 
       - name: TypeScript build
-        run: npm run build
+        # STATION_SKIP_DITTO=1 short-circuits scripts/fetch-ditto.mjs.
+        # CI's smoke test exercises dist/cli.js, not the bundled Ditto
+        # SPA, and the source build clones soapbox-pub/ditto + runs npm
+        # ci on 1k+ packages (~3-5 min, uncached). Publish-time builds
+        # (npm publish → prepublishOnly) DO build Ditto — that's where
+        # the artifact actually needs to ship.
+        run: STATION_SKIP_DITTO=1 npm run build
 
       - name: Verify dist output exists
         run: |

@@ -1,58 +1,94 @@
 #!/usr/bin/env node
-// Fetch + extract Ditto's pre-built web release into dist/ditto/ so the
-// dashboard can serve it as embedded static files.
+// Build Ditto from source with a baked nostr-station ditto.json so the
+// dashboard's Client panel can serve it as embedded static files.
 //
-// Ditto (https://about.ditto.pub/self-hosting) ships as a static SPA —
-// no backend, no DB, just HTML/CSS/JS. We bundle it as part of our
-// build pipeline (call from `npm run build`) so the Client panel can
-// iframe a local copy instead of redirecting offsite or maintaining our
-// own client.
+// Why source-compile instead of fetching GitLab CI artifacts (the
+// previous approach):
+//   - Ditto's `ditto.json` is read at *build time* per Ditto's docs
+//     (https://about.ditto.pub/self-hosting). Dropping a JSON file
+//     into a pre-built bundle has no effect, so the custom theme /
+//     relays / appName / blossom servers we wanted never took.
+//   - With a source build, our ditto.json drives Ditto's actual UI
+//     (theme colors, fonts, background, title) AND the NIP-89 client
+//     tag via `appName`: Ditto's useNostrPublish hook appends
+//     ["client", appName, …] to every outgoing kind-1/6/7/1111
+//     event. Setting appName: "nostr-station" gives every post from
+//     the Client panel network-wide attribution.
+//   - Pinned to a specific upstream commit (DITTO_REF below) instead
+//     of rolling-latest from a third party's CI — bumps are
+//     deliberate and reviewable.
+//
+// Pipeline:
+//   1. Clone soapbox-pub/ditto pinned to DITTO_REF into .ditto-src/
+//   2. Write ditto.json at the clone root (read at build time)
+//   3. npm ci + npm run build inside the clone
+//   4. Copy <clone>/dist → dist/ditto/
+//   5. applyBranding() patches over the build for things ditto.json
+//      doesn't cover (favicon swap, og:* / twitter:* meta cleanup,
+//      manifest name).
 //
 // Behavior:
-//   - Idempotent: re-running with an already-extracted dist/ditto/
-//     skips the download. Force-refresh by deleting dist/ditto/.
-//   - STATION_SKIP_DITTO=1 short-circuits the fetch entirely (CI builds
-//     that don't need Ditto, network-air-gapped installs).
-//   - Failure is NON-FATAL — we log a warning and continue. The
-//     dashboard's Client panel detects a missing index.html at runtime
-//     and surfaces a clear "Ditto not installed" message with a retry
-//     hint, so the rest of nostr-station still boots fine.
+//   - Idempotent: re-running with an already-built dist/ditto/ at the
+//     same DITTO_REF skips the clone+build. `npm run update-ditto`
+//     deletes dist/ditto/ to force a fresh rebuild. Bumping DITTO_REF
+//     also forces a rebuild on next run.
+//   - STATION_SKIP_DITTO=1 short-circuits entirely (CI builds, air-
+//     gapped installs).
+//   - Failure is NON-FATAL — log a warning and continue. The Client
+//     panel detects a missing index.html at runtime and surfaces a
+//     clear "Ditto not installed" message with a retry hint, so the
+//     rest of nostr-station still boots.
 //
-// Source: GitLab CI artifacts from the `build-web` job on `main`.
-// Per Ditto's docs that link is "the latest pre-built release". For
-// reproducible installs you could pin to a specific job id, but the
-// rolling-latest tracks upstream improvements automatically.
+// The filename is kept as fetch-ditto.mjs (not renamed to build-ditto.mjs)
+// so existing references in src/lib/web-server.ts, README, and shell
+// muscle memory keep working. The work it does is now "build" but the
+// intent — "make Ditto present in dist/ditto/" — is unchanged.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import zlib from 'node:zlib';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const DITTO_URL = 'https://gitlab.com/api/v4/projects/79646323/jobs/artifacts/main/download?job=build-web';
+// ─── Upstream pin ─────────────────────────────────────────────────────
+// To bump: pick a SHA on soapbox-pub/ditto's `main` branch that you've
+// validated (CI green, no breaking ditto.json schema changes), paste it
+// here, run `npm run update-ditto`, smoke-test the Client panel. The
+// ditto.json schema is strict (`unknown keys fail the build`), so any
+// field rename upstream surfaces as a loud build failure rather than a
+// silent regression.
+const DITTO_REPO = 'https://gitlab.com/soapbox-pub/ditto.git';
+const DITTO_REF  = '7a5820ca93f833b56cf368fc40c91e42c63f912f';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT  = path.resolve(here, '..');
-const TARGET_DIR = path.resolve(REPO_ROOT, 'dist', 'ditto');
-const SENTINEL   = path.join(TARGET_DIR, 'index.html');
-// Separate sentinel for the branding-applied state. If extraction
-// succeeded but branding wasn't applied yet (first build after the
-// branding feature lands), we re-apply without re-downloading.
+const REPO_ROOT   = path.resolve(here, '..');
+const SRC_DIR     = path.resolve(REPO_ROOT, '.ditto-src');
+const TARGET_DIR  = path.resolve(REPO_ROOT, 'dist', 'ditto');
+const SENTINEL          = path.join(TARGET_DIR, 'index.html');
 const BRANDING_SENTINEL = path.join(TARGET_DIR, '.nostr-station-branded');
+// Records the upstream SHA the current dist/ditto/ was built from. If
+// DITTO_REF is bumped and this file doesn't match, we rebuild even
+// without `npm run update-ditto`.
+const BUILT_FROM_SENTINEL = path.join(TARGET_DIR, '.ditto-built-from');
 
 async function main() {
   if (process.env.STATION_SKIP_DITTO === '1') {
-    console.log('[ditto] STATION_SKIP_DITTO=1 — skipping fetch.');
+    console.log('[ditto] STATION_SKIP_DITTO=1 — skipping build.');
     return;
   }
-  const needsFetch = !fs.existsSync(SENTINEL);
+  const builtFrom = readBuiltFrom();
+  const needsBuild    = !fs.existsSync(SENTINEL) || builtFrom !== DITTO_REF;
   const needsBranding = !fs.existsSync(BRANDING_SENTINEL);
-  if (!needsFetch && !needsBranding) {
-    console.log(`[ditto] already present + branded at ${path.relative(process.cwd(), TARGET_DIR)} — skipping.`);
-    console.log(`[ditto] (run \`npm run update-ditto\` to force a fresh download)`);
+  if (!needsBuild && !needsBranding) {
+    console.log(`[ditto] already built (${DITTO_REF.slice(0, 7)}) + branded at ${path.relative(process.cwd(), TARGET_DIR)} — skipping.`);
+    console.log(`[ditto] (run \`npm run update-ditto\` to force a fresh build)`);
     return;
   }
-  if (needsFetch) {
-    await fetchAndExtract();
+  if (needsBuild) {
+    if (builtFrom && builtFrom !== DITTO_REF) {
+      console.log(`[ditto] DITTO_REF changed (${builtFrom.slice(0, 7)} → ${DITTO_REF.slice(0, 7)}) — rebuilding.`);
+    }
+    const ok = await cloneAndBuild();
+    if (!ok) return;
   } else {
     console.log(`[ditto] bundle present but unbranded — applying branding only.`);
   }
@@ -61,172 +97,172 @@ async function main() {
   }
 }
 
-async function fetchAndExtract() {
+function readBuiltFrom() {
+  try { return fs.readFileSync(BUILT_FROM_SENTINEL, 'utf8').trim(); }
+  catch { return null; }
+}
 
-  console.log(`[ditto] fetching ${DITTO_URL}`);
-  let buf;
-  try {
-    const res = await fetch(DITTO_URL, { redirect: 'follow' });
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-    buf = Buffer.from(await res.arrayBuffer());
-    console.log(`[ditto] downloaded ${(buf.length / (1024 * 1024)).toFixed(1)} MiB`);
-  } catch (e) {
-    console.warn(`[ditto] WARN: download failed — ${e.message}`);
-    console.warn(`[ditto] Continuing without Ditto. The Client panel will show "Ditto not installed" at runtime.`);
-    console.warn(`[ditto] Retry with: npm run build  (after fixing network)`);
-    return;
+async function cloneAndBuild() {
+  // Wipe any stale clone so the SHA pin is honored deterministically —
+  // a half-checked-out tree from a prior interrupted run is worse than
+  // starting over.
+  if (fs.existsSync(SRC_DIR)) {
+    fs.rmSync(SRC_DIR, { recursive: true, force: true });
   }
 
-  // Extract using a pure-Node ZIP reader. We previously shelled out to
-  // `unzip`, but it isn't reliably on PATH (minimal docker images, some
-  // managed/cloud envs, fresh Windows installs without git-bash) and the
-  // "Fetch Ditto" dashboard button surfaced the failure as ENOENT. zlib
-  // is built into Node, so this avoids both the spawn and a new dep.
+  console.log(`[ditto] cloning ${DITTO_REPO} @ ${DITTO_REF.slice(0, 7)}`);
+  // --filter=blob:none + --no-checkout + fetch by SHA gives us a shallow
+  // partial clone of just the pinned commit. Faster than a full clone,
+  // and the SHA fetch works against any commit on the remote (including
+  // non-tip commits, which a plain `git clone --depth 1 --branch <sha>`
+  // can't do because --branch needs a ref name not a SHA).
+  if (!run('git', ['clone', '--filter=blob:none', '--no-checkout', DITTO_REPO, SRC_DIR])) return false;
+  if (!run('git', ['-C', SRC_DIR, 'fetch', '--depth', '1', 'origin', DITTO_REF])) return false;
+  if (!run('git', ['-C', SRC_DIR, 'checkout', DITTO_REF])) return false;
+
+  // Write ditto.json BEFORE the build — Ditto reads it at build time
+  // and bakes the values into the resulting bundle.
+  const dittoJson = buildDittoConfig();
+  try {
+    fs.writeFileSync(
+      path.join(SRC_DIR, 'ditto.json'),
+      JSON.stringify(dittoJson, null, 2),
+    );
+    console.log('[ditto] wrote ditto.json (theme, relays, appName=nostr-station)');
+  } catch (e) {
+    console.warn(`[ditto] WARN: ditto.json write failed — ${e.message}`);
+    return false;
+  }
+
+  console.log('[ditto] running npm ci (this can take a minute)…');
+  if (!run('npm', ['ci', '--no-audit', '--no-fund'], { cwd: SRC_DIR })) {
+    console.warn(`[ditto] WARN: npm ci failed. Continuing without Ditto.`);
+    return false;
+  }
+
+  console.log('[ditto] running npm run build…');
+  if (!run('npm', ['run', 'build'], { cwd: SRC_DIR })) {
+    console.warn(`[ditto] WARN: build failed. Continuing without Ditto.`);
+    return false;
+  }
+
+  // Copy dist out into our published location.
+  const builtDist = path.join(SRC_DIR, 'dist');
+  if (!fs.existsSync(path.join(builtDist, 'index.html'))) {
+    console.warn(`[ditto] WARN: built dist/index.html not found in ${builtDist}`);
+    return false;
+  }
+  fs.rmSync(TARGET_DIR, { recursive: true, force: true });
   fs.mkdirSync(TARGET_DIR, { recursive: true });
+  fs.cpSync(builtDist, TARGET_DIR, { recursive: true });
+
   try {
-    extractZip(buf, TARGET_DIR);
+    fs.writeFileSync(BUILT_FROM_SENTINEL, DITTO_REF + '\n');
   } catch (e) {
-    console.warn(`[ditto] WARN: extraction failed — ${e.message}`);
-    return;
+    console.warn(`[ditto] WARN: built-from sentinel write failed — ${e.message}`);
   }
 
-  // GitLab CI artifact zips occasionally wrap the build output in a
-  // top-level subdirectory (e.g. dist/, build/). Flatten: if there's no
-  // index.html at TARGET_DIR root but one subdir contains it, hoist
-  // that subdir's contents up.
-  if (!fs.existsSync(SENTINEL)) {
-    const entries = fs.readdirSync(TARGET_DIR);
-    let hoisted = false;
-    for (const e of entries) {
-      const sub = path.join(TARGET_DIR, e);
-      let stat;
-      try { stat = fs.statSync(sub); } catch { continue; }
-      if (!stat.isDirectory()) continue;
-      if (!fs.existsSync(path.join(sub, 'index.html'))) continue;
-      console.log(`[ditto] hoisting build output from ${e}/`);
-      for (const f of fs.readdirSync(sub)) {
-        fs.renameSync(path.join(sub, f), path.join(TARGET_DIR, f));
-      }
-      fs.rmdirSync(sub);
-      hoisted = true;
-      break;
-    }
-    if (!hoisted) {
-      console.warn(`[ditto] WARN: extracted zip but no index.html found in ${TARGET_DIR}`);
-      console.warn(`[ditto] contents: ${entries.join(', ')}`);
-      return;
-    }
-  }
+  console.log(`[ditto] built to ${path.relative(process.cwd(), TARGET_DIR)}`);
 
-  console.log(`[ditto] extracted to ${path.relative(process.cwd(), TARGET_DIR)}`);
+  // Best-effort cleanup of the source tree — it's gitignored and not
+  // referenced after the copy. Skipping the rm on failure is fine; the
+  // next run will wipe it anyway before re-cloning.
+  try {
+    fs.rmSync(SRC_DIR, { recursive: true, force: true });
+  } catch {}
+
+  return true;
 }
 
-// Pure-Node ZIP extractor. Supports the only two compression methods
-// GitLab CI artifact zips use in practice: stored (0) and deflate (8).
-// Walks the Central Directory from the End-of-Central-Directory record
-// rather than scanning sequentially, which is the standard ZIP read path
-// and tolerates trailing junk / signed archives gracefully.
-function extractZip(buf, destDir) {
-  const EOCD_SIG = 0x06054b50;
-  const CD_SIG   = 0x02014b50;
-  const LFH_SIG  = 0x04034b50;
-
-  // EOCD lives within the last 22 + 65535 bytes (the trailing comment
-  // field is capped at 64 KiB by the spec). Scan backwards.
-  let eocdOff = -1;
-  const minOff = Math.max(0, buf.length - (22 + 0xffff));
-  for (let i = buf.length - 22; i >= minOff; i--) {
-    if (buf.readUInt32LE(i) === EOCD_SIG) { eocdOff = i; break; }
+function run(cmd, args, opts = {}) {
+  const res = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
+  if (res.error) {
+    console.warn(`[ditto] WARN: ${cmd} ${args.join(' ')} errored — ${res.error.message}`);
+    return false;
   }
-  if (eocdOff < 0) throw new Error('not a ZIP (no EOCD record)');
-
-  const totalEntries = buf.readUInt16LE(eocdOff + 10);
-  const cdOffset     = buf.readUInt32LE(eocdOff + 16);
-  // ZIP64 signal: 0xffffffff in the 32-bit fields. The 6 MiB GitLab
-  // artifact won't hit this, but bail loudly if it ever does rather
-  // than silently corrupt.
-  if (cdOffset === 0xffffffff) throw new Error('ZIP64 archive not supported');
-
-  const destResolved = path.resolve(destDir);
-  let off = cdOffset;
-  for (let i = 0; i < totalEntries; i++) {
-    if (buf.readUInt32LE(off) !== CD_SIG) {
-      throw new Error(`malformed central directory at entry ${i}`);
-    }
-    const method     = buf.readUInt16LE(off + 10);
-    const compSize   = buf.readUInt32LE(off + 20);
-    const nameLen    = buf.readUInt16LE(off + 28);
-    const extraLen   = buf.readUInt16LE(off + 30);
-    const commentLen = buf.readUInt16LE(off + 32);
-    const extAttr    = buf.readUInt32LE(off + 38);
-    const localOff   = buf.readUInt32LE(off + 42);
-    const name       = buf.subarray(off + 46, off + 46 + nameLen).toString('utf8');
-    off += 46 + nameLen + extraLen + commentLen;
-
-    if (buf.readUInt32LE(localOff) !== LFH_SIG) {
-      throw new Error(`malformed local file header for ${name}`);
-    }
-    const lfhNameLen  = buf.readUInt16LE(localOff + 26);
-    const lfhExtraLen = buf.readUInt16LE(localOff + 28);
-    const dataOff = localOff + 30 + lfhNameLen + lfhExtraLen;
-
-    // Path-traversal guard — refuse any entry that escapes destDir.
-    const outPath = path.resolve(destResolved, name);
-    if (outPath !== destResolved && !outPath.startsWith(destResolved + path.sep)) {
-      throw new Error(`refusing to extract outside dest: ${name}`);
-    }
-
-    // Directory entries: name ends with '/', no data.
-    if (name.endsWith('/')) {
-      fs.mkdirSync(outPath, { recursive: true });
-      continue;
-    }
-
-    const compData = buf.subarray(dataOff, dataOff + compSize);
-    let data;
-    if (method === 0) {
-      data = compData;
-    } else if (method === 8) {
-      data = zlib.inflateRawSync(compData);
-    } else {
-      throw new Error(`unsupported compression method ${method} for ${name}`);
-    }
-
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    fs.writeFileSync(outPath, data);
-
-    // Preserve Unix mode bits if present (upper 16 bits of external
-    // attrs when "version made by" is Unix). Bundled JS/CSS/HTML don't
-    // need exec bits, but matches what `unzip` did before.
-    const unixMode = (extAttr >>> 16) & 0o777;
-    if (unixMode) {
-      try { fs.chmodSync(outPath, unixMode); } catch {}
-    }
+  if (res.status !== 0) {
+    console.warn(`[ditto] WARN: ${cmd} ${args.join(' ')} exited ${res.status}`);
+    return false;
   }
+  return true;
 }
 
-// Overlay nostr-station branding on top of the extracted Ditto bundle.
-// Three categories:
-//   1. Files we own outright — copy our logo over Ditto's logo.svg.
-//      Their <link rel="icon" type="image/svg+xml" href="/logo.svg">
-//      makes this the favicon too, so one file covers both surfaces.
-//   2. HTML / manifest patches — title, description, og:* / twitter:*
-//      meta tags, theme-color, manifest name + short_name. Regex
-//      replacements on the strings Ditto's pre-built bundle ships with.
-//   3. Speculative ditto.json — Ditto's docs say its config is read
-//      "at build time", which strictly speaking means a runtime drop-in
-//      shouldn't take effect. We ship it anyway: zero cost if ignored,
-//      free theming + default-relay alignment if Ditto's runtime ever
-//      starts honoring it.
+// Authoritative ditto.json. Schema is enforced strictly at Ditto build
+// time by DittoConfigSchema (see /tmp/upstream src/lib/schemas.ts —
+// AppConfigSchema.partial().strict()). Unknown keys fail the build, so
+// every field below has been verified against upstream at DITTO_REF.
 //
-// Idempotent: writes .nostr-station-branded as a sentinel file on
-// success. Re-runs short-circuit unless the sentinel is missing.
-function applyBranding() {
-  console.log('[ditto] applying nostr-station branding...');
+// HSL colors are space-separated "H S% L%" per Ditto's CoreThemeColors
+// schema. Values sourced from nostr-station's palette:
+//   --bg     #0a0a0a  → 0 0% 4%
+//   --text   #c8c8d0  → 240 6% 80%
+//   --accent #7B68EE  → 248 80% 67% (mediumslateblue)
+function buildDittoConfig() {
+  return {
+    // ─── Identity ─────────────────────────────────────────────────
+    // appName + client together drive the full 4-element NIP-89 client
+    // tag that Ditto's useNostrPublish hook appends to every outgoing
+    // kind-1/6/7/1111 event:
+    //   ["client", "nostr-station",
+    //    "31990:291c75d…:nostr-station",
+    //    "wss://relay.nsite.lol"]
+    // The naddr1 below decodes to the kind-31990 client handler
+    // coordinate for nostr-station (pubkey 291c75d… — same project
+    // identity that anchors the landing-page nsite and signs ngit
+    // merge events). The handler event itself is published via
+    // `npm run publish-client-handler` (see scripts/publish-client-handler.mjs);
+    // re-publishes are idempotent (NIP-33 addressable event).
+    appName: 'nostr-station',
+    client: 'naddr1qvzqqqru7cpzq2guwhvn0fzlv6sjp8uw5es3ma6y33vmx5n9yrrxegkde5mlr0a7qy2hwumn8ghj7un9d3shjtnwwd5hgefwd3hkcqqddehhxarj94ehgct5d9hkuy7cpf4',
+    homePage: 'feed',
 
-  // 1. Logo (also serves as favicon via the <link rel=icon> in Ditto's
-  //    index.html). nori.svg is nostr-station's mark — same SVG used
-  //    elsewhere in the dashboard for visual consistency.
+    // ─── Theme ────────────────────────────────────────────────────
+    theme: 'custom',
+    customTheme: {
+      title: 'nostr-station',
+      colors: {
+        background: '0 0% 4%',
+        text:       '240 6% 80%',
+        primary:    '248 80% 67%',
+      },
+    },
+
+    // ─── Relays ───────────────────────────────────────────────────
+    // Mirrors nostr-station's App Relays defaults. useAppRelays=true
+    // makes Ditto honor this list; updatedAt=0 so any user-side
+    // override (kind-10002 list, in-app changes) supersedes.
+    useAppRelays: true,
+    useUserRelays: false,
+    relayMetadata: {
+      relays: [
+        { url: 'wss://relay.damus.io',    read: true, write: true },
+        { url: 'wss://relay.nostr.band',  read: true, write: true },
+        { url: 'wss://nos.lol',           read: true, write: true },
+        { url: 'wss://relay.primal.net',  read: true, write: true },
+        { url: 'wss://relay.ditto.pub',   read: true, write: true },
+      ],
+      updatedAt: 0,
+    },
+  };
+}
+
+// Overlay nostr-station branding on top of the source-built bundle.
+// With ditto.json now honored, several historically-patched fields
+// (title, theme-color) are baked in already — but applying the regex
+// patches defensively is idempotent and forward-compatible if Ditto's
+// schema drops one of those fields in a future bump.
+//
+// Categories that ditto.json doesn't cover and still need patching:
+//   1. Logo SVG (we own the bytes, not just a name)
+//   2. og:* / twitter:* social cards (point at ditto.pub by default)
+//   3. PWA manifest.webmanifest install name + colors
+//
+// Idempotent: writes BRANDING_SENTINEL on success. Re-runs short-
+// circuit unless the sentinel is missing.
+function applyBranding() {
+  console.log('[ditto] applying nostr-station branding…');
+
+  // 1. Logo (also serves as favicon via Ditto's <link rel=icon>).
   const sourceLogo = path.join(REPO_ROOT, 'src', 'web', 'nori.svg');
   const targetLogo = path.join(TARGET_DIR, 'logo.svg');
   if (fs.existsSync(sourceLogo)) {
@@ -240,7 +276,11 @@ function applyBranding() {
     console.warn(`[ditto] WARN: source logo not found at ${sourceLogo}; keeping Ditto's default`);
   }
 
-  // 2a. index.html — title + description + og/twitter meta tags
+  // 2. index.html patches. ditto.json's `customTheme.title` controls
+  //    Ditto's IN-APP rendered title (sidebar, header) but doesn't
+  //    touch the <title> tag or social meta in the built index.html —
+  //    those come from Ditto's static index.html template, baked in
+  //    at build time. We still regex-patch them.
   const indexPath = path.join(TARGET_DIR, 'index.html');
   if (fs.existsSync(indexPath)) {
     try {
@@ -253,9 +293,8 @@ function applyBranding() {
         /<meta name="description" content="[^"]*"\s*\/?>/,
         '<meta name="description" content="nostr-station — Nostr-native dev environment. Public Nostr client powered by Ditto." />',
       );
-      // og:title / og:site_name / twitter:title — all the simple "Ditto"
-      // strings become "nostr-station". og:description / twitter:description
-      // get the same descriptor.
+      // og:title / og:site_name / twitter:title — generic strings
+      // mentioning "Ditto" become "nostr-station".
       html = html.replace(
         /(<meta\s+(?:property|name)="(?:og:title|og:site_name|twitter:title)"\s+content=")[^"]*("\s*\/?>)/g,
         '$1nostr-station$2',
@@ -264,8 +303,8 @@ function applyBranding() {
         /(<meta\s+(?:property|name)="(?:og:description|twitter:description)"\s+content=")[^"]*("\s*\/?>)/g,
         '$1Nostr-native dev environment$2',
       );
-      // og:url + og:image point at ditto.pub by default — drop them
-      // rather than redirect (we don't have a stable og image yet).
+      // og:url + og:image still point at ditto.pub by default; drop
+      // them rather than redirect (we don't have a stable og image yet).
       html = html.replace(
         /<meta\s+property="og:(?:url|image|image:width|image:height|image:type)"[^>]*>\s*\n?/g,
         '',
@@ -274,10 +313,17 @@ function applyBranding() {
         /<meta\s+name="twitter:image"[^>]*>\s*\n?/g,
         '',
       );
-      // theme-color — match nostr-station's dark background (#0a0a0a).
-      // Ditto's default ('#161b2e') is a deep navy; ours is near-black.
+      // theme-color — Ditto ships TWO tags (one per color-scheme media
+      // query) now. Match the dark one only; light mode keeps Ditto's
+      // default (we don't have a light-mode palette).
       html = html.replace(
-        /(<meta\s+name="theme-color"\s+content=")#161b2e(")/,
+        /(<meta\s+name="theme-color"\s+content=")#161b2e("\s+media="\(prefers-color-scheme:\s*dark\)"\s*\/?>)/,
+        '$1#0a0a0a$2',
+      );
+      // Fallback: also match a theme-color tag with no media query
+      // (older Ditto builds).
+      html = html.replace(
+        /(<meta\s+name="theme-color"\s+content=")#161b2e("\s*\/?>)/,
         '$1#0a0a0a$2',
       );
       fs.writeFileSync(indexPath, html);
@@ -287,9 +333,8 @@ function applyBranding() {
     }
   }
 
-  // 2b. manifest.webmanifest — PWA install name. Most users won't ever
-  //     install Ditto as a PWA from inside our iframe, but if they do,
-  //     it should say nostr-station.
+  // 3. manifest.webmanifest — PWA install name + colors. ditto.json
+  //    doesn't expose manifest fields, so this stays regex-driven.
   const manifestPath = path.join(TARGET_DIR, 'manifest.webmanifest');
   if (fs.existsSync(manifestPath)) {
     try {
@@ -300,65 +345,15 @@ function applyBranding() {
       if (typeof manifest.description === 'string') {
         manifest.description = 'nostr-station — Nostr-native dev environment.';
       }
-      // PWA chrome colors — when the user installs Ditto as a standalone
-      // app the OS uses these for the splash screen + title bar. Match
-      // nostr-station's --bg (#0a0a0a) and --accent (#7B68EE) so the
-      // installed app reads as nostr-station, not Ditto.
       manifest.background_color = '#0a0a0a';
       manifest.theme_color      = '#7B68EE';
       fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-      console.log('[ditto] patched manifest.webmanifest (name + short_name)');
+      console.log('[ditto] patched manifest.webmanifest (name + colors)');
     } catch (e) {
       console.warn(`[ditto] WARN: manifest patch failed — ${e.message}`);
     }
   }
 
-  // 3. ditto.json — drop-in config. Per Ditto's docs this is read at
-  //    build time, so a runtime drop-in shouldn't take effect on the
-  //    pre-built bundle. Shipping anyway because: (a) zero cost if
-  //    ignored, (b) free theme + relay-list alignment if Ditto's
-  //    runtime ever starts honoring it, (c) makes our intent
-  //    legible to anyone inspecting the bundle ("here's what
-  //    nostr-station WANTS Ditto to look like").
-  //
-  //    Color values are HSL space-separated (H S% L%), matching
-  //    Ditto's customTheme format. Sourced from nostr-station's
-  //    palette (--bg #0a0a0a, --text #c8c8d0, --accent #7B68EE).
-  //    Relay list mirrors our App Relays defaults.
-  const dittoJson = {
-    theme: 'custom',
-    customTheme: {
-      colors: {
-        background: '0 0% 4%',
-        text:       '240 6% 80%',
-        primary:    '248 80% 67%',
-      },
-    },
-    relayMetadata: {
-      relays: [
-        { url: 'wss://relay.damus.io',    read: true, write: true },
-        { url: 'wss://relay.nostr.band',  read: true, write: true },
-        { url: 'wss://nos.lol',           read: true, write: true },
-        { url: 'wss://relay.primal.net',  read: true, write: true },
-        { url: 'wss://relay.ditto.pub',   read: true, write: true },
-      ],
-      updatedAt: 0,
-    },
-  };
-  try {
-    fs.writeFileSync(
-      path.join(TARGET_DIR, 'ditto.json'),
-      JSON.stringify(dittoJson, null, 2),
-    );
-    console.log('[ditto] wrote ditto.json (speculative — may be ignored by pre-built bundle)');
-  } catch (e) {
-    console.warn(`[ditto] WARN: ditto.json write failed — ${e.message}`);
-  }
-
-  // Sentinel: any future `node scripts/fetch-ditto.mjs` invocation with
-  // the bundle present + this file present → skip both fetch and
-  // branding. `npm run update-ditto` (which deletes the whole dist/ditto
-  // dir) re-runs everything from scratch.
   try {
     fs.writeFileSync(BRANDING_SENTINEL, new Date().toISOString() + '\n');
     console.log('[ditto] branding complete.');

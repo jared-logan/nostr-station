@@ -2214,9 +2214,10 @@ export async function startWebServer(port: number): Promise<http.Server> {
           {
             bin:  process.execPath,
             args: [script],
-            // Generous timeout — the GitLab artifact zip pulls in
-            // 6 MiB but the API endpoint can be slow under load.
-            timeoutMs: 180_000,
+            // Source build = git clone + npm ci + npm run build, which
+            // typically takes 2–5 minutes on a warm box and longer on
+            // cold/slow networks. 10 min covers the slow case.
+            timeoutMs: 600_000,
           },
           res, req, root,
           { line: '$ node scripts/fetch-ditto.mjs', stream: 'stdout' },

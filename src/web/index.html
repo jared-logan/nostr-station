@@ -497,8 +497,10 @@
          v1 reads from identity.readRelays and signs via the persisted bunker
          pairing; private DMs (NIP-17) are intentionally deferred. -->
     <!-- CLIENT — embeds Ditto (https://about.ditto.pub) as a same-origin
-         iframe. nostr-station bundles Ditto's pre-built static SPA at
-         build time (scripts/fetch-ditto.mjs) and serves it from /ditto/*.
+         iframe. nostr-station compiles Ditto from source at build time
+         (scripts/fetch-ditto.mjs — pinned to a specific SHA, with a
+         baked nostr-station ditto.json driving theme + relays + the
+         NIP-89 client tag) and serves the resulting dist from /ditto/*.
          The dashboard keeps a slim chrome row (title + public chip +
          refresh) so the panel still feels native; everything inside the
          iframe is Ditto's own UX. Auth: NIP-07 (browser extension) carries
@@ -520,12 +522,14 @@
         <div id="client-ditto-missing" class="client-ditto-missing" hidden>
           <div class="client-ditto-missing-title">Ditto isn't bundled</div>
           <div class="muted" style="max-width:520px;text-align:center">
-            The embedded Ditto SPA failed to download during the last build.
-            Click below to fetch it now (~6 MiB from GitLab), or run
-            <code>npm run update-ditto</code> from the install directory and reload this panel.
+            The embedded Ditto SPA wasn't built during the last
+            install. Click below to build it now (clones soapbox-pub/ditto
+            and runs npm ci + npm run build — typically 2–5 min), or run
+            <code>npm run update-ditto</code> from the install directory
+            and reload this panel.
           </div>
           <div style="display:flex;gap:10px">
-            <button class="primary" id="client-ditto-install">Fetch Ditto now</button>
+            <button class="primary" id="client-ditto-install">Build Ditto now</button>
             <button id="client-ditto-retry">Reload</button>
           </div>
         </div>
