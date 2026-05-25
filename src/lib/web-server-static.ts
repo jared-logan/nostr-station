@@ -265,7 +265,7 @@ export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse):
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       error: 'ditto-not-bundled',
-      hint:  'run `npm run build` (or `npm run update-ditto`) to fetch the Ditto bundle.',
+      hint:  'run `npm run build` (or `npm run update-ditto`) to build the Ditto bundle.',
     }));
     return true;
   }
