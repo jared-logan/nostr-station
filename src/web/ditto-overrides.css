@@ -2,85 +2,102 @@
  *
  * Applied via a <link> tag injected at the end of dist/ditto/index.html
  * (see applyBranding() in scripts/fetch-ditto.mjs). Loaded after Ditto's
- * own compiled CSS — for equal specificity, cascade resolves to ours.
+ * own compiled CSS — at equal specificity, cascade resolves to ours.
  *
  * --------------------------------------------------------------------
- * History: prior attempts targeted only the .rounded-* utility surface
- * (e.g. `.rounded-md { border-radius: 5px !important }`). They were
- * delivered correctly by the server, fetched correctly by the browser,
- * but produced no visible change. Diagnosis (via DevTools + grep of
- * the built Ditto CSS):
+ * Strategy overview
  *
- *   1. Ditto declares `--radius: .75rem` as a CSS custom property and
- *      applies it via `border-radius: var(--radius)` directly in
- *      component rules. No .rounded-* class involved → no class
- *      selector to override.
- *   2. Compiled component CSS bakes raw `border-radius: 0.25rem` /
- *      `.375rem` / `1rem` / `1.25rem` declarations directly into
- *      rules. Also class-less.
- *   3. Tailwind v4's @layer ordering means .rounded-* utility
- *      overrides at equal specificity may still lose the cascade.
+ * Ditto is built with Tailwind v3 + shadcn primitives. Visual properties
+ * reach the DOM via three layers:
  *
- * Strategy: heavy hammer. Square EVERY element's corners by default,
- * then a narrow allow-list to preserve avatars (which Ditto wants
- * round, and the user agrees). Also override the --radius custom
- * property at the root to neutralize var(--radius) usage.
+ *   [1] Ditto's compiled Tailwind output (static, in dist/assets/*.css)
+ *   [2] THIS OVERLAY (static, loaded after [1] via the injected <link>)
+ *   [3] Ditto's runtime <style> tags that useApplyTheme / fontLoader /
+ *       useApplyBackground append to <head> on every theme change:
+ *         <style id="theme-vars">        — :root { color tokens }
+ *         <style id="theme-font-overrides"> — html { font-family: !important }
+ *         <style id="theme-background">  — body { background-image }
  *
- * Allow-list rationale: Ditto's Avatar component
- * (src/components/ui/avatar.tsx) renders `<div class="...
- * shrink-0 overflow-hidden ... rounded-full">` for default circular
- * avatars. Inline image avatars use `<img class="rounded-full">`.
- * Pill nav buttons use `rounded-full` WITHOUT `overflow-hidden`,
- * so the allow-list (which requires both) leaves them squared —
- * which is exactly the look-and-feel goal: nostr-station's sharp
- * dashboard chrome extended to Ditto's surfaces.
+ * For each visual property we pick the cheapest layer that beats the
+ * relevant runtime injection. Radii live here (Ditto's runtime never
+ * touches --radius). Font lock starts here as insurance, with the full
+ * defense — drop customTheme.font from ditto.json + MutationObserver in
+ * /theme.js — landing in PR B. Color tokens are LEFT to Ditto's runtime
+ * derivation from the customTheme.colors baked into ditto.json: the
+ * brief defers user-themable colors (background, accent) to whatever
+ * the user publishes via kind-16767, so we don't fight those.
+ *
+ * Avatar shape preservation
+ *
+ *   - Default circular avatars use Tailwind's `rounded-full` keyword,
+ *     which resolves to border-radius: 9999px — independent of --radius
+ *     and untouched by our class-specific overrides below.
+ *   - Custom emoji-mask avatars use CSS mask-image (no border-radius
+ *     involvement at all — see Ditto's src/lib/avatarShape.ts).
+ *   - The explicit allow-list rule at the bottom of this file is
+ *     defense-in-depth in case a future selector accidentally targets
+ *     a rounded-full avatar wrapper.
  */
 
-/* ───── Font ────────────────────────────────────────────────────
- * Same stack as src/web/app.css's --font-mono. Re-applied here in
- * the overlay because Ditto's runtime theme-sync (fetched from
- * Nostr) can clobber the customTheme.font we baked into ditto.json.
- * Ditto's fontLoader.ts injects `html { font-family: X !important }`
- * — our overlay loads later in the cascade so for equal specificity
- * + !important, ours wins. Specifically targets `html` only (not
- * `*`) so icon fonts that explicitly set their own family still
- * render correctly. */
+/* ───── Font stack (insurance, not lock) ─────────────────────────
+ * Same stack as src/web/app.css's --font-mono. This rule loses the
+ * cascade race against Ditto's <style id="theme-font-overrides">
+ * because both sides use !important and Ditto's tag is appended later
+ * in <head>. PR B's full defense:
+ *   1. Drop customTheme.font from ditto.json so theme-font-overrides
+ *      is not written in the steady state.
+ *   2. MutationObserver in /theme.js to remove the tag if a user
+ *      publishes a kind-16767 with a font.
+ * Until PR B lands, this rule covers the (currently rare) case where
+ * the user has neither customTheme.font set nor a published theme.
+ */
 html {
   font-family: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace !important;
 }
 
-/* ───── Kill the --radius custom property ────────────────────────
- * Neutralizes every `border-radius: var(--radius)` rule baked into
- * Ditto's component CSS. Higher-priority root-level declaration
- * shadows Ditto's :root { --radius: .75rem; } default. */
-html {
-  --radius: 0 !important;
-  --radius-sm: 0 !important;
-  --radius-md: 0 !important;
-  --radius-lg: 0 !important;
-  --radius-xl: 0 !important;
-}
-
-/* ───── Heavy hammer: square everything ──────────────────────────
- * Catches all the raw `border-radius: <length>` declarations
- * baked into compiled component CSS that no class selector can
- * reach. Specificity is (0,1,1) which beats most class-only rules,
- * including Tailwind v4 @layer utilities. */
-html * {
-  border-radius: 0 !important;
-}
-
-/* ───── Avatar preservation ──────────────────────────────────────
- * Ditto's Avatar component (src/components/ui/avatar.tsx) marks
- * default circular avatars with two distinguishing classes:
- * `overflow-hidden` (to clip the image) AND `rounded-full`. Pill
- * nav buttons use `rounded-full` WITHOUT `overflow-hidden`, so they
- * fall through the heavy hammer above.
+/* ───── Border-radius scale ───────────────────────────────────────
+ * Maps Tailwind's compiled rounded-{lg,md,sm,xs} utilities to nostr-
+ * station's --r-lg (8px) / --r (5px) / --r-sm (3px) / squared scale
+ * from src/web/app.css:38-40.
  *
- * Also preserve inline <img class="rounded-full"> avatars used in
- * places where Ditto skips the Avatar wrapper.
+ * Ditto's tailwind.config.ts:131-141 derives each size from a single
+ * --radius custom property via calc():
+ *     rounded-lg → var(--radius)
+ *     rounded-md → calc(var(--radius) - 2px)
+ *     rounded-sm → calc(var(--radius) - 4px)
+ *     rounded-xs → calc(var(--radius) - 8px)
  *
- * Specificity (0,2,1) reliably beats the heavy hammer's (0,1,1). */
+ * Setting --radius alone would force a 1px compromise between lg and
+ * md (no single base value produces 8/5/3/0 exactly). Belt-and-
+ * suspenders: also override the compiled .rounded-* classes directly
+ * so any code that bypasses Tailwind utilities and reads var(--radius)
+ * inline still gets a sane value, while class-driven UI hits the
+ * exact dashboard tokens.
+ *
+ * rounded-full is intentionally untouched — preserves circular
+ * avatars (Avatar component, custom emoji-mask shapes) and any other
+ * intentional pill UI. Sidebar nav pills and post action buttons get
+ * narrowly-targeted overrides in PR C / PR D.
+ */
+:root {
+  --radius:    7px !important;
+  --radius-lg: 8px !important;
+  --radius-md: 5px !important;
+  --radius-sm: 3px !important;
+  --radius-xs: 0   !important;
+}
+.rounded-lg { border-radius: 8px !important; }
+.rounded-md { border-radius: 5px !important; }
+.rounded-sm { border-radius: 3px !important; }
+.rounded-xs { border-radius: 0   !important; }
+
+/* ───── Avatar shape preservation ────────────────────────────────
+ * Defense-in-depth. With the previous heavy-hammer rule
+ * (`html * { border-radius: 0 !important }` from PR #193) removed,
+ * Tailwind's `rounded-full` survives naturally on avatars — but
+ * cheap insurance against any future overlay rule that accidentally
+ * matches an avatar wrapper. Specificity (0,2,1) beats class-only
+ * selectors. */
 html [class~="overflow-hidden"][class~="rounded-full"],
 html img.rounded-full {
   border-radius: 9999px !important;

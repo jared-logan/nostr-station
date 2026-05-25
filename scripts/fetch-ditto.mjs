@@ -71,30 +71,59 @@ const BRANDING_SENTINEL = path.join(TARGET_DIR, '.nostr-station-branded');
 // without `npm run update-ditto`.
 const BUILT_FROM_SENTINEL = path.join(TARGET_DIR, '.ditto-built-from');
 
-// Hash of *this script's* current content. Embedded in the branding
-// sentinel so the script can detect when its own applyBranding() logic
-// has changed since the last branding run — e.g. someone bumped what
-// gets copied / patched. Without this, the sentinel-exists check would
-// short-circuit re-branding even after a new applyBranding step lands.
+// Hash of all branding inputs. Embedded in the branding sentinel so
+// the script can detect when ANY input that feeds applyBranding() has
+// changed since the last run — the script's own bytes, the overlay
+// CSS, or the logo. Without this, the sentinel-exists check would
+// short-circuit re-branding even after a new branding input lands.
 //
-// Real-world repro: PR #189 added an overlay-CSS copy step. End users
-// pulling that commit saw their dist/ditto/ stay untouched because the
-// existing .nostr-station-branded sentinel matched DITTO_REF and the
-// script's idempotency check exited early before applyBranding could
-// run again. Including a script hash in the sentinel invalidates it on
-// any future fetch-ditto.mjs change.
+// Inputs hashed (in order, must stay stable for sentinel comparison):
+//   1. scripts/fetch-ditto.mjs       — this script (so logic changes
+//                                      to applyBranding re-fire)
+//   2. src/web/ditto-overrides.css   — overlay CSS copied to dist/
+//                                      ditto/nostr-station-overrides.css
+//   3. src/web/nori.svg              — logo copied to dist/ditto/logo.svg
 //
-// 16-char sha256 prefix is plenty for uniqueness here — there are only
-// going to be a handful of distinct versions of this script ever, not
-// millions of artifacts to disambiguate.
+// Real-world repros:
+//   - PR #189 added an overlay-CSS copy step. End users pulling that
+//     commit saw their dist/ditto/ stay untouched because the existing
+//     .nostr-station-branded sentinel matched DITTO_REF and the
+//     script's idempotency check exited early before applyBranding
+//     could run again. PR #191 introduced the script-hash check to
+//     fix that class of bug.
+//   - PR #193 changed ONLY src/web/ditto-overrides.css. The script-
+//     hash check from PR #191 did not invalidate (script bytes were
+//     identical), so applyBranding() short-circuited and the new CSS
+//     never reached dist/. Users had to run `npm run update-ditto`
+//     manually. Folding the CSS + logo into the hash closes that gap:
+//     ANY branding input that changes invalidates the sentinel.
+//
+// A missing input file gets a deterministic marker in the hash so a
+// previously-present-then-removed file still invalidates the
+// sentinel correctly. 16-char sha256 prefix is plenty for uniqueness.
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
-function currentScriptHash() {
+function currentInputsHash() {
+  const hash = crypto.createHash('sha256');
   try {
-    const content = fs.readFileSync(SCRIPT_PATH);
-    return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+    hash.update(fs.readFileSync(SCRIPT_PATH));
   } catch {
+    // Can't read this script's own bytes — extremely unusual; bail
+    // with a sentinel that won't match any real hash. brandingIsCurrent
+    // will return false and the next run will try again.
     return 'unknown';
   }
+  const brandingInputs = [
+    path.join(REPO_ROOT, 'src', 'web', 'ditto-overrides.css'),
+    path.join(REPO_ROOT, 'src', 'web', 'nori.svg'),
+  ];
+  for (const p of brandingInputs) {
+    try {
+      hash.update(fs.readFileSync(p));
+    } catch {
+      hash.update(`<missing:${path.basename(p)}>`);
+    }
+  }
+  return hash.digest('hex').slice(0, 16);
 }
 
 // Returns true when the existing branding sentinel was written by the
@@ -105,14 +134,16 @@ function brandingIsCurrent() {
   if (!fs.existsSync(BRANDING_SENTINEL)) return false;
   try {
     const stored = fs.readFileSync(BRANDING_SENTINEL, 'utf8');
-    // Sentinel format: line 1 = ISO timestamp, line 2 = script hash.
-    // Pre-hash sentinels (timestamp only) lack line 2 — treat as stale,
-    // which is correct: we want to re-brand once after this fix lands
-    // so the script-hash dimension gets stamped onto the sentinel.
+    // Sentinel format: line 1 = ISO timestamp, line 2 = inputs hash
+    // (script bytes + overlay CSS bytes + logo bytes — see
+    // currentInputsHash above). Pre-hash sentinels (timestamp only)
+    // lack line 2 — treat as stale, which is correct: we want to
+    // re-brand once after each fix lands so the new hash dimension
+    // gets stamped onto the sentinel.
     const lines = stored.split('\n');
     const storedHash = lines[1]?.trim();
     if (!storedHash) return false;
-    return storedHash === currentScriptHash();
+    return storedHash === currentInputsHash();
   } catch {
     return false;
   }
@@ -471,11 +502,12 @@ function applyBranding() {
   }
 
   try {
-    // Sentinel format: ISO timestamp on line 1, script hash on line 2.
+    // Sentinel format: ISO timestamp on line 1, inputs hash on line 2.
     // brandingIsCurrent() reads line 2 and invalidates when it doesn't
-    // match the running script's hash — so the next time fetch-ditto.mjs
-    // gains a new branding step, the next run re-brands automatically.
-    fs.writeFileSync(BRANDING_SENTINEL, new Date().toISOString() + '\n' + currentScriptHash() + '\n');
+    // match the current inputs hash — so the next time fetch-ditto.mjs,
+    // ditto-overrides.css, or nori.svg changes, the next run re-brands
+    // automatically.
+    fs.writeFileSync(BRANDING_SENTINEL, new Date().toISOString() + '\n' + currentInputsHash() + '\n');
     console.log('[ditto] branding complete.');
   } catch (e) {
     console.warn(`[ditto] WARN: sentinel write failed — ${e.message}`);
