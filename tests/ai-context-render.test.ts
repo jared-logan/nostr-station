@@ -14,6 +14,8 @@ const HOME = useTempHome();
 const aiCtx = await import('../src/lib/ai-context.js');
 const { buildAiContext } = aiCtx;
 const { writeProjectTemplate, ensureConfigDir } = await import('../src/lib/project-config.js');
+const { setPrivacy } = await import('../src/lib/ai-config.js');
+const { USER_REGION_BEGIN, USER_REGION_END } = await import('../src/lib/editor.js');
 
 interface Project {
   id: string; name: string; path: string | null;
@@ -146,7 +148,7 @@ test('tools section renders when project is active and lists each tool', () => {
 
 // ── User block ───────────────────────────────────────────────────────────
 
-test('user.npub renders when identity.json has one', () => {
+test('user.npub renders when identity.json has one AND privacy opt-in', () => {
   // Seed an identity.json under tmp HOME.
   const dir = path.join(HOME, '.config', 'nostr-station');
   fs.mkdirSync(dir, { recursive: true });
@@ -155,13 +157,101 @@ test('user.npub renders when identity.json has one', () => {
     npub: 'a'.repeat(64),
     readRelays: [],
   }));
+  // Default is to withhold the npub; the existing assertion only holds
+  // when the user has opted in explicitly. setPrivacy persists through
+  // ai-config.json so buildAiContext picks it up on the next call.
+  setPrivacy({ includeNpub: true });
   const ctx = buildAiContext(null);
   assert.match(ctx.text, /Nostr npub: npub1/);
+});
+
+test('npub is withheld by default even when identity.json has one', () => {
+  // No setPrivacy() call — default behavior. The model should see a
+  // "(withheld)" line rather than the actual npub, and the prompt
+  // should not contain any `npub1…` substring.
+  const dir = path.join(HOME, '.config', 'nostr-station');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'identity.json'), JSON.stringify({
+    npub: 'a'.repeat(64),
+    readRelays: [],
+  }));
+  const ctx = buildAiContext(null);
+  assert.match(ctx.text, /withheld by their AI privacy setting/);
+  assert.doesNotMatch(ctx.text, /npub1/);
 });
 
 test('user section falls back to "not yet paired" prompt when no identity', () => {
   const ctx = buildAiContext(null);
   assert.match(ctx.text, /not yet paired with a Nostr identity/);
+  // Withheld branch must NOT fire when there is no identity at all.
+  assert.doesNotMatch(ctx.text, /withheld by their AI privacy setting/);
+});
+
+// ── Privacy: cwd / path redaction (always-on) ────────────────────────────
+
+test('cwd is always anonymized to ~ or $(PROJECT_ROOT)', async () => {
+  // No project → cwd falls back to HOME, which must render as `~`.
+  const ctxNoProj = buildAiContext(null);
+  assert.match(ctxNoProj.text, /Current Working Directory: ~/);
+  // The actual HOME path should not appear anywhere in the prompt.
+  assert.ok(!ctxNoProj.text.includes(HOME),
+    `expected HOME (${HOME}) to be redacted, but it appeared in the prompt`);
+
+  // With a project → cwd renders as $(PROJECT_ROOT). The project's real
+  // path must not leak into the body either.
+  const repo = path.join(HOME, 'projects', 'redact-test');
+  fs.mkdirSync(repo, { recursive: true });
+  registerProject(makeProject({
+    id: 'redact', name: 'redact', path: repo,
+    capabilities: { git: false, ngit: false, nsite: false },
+  }));
+  const ctxProj = buildAiContext('redact');
+  assert.match(ctxProj.text, /Current Working Directory: \$\(PROJECT_ROOT\)/);
+  assert.ok(!ctxProj.text.includes(repo),
+    `expected project path (${repo}) to be redacted, but it appeared in the prompt`);
+});
+
+// ── Privacy: project-context.md honors USER_REGION markers ───────────────
+
+test('project-context.md with USER_REGION markers splices only the inner region', () => {
+  const repo = path.join(HOME, 'projects', 'overlay-region');
+  fs.mkdirSync(repo, { recursive: true });
+  const project = makeProject({
+    id: 'overlay-region', name: 'overlay-region', path: repo,
+    capabilities: { git: false, ngit: false, nsite: false },
+  });
+  registerProject(project);
+  ensureConfigDir(project);
+  const overlay =
+    `# Local reference notes that should NOT be sent upstream\n` +
+    `LOCAL_ONLY_SENTINEL\n\n` +
+    `${USER_REGION_BEGIN}\n` +
+    `UPSTREAM_ONLY_SENTINEL\n` +
+    `${USER_REGION_END}\n` +
+    `# More local-only material\n` +
+    `ANOTHER_LOCAL_SENTINEL\n`;
+  fs.writeFileSync(path.join(repo, '.nostr-station', 'project-context.md'), overlay);
+  const ctx = buildAiContext('overlay-region');
+  assert.match(ctx.text, /UPSTREAM_ONLY_SENTINEL/);
+  assert.doesNotMatch(ctx.text, /LOCAL_ONLY_SENTINEL/);
+  assert.doesNotMatch(ctx.text, /ANOTHER_LOCAL_SENTINEL/);
+});
+
+test('project-context.md without USER_REGION markers splices the whole file (back-compat)', () => {
+  const repo = path.join(HOME, 'projects', 'overlay-whole');
+  fs.mkdirSync(repo, { recursive: true });
+  const project = makeProject({
+    id: 'overlay-whole', name: 'overlay-whole', path: repo,
+    capabilities: { git: false, ngit: false, nsite: false },
+  });
+  registerProject(project);
+  ensureConfigDir(project);
+  fs.writeFileSync(
+    path.join(repo, '.nostr-station', 'project-context.md'),
+    'NO_MARKERS_WHOLE_FILE_CONTENT',
+  );
+  const ctx = buildAiContext('overlay-whole');
+  assert.match(ctx.text, /NO_MARKERS_WHOLE_FILE_CONTENT/);
 });
 
 // ── Permissions reflection ───────────────────────────────────────────────

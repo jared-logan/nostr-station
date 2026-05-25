@@ -2965,6 +2965,40 @@ const ChatPanel = (() => {
   const provSel = $('chat-provider');
   const modelSel = $('chat-model');
   const warnEl = $('chat-key-warning');
+  const contextChip = $('chat-context-chip');
+
+  // Context chip — opens the same preview modal as Config → AI →
+  // Preview prompt, and re-labels itself based on the current privacy
+  // posture. "minimal" = npub withheld (default); "standard" = user
+  // opted into including the npub. Label is a hint, not load-bearing —
+  // a stale label is harmless because the click target is the preview
+  // modal itself, which always reflects the current server state.
+  async function refreshContextChip() {
+    if (!contextChip) return;
+    try {
+      const r = await api('/api/ai/privacy');
+      const includeNpub = !!r?.privacy?.includeNpub;
+      contextChip.textContent = includeNpub ? 'context: standard' : 'context: minimal';
+    } catch {
+      contextChip.textContent = 'context: …';
+    }
+  }
+  if (contextChip) {
+    contextChip.addEventListener('click', () => {
+      // openPromptPreview lives in the Config panel module; access via
+      // the global helper if it's been wired, otherwise fall back to a
+      // direct route call. Same modal contents either way.
+      if (typeof window.openPromptPreview === 'function') {
+        window.openPromptPreview();
+      } else {
+        // Defensive fallback — should not be reachable in production
+        // because ConfigPanel exports openPromptPreview on first load.
+        window.location.hash = '#config';
+      }
+    });
+    refreshContextChip();
+    document.addEventListener('api-config-changed', refreshContextChip);
+  }
 
   // activeProject mirrors the projectId of the currently-active session.
   // Kept as a separate var so existing call sites (renderBadge, sendMsg,
@@ -7313,13 +7347,14 @@ const ProjectsPanel = (() => {
       </div>
 
       <div class="rev-section">
-        <h4>Continuous sync</h4>
+        <h4>Continuous pull</h4>
         <label class="rev-autosync">
           <input type="checkbox" class="rev-autosync-toggle" checked>
           <span>
-            <strong>Enable auto-sync after publishing</strong>
+            <strong>Enable automatic pull after publishing</strong>
             <div class="muted" style="font-size:12px;margin-top:2px">
-              Pulls remote changes and pushes local commits every few minutes.
+              Fetches remote changes every 5 minutes (fast-forward only).
+              Commits and pushes are never auto-fired — you stay in control of signing.
               Toggle later in Settings.
             </div>
           </span>
@@ -8847,10 +8882,10 @@ const ProjectsPanel = (() => {
           <strong>Pull</strong> = <code>ngit fetch</code> + fast-forward merge.
           <strong>Push</strong> = <code>ngit push</code> (Amber signs on your phone).
         </div>
-        <label class="ngit-autosync" style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;cursor:pointer">
+        <label class="ngit-autosync" title="Pull-only — fetches and fast-forwards. Commits and pushes are never auto-fired." style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;cursor:pointer">
           <input type="checkbox" class="ngit-autosync-input" ${p.autoSync ? 'checked' : ''}>
-          <span>Automatic sync</span>
-          <span class="muted" style="font-size:11px">— pull every 5 minutes</span>
+          <span>Automatic pull</span>
+          <span class="muted" style="font-size:11px">— ngit fetch + fast-forward every 5 minutes (no auto-commits, no auto-push)</span>
         </label>
         <div class="ngit-send-section" style="margin-top:14px">
           <button class="ngit-send-btn" style="display:none"></button>
@@ -15141,6 +15176,12 @@ const ConfigPanel = (() => {
     refresh();
   }
 
+  // Expose to other modules (specifically the chat-header "context:"
+  // chip in ChatPanel) so they can open the same modal without
+  // duplicating the route call + dropdown plumbing. Done once the
+  // function is in scope; later reassignment is harmless.
+  if (typeof window !== 'undefined') window.openPromptPreview = openPromptPreview;
+
   // Identity section echoes who the dashboard is signed in as. The server
   // already enforces that session.npub === configured station owner npub,
   // so ident.npub is also the authenticated identity — we surface profile
@@ -15646,6 +15687,22 @@ const ConfigPanel = (() => {
               <button id="cfg-prompt-preview" type="button">Preview prompt</button>
             </div>
           </div>
+          <div class="config-row" style="margin-top:8px">
+            <div class="k">Privacy</div>
+            <div class="v" style="display:flex;flex-direction:column;gap:6px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px">
+                <input type="checkbox" id="cfg-privacy-include-npub">
+                <span>Include my npub in AI prompts</span>
+              </label>
+              <span style="font-size:11px;color:var(--text-dim);max-width:560px">
+                Off by default. The Chat pane assistant never signs Nostr events itself —
+                signing runs locally through ngit or the bunker — so it doesn't need your
+                npub to function. Your working directory and home path are always anonymized
+                regardless of this setting. Use <strong>Preview prompt</strong> above to see
+                exactly what each turn sends upstream.
+              </span>
+            </div>
+          </div>
           <div class="callout">
             Per-provider keys live in the OS keychain as <code>ai:&lt;provider&gt;</code>.
             Config file: <code>~/.nostr-station/ai-config.json</code>.
@@ -16052,6 +16109,37 @@ const ConfigPanel = (() => {
     // the user inspect any project's resolved prompt, not just station.
     const previewPromptBtn = $('cfg-prompt-preview');
     if (previewPromptBtn) previewPromptBtn.addEventListener('click', openPromptPreview);
+
+    // Privacy: include-npub toggle. Hydrate from /api/ai/privacy on
+    // panel open; persist on change. Dispatches api-config-changed so
+    // the chat-header context chip re-labels without a manual refresh.
+    const includeNpubBox = $('cfg-privacy-include-npub');
+    if (includeNpubBox) {
+      (async () => {
+        try {
+          const r = await api('/api/ai/privacy');
+          includeNpubBox.checked = !!r?.privacy?.includeNpub;
+        } catch { /* leave unchecked; PUT will materialize the default */ }
+      })();
+      includeNpubBox.addEventListener('change', async () => {
+        const next = !!includeNpubBox.checked;
+        includeNpubBox.disabled = true;
+        try {
+          await api('/api/ai/privacy', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ includeNpub: next }),
+          });
+          toast('AI privacy updated', next ? 'npub will be shared with the model' : 'npub withheld', 'ok');
+          document.dispatchEvent(new CustomEvent('api-config-changed'));
+        } catch (e) {
+          includeNpubBox.checked = !next;
+          toast('Save failed', e?.message || '', 'err');
+        } finally {
+          includeNpubBox.disabled = false;
+        }
+      });
+    }
 
     // Templates registry section — fetched + rendered after the rest of
     // the panel paints. Failures are non-fatal (the section shows an

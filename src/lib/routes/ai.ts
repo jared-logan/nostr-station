@@ -30,6 +30,7 @@ import {
 } from '../ai-providers.js';
 import {
   readAiConfig, writeAiConfig, setProviderEntry,
+  setPrivacy, effectivePrivacy,
   type ProviderConfig as AiProviderConfig,
 } from '../ai-config.js';
 import { buildAiContext } from '../ai-context.js';
@@ -703,6 +704,34 @@ export async function handleAi(
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+    return true;
+  }
+
+  // GET /api/ai/privacy — return the effective outbound-redaction
+  // settings. Always returns a fully-populated record so the UI can
+  // bind directly without default-handling.
+  if (url === '/api/ai/privacy' && method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ privacy: effectivePrivacy() }));
+    return true;
+  }
+
+  // PUT /api/ai/privacy — merge a partial privacy patch into
+  // ai-config.json. Only known boolean fields are accepted; anything
+  // else is silently dropped (defensive against stale client builds).
+  if (url === '/api/ai/privacy' && method === 'PUT') {
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid JSON body' }));
+      return true;
+    }
+    const patch: { includeNpub?: boolean } = {};
+    if (typeof parsed.includeNpub === 'boolean') patch.includeNpub = parsed.includeNpub;
+    setPrivacy(patch);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ privacy: effectivePrivacy() }));
     return true;
   }
 

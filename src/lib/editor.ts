@@ -149,7 +149,9 @@ You are Nori, the assistant for nostr-station — an open-source CLI that sets u
 
 **Editor target files.** Switch which file your AI coding tool reads with \`nostr-station editor\`. The canonical content lives at \`~/nostr-station/projects/${CONTEXT_FILENAME}\` and the editor command symlinks the tool-specific filename to it (\`CLAUDE.md\` for Claude Code, \`AGENTS.md\` for Codex / generic agents, \`.cursorrules\`, \`.windsurfrules\`, \`.github/copilot-instructions.md\`, \`CONVENTIONS.md\` for aider).
 
-**Per-project context.** Add a \`project-context.md\` file to any project root to inject project-specific guidance — NIP targets, conventions, architecture notes. The Chat pane reads it on every turn. The file is developer-authored and never auto-created.
+**Per-project context.** Add a \`project-context.md\` file to any project root to inject project-specific guidance — NIP targets, conventions, architecture notes. The Chat pane reads it on every turn. The file is developer-authored and never auto-created. Wrap a section in \`${USER_REGION_BEGIN}\` / \`${USER_REGION_END}\` if you want only that region spliced upstream — the rest of the file then stays as local-only reference.
+
+**What gets sent to the AI.** Your working directory and home path are always anonymized to \`$(PROJECT_ROOT)\` and \`~\` before any chat turn leaves your machine. Your npub is *not* sent by default — the Chat assistant doesn't sign Nostr events itself, so it doesn't need it. Open \`Config → AI → Privacy\` to opt your npub back in, or click the \`context:\` chip in the Chat panel to preview exactly what the next turn will send.
 
 ${USER_REGION_BEGIN}
 
