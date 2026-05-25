@@ -178,6 +178,105 @@ button[class~="rounded-full"][class~="bg-primary"][class~="h-10"] {
   box-shadow: 0 20px 60px rgba(0,0,0,0.6) !important;
 }
 
+/* ───── Buttons — tighten to dashboard rhythm ────────────────────
+ * shadcn's button variants (Ditto's src/components/ui/button-variants.ts)
+ * size text buttons at h-10 / h-9 / h-11 with px-4/8 padding —
+ * substantially taller and wider than nostr-station's
+ * `padding: 6px 12px` button rule (src/web/app.css:86-96).
+ *
+ * Override to auto-height + dashboard padding. Excludes square icon
+ * buttons: the shadcn `icon` variant pairs h-10 with w-10 (and
+ * occasional h-9/w-9, h-11/w-11 for adjacent sizes). The
+ * `:not([class~="w-N"])` filters preserve those exactly.
+ *
+ * Tailwind `size-*` icon buttons (Ditto uses these extensively in
+ * NoteCard etc.) don't match h-N classes so they pass through
+ * unaffected.
+ */
+button[class~="h-10"]:not([class~="w-10"]),
+button[class~="h-9"]:not([class~="w-9"]),
+button[class~="h-11"]:not([class~="w-11"]) {
+  height: auto !important;
+  padding: 6px 12px !important;
+}
+
+/* ───── Post action buttons — square + tight ─────────────────────
+ * NoteCard reply/repost/like/zap buttons (NoteCard.tsx:879-963 at
+ * DITTO_REF 7a5820c) are `rounded-full text-muted-foreground
+ * hover:text-primary hover:bg-primary/10` icon pills. The dashboard
+ * has no circular icon button — every interactive control is
+ * 3px-corner rectangular (closest analog: .copy-btn at
+ * src/web/app.css:3410-3427). Square them out and tighten padding.
+ *
+ * Repost button uses `hover:bg-accent/10` instead (NoteCard.tsx:898);
+ * second selector covers it. Both are unique to feed action buttons
+ * — avatars don't use hover:bg-primary/accent, sidebar pills don't
+ * either.
+ */
+button[class~="rounded-full"][class~="hover:bg-primary/10"],
+button[class~="rounded-full"][class~="hover:bg-accent/10"],
+[class~="rounded-full"][class~="hover:bg-primary/10"][class~="text-muted-foreground"],
+[class~="rounded-full"][class~="hover:bg-accent/10"][class~="text-muted-foreground"] {
+  border-radius: var(--r-sm) !important;
+  padding: 4px 6px !important;
+}
+
+/* ───── Inputs — tighten to dashboard rhythm ─────────────────────
+ * shadcn input/textarea (Ditto's src/components/ui/input.tsx and
+ * textarea.tsx) use h-10 with px-3 py-2. Dashboard's input rule
+ * (src/web/app.css:118-128) uses `padding: 7px 10px` and lets the
+ * font + padding define the height. Match it.
+ */
+input[class~="h-10"] {
+  height: auto !important;
+  padding: 7px 10px !important;
+}
+textarea {
+  padding: 7px 10px !important;
+}
+
+/* ───── Focus — border-color shift, no ring ──────────────────────
+ * shadcn's focus pattern is
+ *   focus-visible:outline-none focus-visible:ring-2
+ *   focus-visible:ring-ring focus-visible:ring-offset-2
+ * The ring is implemented as box-shadow via Tailwind's
+ * --tw-ring-shadow / --tw-ring-offset-shadow custom properties. Kill
+ * the ring on focus by zeroing those (preserves the always-on
+ * --tw-shadow chain, so shadow-sm/md/lg on cards/dialogs survive a
+ * focus state). Then layer in a border-color shift on inputs and
+ * outlined buttons, matching the dashboard's focus convention
+ * (src/web/app.css:127).
+ */
+*:focus-visible {
+  outline: none !important;
+  --tw-ring-shadow: 0 0 transparent !important;
+  --tw-ring-offset-shadow: 0 0 transparent !important;
+}
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+[role="combobox"]:focus-visible,
+button:focus-visible {
+  border-color: hsl(var(--ring)) !important;
+}
+
+/* ───── Spacing rhythm — tighten p-6 surfaces ────────────────────
+ * shadcn Card/Dialog/Popover lean on `p-6` (24px) for the major
+ * surfaces — Ditto inherits this default. The dashboard's
+ * .panel-head padding is `16px 24px` and .modal-head is `14px 18px`
+ * (src/web/app.css:587-596, 3342-3354) — meaningfully tighter.
+ *
+ * Remap .p-6 globally to a single mid-value that matches the
+ * dashboard's modal padding. Buttons don't use p-6 (they use px-4 /
+ * px-8 for horiz padding only), so this doesn't compress button
+ * geometry. If a specific surface needs different padding it can
+ * get a more specific override in a follow-up.
+ */
+.p-6 {
+  padding: 14px 18px !important;
+}
+
 /* ───── Avatar shape preservation ────────────────────────────────
  * Defense-in-depth. With the previous heavy-hammer rule
  * (`html * { border-radius: 0 !important }` from PR #193) removed,
