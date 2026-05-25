@@ -305,17 +305,23 @@ function buildDittoConfig() {
     magicMouse: false,
 
     // ─── Theme ────────────────────────────────────────────────────
-    // Font stack mirrors nostr-station's --font-mono in src/web/app.css
-    // exactly: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code',
-    // Menlo, Consolas, monospace. Applied globally via Ditto's
-    // fontLoader.ts which injects an html { font-family: ... } !important
-    // rule, so it cuts across every component without needing source
-    // patches. titleFont gets the same stack so profile display names
-    // render mono too (matches the dashboard's identity-chip styling).
+    // Only the 3 core colors are baked here. customTheme.font and
+    // customTheme.titleFont are deliberately omitted: setting them
+    // would make Ditto's fontLoader inject
+    //   <style id="theme-font-overrides">html{font-family:!important}</style>
+    // at runtime on every theme apply (src/lib/fontLoader.ts:76-92 in
+    // the pinned Ditto). That tag is appended to <head> AFTER our
+    // overlay <link>, so even though both sides use !important, source
+    // order means Ditto's font would win the cascade.
     //
-    // No `url` on either font config — relying on the host system
-    // having one of these mono faces. Same fallback chain the dashboard
-    // already depends on; no new network requests.
+    // Strategy instead: leave font unset here so the override tag
+    // never gets written in the steady state, and let
+    // src/web/ditto-overrides.css's `html { font-family: ... !important }`
+    // rule define typography unopposed. For the rarer case where a
+    // user publishes a kind-16767 with f-tag fonts (which would cause
+    // fontLoader to write the tag at runtime), a MutationObserver in
+    // /theme.js (see DITTO_THEME_JS_BODY in src/lib/web-server-static.ts)
+    // strips the tag as it appears.
     theme: 'custom',
     customTheme: {
       title: 'nostr-station',
@@ -323,12 +329,6 @@ function buildDittoConfig() {
         background: '0 0% 4%',
         text:       '240 6% 80%',
         primary:    '248 80% 67%',
-      },
-      font: {
-        family: "'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace",
-      },
-      titleFont: {
-        family: "'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace",
       },
     },
 

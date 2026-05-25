@@ -225,13 +225,61 @@ const DITTO_ROOT_FILES = new Set([
   '/404.html',
 ]);
 
-// Root paths Ditto's bundle probes that we intentionally answer with a
-// 200 + empty body rather than 404. `/theme.js` is Ditto's runtime
-// theme-override hook (optional, absent in our build) — without this
-// stub the bundle logs a `theme.js 404` in devtools on every page load.
-// Empty JS is a no-op for Ditto and silences the noise.
-const DITTO_EMPTY_JS_STUBS = new Set([
-  '/theme.js',
+// Inline JS bodies served at root paths that Ditto's bundle probes
+// directly. The bundle expects these to exist (loaded as blocking
+// <script src> from its index.html), and the host provides them
+// rather than baking them into the Ditto build.
+//
+// `/theme.js` — Ditto's runtime theme-override hook. Loaded
+// synchronously in <head> before React mounts (see Ditto's
+// index.html line ~213). We use it as a CSP-clean place to install
+// a MutationObserver that locks nostr-station's monospace
+// typography against Ditto's runtime <style id="theme-font-overrides">
+// injection (Ditto's fontLoader writes html { font-family: !important }
+// at useLayoutEffect time on every theme apply). Source order means
+// that overlay font rule loses the cascade race even with !important;
+// stripping the injected style tag on the way in is the simplest fix.
+// See src/web/ditto-overrides.css's strategy comment for the full
+// cascade map.
+//
+// no-cache because the body content changes with overlay iteration;
+// caching would mean users keep an old version of the MutationObserver
+// after we ship updates.
+const DITTO_THEME_JS_BODY =
+  '/*! nostr-station theme.js — typography lock for the Client panel.\n' +
+  ' * MutationObserver strips Ditto\'s font-override <style> tags when\n' +
+  ' * useApplyTheme injects them; lets our overlay\'s html { font-family\n' +
+  ' * !important } rule win unopposed. No eval / no Function — CSP-clean.\n' +
+  ' */\n' +
+  '(function () {\n' +
+  '  var STRIP_IDS = ["theme-font-overrides", "title-font-overrides"];\n' +
+  '  function maybeStrip(node) {\n' +
+  '    if (!node || node.nodeType !== 1) return;\n' +
+  '    if (node.tagName !== "STYLE") return;\n' +
+  '    if (STRIP_IDS.indexOf(node.id) === -1) return;\n' +
+  '    if (node.parentNode) node.parentNode.removeChild(node);\n' +
+  '  }\n' +
+  '  // Strip anything already present (defensive; React has not mounted yet).\n' +
+  '  for (var i = 0; i < STRIP_IDS.length; i++) {\n' +
+  '    maybeStrip(document.getElementById(STRIP_IDS[i]));\n' +
+  '  }\n' +
+  '  function attach() {\n' +
+  '    var observer = new MutationObserver(function (mutations) {\n' +
+  '      for (var i = 0; i < mutations.length; i++) {\n' +
+  '        var added = mutations[i].addedNodes;\n' +
+  '        for (var j = 0; j < added.length; j++) {\n' +
+  '          maybeStrip(added[j]);\n' +
+  '        }\n' +
+  '      }\n' +
+  '    });\n' +
+  '    observer.observe(document.head, { childList: true });\n' +
+  '  }\n' +
+  '  if (document.head) attach();\n' +
+  '  else document.addEventListener("DOMContentLoaded", attach);\n' +
+  '})();\n';
+
+const DITTO_SCRIPT_STUBS: Map<string, string> = new Map([
+  ['/theme.js', DITTO_THEME_JS_BODY],
 ]);
 
 // Serve the bundled Ditto SPA. Two URL shapes:
@@ -261,13 +309,15 @@ const DITTO_EMPTY_JS_STUBS = new Set([
 // hosting + the dashboard's `frame-src 'self'` are what gate access.
 export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const urlPath = (req.url || '/').split('?')[0];
-  if (DITTO_EMPTY_JS_STUBS.has(urlPath)) {
+  const stubBody = DITTO_SCRIPT_STUBS.get(urlPath);
+  if (stubBody !== undefined) {
+    const body = Buffer.from(stubBody, 'utf8');
     res.writeHead(200, {
       'Content-Type':  'application/javascript; charset=utf-8',
-      'Cache-Control': 'public, max-age=86400',
-      'Content-Length': '0',
+      'Cache-Control': 'no-cache',
+      'Content-Length': String(body.length),
     });
-    res.end();
+    res.end(body);
     return true;
   }
   const isPrefixed   = urlPath === '/ditto' || urlPath.startsWith('/ditto/');

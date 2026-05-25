@@ -39,20 +39,32 @@
  *     a rounded-full avatar wrapper.
  */
 
-/* ───── Font stack (insurance, not lock) ─────────────────────────
- * Same stack as src/web/app.css's --font-mono. This rule loses the
- * cascade race against Ditto's <style id="theme-font-overrides">
- * because both sides use !important and Ditto's tag is appended later
- * in <head>. PR B's full defense:
- *   1. Drop customTheme.font from ditto.json so theme-font-overrides
- *      is not written in the steady state.
- *   2. MutationObserver in /theme.js to remove the tag if a user
- *      publishes a kind-16767 with a font.
- * Until PR B lands, this rule covers the (currently rare) case where
- * the user has neither customTheme.font set nor a published theme.
+/* ───── Typography ───────────────────────────────────────────────
+ * Family mirrors src/web/app.css's --font-mono. Size baseline is
+ * 14px (slightly above the dashboard's 13px to leave Tailwind's
+ * text-xs / text-sm classes — which scale off `html { font-size }` —
+ * landing on 11.2px / 12.25px, close to the dashboard's tight scale).
+ *
+ * Defense map against Ditto's runtime font injection:
+ *   - customTheme.font is NOT set in ditto.json (see buildDittoConfig
+ *     in scripts/fetch-ditto.mjs) so Ditto's fontLoader does not
+ *     write <style id="theme-font-overrides"> in the steady state →
+ *     this rule wins unopposed.
+ *   - If a user publishes a kind-16767 event with f-tag fonts, the
+ *     style tag CAN appear at runtime. A MutationObserver installed
+ *     in /theme.js (see DITTO_THEME_JS_BODY in
+ *     src/lib/web-server-static.ts) strips it as it lands; this rule
+ *     remains unopposed.
+ *
+ * line-height matches the dashboard's body line-height (1.6 in
+ * src/web/app.css:78). Targets `html` (not `*`) so icon fonts and
+ * elements that explicitly opt out (mono-in-mono code blocks, etc.)
+ * still render correctly.
  */
 html {
   font-family: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace !important;
+  font-size: 14px !important;
+  line-height: 1.6 !important;
 }
 
 /* ───── Border-radius scale ───────────────────────────────────────
