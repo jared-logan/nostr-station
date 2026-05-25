@@ -279,6 +279,35 @@ export function writeMcpConfigs(target: string): void {
   fs.cpSync(src, target, { recursive: true });
 }
 
+// Drop the dashboard's Nori ostrich SVG into the project's `public/`
+// folder so the AI assistant can reference it as `/nori.svg` when it
+// builds out the footer ("Powered by nostr-station" — see the branding
+// section in the MKStack template's projectContext). Pre-copying the
+// asset at scaffold time means the AI's first attempt at a footer
+// renders correctly without an extra round-trip.
+//
+// Single source of truth: the icon lives at `src/web/nori.svg` (dev) /
+// `dist/web/nori.svg` (production). Same relative path lookup pattern
+// as mcpConfigsSourceDir(). No-ops when the source file is missing
+// (e.g. an unusual build artifact layout) — the AI can still build a
+// text-only footer without it.
+function noriIconSource(): string {
+  return fileURLToPath(new URL('../web/nori.svg', import.meta.url));
+}
+
+export function copyNoriIcon(target: string): boolean {
+  const src = noriIconSource();
+  if (!fs.existsSync(src)) return false;
+  const publicDir = path.join(target, 'public');
+  try {
+    fs.mkdirSync(publicDir, { recursive: true });
+    fs.copyFileSync(src, path.join(publicDir, 'nori.svg'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Validate a URL we're about to hand to `git clone`. We allow http/https
 // and git-over-ssh. We explicitly reject `nostr://` and bare naddr values
 // — those route through /api/ngit/clone, not here. Rejecting early gives
@@ -437,6 +466,22 @@ export async function scaffoldProject(
     }
   } catch (e: any) {
     writeLine(res, 'stderr', `(scaffold) project-config seed failed: ${e?.message ?? 'unknown'}`);
+  }
+
+  // MKStack ships a Vite project with a `public/` static-asset
+  // convention. Pre-seed `public/nori.svg` so the AI assistant can
+  // render the "Powered by nostr-station" footer described in the
+  // template's projectContext on its first pass — no need for the
+  // model to ask for the asset or generate a stand-in. Best-effort:
+  // a missing source file or unwritable target is logged but does
+  // not fail the scaffold (the AI can still build a text-only
+  // attribution line).
+  if (templateId === 'mkstack') {
+    if (copyNoriIcon(target)) {
+      writeLine(res, 'sys', 'Pre-seeded public/nori.svg for the nostr-station footer.');
+    } else {
+      writeLine(res, 'stderr', '(scaffold) could not pre-seed public/nori.svg — footer can still render text-only.');
+    }
   }
 
   writeLine(res, 'sys', `Registered as project "${created.project.name}".`);
