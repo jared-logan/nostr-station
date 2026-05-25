@@ -98,23 +98,32 @@ function buildTemplate() {
       ['k', '6'],
       ['k', '7'],
       ['k', '1111'],
-      // ─── Rich-card `a` references ─────────────────────────────────
+      // ─── Rich-card `a` reference (kind-30617 only) ────────────────
       // NIP-89-aware clients (Ditto in particular) render `a` tags
       // pointing at other addressable events by the same author as
-      // action buttons on the handler card. Reference Ditto's own
-      // kind-31990 for the pattern: they ship `a` tags for their
-      // nsite (kind-35128) → "Run" button + their ngit repo
-      // (kind-30617) → "Fork" button.
+      // action buttons on the handler card. Ditto's own kind-31990
+      // ships TWO: kind-35128 (nsite) → "Run" button + kind-30617
+      // (ngit repo) → "Fork" button.
       //
-      // Both coordinates below resolve under the same project pubkey:
-      //   35128:291c75d…:nostr-station → the dedicated nsite at
-      //     10vy5d0umw8izp3bcmh0btzl6k2szvsu8zestncxpsstb6l8e6nostr-station.nsite.lol
-      //   30617:291c75d…:nostr-station → nostr-station's NIP-34
-      //     repository announcement (published via ngit)
-      // If either event isn't currently reachable on a relay the
-      // client just skips rendering its button — no broken UI,
-      // graceful degradation.
-      ['a', `35128:${EXPECTED_PUBKEY}:${D_TAG}`],
+      // We only ship the kind-30617 reference. Rationale:
+      //
+      //   kind-30617 → "Fork" → opens the repo. Honest: the repo
+      //     exists, clone URLs work, the kind-30617 was just
+      //     published via shakespeare.diy's Nostr push (see PR #185).
+      //
+      //   kind-35128 → "Run" → would open the nsite at
+      //     10vy5d0umw8izp3bcmh0btzl6k2szvsu8zestncxpsstb6l8e6nostr-station.nsite.lol.
+      //     But that nsite is a *landing page* explaining how to
+      //     install nostr-station, NOT a hosted runnable instance —
+      //     nostr-station only runs locally (`curl install.sh | bash`
+      //     → localhost:3000). Whatever label NIP-89 clients render
+      //     for a kind-35128 reference (Run, Launch, Try), clicking
+      //     it would imply "use it now" but actually land users on a
+      //     "here's how to install this" page. Bait-and-switch.
+      //
+      // The `website` field in content (the same nsite URL) gives
+      // users an "Open App" / "Visit" button which is semantically
+      // honest — that's a website link, not a launch action.
       ['a', `30617:${EXPECTED_PUBKEY}:${D_TAG}`],
       // Topic tag — surfaces this handler in topic-discovery feeds
       // (e.g. "Nostr clients tagged #nostr-dev"). Ditto uses a
