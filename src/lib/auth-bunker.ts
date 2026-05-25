@@ -26,6 +26,7 @@ import {
 } from './identity.js';
 import {
   readSavedBunkerClient, writeSavedBunkerClient, clearSavedBunkerClient,
+  recordSilentSuccess, recordSilentFailure,
   type SavedBunkerClient,
 } from './bunker-storage.js';
 
@@ -38,15 +39,56 @@ const BUNKER_TIMEOUT_MS  = 30_000;
 // stuck.
 const SILENT_BUNKER_TIMEOUT_MS = 20_000;
 
+// Polling slack — the BunkerSigner subscription closes at exactly
+// CONNECT_TIMEOUT_MS, at which point runNostrConnectFlow() sets
+// session.status = 'timeout'. Without slack, expiresAt fires at the same
+// instant and pruneBunkerSessions() deletes the session before the next
+// 2-second client poll can read the 'timeout' status — the user then
+// sees a red "unknown session" error instead of the actionable yellow
+// "Connection timed out. Try again." Five seconds is enough for two
+// poll rounds to observe the terminal status.
+const SESSION_EXPIRY_SLACK_MS = 5_000;
+
+// Well-known Amber-friendly relays. relay.nsec.app is Amber's home
+// relay — its NIP-46 routing is optimised for the Amber traffic shape
+// and it's what setup-pairing already uses. Including it in every
+// sign-in QR (and not just first-run setup) means Amber's connect
+// response always has a known-good path back to us, regardless of
+// which read-relays the user configured. relay.damus.io / nos.lol are
+// retained as well-known fallbacks.
+const SETUP_AMBER_RELAYS = [
+  'wss://relay.nsec.app',
+  'wss://relay.damus.io',
+  'wss://nos.lol',
+];
+
 // ── Relay resolution ────────────────────────────────────────────────────────
 
 // Only wss:// relays are acceptable — a plain ws:// relay for an auth flow
 // leaks the NIP-44 encrypted connect/sign_event events in plaintext on the
-// wire. Identity read-relays are the default set.
+// wire. We always include the well-known Amber relays so the QR flow has
+// a known-good path back from Amber regardless of which read-relays the
+// user configured; user read-relays are merged in after, deduped, and
+// capped. Cap of 5 keeps the URI short enough for reliable QR scanning
+// while leaving room for a couple of the user's preferred relays.
+//
+// Exported as a pure helper so the merge behaviour can be unit-tested
+// without setting up a temp home + identity.json fixture.
+export function mergeAuthRelays(userRelays: readonly string[]): string[] {
+  const userSafe = (userRelays || []).filter(r => /^wss:\/\//i.test(r));
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const r of [...SETUP_AMBER_RELAYS, ...userSafe]) {
+    const key = r.replace(/\/+$/, '').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(r);
+  }
+  return merged.slice(0, 5);
+}
+
 function pickAuthRelays(): string[] {
-  const ident = readIdentity();
-  const safe  = ident.readRelays.filter(r => /^wss:\/\//i.test(r));
-  return safe.length > 0 ? safe.slice(0, 4) : ['wss://relay.damus.io'];
+  return mergeAuthRelays(readIdentity().readRelays || []);
 }
 
 // ── Session tracking (for the QR polling flow) ──────────────────────────────
@@ -141,7 +183,7 @@ export async function startNostrConnect(
     nostrconnectUri,
     relays,
     createdAt: now,
-    expiresAt: now + CONNECT_TIMEOUT_MS,
+    expiresAt: now + CONNECT_TIMEOUT_MS + SESSION_EXPIRY_SLACK_MS,
     status: 'waiting',
     challenge,
   };
@@ -348,13 +390,18 @@ export async function silentBunkerSign(
     const signed = await withTimeout(
       signer.signEvent(template), SILENT_BUNKER_TIMEOUT_MS, 'sign_event',
     );
+    recordSilentSuccess(ident.npub);
     return { ok: true, tried: true, signedEvent: signed };
   } catch (e: any) {
-    // A failure here usually means the user revoked the bunker pairing
-    // in Amber, uninstalled the app, or the relays changed. Clear the
-    // saved state so the next attempt goes straight to the QR fallback
-    // instead of retrying a broken path.
-    clearSavedBunkerClient();
+    // A connect/sign timeout here is usually transient — flaky wifi, phone
+    // briefly offline, Amber paged out by the OS. Bumping a failure counter
+    // and only clearing the pairing after a few consecutive failures keeps
+    // a single bad moment from permanently kicking the user into the QR
+    // flow (which is the path that's been silently broken for users with
+    // non-Amber-friendly read-relays). Definitive failures — fromBunker
+    // init throwing — still clear immediately above; only the connect /
+    // sign_event leg counts toward the threshold.
+    recordSilentFailure(ident.npub);
     return { ok: false, tried: true, error: e?.message || 'silent bunker flow failed' };
   } finally {
     try { await signer.close(); } catch {}
@@ -403,15 +450,10 @@ export function consumeSetupAmberSession(eph: string): SetupAmberSession | null 
   return s;
 }
 
-// Setup pairing uses a fixed list of well-known public bunker relays. The
-// user has no identity yet, so we can't pull their preferred read-relays
+// Setup pairing uses SETUP_AMBER_RELAYS (declared at top of file) since
+// the user has no identity yet — we can't pull their preferred read-relays
 // from identity.json the way startNostrConnect() does. These are the
 // relays Amber + the major Nostr clients use for NIP-46 routing.
-const SETUP_AMBER_RELAYS = [
-  'wss://relay.nsec.app',
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-];
 
 export async function startSetupAmber(dashboardUrl: string): Promise<SetupAmberStart> {
   const secretKey       = generateSecretKey();
@@ -440,7 +482,7 @@ export async function startSetupAmber(dashboardUrl: string): Promise<SetupAmberS
     nostrconnectUri,
     relays:    SETUP_AMBER_RELAYS,
     createdAt: now,
-    expiresAt: now + CONNECT_TIMEOUT_MS,
+    expiresAt: now + CONNECT_TIMEOUT_MS + SESSION_EXPIRY_SLACK_MS,
     status:    'waiting',
   };
   setupSessions.set(ephemeralPubkey, session);

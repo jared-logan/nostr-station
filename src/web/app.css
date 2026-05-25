@@ -5135,6 +5135,18 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .auth-status-line.warn { color: var(--warn); }
 .auth-status-line.warn .pulse { background: var(--warn); animation: none; }
 
+.auth-qr-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+  margin-top: 4px;
+}
+.auth-qr-hint a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.auth-qr-hint a:hover { text-decoration: underline; }
+
 .auth-bunker-paste {
   display: flex;
   flex-direction: column;
