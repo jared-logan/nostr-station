@@ -1,37 +1,39 @@
-/* nostr-station overrides for Ditto's Tailwind border-radius defaults.
+/* nostr-station overrides for Ditto's UI.
  *
  * Applied via a <link> tag injected at the end of dist/ditto/index.html
  * (see applyBranding() in scripts/fetch-ditto.mjs). Loaded after Ditto's
- * own compiled CSS, but the file being downloaded isn't enough — the
- * RULES have to win the cascade.
+ * own compiled CSS — for equal specificity, cascade resolves to ours.
  *
- * Specificity strategy: every selector is prefixed with `html ` to
- * raise specificity from (0,1,0) to (0,1,1). That beats:
- *   - any unlayered .rounded-* rule from Ditto's compiled Tailwind
- *   - Tailwind v4 @layer utilities rules (modern cascade puts unlayered
- *     after layered for equal specificity)
- *   - most CSS-in-JS class-based runtime injections
+ * --------------------------------------------------------------------
+ * History: prior attempts targeted only the .rounded-* utility surface
+ * (e.g. `.rounded-md { border-radius: 5px !important }`). They were
+ * delivered correctly by the server, fetched correctly by the browser,
+ * but produced no visible change. Diagnosis (via DevTools + grep of
+ * the built Ditto CSS):
  *
- * The previous version of this file used bare class selectors with
- * !important. That should have been enough by the spec, but in practice
- * something in Ditto's compiled CSS (or its theme-sync) was still
- * winning. The html-prefixed form is the smallest specificity bump
- * that doesn't require knowing Ditto's actual DOM structure.
+ *   1. Ditto declares `--radius: .75rem` as a CSS custom property and
+ *      applies it via `border-radius: var(--radius)` directly in
+ *      component rules. No .rounded-* class involved → no class
+ *      selector to override.
+ *   2. Compiled component CSS bakes raw `border-radius: 0.25rem` /
+ *      `.375rem` / `1rem` / `1.25rem` declarations directly into
+ *      rules. Also class-less.
+ *   3. Tailwind v4's @layer ordering means .rounded-* utility
+ *      overrides at equal specificity may still lose the cascade.
  *
- * Mapping comes from src/web/app.css's radius scale:
- *   --r-sm: 3px   chips, small buttons, badges
- *   --r:    5px   default — cards, inputs, most surfaces
- *   --r-lg: 8px   major panels, modals
+ * Strategy: heavy hammer. Square EVERY element's corners by default,
+ * then a narrow allow-list to preserve avatars (which Ditto wants
+ * round, and the user agrees). Also override the --radius custom
+ * property at the root to neutralize var(--radius) usage.
  *
- * Tailwind defaults vs nostr-station targets:
- *   rounded-sm    2px  → 3px   (snap to chip scale)
- *   rounded       4px  → 5px   (snap to default)
- *   rounded-md    6px  → 5px   (squashed by 1px)
- *   rounded-lg    8px  → 8px   (already matches --r-lg)
- *   rounded-xl    12px → 8px   (tighten to --r-lg)
- *   rounded-2xl   16px → 12px  (tighten)
- *   rounded-3xl   24px → 16px  (tighten)
- *   rounded-full  9999px → (untouched — preserve avatars + pills)
+ * Allow-list rationale: Ditto's Avatar component
+ * (src/components/ui/avatar.tsx) renders `<div class="...
+ * shrink-0 overflow-hidden ... rounded-full">` for default circular
+ * avatars. Inline image avatars use `<img class="rounded-full">`.
+ * Pill nav buttons use `rounded-full` WITHOUT `overflow-hidden`,
+ * so the allow-list (which requires both) leaves them squared —
+ * which is exactly the look-and-feel goal: nostr-station's sharp
+ * dashboard chrome extended to Ditto's surfaces.
  */
 
 /* ───── Font ────────────────────────────────────────────────────
@@ -39,7 +41,7 @@
  * the overlay because Ditto's runtime theme-sync (fetched from
  * Nostr) can clobber the customTheme.font we baked into ditto.json.
  * Ditto's fontLoader.ts injects `html { font-family: X !important }`
- * — our overlay loads later in the cascade, so for equal specificity
+ * — our overlay loads later in the cascade so for equal specificity
  * + !important, ours wins. Specifically targets `html` only (not
  * `*`) so icon fonts that explicitly set their own family still
  * render correctly. */
@@ -47,48 +49,39 @@ html {
   font-family: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace !important;
 }
 
-/* ───── Symmetric radius classes ─────────────────────────────────── */
-html .rounded-sm   { border-radius: 3px  !important; }
-html .rounded      { border-radius: 5px  !important; }
-html .rounded-md   { border-radius: 5px  !important; }
-html .rounded-lg   { border-radius: 8px  !important; }
-html .rounded-xl   { border-radius: 8px  !important; }
-html .rounded-2xl  { border-radius: 12px !important; }
-html .rounded-3xl  { border-radius: 16px !important; }
-/* html .rounded-full deliberately not overridden — preserves avatars + pills */
+/* ───── Kill the --radius custom property ────────────────────────
+ * Neutralizes every `border-radius: var(--radius)` rule baked into
+ * Ditto's component CSS. Higher-priority root-level declaration
+ * shadows Ditto's :root { --radius: .75rem; } default. */
+html {
+  --radius: 0 !important;
+  --radius-sm: 0 !important;
+  --radius-md: 0 !important;
+  --radius-lg: 0 !important;
+  --radius-xl: 0 !important;
+}
 
-/* ───── Asymmetric variants — top edge ──────────────────────────── */
-html .rounded-t-sm  { border-top-left-radius: 3px  !important; border-top-right-radius: 3px  !important; }
-html .rounded-t     { border-top-left-radius: 5px  !important; border-top-right-radius: 5px  !important; }
-html .rounded-t-md  { border-top-left-radius: 5px  !important; border-top-right-radius: 5px  !important; }
-html .rounded-t-lg  { border-top-left-radius: 8px  !important; border-top-right-radius: 8px  !important; }
-html .rounded-t-xl  { border-top-left-radius: 8px  !important; border-top-right-radius: 8px  !important; }
-html .rounded-t-2xl { border-top-left-radius: 12px !important; border-top-right-radius: 12px !important; }
-html .rounded-t-3xl { border-top-left-radius: 16px !important; border-top-right-radius: 16px !important; }
+/* ───── Heavy hammer: square everything ──────────────────────────
+ * Catches all the raw `border-radius: <length>` declarations
+ * baked into compiled component CSS that no class selector can
+ * reach. Specificity is (0,1,1) which beats most class-only rules,
+ * including Tailwind v4 @layer utilities. */
+html * {
+  border-radius: 0 !important;
+}
 
-/* ───── Asymmetric variants — bottom edge ───────────────────────── */
-html .rounded-b-sm  { border-bottom-left-radius: 3px  !important; border-bottom-right-radius: 3px  !important; }
-html .rounded-b     { border-bottom-left-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
-html .rounded-b-md  { border-bottom-left-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
-html .rounded-b-lg  { border-bottom-left-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
-html .rounded-b-xl  { border-bottom-left-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
-html .rounded-b-2xl { border-bottom-left-radius: 12px !important; border-bottom-right-radius: 12px !important; }
-html .rounded-b-3xl { border-bottom-left-radius: 16px !important; border-bottom-right-radius: 16px !important; }
-
-/* ───── Asymmetric variants — left edge ─────────────────────────── */
-html .rounded-l-sm  { border-top-left-radius: 3px  !important; border-bottom-left-radius: 3px  !important; }
-html .rounded-l     { border-top-left-radius: 5px  !important; border-bottom-left-radius: 5px  !important; }
-html .rounded-l-md  { border-top-left-radius: 5px  !important; border-bottom-left-radius: 5px  !important; }
-html .rounded-l-lg  { border-top-left-radius: 8px  !important; border-bottom-left-radius: 8px  !important; }
-html .rounded-l-xl  { border-top-left-radius: 8px  !important; border-bottom-left-radius: 8px  !important; }
-html .rounded-l-2xl { border-top-left-radius: 12px !important; border-bottom-left-radius: 12px !important; }
-html .rounded-l-3xl { border-top-left-radius: 16px !important; border-bottom-left-radius: 16px !important; }
-
-/* ───── Asymmetric variants — right edge ────────────────────────── */
-html .rounded-r-sm  { border-top-right-radius: 3px  !important; border-bottom-right-radius: 3px  !important; }
-html .rounded-r     { border-top-right-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
-html .rounded-r-md  { border-top-right-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
-html .rounded-r-lg  { border-top-right-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
-html .rounded-r-xl  { border-top-right-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
-html .rounded-r-2xl { border-top-right-radius: 12px !important; border-bottom-right-radius: 12px !important; }
-html .rounded-r-3xl { border-top-right-radius: 16px !important; border-bottom-right-radius: 16px !important; }
+/* ───── Avatar preservation ──────────────────────────────────────
+ * Ditto's Avatar component (src/components/ui/avatar.tsx) marks
+ * default circular avatars with two distinguishing classes:
+ * `overflow-hidden` (to clip the image) AND `rounded-full`. Pill
+ * nav buttons use `rounded-full` WITHOUT `overflow-hidden`, so they
+ * fall through the heavy hammer above.
+ *
+ * Also preserve inline <img class="rounded-full"> avatars used in
+ * places where Ditto skips the Avatar wrapper.
+ *
+ * Specificity (0,2,1) reliably beats the heavy hammer's (0,1,1). */
+html [class~="overflow-hidden"][class~="rounded-full"],
+html img.rounded-full {
+  border-radius: 9999px !important;
+}
