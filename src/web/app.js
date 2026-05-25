@@ -764,8 +764,12 @@ function openExecModal({ title, subtitle, endpoint, body }) {
       // look at `code`. Caller-visible `ok` is false in that case so the
       // post-install toast doesn't claim a success that didn't happen.
       if (doneWarn) {
-        addLine('— needs a manual sudo step (see above) —', 'warn');
-        statusPill.className = 'status-pill warn'; statusPill.textContent = 'needs sudo';
+        // Covers both the sudo-cred-cache-empty case and the PATH-
+        // shadowing case from verifyVersionOnPath. The actionable
+        // detail (which sudo line to run, or which shadow binary to
+        // remove) was already emitted as a log line above.
+        addLine('— needs a manual step (see above) —', 'warn');
+        statusPill.className = 'status-pill warn'; statusPill.textContent = 'needs action';
       } else if (doneCode === 0) {
         addLine('— done —', 'ok');
         statusPill.className = 'status-pill done'; statusPill.textContent = 'done';
@@ -2476,7 +2480,7 @@ function buildStatusRow(s) {
         endpoint: `/api/exec/install/${cta.installSlug}`,
       }).then(r => {
         if (r.ok)        toast(`${s.label} install finished`, '', 'ok');
-        else if (r.warn) toast(`${s.label} install needs sudo`, 'See modal log for the manual command.', 'warn');
+        else if (r.warn) toast(`${s.label} install needs a manual step`, 'See modal log for details.', 'warn');
         else             toast(`${s.label} install exited ${r.code}`, '', 'err');
         // Bust the cached /api/status so any open Config panel rebuild
         // (or a later navigation to Config) reflects the new install
@@ -17653,7 +17657,7 @@ const ConfigPanel = (() => {
             endpoint: `/api/exec/install/${slug}`,
           }).then(r => {
             if (r.ok)        toast(`${label} install finished`, '', 'ok');
-            else if (r.warn) toast(`${label} install needs sudo`, 'See modal log for the manual command.', 'warn');
+            else if (r.warn) toast(`${label} install needs a manual step`, 'See modal log for details.', 'warn');
             else             toast(`${label} install exited ${r.code}`, '', 'err');
             refreshHealth();
             // Drop the providers + status caches and re-render Config
@@ -20323,7 +20327,7 @@ const SetupWizard = (() => {
             renderBinaryState();
             syncAmberGate();
           } else if (r.warn) {
-            toast('ngit install needs sudo', 'See modal log for the manual command.', 'warn');
+            toast('ngit install needs a manual step', 'See modal log for details.', 'warn');
           } else {
             toast(`ngit install exited ${r.code}`, '', 'err');
           }
@@ -24865,7 +24869,10 @@ const Updates = (() => {
       if (result.ok) {
         addLine(`${tool.name}: updated to ${tool.pinnedVersion}`, 'ok');
       } else if (result.warn) {
-        addLine(`${tool.name}: download verified — run the sudo install line above to finish`, 'warn');
+        // Two warn paths: cred-cache empty (run the sudo line above) or
+        // PATH shadowing (remove the old binary above). Generic phrasing
+        // covers both; the actionable detail is one line above this one.
+        addLine(`${tool.name}: install needs a manual step — see above`, 'warn');
       } else {
         addLine(`${tool.name}: update failed${result.error ? ` — ${result.error}` : ''}`, 'err');
       }
@@ -24913,7 +24920,7 @@ const Updates = (() => {
           // 2.4.3" line.
           const parts = [];
           if (toolFailures) parts.push(`${toolFailures} failed`);
-          if (toolWarns)    parts.push(`${toolWarns} need${toolWarns === 1 ? 's' : ''} sudo`);
+          if (toolWarns)    parts.push(`${toolWarns} need${toolWarns === 1 ? 's' : ''} a manual step`);
           const cls = toolFailures ? 'err' : 'warn';
           addLine(`Tool upgrades: ${parts.join(', ')}.`, cls);
           statusPill.className = `status-pill ${toolFailures ? 'error' : 'warn'}`;

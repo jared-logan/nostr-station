@@ -25,7 +25,7 @@ import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
 import {
   type InstallResult, type ProgressCallback,
-  createInstallLogger, downloadAndVerify,
+  createInstallLogger, downloadAndVerify, verifyVersionOnPath,
 } from './installer-runtime.js';
 
 export type { InstallResult, ProgressCallback };
@@ -213,12 +213,15 @@ export async function installNgit(
   fs.rmSync(tmp, { recursive: true, force: true });
 
   log.step('verifying binaries on PATH');
-  try {
-    await execa('ngit', ['--version'], { stdio: 'pipe', timeout: 5000 });
-    log.append('ngit verify ok');
-  } catch (e: any) {
-    return log.fail('verify', `ngit --version failed: ${(e?.message || '').slice(0, 160)}`);
-  }
+  // verifyVersionOnPath catches the case where install -m succeeded but
+  // PATH still resolves to an older ngit at ~/.cargo/bin or ~/.local/bin
+  // (the previous "exit code 0" check happily passed that). Returns a
+  // warn-shaped result with a "remove the shadow" detail so the modal
+  // surfaces an actionable yellow line instead of fake green success.
+  const shadowResult = await verifyVersionOnPath({
+    bin: 'ngit', destFile, expectedVersion: pinnedVersion, log,
+  });
+  if (shadowResult) return shadowResult;
   // `git-remote-nostr` has no --version flag (it's a git protocol
   // helper invoked by git, not a user-facing CLI). Check it's
   // executable via fs instead — `which` would shell out and add
