@@ -36,6 +36,13 @@ export interface InstallResult {
   // not err. nak / ngit reuse the same flag for the cred-cache miss
   // case to keep status semantics uniform across the three.
   warn?:   boolean;
+  // PATH-shadowing warn case: file at destFile is the new pinned
+  // version, but `which <bin>` resolves to an older binary at this
+  // path. Surfaced as a structured field (not just in `detail`) so
+  // the Updates modal can offer a one-click "remove this and retry"
+  // button without parsing the detail string. Always a real absolute
+  // path; absent when `which` couldn't identify the shadow.
+  shadowPath?: string;
 }
 
 export type ProgressCallback = (step: string) => void;
@@ -160,4 +167,86 @@ export async function downloadAndVerify(args: DownloadAndVerifyArgs): Promise<
   }
   log.append('sha256 verified');
   return { ok: true };
+}
+
+// First MAJOR.MINOR.PATCH(-suffix)? in the input. Tolerant of "ngit 2.4.3",
+// "nak version 0.19.7", "ngit-cli 2.4.3-rc.1", etc. Used by the post-
+// install verify step to compare what `<bin> --version` actually returns
+// against the version we just dropped on disk.
+export function extractSemver(s: string): string | null {
+  const m = s.match(/(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)/);
+  return m ? m[1] : null;
+}
+
+// Post-install PATH-resolution check. Runs `<bin> --version` against the
+// user's shell PATH and confirms the running binary actually reports the
+// version we just installed at `destFile`.
+//
+// The bug this catches: install -m writes /usr/local/bin/<bin> at the
+// pinned version, but the user has an older <bin> at ~/.cargo/bin or
+// ~/.local/bin (or another dir earlier in PATH). The previous verify
+// step only checked that `<bin> --version` exited 0 — it does, because
+// the shadow binary is still a working <bin>, just an older one. The
+// installer reported success, the Updates modal printed a green
+// "updated to X", and the update pill kept reappearing on every poll
+// because the live binary on PATH never actually changed.
+//
+// On mismatch we shell out to `which <bin>` to identify the shadowing
+// path and return a warn-shaped result (warn:true) — the file at
+// destFile IS the new version, so this isn't a hard failure; the user
+// just needs to remove the shadow or reorder PATH. The Updates modal
+// surfaces this as a yellow "needs manual step" with the actionable
+// detail line in the log above.
+export async function verifyVersionOnPath(opts: {
+  bin:             string;     // e.g. 'ngit'
+  destFile:        string;     // where we just installed it
+  expectedVersion: string;     // pinned version from versions.ts
+  log:             InstallLogger;
+}): Promise<InstallResult | null> {
+  let probe;
+  try {
+    probe = await execa(opts.bin, ['--version'], { stdio: 'pipe', timeout: 5000 });
+  } catch (e: any) {
+    return opts.log.fail('verify', `${opts.bin} --version failed: ${(e?.message || '').slice(0, 160)}`);
+  }
+  // Some Rust binaries print --version to stderr; concatenate both so the
+  // extractor doesn't miss it. Mirrors the dual-stream capture in
+  // tool-updates.ts probeVersion().
+  const out = (probe.stdout || '') + (probe.stderr || '');
+  const actual = extractSemver(out);
+  if (!actual) {
+    // No semver found — can't decide. Don't fail the install; the same
+    // input would have made gatherToolUpdates return currentVersion:null
+    // (and thus updateAvailable:false), so a stuck pill isn't a risk here.
+    opts.log.append(`verify ok (no semver in --version output: ${out.slice(0, 80)})`);
+    return null;
+  }
+  if (actual === opts.expectedVersion) {
+    opts.log.append(`verify ok (PATH resolves to ${actual})`);
+    return null;
+  }
+
+  // Mismatch — PATH shadowing. Identify the offending binary so the
+  // detail message tells the user exactly what to remove (and so the
+  // SSE done frame can carry a structured shadowPath for the Updates
+  // modal's one-click "Remove shadow and retry" button).
+  let shadowPath: string | null = null;
+  try {
+    const w = await execa('which', [opts.bin], { stdio: 'pipe', timeout: 3000 });
+    const p = w.stdout.trim();
+    if (p) shadowPath = p;
+  } catch { /* `which` not available — fall through to generic phrasing */ }
+
+  const shadowDesc = shadowPath || 'an earlier PATH entry';
+  opts.log.append(`verify shadow: installed=${opts.expectedVersion} actual=${actual} shadow=${shadowDesc}`);
+  return {
+    ok:   false,
+    warn: true,
+    shadowPath: shadowPath ?? undefined,
+    detail:
+      `${opts.bin} ${opts.expectedVersion} installed at ${opts.destFile}, but PATH still ` +
+      `resolves to ${opts.bin} ${actual} at ${shadowDesc}. ` +
+      `Remove the older binary (e.g. \`rm ${shadowDesc}\`) or reorder PATH so ${opts.destFile} wins, ` +
+      `then re-run the update.`,
+  };
 }

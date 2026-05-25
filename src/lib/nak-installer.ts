@@ -21,7 +21,7 @@ import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
 import {
   type InstallResult, type ProgressCallback,
-  createInstallLogger, downloadAndVerify,
+  createInstallLogger, downloadAndVerify, verifyVersionOnPath,
 } from './installer-runtime.js';
 
 export type { InstallResult, ProgressCallback };
@@ -125,12 +125,12 @@ export async function installNak(
   fs.rmSync(tmp, { recursive: true, force: true });
 
   log.step('verifying binary on PATH');
-  try {
-    await execa('nak', ['--version'], { stdio: 'pipe', timeout: 5000 });
-    log.append('verify ok');
-  } catch (e: any) {
-    return log.fail('verify', `nak --version failed: ${(e?.message || '').slice(0, 160)}`);
-  }
+  // See ngit-installer for the rationale — verifyVersionOnPath catches
+  // the PATH-shadowing case the old exit-code-only verify missed.
+  const shadowResult = await verifyVersionOnPath({
+    bin: 'nak', destFile, expectedVersion: pinnedVersion, log,
+  });
+  if (shadowResult) return shadowResult;
 
   return { ok: true, detail: `installed at ${destFile}` };
 }
