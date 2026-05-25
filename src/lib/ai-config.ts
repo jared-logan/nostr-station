@@ -69,6 +69,50 @@ export interface AiConfig {
     terminal?: string;
     chat?:    string;
   };
+  // Outbound-to-LLM redaction settings. The Chat pane and any other
+  // surface that ships a system prompt upstream reads through
+  // effectivePrivacy() so user-identifying fields can be withheld.
+  // Absent = use the defaults from effectivePrivacy().
+  privacy?: PrivacyConfig;
+}
+
+/**
+ * Privacy toggles for what gets sent to the LLM provider. Kept narrow on
+ * purpose — every knob here addresses a concrete leak the assistant does
+ * not need to function:
+ *
+ * - includeNpub: when off, the user's npub is not spliced into the
+ *   system prompt. The model never signs Nostr events itself (ngit and
+ *   the local tools handle signing), so it has no functional need for
+ *   the user's public key. Default off.
+ *
+ * The `cwd` redaction (replacing the user's home dir + project path
+ * with anonymized tokens) is unconditional — it's never useful to ship
+ * the username upstream, so we don't expose a toggle for it.
+ */
+export interface PrivacyConfig {
+  includeNpub?: boolean;
+}
+
+/**
+ * Resolved privacy settings — merges hardcoded defaults with whatever
+ * the on-disk ai-config.json has set. Returns a fully-populated record
+ * so callers don't have to repeat default-handling.
+ */
+export function effectivePrivacy(): Required<PrivacyConfig> {
+  const cfg = readAiConfig();
+  return {
+    includeNpub: cfg.privacy?.includeNpub === true,
+  };
+}
+
+/** Merge a partial privacy patch into ai-config.json and persist. */
+export function setPrivacy(patch: Partial<PrivacyConfig>): AiConfig {
+  const cfg = readAiConfig();
+  const current = cfg.privacy ?? {};
+  cfg.privacy = { ...current, ...patch };
+  writeAiConfig(cfg);
+  return cfg;
 }
 
 /** Fresh config value — callers never share references across read/write. */
@@ -90,10 +134,17 @@ function parseFile(): AiConfig | null {
     const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
     const parsed = JSON.parse(raw);
     // Defensive: accept partial shapes, fill in missing fields.
-    return {
+    const out: AiConfig = {
       providers: (parsed && typeof parsed.providers === 'object' && parsed.providers) || {},
       defaults:  (parsed && typeof parsed.defaults  === 'object' && parsed.defaults)  || {},
     };
+    const rawPrivacy = parsed && typeof parsed.privacy === 'object' && parsed.privacy;
+    if (rawPrivacy) {
+      const priv: PrivacyConfig = {};
+      if (typeof rawPrivacy.includeNpub === 'boolean') priv.includeNpub = rawPrivacy.includeNpub;
+      if (Object.keys(priv).length > 0) out.privacy = priv;
+    }
+    return out;
   } catch {
     return null;
   }

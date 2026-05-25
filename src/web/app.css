@@ -3501,6 +3501,27 @@ body.sidebar-open .sidebar-toggle-bars span:nth-child(3) { transform: translateY
   border-radius: var(--r-sm);
 }
 
+/* Click-to-preview pill that summarizes the outbound-privacy posture
+   for the next chat turn. Label text is set by app.js — "context:
+   minimal" when npub is withheld (the default), "context: standard"
+   when it's been opted back in. */
+.chat-controls .chat-context-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chat-controls .chat-context-chip:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
 /* ── whitelist manager ────────────────────────────────────────────────── */
 
 .whitelist-manager {

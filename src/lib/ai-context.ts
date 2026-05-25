@@ -34,6 +34,32 @@
  * llm-wiki namespaces Nori should query for that project specifically.
  * Today we splice the whole file; a future pass can parse this section
  * and feed it into the wiki-lookup hint at request time.
+ *
+ * ── Privacy axes ──────────────────────────────────────────────────────
+ *
+ * Every variable that flows into the system prompt eventually leaves the
+ * user's machine. Two redactions apply:
+ *
+ *   1. `cwd` is *always* anonymized — the user's home dir collapses to
+ *      `~` and the project root to `$(PROJECT_ROOT)`. The LLM has no
+ *      functional need for the username; doing this unconditionally
+ *      avoids a settings-panel tax.
+ *
+ *   2. `user.npub` is opt-in. Default off (via `effectivePrivacy()` in
+ *      ai-config.ts). When withheld, the template renders a "(withheld
+ *      by privacy setting)" line instead of leaking the public key on
+ *      every chat turn. The model never signs Nostr events itself —
+ *      signing happens locally via ngit / the bunker — so it does not
+ *      need the npub to function.
+ *
+ *   3. `project-context.md` honors `USER_REGION_BEGIN/END` markers just
+ *      like the station-level NOSTR_STATION.md. When the markers are
+ *      present, only the inner region is spliced; when absent, the
+ *      whole file is spliced (back-compat).
+ *
+ * The redactions are applied inside `buildVars()` so any system-prompt
+ * template (built-in or per-project override) sees already-redacted
+ * values — a custom template cannot reintroduce a leaked field.
  */
 
 import fs from 'fs';
@@ -50,6 +76,7 @@ import {
 import { renderPrompt } from './prompt-render.js';
 import { readIdentity, hexToNpub, isNpubOrHex } from './identity.js';
 import { extractUserRegion, USER_REGION_BEGIN, USER_REGION_END } from './editor.js';
+import { effectivePrivacy } from './ai-config.js';
 
 export interface AiContext {
   text:        string;
@@ -67,6 +94,33 @@ export interface ModelInfo {
 }
 
 const README_CHARS_MAX = 500;
+
+/**
+ * Anonymize filesystem paths for upstream display. Replaces the project
+ * root with `$(PROJECT_ROOT)` and the user's home directory with `~`.
+ * Always applied — see the "Privacy axes" note at the top of this file
+ * for why this isn't a toggle.
+ *
+ * Safe on inputs that don't contain either prefix (returns them
+ * unchanged). Tolerates missing projectPath.
+ */
+export function redactPath(s: string, projectPath?: string | null): string {
+  if (!s) return s;
+  let out = s;
+  // Project path first — it's typically a child of home, so swapping it
+  // before HOME means a path under the project gets the more specific
+  // token rather than `~/…/projectName`.
+  if (projectPath) {
+    const splitGlobal = out.split(projectPath);
+    out = splitGlobal.join('$(PROJECT_ROOT)');
+  }
+  const home = os.homedir();
+  if (home) {
+    const splitHome = out.split(home);
+    out = splitHome.join('~');
+  }
+  return out;
+}
 
 // ── Helpers (kept for back-compat with existing tests) ────────────────────
 
@@ -185,22 +239,33 @@ function inferMode(project: Project | null, template: ProjectTemplateRecord | nu
 // future caching populate the rest.
 
 interface UserVars {
-  npub:  string | null;
-  name:  string | null;
-  nip05: string | null;
-  lud16: string | null;
+  npub:     string | null;
+  name:     string | null;
+  nip05:    string | null;
+  lud16:    string | null;
+  // True when the identity exists but the npub is being withheld by the
+  // privacy setting. The template uses this to render a distinct
+  // "(withheld)" line vs. the "no identity yet" fallback, so users on a
+  // paired install don't see the setup-wizard hint by accident.
+  withheld: boolean;
 }
 
-function readUserVars(): UserVars {
+function readUserVars(includeNpub: boolean): UserVars {
+  const empty: UserVars = { npub: null, name: null, nip05: null, lud16: null, withheld: false };
   try {
     const ident = readIdentity();
-    if (!ident.npub) return { npub: null, name: null, nip05: null, lud16: null };
+    if (!ident.npub) return empty;
     const npub = isNpubOrHex(ident.npub)
       ? (ident.npub.startsWith('npub') ? ident.npub : hexToNpub(ident.npub))
       : null;
-    return { npub, name: null, nip05: null, lud16: null };
+    if (!includeNpub) {
+      // Identity exists but the user opted out of sharing it with the
+      // model. Mark withheld so the template branches correctly.
+      return { npub: null, name: null, nip05: null, lud16: null, withheld: true };
+    }
+    return { npub, name: null, nip05: null, lud16: null, withheld: false };
   } catch {
-    return { npub: null, name: null, nip05: null, lud16: null };
+    return empty;
   }
 }
 
@@ -236,7 +301,7 @@ You are direct, practical, and privacy-aware. You prefer terminal-first approach
 {% if user.name %}- Name: {{ user.name }}
 {% endif %}{% if user.nip05 %}- NIP-05: {{ user.nip05 }}
 {% endif %}{% if user.lud16 %}- Lightning: {{ user.lud16 }}
-{% endif %}{% else %}The user is not yet paired with a Nostr identity. Suggest the setup wizard at /setup if they ask about publishing.{% endif %}
+{% endif %}{% else %}{% if user.withheld %}The user is paired with a Nostr identity, but their npub is withheld by their AI privacy setting. If they ask about publishing or their npub, point them at Config → AI to share it.{% else %}The user is not yet paired with a Nostr identity. Suggest the setup wizard at /setup if they ask about publishing.{% endif %}{% endif %}
 
 # Project Templates
 
@@ -388,13 +453,34 @@ function buildVars(project: Project | null, model?: ModelInfo): Vars {
   const permission = permLocal?.mode ?? 'auto-edit';
   const mode       = inferMode(project, tplRecord);
 
+  // Outbound privacy posture — read once, applied below. Never throws;
+  // a config-read failure inside the privacy layer would fall through
+  // to the safe defaults (npub withheld).
+  let privacy: { includeNpub: boolean };
+  try { privacy = effectivePrivacy(); }
+  catch { privacy = { includeNpub: false }; }
+
   const README          = project?.path ? readReadmeExcerpt(project.path) : null;
-  const overlay         = project ? readProjectContextOverlay(project) : null;
+
+  // project-context.md may be wrapped in USER_REGION markers (same
+  // convention as the station-level NOSTR_STATION.md). When the markers
+  // are present, splice only the inner region; when absent, splice the
+  // whole file so existing overlays keep working.
+  const rawOverlay      = project ? readProjectContextOverlay(project) : null;
+  const overlay         = (rawOverlay && rawOverlay.includes(USER_REGION_BEGIN))
+    ? (extractUserRegion(rawOverlay) || null)
+    : rawOverlay;
+
   // Recent commits surface in the system prompt as project context.
   // ngit-only projects have git history too (ngit init runs on top
-  // of a real git repo), so we accept either capability.
+  // of a real git repo), so we accept either capability. Commit
+  // messages are passed through redactPath so subjects that mention
+  // absolute paths (`cd /home/alice/…`) get the username collapsed.
   const recentCommits   = (project?.path && (project.capabilities.git || project.capabilities.ngit))
-    ? projectGitLog(project.path, 10).map(c => ({ hash: c.hash, message: c.message }))
+    ? projectGitLog(project.path, 10).map(c => ({
+        hash:    c.hash,
+        message: redactPath(c.message, project.path),
+      }))
     : [];
 
   // Templates registry for the system-prompt's "## Project Templates"
@@ -404,20 +490,27 @@ function buildVars(project: Project | null, model?: ModelInfo): Vars {
     id: t.id, name: t.name, description: t.description,
   }));
 
+  // cwd is always anonymized — see "Privacy axes" at the top of this
+  // file. The model has no functional need for the user's username.
+  const rawCwd = project?.path ?? os.homedir();
+  const cwd    = redactPath(rawCwd, project?.path);
+
   return {
     mode,
     date:           new Date().toISOString(),
-    cwd:            project?.path ?? os.homedir(),
+    cwd,
     repositoryUrl:  project?.remotes?.github ?? project?.remotes?.ngit ?? null,
     deployedUrl:    project?.nsite?.url ?? null,
     model:          { provider: model?.provider ?? 'unknown', fullId: model?.fullId ?? 'unknown' },
     permissions:    { mode: permission },
-    user:           readUserVars(),
+    user:           readUserVars(privacy.includeNpub),
     config:         { templates },
     stationContext: readStationContext(),
     project:        project ? {
       name:         project.name,
-      path:         project.path,
+      // Same redaction policy as cwd — keeps the displayed Path: line
+      // consistent with the {{ cwd }} block above.
+      path:         project.path ? redactPath(project.path, project.path) : null,
       capabilities: formatCapabilities(project),
     } : null,
     projectTemplate: tplRecord,
