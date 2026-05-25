@@ -1,5 +1,23 @@
 /* nostr-station overrides for Ditto's UI.
  *
+ * Sections (in source order):
+ *   ① Typography                  — font stack, base size, line-height
+ *   ② Border-radius scale         — Tailwind rounded-* → --r-sm/--r/--r-lg
+ *   ③ Layout container            — kill 1200px outer cap + 600px feed cap
+ *   ④ Sidebar nav                 — square the pills, accent-soft active
+ *   ⑤ Dialog elevation            — heavier shadow
+ *   ⑥ Buttons                     — auto height + tight padding (exc. icon)
+ *   ⑦ Post action buttons         — square reply/repost/like/zap
+ *   ⑧ Inputs / textareas          — auto height + tight padding
+ *   ⑨ Focus                       — no ring, border-color shift
+ *   ⑩ Spacing rhythm              — p-6 → 14px 18px
+ *   ⑪ Wider radii (xl / 2xl)      — pin to --r-lg
+ *   ⑫ Tabs                        — underline style
+ *   ⑬ Badges                      — square corners
+ *   ⑭ Heading scale               — text-2xl tightened
+ *   ⑮ Toast elevation             — heavier shadow
+ *   ⑯ Avatar shape preservation   — defense-in-depth
+ *
  * Applied via a <link> tag injected at the end of dist/ditto/index.html
  * (see applyBranding() in scripts/fetch-ditto.mjs). Loaded after Ditto's
  * own compiled CSS — at equal specificity, cascade resolves to ours.
@@ -333,6 +351,32 @@ button:focus-visible {
  */
 [class~="rounded-full"][class~="text-xs"][class~="font-semibold"][class~="border"][class~="px-2.5"] {
   border-radius: var(--r-sm) !important;
+}
+
+/* ───── Heading scale — tighten text-2xl ─────────────────────────
+ * Ditto's CardTitle uses `text-2xl font-semibold leading-none
+ * tracking-tight` (src/components/ui/card.tsx:5-80 — confirmed in
+ * the surfaces inventory). At our 14px html base, text-2xl resolves
+ * to 21px, well above the dashboard's 15px .panel-head .title and
+ * 14px .modal-head .title (src/web/app.css:596, 3350). The compressed
+ * .p-6 surface (14px 18px from §10) reads oddly with a 21px title in
+ * a 14px-padded card. Drop text-2xl to 15px to keep the head/title
+ * proportional. Other Tailwind text-* sizes already land close to
+ * the dashboard scale at the 14px base.
+ */
+.text-2xl { font-size: 15px !important; }
+
+/* ───── Toast elevation — heavier shadow ─────────────────────────
+ * shadcn Toast (Ditto's src/components/ui/toast.tsx:10-138) uses
+ * `shadow-lg`. The dashboard's .toast uses
+ * `0 8px 24px rgba(0,0,0,0.4)` (src/web/app.css:3304). Match.
+ *
+ * Selector lifts from the Radix-emitted role + the data-state Radix
+ * sets while the toast is visible. Avoids matching status
+ * announcements that aren't toasts.
+ */
+[role="status"][data-state="open"] {
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4) !important;
 }
 
 /* ───── Avatar shape preservation ────────────────────────────────
