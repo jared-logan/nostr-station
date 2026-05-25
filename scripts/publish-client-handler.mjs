@@ -41,8 +41,19 @@ import WebSocket from 'ws';
 // can't ship the event under a different identity.
 const EXPECTED_PUBKEY = '291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe';
 const D_TAG    = 'nostr-station';
-const NSITE_URL = `https://${nip19.npubEncode(EXPECTED_PUBKEY)}.nsite.lol`;
+// Project's dedicated nsite (nsyte form: base36(pubkey) + project name).
+// Same pubkey publishes other nsites at the bare-npub form, so the
+// project-name-suffixed URL is what we hand out as the canonical
+// "nostr-station" page. tests/nsite-resolver.test.ts already pins
+// this resolution.
+const NSITE_URL = 'https://10vy5d0umw8izp3bcmh0btzl6k2szvsu8zestncxpsstb6l8e6nostr-station.nsite.lol';
 const REPO_URL  = 'https://github.com/jared-logan/nostr-station';
+// Icon URL. Served from GitHub raw rather than the nsite so it stays
+// reachable regardless of whether the nsite is currently published /
+// reachable / has the asset at that path. NIP-89-aware clients fetch
+// this directly to render the handler card; a 404 here means clients
+// fall back to a placeholder icon.
+const PICTURE_URL = 'https://raw.githubusercontent.com/jared-logan/nostr-station/main/src/web/nori.svg';
 
 // Relays we publish to. Mirrors the App Relays default list in
 // scripts/fetch-ditto.mjs's buildDittoConfig() plus the nsite relay
@@ -68,7 +79,7 @@ function buildTemplate() {
     display_name: 'nostr-station',
     about:        'Nostr-native dev environment — one-command relay, mesh VPN, ngit, AI assistant, Stacks. Public Nostr client powered by Ditto.',
     website:      NSITE_URL,
-    picture:      `${NSITE_URL}/nori.svg`,
+    picture:      PICTURE_URL,
   });
   return {
     kind: 31990,
@@ -87,11 +98,34 @@ function buildTemplate() {
       ['k', '6'],
       ['k', '7'],
       ['k', '1111'],
-      // Where to open content. {bech32} is NIP-89's URI template
-      // placeholder for the resolved nevent/naddr/etc. The landing
-      // page is nsite-hosted; its router accepts /<bech32> paths.
-      ['web', `${NSITE_URL}/{bech32}`, 'nevent'],
-      ['web', `${NSITE_URL}/{bech32}`, 'naddr'],
+      // ─── Rich-card `a` references ─────────────────────────────────
+      // NIP-89-aware clients (Ditto in particular) render `a` tags
+      // pointing at other addressable events by the same author as
+      // action buttons on the handler card. Reference Ditto's own
+      // kind-31990 for the pattern: they ship `a` tags for their
+      // nsite (kind-35128) → "Run" button + their ngit repo
+      // (kind-30617) → "Fork" button.
+      //
+      // Both coordinates below resolve under the same project pubkey:
+      //   35128:291c75d…:nostr-station → the dedicated nsite at
+      //     10vy5d0umw8izp3bcmh0btzl6k2szvsu8zestncxpsstb6l8e6nostr-station.nsite.lol
+      //   30617:291c75d…:nostr-station → nostr-station's NIP-34
+      //     repository announcement (published via ngit)
+      // If either event isn't currently reachable on a relay the
+      // client just skips rendering its button — no broken UI,
+      // graceful degradation.
+      ['a', `35128:${EXPECTED_PUBKEY}:${D_TAG}`],
+      ['a', `30617:${EXPECTED_PUBKEY}:${D_TAG}`],
+      // Topic tag — surfaces this handler in topic-discovery feeds
+      // (e.g. "Nostr clients tagged #nostr-dev"). Ditto uses a
+      // single `t` tag for the same purpose.
+      ['t', 'nostr-dev'],
+      // NB: `web` URI-template tags intentionally omitted. NIP-89 lets
+      // a handler declare a URL pattern for opening nevent/naddr/etc.,
+      // but nostr-station is a local dashboard — there is no public
+      // web URL that takes a {bech32} path and dispatches it. Until
+      // the nsite (or some other surface) grows that handler,
+      // claiming it would 404 anyone who clicks through.
       // Repo for source-level provenance — NIP-89 doesn't formalize
       // a `r` (reference) tag here, but several clients (notably
       // Coracle, Nostrudel) read it.

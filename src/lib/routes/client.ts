@@ -63,11 +63,16 @@ const PROFILE_CACHE_TTL_MS   = 5 * 60_000;
 // 4-element NIP-89 form: ["client", <name>, <kind>:<pubkey>:<d-tag>, <relay-hint>].
 // Coordinate points at the kind-31990 client handler event for
 // nostr-station (NIP-89 "handler information"), signed by the project
-// pubkey (291c75d… — same identity that anchors the landing-page nsite
-// and signs ngit merge events). Publish/refresh the handler event with
-// `npm run publish-client-handler`; this constant must stay in sync with
-// the `client` naddr1 baked into scripts/fetch-ditto.mjs so the iframe
-// (Ditto) and native (/api/client) publish paths emit the same tag.
+// pubkey 291c75d… (jaredlogan) — same identity that signs ngit merges
+// on this repo and publishes the project's dedicated nsite at
+// 10vy5d0umw8izp3bcmh0btzl6k2szvsu8zestncxpsstb6l8e6nostr-station.nsite.lol
+// (the nsyte form: base36(pubkey) + project name). Solo-dev Nostr
+// clients conventionally sign their kind-31990 with the founder's
+// personal pubkey — same pattern as Damus / Primal / Coracle.
+// Publish/refresh the handler event with `npm run publish-client-handler`;
+// this constant must stay in sync with the `client` naddr1 baked into
+// scripts/fetch-ditto.mjs so the iframe (Ditto) and native
+// (/api/client) publish paths emit the same tag.
 const CLIENT_TAG: string[] = [
   'client',
   'nostr-station',
