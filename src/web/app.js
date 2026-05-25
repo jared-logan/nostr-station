@@ -24852,13 +24852,14 @@ const Updates = (() => {
             }
             if (msg.done) {
               // warn:true means the new binary was downloaded + verified
-              // but the sudo-install step failed for lack of a cred-cache
-              // entry — the on-disk binary is still the OLD version. Treat
-              // as not-ok so we don't claim "updated to X" and so the
-              // post-install pill refresh correctly keeps showing the
-              // pending upgrade.
+              // but the on-disk install can't take effect for one of two
+              // reasons: (a) the sudo-install step failed for lack of a
+              // cred-cache entry, (b) PATH is shadowed by an older
+              // binary at e.g. ~/.cargo/bin. Both are not-ok so we don't
+              // claim "updated to X". For (b), shadowPath carries the
+              // offending path so we can offer a one-click remove+retry.
               if (msg.warn) {
-                result = { ok: false, warn: true, error: null };
+                result = { ok: false, warn: true, error: null, shadowPath: msg.shadowPath || null };
               } else {
                 result = { ok: msg.code === 0, error: msg.code === 0 ? null : `exit ${msg.code}` };
               }
@@ -24896,28 +24897,32 @@ const Updates = (() => {
       // diagnostic per row and can re-run.
       let toolFailures = 0;
       let toolWarns    = 0;
+      // PATH-shadow warns carry a structured shadowPath; we collect
+      // them so the "Remove shadow and retry" button below can fix the
+      // problem in one click instead of asking the user to copy-paste
+      // a shell command.
+      let pendingShadows = [];
       for (const tool of pendingTools) {
         const r = await streamToolUpdate(tool);
         if (r.warn)      toolWarns++;
         else if (!r.ok)  toolFailures++;
+        if (r.warn && r.shadowPath) pendingShadows.push({ tool, shadowPath: r.shadowPath });
       }
 
-      // Stage 2: nostr-station self-update. Skip when there's nothing
-      // committed upstream — keeps the modal honest when the only
-      // pending work was tool upgrades.
-      if (!hasSelfUpdate) {
-        try { cursor.remove(); } catch {}
-        running = false;
+      // Summary render — extracted so the retry-button click handler
+      // below can re-render after a remove+retry cycle without
+      // duplicating copy.
+      const renderToolSummary = () => {
         if (toolFailures === 0 && toolWarns === 0) {
           addLine('All tool upgrades complete.', 'ok');
           statusPill.className = 'status-pill done'; statusPill.textContent = 'done';
         } else {
-          // Warns (needs-sudo) are distinct from hard failures: the
-          // download + sha256 check passed, the install just needs the
-          // user to run the printed sudo line manually. Reporting them
-          // as "failed" was what made the friend-tester confused when
-          // the pill kept returning after a green-looking "updated to
-          // 2.4.3" line.
+          // Warns (needs-sudo / shadow) are distinct from hard failures:
+          // the download + sha256 check passed, the install just needs
+          // the user to run the printed sudo line manually OR remove a
+          // shadowing binary. Reporting them as "failed" was what made
+          // the friend-tester confused when the pill kept returning
+          // after a green-looking "updated to 2.4.3" line.
           const parts = [];
           if (toolFailures) parts.push(`${toolFailures} failed`);
           if (toolWarns)    parts.push(`${toolWarns} need${toolWarns === 1 ? 's' : ''} a manual step`);
@@ -24926,8 +24931,107 @@ const Updates = (() => {
           statusPill.className = `status-pill ${toolFailures ? 'error' : 'warn'}`;
           statusPill.textContent = parts.join(' · ');
         }
+      };
+
+      // Stage 2: nostr-station self-update. Skip when there's nothing
+      // committed upstream — keeps the modal honest when the only
+      // pending work was tool upgrades.
+      if (!hasSelfUpdate) {
+        try { cursor.remove(); } catch {}
+        running = false;
+        renderToolSummary();
         installBtn.disabled = false;
         closeBtn.disabled = false;
+
+        // Offer one-click PATH-shadow cleanup when verifyVersionOnPath
+        // reported one or more shadowing binaries. The button rm's each
+        // (via /api/exec/remove-shadow, which strictly validates the
+        // path), then re-streams the install for just the shadowed
+        // tools and re-renders the summary. Two presses max in the
+        // common case; the user never has to leave the modal.
+        if (pendingShadows.length) {
+          const fixBtn = document.createElement('button');
+          fixBtn.className = 'primary';
+          const setFixLabel = () => {
+            fixBtn.textContent = pendingShadows.length === 1
+              ? `Remove shadow and retry`
+              : `Remove ${pendingShadows.length} shadows and retry`;
+            fixBtn.title = pendingShadows
+              .map(s => `${s.tool.name}: rm ${s.shadowPath}`)
+              .join('\n');
+          };
+          setFixLabel();
+          fixBtn.addEventListener('click', async () => {
+            fixBtn.disabled = true;
+            closeBtn.disabled = true;
+            installBtn.disabled = true;
+            // Re-add the cursor so addLine() keeps the live-streaming
+            // appearance during the retry pass.
+            term.appendChild(cursor);
+            statusPill.className = 'status-pill running';
+            statusPill.innerHTML = '<span class="spinner"></span>running';
+            addLine('— removing shadow binaries —', 'sys');
+
+            // 1. rm each shadow. Endpoint validates path strictly
+            //    (must be in a user-owned shadow dir, basename matches
+            //    slug, not the install destination) before unlinking.
+            let removeFailures = 0;
+            for (const s of pendingShadows) {
+              try {
+                const resp = await api('/api/exec/remove-shadow', {
+                  method:  'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body:    JSON.stringify({ slug: s.tool.id, path: s.shadowPath }),
+                }, { silent: true });
+                addLine(`${s.tool.name}: removed ${resp?.removed || s.shadowPath}`, 'ok');
+              } catch (e) {
+                addLine(`${s.tool.name}: remove failed — ${e?.message || e}`, 'err');
+                removeFailures++;
+              }
+            }
+            if (removeFailures) {
+              addLine(`${removeFailures} removal${removeFailures === 1 ? '' : 's'} failed — retry aborted.`, 'err');
+              statusPill.className = 'status-pill error';
+              statusPill.textContent = `${removeFailures} failed`;
+              try { cursor.remove(); } catch {}
+              fixBtn.disabled = false;
+              closeBtn.disabled = false;
+              return;
+            }
+
+            // 2. Re-install just the shadowed tools. Subtract their
+            //    original warn contribution before re-counting.
+            toolWarns -= pendingShadows.length;
+            const retryTools = pendingShadows.map(s => s.tool);
+            pendingShadows = [];
+            addLine('— re-running install —', 'sys');
+            for (const tool of retryTools) {
+              const r = await streamToolUpdate(tool);
+              if (r.warn)      toolWarns++;
+              else if (!r.ok)  toolFailures++;
+              if (r.warn && r.shadowPath) pendingShadows.push({ tool, shadowPath: r.shadowPath });
+            }
+
+            try { cursor.remove(); } catch {}
+            renderToolSummary();
+            closeBtn.disabled = false;
+            // If retry exposed a deeper shadow (e.g. user had ngit at
+            // both ~/.cargo/bin AND ~/.local/bin), keep the button live
+            // with updated label; otherwise retire it.
+            if (pendingShadows.length) {
+              setFixLabel();
+              fixBtn.disabled = false;
+            } else {
+              fixBtn.remove();
+            }
+            void refresh(false);
+          });
+          // Layout: [statusWrap, closeBtn, fixBtn, installBtn]. Slotting
+          // before installBtn keeps the primary action (re-install)
+          // rightmost while putting the new action next to it.
+          foot.insertBefore(fixBtn, installBtn);
+        }
+
         // Refresh so the pill recounts whatever's left.
         void refresh(false);
         return;

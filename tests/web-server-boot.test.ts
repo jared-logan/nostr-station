@@ -237,6 +237,137 @@ test('web-server: nsite host with wrong port → bad host', async (t) => {
 // dashboard refused to load any nsite-content URL into its iframe even
 // though the nsite response correctly granted localhost as an ancestor.
 
+// ── remove-shadow endpoint validation ────────────────────────────────────
+//
+// /api/exec/remove-shadow rm's the PATH-shadow binary the Updates modal's
+// retry button targets. It's a destructive endpoint operating on user-
+// owned binaries; the strict validation (basename matches slug, dir is
+// in the curated allow-list, not the installer's destination) is the
+// security contract. These tests pin that contract so a future refactor
+// can't loosen it without going red.
+//
+// Auth: useTempHome() creates a fresh HOME with no identity.json, so
+// localhostExempt() grants access without a session token. Origin header
+// satisfies the CSRF gate on mutations.
+
+test('remove-shadow: 400 on missing slug/path', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await rawRequest({
+    port, method: 'POST', path: '/api/exec/remove-shadow',
+    extraHeaders: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({}),
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body, /slug and path are required/);
+});
+
+test('remove-shadow: 400 on unsupported slug', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const r = await rawRequest({
+    port, method: 'POST', path: '/api/exec/remove-shadow',
+    extraHeaders: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({ slug: 'bash', path: '/bin/bash' }),
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body, /unsupported slug/);
+});
+
+test('remove-shadow: 400 when basename does not match slug', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // Path looks shadow-shaped (lives in ~/.cargo/bin) but isn't named
+  // ngit — rejecting this stops a malformed request from rm'ing arbitrary
+  // files in shadow dirs.
+  const r = await rawRequest({
+    port, method: 'POST', path: '/api/exec/remove-shadow',
+    extraHeaders: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({ slug: 'ngit', path: `${process.env.HOME}/.cargo/bin/cat` }),
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body, /basename does not match slug/);
+});
+
+test('remove-shadow: 400 when path is the install destination', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // /usr/local/bin/ngit is where the installer WRITES — accepting a
+  // request to rm it would nuke our own binary the moment a user
+  // happened to also have /usr/local/bin earlier on PATH than something.
+  const r = await rawRequest({
+    port, method: 'POST', path: '/api/exec/remove-shadow',
+    extraHeaders: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({ slug: 'ngit', path: '/usr/local/bin/ngit' }),
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body, /refusing to remove the install destination/);
+});
+
+test('remove-shadow: 400 when path is not in an allowed shadow dir', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // System dirs (/usr/bin, /bin, /etc, /tmp, etc.) are never removable
+  // via this endpoint — only the user-owned curated paths from
+  // detect.ts:augmentedBinDirs minus the system entries. /tmp/ngit
+  // matches the slug + basename rules but isn't a real shadow location.
+  const r = await rawRequest({
+    port, method: 'POST', path: '/api/exec/remove-shadow',
+    extraHeaders: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({ slug: 'ngit', path: '/tmp/ngit' }),
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body, /not in an allowed shadow dir/);
+});
+
+test('remove-shadow: traversal segments are normalised, rejected', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  // path.resolve() collapses `..` BEFORE the basename/dir checks, so a
+  // crafted "..//etc/passwd" via the cargo dir resolves to /etc/passwd
+  // and fails the basename check (passwd !== ngit). Pin that behaviour
+  // so a future refactor that swaps to raw string handling fails.
+  const r = await rawRequest({
+    port, method: 'POST', path: '/api/exec/remove-shadow',
+    extraHeaders: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({ slug: 'ngit', path: `${process.env.HOME}/.cargo/bin/../../../etc/passwd` }),
+  });
+  assert.equal(r.status, 400);
+  // Either basename mismatch or "not in allowed dir" — both are correct
+  // rejections; the file lives at /etc/passwd post-resolve.
+  assert.ok(/basename does not match slug|not in an allowed shadow dir/.test(r.body), r.body);
+});
+
+test('remove-shadow: happy path unlinks a real shadow in ~/.cargo/bin', async (t) => {
+  const { server, port } = await bootOnRandomPort();
+  t.after(() => new Promise<void>((r) => server.close(() => r())));
+
+  const fs   = await import('node:fs');
+  const path = await import('node:path');
+  const shadowDir  = path.join(process.env.HOME!, '.cargo', 'bin');
+  const shadowPath = path.join(shadowDir, 'ngit');
+  fs.mkdirSync(shadowDir, { recursive: true });
+  fs.writeFileSync(shadowPath, '#!/bin/sh\necho fake\n', { mode: 0o755 });
+  assert.ok(fs.existsSync(shadowPath), 'precondition: shadow file exists');
+
+  const r = await rawRequest({
+    port, method: 'POST', path: '/api/exec/remove-shadow',
+    extraHeaders: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({ slug: 'ngit', path: shadowPath }),
+  });
+  assert.equal(r.status, 200, `expected 200, got ${r.status}: ${r.body}`);
+  const body = JSON.parse(r.body);
+  assert.equal(body.ok, true);
+  assert.equal(body.removed, shadowPath);
+  assert.ok(!fs.existsSync(shadowPath), 'shadow file should be gone');
+});
+
 test('web-server: HTML_SECURITY_HEADERS frame-src includes the nsite wildcard', async () => {
   // Direct unit assertion against the exported constant so a future
   // refactor can't silently drop the wildcard.

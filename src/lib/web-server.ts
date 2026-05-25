@@ -1551,8 +1551,15 @@ export async function startWebServer(port: number): Promise<http.Server> {
             // Status-panel install both used to treat warn as a green
             // "install finished" — leaving the user with the pre-update
             // binary on PATH and the update pill coming right back.
+            // `shadowPath` carries the PATH-shadow case's offending path
+            // so the Updates modal can offer a one-click remove+retry.
             const isWarn = !result.ok && !!result.warn;
-            emit({ done: true, code: result.ok ? 0 : (isWarn ? 0 : 1), warn: isWarn });
+            emit({
+              done: true,
+              code: result.ok ? 0 : (isWarn ? 0 : 1),
+              warn: isWarn,
+              ...(result.shadowPath ? { shadowPath: result.shadowPath } : {}),
+            });
           } catch (e: any) {
             emit({ line: String(e?.message || e), stream: 'stderr' });
             emit({ done: true, code: -1 });
@@ -1572,11 +1579,15 @@ export async function startWebServer(port: number): Promise<http.Server> {
             if (!result.ok && result.detail) {
               emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
             }
-            // See nak branch above — warn flag tells the client the binary
-            // was downloaded + verified but not actually installed (no sudo
-            // password), so it shouldn't claim "updated to X" on success.
+            // See nak branch above — warn flag + shadowPath drive the
+            // Updates modal's warn rendering and one-click retry button.
             const isWarn = !result.ok && !!result.warn;
-            emit({ done: true, code: result.ok ? 0 : (isWarn ? 0 : 1), warn: isWarn });
+            emit({
+              done: true,
+              code: result.ok ? 0 : (isWarn ? 0 : 1),
+              warn: isWarn,
+              ...(result.shadowPath ? { shadowPath: result.shadowPath } : {}),
+            });
           } catch (e: any) {
             emit({ line: String(e?.message || e), stream: 'stderr' });
             emit({ done: true, code: -1 });
@@ -1625,6 +1636,91 @@ export async function startWebServer(port: number): Promise<http.Server> {
         }
         cachedGatherStatus.invalidate();
         try { res.end(); } catch {}
+        return;
+      }
+
+      // POST /api/exec/remove-shadow — backs the Updates modal's
+      // "Remove shadow and retry" button. When verifyVersionOnPath
+      // detects that PATH resolves to an older nak/ngit at e.g.
+      // ~/.cargo/bin instead of the /usr/local/bin install target,
+      // it returns the shadow path; the user can then one-click that
+      // file out of existence (via this endpoint) and re-run the
+      // install loop without leaving the modal.
+      //
+      // STRICT validation — this endpoint deletes a file in the
+      // user's home directory. We refuse to touch anything that
+      // isn't:
+      //   1. Named exactly `<slug>` (no traversal, no rename tricks)
+      //   2. Inside one of the user-owned shadow dirs from
+      //      detect.ts:augmentedBinDirs (~/.cargo/bin, ~/.local/bin,
+      //      ~/.opencode/bin, ~/.nostr-station/bin, /opt/homebrew/bin).
+      //      System dirs (/usr/local/bin, /usr/bin, /bin) are NEVER
+      //      removable — that's where our installer writes, and we
+      //      don't want a malformed request to nuke our own binary.
+      //   3. A regular file or symlink (not a dir, not a special).
+      //   4. Not equal to the installer's destFile.
+      if (url === '/api/exec/remove-shadow' && method === 'POST') {
+        if (!requireSession(req, res)) return;
+        // Slug → install destination. Mirrors the consts in
+        // {nak,ngit}-installer.ts; kept here so the endpoint is a
+        // self-contained validation surface.
+        const DEST_FILES: Record<string, string> = {
+          nak:  '/usr/local/bin/nak',
+          ngit: '/usr/local/bin/ngit',
+        };
+        const home = os.homedir();
+        const ALLOWED_DIRS = [
+          path.join(home, '.cargo', 'bin'),
+          path.join(home, '.local', 'bin'),
+          path.join(home, '.opencode', 'bin'),
+          path.join(home, '.nostr-station', 'bin'),
+          '/opt/homebrew/bin',
+        ];
+        const reject = (status: number, error: string) => {
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error }));
+        };
+        let body = '';
+        try {
+          for await (const chunk of req) body += chunk;
+        } catch { return reject(400, 'request body read failed'); }
+        let parsed: { slug?: string; path?: string };
+        try { parsed = JSON.parse(body || '{}'); }
+        catch { return reject(400, 'invalid JSON body'); }
+        const slug = String(parsed.slug || '');
+        const rawPath = String(parsed.path || '');
+        if (!slug || !rawPath) return reject(400, 'slug and path are required');
+        const destFile = DEST_FILES[slug];
+        if (!destFile) return reject(400, `unsupported slug: ${slug}`);
+        // Normalise — collapses `..`, resolves to absolute. After
+        // this any traversal trickery in `path` is moot.
+        const resolved = path.resolve(rawPath);
+        if (path.basename(resolved) !== slug) {
+          return reject(400, `path basename does not match slug (${slug})`);
+        }
+        if (resolved === destFile) {
+          return reject(400, `refusing to remove the install destination ${destFile}`);
+        }
+        if (!ALLOWED_DIRS.includes(path.dirname(resolved))) {
+          return reject(400, `path is not in an allowed shadow dir: ${path.dirname(resolved)}`);
+        }
+        // lstat (NOT stat) — we want to act on the symlink itself if
+        // the shadow happens to be a symlink, not chase it to whatever
+        // it points at. unlinkSync on a symlink removes the link;
+        // on a regular file removes the file. Either is what we want.
+        let st: fs.Stats;
+        try { st = fs.lstatSync(resolved); }
+        catch (e: any) { return reject(404, `path does not exist: ${(e?.message || '').slice(0, 120)}`); }
+        if (!st.isFile() && !st.isSymbolicLink()) {
+          return reject(400, 'path is not a regular file or symlink');
+        }
+        try { fs.unlinkSync(resolved); }
+        catch (e: any) { return reject(500, `unlink failed: ${(e?.message || '').slice(0, 120)}`); }
+        // Removing the shadow changes what findBin('<slug>') returns —
+        // the cached status snapshot is now stale.
+        cachedGatherStatus.invalidate();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, removed: resolved }));
         return;
       }
 
