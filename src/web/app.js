@@ -730,6 +730,7 @@ function openExecModal({ title, subtitle, endpoint, body }) {
       const dec = new TextDecoder();
       let buf = '';
       let doneCode = null;
+      let doneWarn = false;
       const info = {};
       outer: while (true) {
         let read;
@@ -744,7 +745,7 @@ function openExecModal({ title, subtitle, endpoint, body }) {
           if (!raw) continue;
           try {
             const msg = JSON.parse(raw);
-            if (msg.done) { doneCode = msg.code ?? 0; break outer; }
+            if (msg.done) { doneCode = msg.code ?? 0; doneWarn = !!msg.warn; break outer; }
             // Info frames carry side-channel metadata (e.g. the resolved
             // path from /api/ngit/clone). They don't render in the log —
             // we stash them and surface via the resolved promise.
@@ -757,7 +758,15 @@ function openExecModal({ title, subtitle, endpoint, body }) {
       }
       cursor.remove();
       running = false;
-      if (doneCode === 0) {
+      // `warn` is the "downloaded but not installed" path (sudo cred cache
+      // empty); the server emits code:0 + warn:true so we can distinguish
+      // it from a clean success without breaking older callers that only
+      // look at `code`. Caller-visible `ok` is false in that case so the
+      // post-install toast doesn't claim a success that didn't happen.
+      if (doneWarn) {
+        addLine('— needs a manual sudo step (see above) —', 'warn');
+        statusPill.className = 'status-pill warn'; statusPill.textContent = 'needs sudo';
+      } else if (doneCode === 0) {
         addLine('— done —', 'ok');
         statusPill.className = 'status-pill done'; statusPill.textContent = 'done';
       } else {
@@ -765,7 +774,7 @@ function openExecModal({ title, subtitle, endpoint, body }) {
         statusPill.className = 'status-pill error'; statusPill.textContent = `exit ${doneCode}`;
       }
       closeBtn.disabled = false;
-      resolve({ ok: doneCode === 0, code: doneCode, info });
+      resolve({ ok: doneCode === 0 && !doneWarn, warn: doneWarn, code: doneCode, info });
     }).catch((e) => {
       addLine(String(e.message || e), 'err');
       running = false;
@@ -2466,8 +2475,9 @@ function buildStatusRow(s) {
         subtitle: `Installing ${cta.installSlug}…`,
         endpoint: `/api/exec/install/${cta.installSlug}`,
       }).then(r => {
-        if (r.ok) toast(`${s.label} install finished`, '', 'ok');
-        else      toast(`${s.label} install exited ${r.code}`, '', 'err');
+        if (r.ok)        toast(`${s.label} install finished`, '', 'ok');
+        else if (r.warn) toast(`${s.label} install needs sudo`, 'See modal log for the manual command.', 'warn');
+        else             toast(`${s.label} install exited ${r.code}`, '', 'err');
         // Bust the cached /api/status so any open Config panel rebuild
         // (or a later navigation to Config) reflects the new install
         // state immediately instead of waiting out the 30s apiCached
@@ -17642,8 +17652,9 @@ const ConfigPanel = (() => {
             subtitle: `Installing ${slug}…`,
             endpoint: `/api/exec/install/${slug}`,
           }).then(r => {
-            if (r.ok) toast(`${label} install finished`, '', 'ok');
-            else      toast(`${label} install exited ${r.code}`, '', 'err');
+            if (r.ok)        toast(`${label} install finished`, '', 'ok');
+            else if (r.warn) toast(`${label} install needs sudo`, 'See modal log for the manual command.', 'warn');
+            else             toast(`${label} install exited ${r.code}`, '', 'err');
             refreshHealth();
             // Drop the providers + status caches and re-render Config
             // → AI so the newly-installed binary flips green and the
@@ -20311,6 +20322,8 @@ const SetupWizard = (() => {
             ngitInstalled = await probeNgitInstalled();
             renderBinaryState();
             syncAmberGate();
+          } else if (r.warn) {
+            toast('ngit install needs sudo', 'See modal log for the manual command.', 'warn');
           } else {
             toast(`ngit install exited ${r.code}`, '', 'err');
           }
@@ -24834,13 +24847,25 @@ const Updates = (() => {
               addLine(`${tool.name}: ${msg.line.replace(/\x1b\[[0-9;]*m/g, '')}`, cls);
             }
             if (msg.done) {
-              result = { ok: msg.code === 0, error: msg.code === 0 ? null : `exit ${msg.code}` };
+              // warn:true means the new binary was downloaded + verified
+              // but the sudo-install step failed for lack of a cred-cache
+              // entry — the on-disk binary is still the OLD version. Treat
+              // as not-ok so we don't claim "updated to X" and so the
+              // post-install pill refresh correctly keeps showing the
+              // pending upgrade.
+              if (msg.warn) {
+                result = { ok: false, warn: true, error: null };
+              } else {
+                result = { ok: msg.code === 0, error: msg.code === 0 ? null : `exit ${msg.code}` };
+              }
             }
           }
         }
       }
       if (result.ok) {
         addLine(`${tool.name}: updated to ${tool.pinnedVersion}`, 'ok');
+      } else if (result.warn) {
+        addLine(`${tool.name}: download verified — run the sudo install line above to finish`, 'warn');
       } else {
         addLine(`${tool.name}: update failed${result.error ? ` — ${result.error}` : ''}`, 'err');
       }
@@ -24863,9 +24888,11 @@ const Updates = (() => {
       // single tool failing does NOT abort the rest — the user gets a
       // diagnostic per row and can re-run.
       let toolFailures = 0;
+      let toolWarns    = 0;
       for (const tool of pendingTools) {
         const r = await streamToolUpdate(tool);
-        if (!r.ok) toolFailures++;
+        if (r.warn)      toolWarns++;
+        else if (!r.ok)  toolFailures++;
       }
 
       // Stage 2: nostr-station self-update. Skip when there's nothing
@@ -24874,12 +24901,23 @@ const Updates = (() => {
       if (!hasSelfUpdate) {
         try { cursor.remove(); } catch {}
         running = false;
-        if (toolFailures === 0) {
+        if (toolFailures === 0 && toolWarns === 0) {
           addLine('All tool upgrades complete.', 'ok');
           statusPill.className = 'status-pill done'; statusPill.textContent = 'done';
         } else {
-          addLine(`${toolFailures} tool upgrade${toolFailures === 1 ? '' : 's'} failed.`, 'err');
-          statusPill.className = 'status-pill error'; statusPill.textContent = `${toolFailures} failed`;
+          // Warns (needs-sudo) are distinct from hard failures: the
+          // download + sha256 check passed, the install just needs the
+          // user to run the printed sudo line manually. Reporting them
+          // as "failed" was what made the friend-tester confused when
+          // the pill kept returning after a green-looking "updated to
+          // 2.4.3" line.
+          const parts = [];
+          if (toolFailures) parts.push(`${toolFailures} failed`);
+          if (toolWarns)    parts.push(`${toolWarns} need${toolWarns === 1 ? 's' : ''} sudo`);
+          const cls = toolFailures ? 'err' : 'warn';
+          addLine(`Tool upgrades: ${parts.join(', ')}.`, cls);
+          statusPill.className = `status-pill ${toolFailures ? 'error' : 'warn'}`;
+          statusPill.textContent = parts.join(' · ');
         }
         installBtn.disabled = false;
         closeBtn.disabled = false;

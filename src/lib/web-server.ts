@@ -1545,7 +1545,14 @@ export async function startWebServer(port: number): Promise<http.Server> {
             if (!result.ok && result.detail) {
               emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
             }
-            emit({ done: true, code: result.ok ? 0 : (result.warn ? 0 : 1) });
+            // `warn:true` distinguishes the soft-fail case (download verified
+            // but sudo cred cache empty, so the binary was NOT actually
+            // installed) from a clean success. The Updates modal and the
+            // Status-panel install both used to treat warn as a green
+            // "install finished" — leaving the user with the pre-update
+            // binary on PATH and the update pill coming right back.
+            const isWarn = !result.ok && !!result.warn;
+            emit({ done: true, code: result.ok ? 0 : (isWarn ? 0 : 1), warn: isWarn });
           } catch (e: any) {
             emit({ line: String(e?.message || e), stream: 'stderr' });
             emit({ done: true, code: -1 });
@@ -1565,7 +1572,11 @@ export async function startWebServer(port: number): Promise<http.Server> {
             if (!result.ok && result.detail) {
               emit({ line: result.detail, stream: result.warn ? 'stdout' : 'stderr' });
             }
-            emit({ done: true, code: result.ok ? 0 : (result.warn ? 0 : 1) });
+            // See nak branch above — warn flag tells the client the binary
+            // was downloaded + verified but not actually installed (no sudo
+            // password), so it shouldn't claim "updated to X" on success.
+            const isWarn = !result.ok && !!result.warn;
+            emit({ done: true, code: result.ok ? 0 : (isWarn ? 0 : 1), warn: isWarn });
           } catch (e: any) {
             emit({ line: String(e?.message || e), stream: 'stderr' });
             emit({ done: true, code: -1 });
