@@ -204,16 +204,21 @@ function buildDittoConfig() {
     // tag that Ditto's useNostrPublish hook appends to every outgoing
     // kind-1/6/7/1111 event:
     //   ["client", "nostr-station",
-    //    "31990:291c75d…:nostr-station",
-    //    "wss://relay.nsite.lol"]
+    //    "31990:291c75d…:wsfom06gac",
+    //    "wss://relay.damus.io"]
     // The naddr1 below decodes to the kind-31990 client handler
-    // coordinate for nostr-station (pubkey 291c75d… — same project
-    // identity that anchors the landing-page nsite and signs ngit
-    // merge events). The handler event itself is published via
-    // `npm run publish-client-handler` (see scripts/publish-client-handler.mjs);
-    // re-publishes are idempotent (NIP-33 addressable event).
+    // coordinate for nostr-station. The handler event was published
+    // via NostrHub's "Submit New App" form (nostrhub.io/apps/new),
+    // signed via NIP-07 in the browser. NostrHub auto-generates an
+    // opaque random d-tag (`wsfom06gac`) which we adopt — the d-tag
+    // is an internal identifier never shown to users.
+    //
+    // MUST stay in sync with CLIENT_TAG in src/lib/routes/client.ts.
+    // If the NostrHub event is ever deleted + recreated (rare), the
+    // new d-tag goes here (re-encode naddr1) AND in CLIENT_TAG, then
+    // `npm run update-ditto` to rebuild the Ditto bundle.
     appName: 'nostr-station',
-    client: 'naddr1qvzqqqru7cpzq2guwhvn0fzlv6sjp8uw5es3ma6y33vmx5n9yrrxegkde5mlr0a7qy2hwumn8ghj7un9d3shjtnwwd5hgefwd3hkcqqddehhxarj94ehgct5d9hkuy7cpf4',
+    client: 'naddr1qvzqqqru7cpzq2guwhvn0fzlv6sjp8uw5es3ma6y33vmx5n9yrrxegkde5mlr0a7qy28wumn8ghj7un9d3shjtnyv9kh2uewd9hsqznhwdnx7mfsxenkzcc57d93e',
     homePage: 'feed',
 
     // ─── Theme ────────────────────────────────────────────────────

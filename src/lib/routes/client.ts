@@ -62,17 +62,25 @@ const PROFILE_CACHE_TTL_MS   = 5 * 60_000;
 // Client identity stamped on every event published through this surface.
 // 4-element NIP-89 form: ["client", <name>, <kind>:<pubkey>:<d-tag>, <relay-hint>].
 // Coordinate points at the kind-31990 client handler event for
-// nostr-station (NIP-89 "handler information"), signed by the project
-// pubkey (291c75d… — same identity that anchors the landing-page nsite
-// and signs ngit merge events). Publish/refresh the handler event with
-// `npm run publish-client-handler`; this constant must stay in sync with
-// the `client` naddr1 baked into scripts/fetch-ditto.mjs so the iframe
-// (Ditto) and native (/api/client) publish paths emit the same tag.
+// nostr-station, signed by the project pubkey 291c75d… (jaredlogan).
+// Published via NostrHub's "Submit New App" form (nostrhub.io/apps/new),
+// which signs via NIP-07 in the browser. NostrHub auto-generates an
+// opaque random d-tag (`wsfom06gac`) — we adopt their coordinate
+// rather than try to override it, since the d-tag is an internal
+// identifier never shown to users. The card content (name, picture,
+// about, website) is what NIP-89-aware clients render.
+//
+// MUST stay in sync with the `client` naddr1 baked into
+// scripts/fetch-ditto.mjs so the iframe (Ditto) and native
+// (/api/client) publish paths emit the same tag. If the NostrHub
+// event is ever deleted + re-created (rare), the new d-tag must be
+// updated here AND in scripts/fetch-ditto.mjs, then `npm run
+// update-ditto` to rebuild the Ditto bundle with the new naddr.
 const CLIENT_TAG: string[] = [
   'client',
   'nostr-station',
-  '31990:291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe:nostr-station',
-  'wss://relay.nsite.lol',
+  '31990:291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe:wsfom06gac',
+  'wss://relay.damus.io',
 ];
 
 // Notification kinds we surface in the UI. Matches what Damus/Primal show:
