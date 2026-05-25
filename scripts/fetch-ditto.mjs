@@ -46,6 +46,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -70,6 +71,53 @@ const BRANDING_SENTINEL = path.join(TARGET_DIR, '.nostr-station-branded');
 // without `npm run update-ditto`.
 const BUILT_FROM_SENTINEL = path.join(TARGET_DIR, '.ditto-built-from');
 
+// Hash of *this script's* current content. Embedded in the branding
+// sentinel so the script can detect when its own applyBranding() logic
+// has changed since the last branding run — e.g. someone bumped what
+// gets copied / patched. Without this, the sentinel-exists check would
+// short-circuit re-branding even after a new applyBranding step lands.
+//
+// Real-world repro: PR #189 added an overlay-CSS copy step. End users
+// pulling that commit saw their dist/ditto/ stay untouched because the
+// existing .nostr-station-branded sentinel matched DITTO_REF and the
+// script's idempotency check exited early before applyBranding could
+// run again. Including a script hash in the sentinel invalidates it on
+// any future fetch-ditto.mjs change.
+//
+// 16-char sha256 prefix is plenty for uniqueness here — there are only
+// going to be a handful of distinct versions of this script ever, not
+// millions of artifacts to disambiguate.
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
+function currentScriptHash() {
+  try {
+    const content = fs.readFileSync(SCRIPT_PATH);
+    return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+  } catch {
+    return 'unknown';
+  }
+}
+
+// Returns true when the existing branding sentinel was written by the
+// *same* version of this script that's currently running. Returns false
+// when missing, malformed, or written by a different script version —
+// any of which should trigger re-branding.
+function brandingIsCurrent() {
+  if (!fs.existsSync(BRANDING_SENTINEL)) return false;
+  try {
+    const stored = fs.readFileSync(BRANDING_SENTINEL, 'utf8');
+    // Sentinel format: line 1 = ISO timestamp, line 2 = script hash.
+    // Pre-hash sentinels (timestamp only) lack line 2 — treat as stale,
+    // which is correct: we want to re-brand once after this fix lands
+    // so the script-hash dimension gets stamped onto the sentinel.
+    const lines = stored.split('\n');
+    const storedHash = lines[1]?.trim();
+    if (!storedHash) return false;
+    return storedHash === currentScriptHash();
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   if (process.env.STATION_SKIP_DITTO === '1') {
     console.log('[ditto] STATION_SKIP_DITTO=1 — skipping build.');
@@ -77,7 +125,7 @@ async function main() {
   }
   const builtFrom = readBuiltFrom();
   const needsBuild    = !fs.existsSync(SENTINEL) || builtFrom !== DITTO_REF;
-  const needsBranding = !fs.existsSync(BRANDING_SENTINEL);
+  const needsBranding = !brandingIsCurrent();
   if (!needsBuild && !needsBranding) {
     console.log(`[ditto] already built (${DITTO_REF.slice(0, 7)}) + branded at ${path.relative(process.cwd(), TARGET_DIR)} — skipping.`);
     console.log(`[ditto] (run \`npm run update-ditto\` to force a fresh build)`);
@@ -90,7 +138,11 @@ async function main() {
     const ok = await cloneAndBuild();
     if (!ok) return;
   } else {
-    console.log(`[ditto] bundle present but unbranded — applying branding only.`);
+    // needsBranding fired without needsBuild — either no sentinel yet
+    // (first-ever post-build branding pass) or the sentinel hash
+    // doesn't match this script's hash (fetch-ditto.mjs's branding
+    // logic changed since the last run; re-apply).
+    console.log(`[ditto] bundle present but branding stale — re-applying branding only.`);
   }
   if (fs.existsSync(SENTINEL)) {
     applyBranding();
@@ -410,7 +462,11 @@ function applyBranding() {
   }
 
   try {
-    fs.writeFileSync(BRANDING_SENTINEL, new Date().toISOString() + '\n');
+    // Sentinel format: ISO timestamp on line 1, script hash on line 2.
+    // brandingIsCurrent() reads line 2 and invalidates when it doesn't
+    // match the running script's hash — so the next time fetch-ditto.mjs
+    // gains a new branding step, the next run re-brands automatically.
+    fs.writeFileSync(BRANDING_SENTINEL, new Date().toISOString() + '\n' + currentScriptHash() + '\n');
     console.log('[ditto] branding complete.');
   } catch (e) {
     console.warn(`[ditto] WARN: sentinel write failed — ${e.message}`);
