@@ -200,12 +200,20 @@ function run(cmd, args, opts = {}) {
 function buildDittoConfig() {
   return {
     // ─── Identity ─────────────────────────────────────────────────
-    // appName is the magic field: useNostrPublish.ts appends
-    // ["client", appName] to every outgoing event when no naddr1 is
-    // provided via `client`. To upgrade to the full NIP-89 form,
-    // publish a kind-31990 handler event from a project-controlled
-    // npub, encode it as naddr1, and add a `client` field here.
+    // appName + client together drive the full 4-element NIP-89 client
+    // tag that Ditto's useNostrPublish hook appends to every outgoing
+    // kind-1/6/7/1111 event:
+    //   ["client", "nostr-station",
+    //    "31990:291c75d…:nostr-station",
+    //    "wss://relay.nsite.lol"]
+    // The naddr1 below decodes to the kind-31990 client handler
+    // coordinate for nostr-station (pubkey 291c75d… — same project
+    // identity that anchors the landing-page nsite and signs ngit
+    // merge events). The handler event itself is published via
+    // `npm run publish-client-handler` (see scripts/publish-client-handler.mjs);
+    // re-publishes are idempotent (NIP-33 addressable event).
     appName: 'nostr-station',
+    client: 'naddr1qvzqqqru7cpzq2guwhvn0fzlv6sjp8uw5es3ma6y33vmx5n9yrrxegkde5mlr0a7qy2hwumn8ghj7un9d3shjtnwwd5hgefwd3hkcqqddehhxarj94ehgct5d9hkuy7cpf4',
     homePage: 'feed',
 
     // ─── Theme ────────────────────────────────────────────────────

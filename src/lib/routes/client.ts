@@ -61,15 +61,17 @@ const CONTACTS_CACHE_TTL_MS  = 60_000;
 const PROFILE_CACHE_TTL_MS   = 5 * 60_000;
 // Client identity stamped on every event published through this surface.
 // 4-element NIP-89 form: ["client", <name>, <kind>:<pubkey>:<d-tag>, <relay-hint>].
-// The coordinate currently points at the kind-35128 nsite manifest for
-// nostr-station's public landing page — NIP-89-aware clients (Ditto et al.)
-// can resolve it and surface a clickable card / link to the nsite. When a
-// proper kind-31990 ("handler information") for nostr-station ships, swap
-// the kind + d-tag here; the rest of the publish path stays unchanged.
+// Coordinate points at the kind-31990 client handler event for
+// nostr-station (NIP-89 "handler information"), signed by the project
+// pubkey (291c75d… — same identity that anchors the landing-page nsite
+// and signs ngit merge events). Publish/refresh the handler event with
+// `npm run publish-client-handler`; this constant must stay in sync with
+// the `client` naddr1 baked into scripts/fetch-ditto.mjs so the iframe
+// (Ditto) and native (/api/client) publish paths emit the same tag.
 const CLIENT_TAG: string[] = [
   'client',
   'nostr-station',
-  '35128:291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe:nostr-station',
+  '31990:291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe:nostr-station',
   'wss://relay.nsite.lol',
 ];
 
@@ -944,9 +946,7 @@ function buildPublishTemplate(body: any): TemplateBuildResult {
     tags.push(['p', pubkey]);
   }
 
-  // Stamp client identity. Bare two-element form (NIP-89 handler
-  // announcement is a phase-2 thing — the tag exists so other
-  // clients can credit "via nostr-station").
+  // Stamp client identity (full 4-element NIP-89 form; see CLIENT_TAG).
   tags.push([...CLIENT_TAG]);
 
   return {
