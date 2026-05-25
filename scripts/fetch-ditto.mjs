@@ -215,8 +215,24 @@ function buildDittoConfig() {
     appName: 'nostr-station',
     client: 'naddr1qvzqqqru7cpzq2guwhvn0fzlv6sjp8uw5es3ma6y33vmx5n9yrrxegkde5mlr0a7qy2hwumn8ghj7un9d3shjtnwwd5hgefwd3hkcqqddehhxarj94ehgct5d9hkuy7cpf4',
     homePage: 'feed',
+    // Disable Ditto's "magic mouse" cursor-fire animation. It's a
+    // decorative flourish that's on-brand for Ditto but at odds with
+    // nostr-station's minimalist dashboard aesthetic. Schema field
+    // explicitly accepts boolean — no source patch needed.
+    magicMouse: false,
 
     // ─── Theme ────────────────────────────────────────────────────
+    // Font stack mirrors nostr-station's --font-mono in src/web/app.css
+    // exactly: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code',
+    // Menlo, Consolas, monospace. Applied globally via Ditto's
+    // fontLoader.ts which injects an html { font-family: ... } !important
+    // rule, so it cuts across every component without needing source
+    // patches. titleFont gets the same stack so profile display names
+    // render mono too (matches the dashboard's identity-chip styling).
+    //
+    // No `url` on either font config — relying on the host system
+    // having one of these mono faces. Same fallback chain the dashboard
+    // already depends on; no new network requests.
     theme: 'custom',
     customTheme: {
       title: 'nostr-station',
@@ -224,6 +240,12 @@ function buildDittoConfig() {
         background: '0 0% 4%',
         text:       '240 6% 80%',
         primary:    '248 80% 67%',
+      },
+      font: {
+        family: "'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace",
+      },
+      titleFont: {
+        family: "'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace",
       },
     },
 
