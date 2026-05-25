@@ -125,16 +125,30 @@ async function gitIsClean(root: string): Promise<boolean> {
   } catch { return false; }
 }
 
-// Did `scripts/fetch-ditto.mjs` change between two commits? If so, the
-// Ditto bundle's baked ditto.json may differ from what's on disk and
-// the build step needs to rebuild Ditto (drop STATION_SKIP_DITTO=1).
+// Did any file affecting the Ditto bundle change between two commits?
+// If so, the bundle on disk may differ from what's on disk and the
+// build step needs to rebuild Ditto (drop STATION_SKIP_DITTO=1).
+//
+// Files watched:
+//   - scripts/fetch-ditto.mjs       — the build script itself
+//   - src/web/ditto-overrides.css   — overlay CSS that applyBranding()
+//                                     copies into dist/ditto/
+//   - src/web/nori.svg              — logo applyBranding() copies into
+//                                     dist/ditto/ as logo.svg + favicon
+//
+// Add more paths here when applyBranding() grows new input files.
 // Returns false on error — conservative: prefers "fast update, possibly
 // stale bundle" over "slow rebuild on a transient git glitch."
 async function dittoConfigChanged(root: string, beforeSha: string, afterSha: string): Promise<boolean> {
   if (beforeSha === afterSha) return false;
   try {
     const { stdout } = await execFileP(
-      'git', ['diff', '--name-only', `${beforeSha}..${afterSha}`, '--', 'scripts/fetch-ditto.mjs'],
+      'git', [
+        'diff', '--name-only', `${beforeSha}..${afterSha}`, '--',
+        'scripts/fetch-ditto.mjs',
+        'src/web/ditto-overrides.css',
+        'src/web/nori.svg',
+      ],
       { cwd: root },
     );
     return stdout.trim().length > 0;

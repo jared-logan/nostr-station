@@ -320,6 +320,15 @@ function buildDittoConfig() {
   };
 }
 
+// Inputs to applyBranding() that affect the bundle on disk:
+//   - src/web/nori.svg              → dist/ditto/logo.svg + favicon
+//   - src/web/ditto-overrides.css   → dist/ditto/nostr-station-overrides.css
+//   - this script's own content     → invalidates BRANDING_SENTINEL via
+//                                     the script-hash check above
+// When any of those change, the in-app updater's dittoConfigChanged()
+// detector (src/lib/update-check.ts) drops STATION_SKIP_DITTO=1 so
+// this script runs and applyBranding picks up the new inputs.
+//
 // Overlay nostr-station branding on top of the source-built bundle.
 // With ditto.json now honored, several historically-patched fields
 // (title, theme-color) are baked in already — but applying the regex
