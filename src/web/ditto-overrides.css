@@ -277,6 +277,64 @@ button:focus-visible {
   padding: 14px 18px !important;
 }
 
+/* ───── Larger radii surfaces ─────────────────────────────────────
+ * Ditto's tailwind.config.ts borderRadius block only redefines
+ * lg/md/sm/xs (lines 76-80 of /tmp/ditto-investigate/tailwind.config.ts);
+ * `xl` and `2xl` fall through to Tailwind's defaults (0.75rem / 1rem)
+ * which are too generous for the dashboard's --r-lg of 8px. Pin both
+ * to --r-lg so widget cards (`rounded-xl` at WidgetCard.tsx:74-77),
+ * the account popover (`rounded-2xl` at LeftSidebar.tsx:176), and any
+ * other xl-rounded surface land on the dashboard's modal-radius
+ * value.
+ */
+.rounded-xl  { border-radius: 8px !important; }
+.rounded-2xl { border-radius: 8px !important; }
+
+/* ───── Tabs — underline-style active state ─────────────────────
+ * shadcn's Tabs primitive (Ditto's src/components/ui/tabs.tsx:8-52)
+ * uses a "filled-pill" pattern: TabsList has a `bg-muted` rounded
+ * container, and the active TabsTrigger gets a contrasting
+ * background + drop shadow. The dashboard uses a flatter underline
+ * style (src/web/app.css:1751-1771): no list background, active tab
+ * marked by a 2px bottom border in --accent + accent-bright text.
+ *
+ * Targets ARIA roles (Radix-provided, stable across upgrades). The
+ * tab trigger's `margin-bottom: -1px` overlaps its 2px underline on
+ * top of the tablist's 1px bottom border so the line reads as a
+ * single continuous baseline with a colored segment under the
+ * active tab — standard underline-tabs technique.
+ */
+[role="tablist"] {
+  background: transparent !important;
+  padding: 0 !important;
+  border-bottom: 1px solid hsl(var(--border)) !important;
+  height: auto !important;
+}
+[role="tab"] {
+  border-radius: 0 !important;
+  padding: 10px 14px !important;
+}
+[role="tab"][data-state="active"] {
+  background: transparent !important;
+  box-shadow: none !important;
+  border-bottom: 2px solid hsl(var(--primary)) !important;
+  color: hsl(var(--primary)) !important;
+  margin-bottom: -1px !important;
+}
+
+/* ───── Badges — square corners ──────────────────────────────────
+ * shadcn Badge (Ditto's src/components/ui/badge.tsx:11-14) renders
+ * pill-shaped `rounded-full border px-2.5 py-0.5 text-xs
+ * font-semibold` chips. nostr-station's .chip pattern
+ * (src/web/app.css:187-197) is a small-radius rectangle. The
+ * specific class combination below is unique to Badge — avatars
+ * (no font-semibold), action buttons (text-sm not text-xs), and
+ * sidebar pills (no px-2.5) all pass through unaffected.
+ */
+[class~="rounded-full"][class~="text-xs"][class~="font-semibold"][class~="border"][class~="px-2.5"] {
+  border-radius: var(--r-sm) !important;
+}
+
 /* ───── Avatar shape preservation ────────────────────────────────
  * Defense-in-depth. With the previous heavy-hammer rule
  * (`html * { border-radius: 0 !important }` from PR #193) removed,
