@@ -298,6 +298,26 @@ function applyBranding() {
     console.warn(`[ditto] WARN: source logo not found at ${sourceLogo}; keeping Ditto's default`);
   }
 
+  // 1b. CSS overlay — nostr-station style overrides (border-radius
+  //     scale matched to the dashboard's --r-sm/--r/--r-lg, plus a
+  //     re-application of the mono font stack as cascade-priority
+  //     insurance against Ditto's runtime theme-sync overriding the
+  //     customTheme.font baked into ditto.json). Source lives at
+  //     src/web/ditto-overrides.css and gets copied alongside Ditto's
+  //     own assets; the <link> tag is injected by step 2 below.
+  const sourceOverlay = path.join(REPO_ROOT, 'src', 'web', 'ditto-overrides.css');
+  const targetOverlay = path.join(TARGET_DIR, 'nostr-station-overrides.css');
+  if (fs.existsSync(sourceOverlay)) {
+    try {
+      fs.copyFileSync(sourceOverlay, targetOverlay);
+      console.log(`[ditto] copied ditto-overrides.css → nostr-station-overrides.css`);
+    } catch (e) {
+      console.warn(`[ditto] WARN: overlay css copy failed — ${e.message}`);
+    }
+  } else {
+    console.warn(`[ditto] WARN: overlay css not found at ${sourceOverlay}; skipping`);
+  }
+
   // 2. index.html patches. ditto.json's `customTheme.title` controls
   //    Ditto's IN-APP rendered title (sidebar, header) but doesn't
   //    touch the <title> tag or social meta in the built index.html —
@@ -348,8 +368,21 @@ function applyBranding() {
         /(<meta\s+name="theme-color"\s+content=")#161b2e("\s*\/?>)/,
         '$1#0a0a0a$2',
       );
+      // Inject the nostr-station style-overrides stylesheet. Position
+      // matters: just before </head>, AFTER Ditto's own bundled
+      // stylesheets, so for equal specificity our rules win the
+      // cascade. Idempotent — if the link is already present from a
+      // prior applyBranding run, regex match fails and the replace is
+      // a no-op (we still won't get duplicate links because the file
+      // gets rebuilt from scratch on `npm run update-ditto`).
+      if (!html.includes('nostr-station-overrides.css')) {
+        html = html.replace(
+          /(<\/head>)/,
+          '    <link rel="stylesheet" href="/ditto/nostr-station-overrides.css">\n$1',
+        );
+      }
       fs.writeFileSync(indexPath, html);
-      console.log('[ditto] patched index.html (title + meta tags + theme-color)');
+      console.log('[ditto] patched index.html (title + meta tags + theme-color + overrides link)');
     } catch (e) {
       console.warn(`[ditto] WARN: index.html patch failed — ${e.message}`);
     }
