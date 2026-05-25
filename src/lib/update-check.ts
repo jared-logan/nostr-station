@@ -261,7 +261,7 @@ export function stopUpdatePoller(): void {
 type SseEmit = (event: { line?: string; stream?: 'stdout' | 'stderr'; phase?: string; done?: boolean; ok?: boolean; restart?: boolean; error?: string }) => void;
 
 function runStep(
-  step: { bin: string; args: string[] },
+  step: { bin: string; args: string[]; env?: Record<string, string> },
   cwd: string,
   emit: SseEmit,
 ): Promise<number> {
@@ -272,7 +272,7 @@ function runStep(
       child = spawn(step.bin, step.args, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, CI: '1' },
+        env: { ...process.env, CI: '1', ...(step.env ?? {}) },
       });
     } catch (e: any) {
       emit({ line: `failed to spawn ${step.bin}: ${e?.message || e}`, stream: 'stderr' });
@@ -368,7 +368,12 @@ export async function applyUpdate(emit: SseEmit): Promise<void> {
     }
 
     emit({ phase: 'build' });
-    code = await runStep({ bin: 'npm', args: ['run', 'build', '--silent'] }, root, emit);
+    // STATION_SKIP_DITTO=1 keeps the in-app update fast (matches the
+    // install.sh path). Building Ditto from source takes 3-5 min and
+    // would freeze the dashboard for the duration of every update;
+    // the Client panel's "Build Ditto now" handler runs the same
+    // script on demand the first time a user opens the panel.
+    code = await runStep({ bin: 'npm', args: ['run', 'build', '--silent'], env: { STATION_SKIP_DITTO: '1' } }, root, emit);
     if (code !== 0) {
       await rollback(root, beforeSha, emit);
       // Best-effort: re-run npm ci so the rolled-back tree has the
