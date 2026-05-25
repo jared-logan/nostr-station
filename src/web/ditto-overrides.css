@@ -2,8 +2,21 @@
  *
  * Applied via a <link> tag injected at the end of dist/ditto/index.html
  * (see applyBranding() in scripts/fetch-ditto.mjs). Loaded after Ditto's
- * own compiled CSS, so for equal specificity the cascade resolves to
- * our values.
+ * own compiled CSS, but the file being downloaded isn't enough — the
+ * RULES have to win the cascade.
+ *
+ * Specificity strategy: every selector is prefixed with `html ` to
+ * raise specificity from (0,1,0) to (0,1,1). That beats:
+ *   - any unlayered .rounded-* rule from Ditto's compiled Tailwind
+ *   - Tailwind v4 @layer utilities rules (modern cascade puts unlayered
+ *     after layered for equal specificity)
+ *   - most CSS-in-JS class-based runtime injections
+ *
+ * The previous version of this file used bare class selectors with
+ * !important. That should have been enough by the spec, but in practice
+ * something in Ditto's compiled CSS (or its theme-sync) was still
+ * winning. The html-prefixed form is the smallest specificity bump
+ * that doesn't require knowing Ditto's actual DOM structure.
  *
  * Mapping comes from src/web/app.css's radius scale:
  *   --r-sm: 3px   chips, small buttons, badges
@@ -19,12 +32,6 @@
  *   rounded-2xl   16px → 12px  (tighten)
  *   rounded-3xl   24px → 16px  (tighten)
  *   rounded-full  9999px → (untouched — preserve avatars + pills)
- *
- * Asymmetric variants (rounded-t-*, rounded-b-*, rounded-l-*, rounded-r-*)
- * follow the same scale via their corresponding per-corner overrides.
- * Per-corner singletons (rounded-tl-*, rounded-tr-*, etc.) are NOT
- * overridden in this pass — add if needed when we spot them in Ditto's
- * actual usage.
  */
 
 /* ───── Font ────────────────────────────────────────────────────
@@ -41,47 +48,47 @@ html {
 }
 
 /* ───── Symmetric radius classes ─────────────────────────────────── */
-.rounded-sm   { border-radius: 3px  !important; }
-.rounded      { border-radius: 5px  !important; }
-.rounded-md   { border-radius: 5px  !important; }
-.rounded-lg   { border-radius: 8px  !important; }
-.rounded-xl   { border-radius: 8px  !important; }
-.rounded-2xl  { border-radius: 12px !important; }
-.rounded-3xl  { border-radius: 16px !important; }
-/* .rounded-full deliberately not overridden — preserves avatars + pills */
+html .rounded-sm   { border-radius: 3px  !important; }
+html .rounded      { border-radius: 5px  !important; }
+html .rounded-md   { border-radius: 5px  !important; }
+html .rounded-lg   { border-radius: 8px  !important; }
+html .rounded-xl   { border-radius: 8px  !important; }
+html .rounded-2xl  { border-radius: 12px !important; }
+html .rounded-3xl  { border-radius: 16px !important; }
+/* html .rounded-full deliberately not overridden — preserves avatars + pills */
 
 /* ───── Asymmetric variants — top edge ──────────────────────────── */
-.rounded-t-sm  { border-top-left-radius: 3px  !important; border-top-right-radius: 3px  !important; }
-.rounded-t     { border-top-left-radius: 5px  !important; border-top-right-radius: 5px  !important; }
-.rounded-t-md  { border-top-left-radius: 5px  !important; border-top-right-radius: 5px  !important; }
-.rounded-t-lg  { border-top-left-radius: 8px  !important; border-top-right-radius: 8px  !important; }
-.rounded-t-xl  { border-top-left-radius: 8px  !important; border-top-right-radius: 8px  !important; }
-.rounded-t-2xl { border-top-left-radius: 12px !important; border-top-right-radius: 12px !important; }
-.rounded-t-3xl { border-top-left-radius: 16px !important; border-top-right-radius: 16px !important; }
+html .rounded-t-sm  { border-top-left-radius: 3px  !important; border-top-right-radius: 3px  !important; }
+html .rounded-t     { border-top-left-radius: 5px  !important; border-top-right-radius: 5px  !important; }
+html .rounded-t-md  { border-top-left-radius: 5px  !important; border-top-right-radius: 5px  !important; }
+html .rounded-t-lg  { border-top-left-radius: 8px  !important; border-top-right-radius: 8px  !important; }
+html .rounded-t-xl  { border-top-left-radius: 8px  !important; border-top-right-radius: 8px  !important; }
+html .rounded-t-2xl { border-top-left-radius: 12px !important; border-top-right-radius: 12px !important; }
+html .rounded-t-3xl { border-top-left-radius: 16px !important; border-top-right-radius: 16px !important; }
 
 /* ───── Asymmetric variants — bottom edge ───────────────────────── */
-.rounded-b-sm  { border-bottom-left-radius: 3px  !important; border-bottom-right-radius: 3px  !important; }
-.rounded-b     { border-bottom-left-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
-.rounded-b-md  { border-bottom-left-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
-.rounded-b-lg  { border-bottom-left-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
-.rounded-b-xl  { border-bottom-left-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
-.rounded-b-2xl { border-bottom-left-radius: 12px !important; border-bottom-right-radius: 12px !important; }
-.rounded-b-3xl { border-bottom-left-radius: 16px !important; border-bottom-right-radius: 16px !important; }
+html .rounded-b-sm  { border-bottom-left-radius: 3px  !important; border-bottom-right-radius: 3px  !important; }
+html .rounded-b     { border-bottom-left-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
+html .rounded-b-md  { border-bottom-left-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
+html .rounded-b-lg  { border-bottom-left-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
+html .rounded-b-xl  { border-bottom-left-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
+html .rounded-b-2xl { border-bottom-left-radius: 12px !important; border-bottom-right-radius: 12px !important; }
+html .rounded-b-3xl { border-bottom-left-radius: 16px !important; border-bottom-right-radius: 16px !important; }
 
 /* ───── Asymmetric variants — left edge ─────────────────────────── */
-.rounded-l-sm  { border-top-left-radius: 3px  !important; border-bottom-left-radius: 3px  !important; }
-.rounded-l     { border-top-left-radius: 5px  !important; border-bottom-left-radius: 5px  !important; }
-.rounded-l-md  { border-top-left-radius: 5px  !important; border-bottom-left-radius: 5px  !important; }
-.rounded-l-lg  { border-top-left-radius: 8px  !important; border-bottom-left-radius: 8px  !important; }
-.rounded-l-xl  { border-top-left-radius: 8px  !important; border-bottom-left-radius: 8px  !important; }
-.rounded-l-2xl { border-top-left-radius: 12px !important; border-bottom-left-radius: 12px !important; }
-.rounded-l-3xl { border-top-left-radius: 16px !important; border-bottom-left-radius: 16px !important; }
+html .rounded-l-sm  { border-top-left-radius: 3px  !important; border-bottom-left-radius: 3px  !important; }
+html .rounded-l     { border-top-left-radius: 5px  !important; border-bottom-left-radius: 5px  !important; }
+html .rounded-l-md  { border-top-left-radius: 5px  !important; border-bottom-left-radius: 5px  !important; }
+html .rounded-l-lg  { border-top-left-radius: 8px  !important; border-bottom-left-radius: 8px  !important; }
+html .rounded-l-xl  { border-top-left-radius: 8px  !important; border-bottom-left-radius: 8px  !important; }
+html .rounded-l-2xl { border-top-left-radius: 12px !important; border-bottom-left-radius: 12px !important; }
+html .rounded-l-3xl { border-top-left-radius: 16px !important; border-bottom-left-radius: 16px !important; }
 
 /* ───── Asymmetric variants — right edge ────────────────────────── */
-.rounded-r-sm  { border-top-right-radius: 3px  !important; border-bottom-right-radius: 3px  !important; }
-.rounded-r     { border-top-right-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
-.rounded-r-md  { border-top-right-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
-.rounded-r-lg  { border-top-right-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
-.rounded-r-xl  { border-top-right-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
-.rounded-r-2xl { border-top-right-radius: 12px !important; border-bottom-right-radius: 12px !important; }
-.rounded-r-3xl { border-top-right-radius: 16px !important; border-bottom-right-radius: 16px !important; }
+html .rounded-r-sm  { border-top-right-radius: 3px  !important; border-bottom-right-radius: 3px  !important; }
+html .rounded-r     { border-top-right-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
+html .rounded-r-md  { border-top-right-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
+html .rounded-r-lg  { border-top-right-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
+html .rounded-r-xl  { border-top-right-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
+html .rounded-r-2xl { border-top-right-radius: 12px !important; border-bottom-right-radius: 12px !important; }
+html .rounded-r-3xl { border-top-right-radius: 16px !important; border-bottom-right-radius: 16px !important; }
