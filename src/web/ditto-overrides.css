@@ -1,0 +1,87 @@
+/* nostr-station overrides for Ditto's Tailwind border-radius defaults.
+ *
+ * Applied via a <link> tag injected at the end of dist/ditto/index.html
+ * (see applyBranding() in scripts/fetch-ditto.mjs). Loaded after Ditto's
+ * own compiled CSS, so for equal specificity the cascade resolves to
+ * our values.
+ *
+ * Mapping comes from src/web/app.css's radius scale:
+ *   --r-sm: 3px   chips, small buttons, badges
+ *   --r:    5px   default — cards, inputs, most surfaces
+ *   --r-lg: 8px   major panels, modals
+ *
+ * Tailwind defaults vs nostr-station targets:
+ *   rounded-sm    2px  → 3px   (snap to chip scale)
+ *   rounded       4px  → 5px   (snap to default)
+ *   rounded-md    6px  → 5px   (squashed by 1px)
+ *   rounded-lg    8px  → 8px   (already matches --r-lg)
+ *   rounded-xl    12px → 8px   (tighten to --r-lg)
+ *   rounded-2xl   16px → 12px  (tighten)
+ *   rounded-3xl   24px → 16px  (tighten)
+ *   rounded-full  9999px → (untouched — preserve avatars + pills)
+ *
+ * Asymmetric variants (rounded-t-*, rounded-b-*, rounded-l-*, rounded-r-*)
+ * follow the same scale via their corresponding per-corner overrides.
+ * Per-corner singletons (rounded-tl-*, rounded-tr-*, etc.) are NOT
+ * overridden in this pass — add if needed when we spot them in Ditto's
+ * actual usage.
+ */
+
+/* ───── Font ────────────────────────────────────────────────────
+ * Same stack as src/web/app.css's --font-mono. Re-applied here in
+ * the overlay because Ditto's runtime theme-sync (fetched from
+ * Nostr) can clobber the customTheme.font we baked into ditto.json.
+ * Ditto's fontLoader.ts injects `html { font-family: X !important }`
+ * — our overlay loads later in the cascade, so for equal specificity
+ * + !important, ours wins. Specifically targets `html` only (not
+ * `*`) so icon fonts that explicitly set their own family still
+ * render correctly. */
+html {
+  font-family: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace !important;
+}
+
+/* ───── Symmetric radius classes ─────────────────────────────────── */
+.rounded-sm   { border-radius: 3px  !important; }
+.rounded      { border-radius: 5px  !important; }
+.rounded-md   { border-radius: 5px  !important; }
+.rounded-lg   { border-radius: 8px  !important; }
+.rounded-xl   { border-radius: 8px  !important; }
+.rounded-2xl  { border-radius: 12px !important; }
+.rounded-3xl  { border-radius: 16px !important; }
+/* .rounded-full deliberately not overridden — preserves avatars + pills */
+
+/* ───── Asymmetric variants — top edge ──────────────────────────── */
+.rounded-t-sm  { border-top-left-radius: 3px  !important; border-top-right-radius: 3px  !important; }
+.rounded-t     { border-top-left-radius: 5px  !important; border-top-right-radius: 5px  !important; }
+.rounded-t-md  { border-top-left-radius: 5px  !important; border-top-right-radius: 5px  !important; }
+.rounded-t-lg  { border-top-left-radius: 8px  !important; border-top-right-radius: 8px  !important; }
+.rounded-t-xl  { border-top-left-radius: 8px  !important; border-top-right-radius: 8px  !important; }
+.rounded-t-2xl { border-top-left-radius: 12px !important; border-top-right-radius: 12px !important; }
+.rounded-t-3xl { border-top-left-radius: 16px !important; border-top-right-radius: 16px !important; }
+
+/* ───── Asymmetric variants — bottom edge ───────────────────────── */
+.rounded-b-sm  { border-bottom-left-radius: 3px  !important; border-bottom-right-radius: 3px  !important; }
+.rounded-b     { border-bottom-left-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
+.rounded-b-md  { border-bottom-left-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
+.rounded-b-lg  { border-bottom-left-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
+.rounded-b-xl  { border-bottom-left-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
+.rounded-b-2xl { border-bottom-left-radius: 12px !important; border-bottom-right-radius: 12px !important; }
+.rounded-b-3xl { border-bottom-left-radius: 16px !important; border-bottom-right-radius: 16px !important; }
+
+/* ───── Asymmetric variants — left edge ─────────────────────────── */
+.rounded-l-sm  { border-top-left-radius: 3px  !important; border-bottom-left-radius: 3px  !important; }
+.rounded-l     { border-top-left-radius: 5px  !important; border-bottom-left-radius: 5px  !important; }
+.rounded-l-md  { border-top-left-radius: 5px  !important; border-bottom-left-radius: 5px  !important; }
+.rounded-l-lg  { border-top-left-radius: 8px  !important; border-bottom-left-radius: 8px  !important; }
+.rounded-l-xl  { border-top-left-radius: 8px  !important; border-bottom-left-radius: 8px  !important; }
+.rounded-l-2xl { border-top-left-radius: 12px !important; border-bottom-left-radius: 12px !important; }
+.rounded-l-3xl { border-top-left-radius: 16px !important; border-bottom-left-radius: 16px !important; }
+
+/* ───── Asymmetric variants — right edge ────────────────────────── */
+.rounded-r-sm  { border-top-right-radius: 3px  !important; border-bottom-right-radius: 3px  !important; }
+.rounded-r     { border-top-right-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
+.rounded-r-md  { border-top-right-radius: 5px  !important; border-bottom-right-radius: 5px  !important; }
+.rounded-r-lg  { border-top-right-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
+.rounded-r-xl  { border-top-right-radius: 8px  !important; border-bottom-right-radius: 8px  !important; }
+.rounded-r-2xl { border-top-right-radius: 12px !important; border-bottom-right-radius: 12px !important; }
+.rounded-r-3xl { border-top-right-radius: 16px !important; border-bottom-right-radius: 16px !important; }
