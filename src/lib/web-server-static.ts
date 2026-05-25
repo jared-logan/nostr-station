@@ -225,6 +225,15 @@ const DITTO_ROOT_FILES = new Set([
   '/404.html',
 ]);
 
+// Root paths Ditto's bundle probes that we intentionally answer with a
+// 200 + empty body rather than 404. `/theme.js` is Ditto's runtime
+// theme-override hook (optional, absent in our build) — without this
+// stub the bundle logs a `theme.js 404` in devtools on every page load.
+// Empty JS is a no-op for Ditto and silences the noise.
+const DITTO_EMPTY_JS_STUBS = new Set([
+  '/theme.js',
+]);
+
 // Serve the bundled Ditto SPA. Two URL shapes:
 //
 //   - /ditto/* — the iframe's own URL space. /ditto/ → index.html;
@@ -252,6 +261,15 @@ const DITTO_ROOT_FILES = new Set([
 // hosting + the dashboard's `frame-src 'self'` are what gate access.
 export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const urlPath = (req.url || '/').split('?')[0];
+  if (DITTO_EMPTY_JS_STUBS.has(urlPath)) {
+    res.writeHead(200, {
+      'Content-Type':  'application/javascript; charset=utf-8',
+      'Cache-Control': 'public, max-age=86400',
+      'Content-Length': '0',
+    });
+    res.end();
+    return true;
+  }
   const isPrefixed   = urlPath === '/ditto' || urlPath.startsWith('/ditto/');
   const isRootAlias  = urlPath.startsWith('/assets/') || DITTO_ROOT_FILES.has(urlPath);
   if (!isPrefixed && !isRootAlias) return false;
@@ -337,6 +355,20 @@ export function serveDitto(req: http.IncomingMessage, res: http.ServerResponse):
     try { html = fs.readFileSync(target, 'utf8'); }
     catch { res.writeHead(500); res.end(); return true; }
     html = html.replace(/<head(\s[^>]*)?>/i, (m) => m + DITTO_PREFIX_STRIP_SCRIPT);
+    // Ditto inlines its icon font as a `data:font/woff2;base64,…` URL,
+    // but its bundled CSP meta tag carries `font-src 'self' https:` —
+    // no `data:` token — so the browser refuses the inline font with a
+    // CSP violation on every page load. Add `data:` to font-src here.
+    // The data: scheme can't exfiltrate (no network egress), so this
+    // is a low-risk relaxation; only Ditto's own meta tag is touched,
+    // the dashboard's response-header CSP stays as-is.
+    html = html.replace(
+      /<meta\b[^>]*\bhttp-equiv=["']Content-Security-Policy["'][^>]*>/i,
+      (tag) => tag.replace(
+        /\bfont-src\b([^;"']*)/i,
+        (_m, tokens) => tokens.includes('data:') ? `font-src${tokens}` : `font-src${tokens} data:`,
+      ),
+    );
     body = Buffer.from(html, 'utf8');
     headers['Content-Length'] = String(body.length);
   }

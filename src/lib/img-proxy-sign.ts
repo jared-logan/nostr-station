@@ -28,21 +28,46 @@
  * rendering, both significantly larger refactors; documented as
  * residual.
  *
- * Secret lifetime: per-process random 32 bytes generated at module
- * load. A dashboard restart invalidates all outstanding signed URLs
- * — they'd 401 on the next browser request. Callers MUST re-fetch the
- * pre-signed payload (profile JSON, Ditto theme, markdown image
- * batch) after a restart. Persisting the secret to disk would let
- * filesystem-read attackers forge proxy URLs without a dashboard
- * sign-in; the threat model already treats FS read as "game over"
- * (bunker client, AI keys, relay DB), so disk persistence wouldn't
- * make things worse — but the per-process model is the simpler
- * default and matches the session-token TTL story.
+ * Secret lifetime: persisted to ~/.nostr-station/img-proxy-secret on
+ * first use (0o600, atomic write). Reused across server restarts so
+ * signed URLs that the dashboard cached in localStorage (Ditto theme
+ * bgImage in particular — see routes/ditto.ts) keep verifying after
+ * a process bounce, instead of 401-ing until the next theme sync.
+ * Threat model unchanged: an attacker with filesystem read on this
+ * host can forge proxy URLs, but they already own the bunker client,
+ * AI keys, and relay DB stored next to this file — disk persistence
+ * doesn't widen the FS-read attacker's surface. If the file can't be
+ * read or written (read-only home, exotic FS), we fall back to an
+ * in-memory 32-byte random secret for the lifetime of the process —
+ * same behavior as before, just with the restart-invalidation
+ * trade-off the per-process model carried.
  */
 
 import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { atomicWriteText } from './atomic-write.js';
 
-const SECRET = crypto.randomBytes(32);
+function loadOrCreateSecret(): Buffer {
+  const home = process.env.NOSTR_STATION_HOME || path.join(os.homedir(), '.nostr-station');
+  const file = path.join(home, 'img-proxy-secret');
+  try {
+    const hex = fs.readFileSync(file, 'utf8').trim();
+    if (/^[0-9a-f]{64}$/.test(hex)) return Buffer.from(hex, 'hex');
+  } catch { /* missing or unreadable — fall through to generate */ }
+  const fresh = crypto.randomBytes(32);
+  try {
+    atomicWriteText(file, fresh.toString('hex') + '\n');
+  } catch {
+    // FS unavailable (read-only home, sandbox, etc.). Stay in-memory —
+    // signed URLs will still verify within this process; they'll just
+    // 401 after a restart, matching the original behavior.
+  }
+  return fresh;
+}
+
+const SECRET = loadOrCreateSecret();
 
 /**
  * Sign a raw external URL and return the proxy URL the browser should

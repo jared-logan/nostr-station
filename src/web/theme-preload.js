@@ -31,9 +31,9 @@
         // app.js stores the signed `/api/img-proxy?…&s=…` form here.
         // Accept the same-origin shape directly; also accept raw
         // http(s) for backward-compat with theme JSON written by a
-        // pre-J9 dashboard before the user re-synced (the bgImage
-        // would 401 at the proxy until the next theme sync but the
-        // preload itself never errors).
+        // pre-J9 dashboard before the user re-synced. The signing
+        // secret persists to disk (img-proxy-sign.ts), so stored
+        // signed URLs keep verifying across server restarts.
         if (typeof d.bgImage === 'string' && d.bgImage.indexOf('/api/img-proxy?') === 0) {
           bgImage = d.bgImage;
         } else {
