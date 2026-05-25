@@ -125,6 +125,22 @@ async function gitIsClean(root: string): Promise<boolean> {
   } catch { return false; }
 }
 
+// Did `scripts/fetch-ditto.mjs` change between two commits? If so, the
+// Ditto bundle's baked ditto.json may differ from what's on disk and
+// the build step needs to rebuild Ditto (drop STATION_SKIP_DITTO=1).
+// Returns false on error — conservative: prefers "fast update, possibly
+// stale bundle" over "slow rebuild on a transient git glitch."
+async function dittoConfigChanged(root: string, beforeSha: string, afterSha: string): Promise<boolean> {
+  if (beforeSha === afterSha) return false;
+  try {
+    const { stdout } = await execFileP(
+      'git', ['diff', '--name-only', `${beforeSha}..${afterSha}`, '--', 'scripts/fetch-ditto.mjs'],
+      { cwd: root },
+    );
+    return stdout.trim().length > 0;
+  } catch { return false; }
+}
+
 // ── GitHub compare ──────────────────────────────────────────────────────────
 
 interface GhCompareResult {
@@ -368,12 +384,23 @@ export async function applyUpdate(emit: SseEmit): Promise<void> {
     }
 
     emit({ phase: 'build' });
-    // STATION_SKIP_DITTO=1 keeps the in-app update fast (matches the
-    // install.sh path). Building Ditto from source takes 3-5 min and
-    // would freeze the dashboard for the duration of every update;
-    // the Client panel's "Build Ditto now" handler runs the same
-    // script on demand the first time a user opens the panel.
-    code = await runStep({ bin: 'npm', args: ['run', 'build', '--silent'], env: { STATION_SKIP_DITTO: '1' } }, root, emit);
+    // Conditional Ditto rebuild: STATION_SKIP_DITTO=1 keeps regular
+    // updates fast (~30s vs ~5min), but if the pulled commits touched
+    // `scripts/fetch-ditto.mjs` the baked ditto.json on disk no longer
+    // matches what the codebase wants — silently skipping would mean
+    // users never see ditto.json changes (fonts, theme, appName,
+    // client tag, relay defaults) until they manually `npm run
+    // update-ditto`. Detect the diff and drop the skip when needed.
+    // afterSha is non-null here (the early-return above bails if SHAs
+    // are equal, and the merge succeeded); `?? beforeSha` is just to
+    // satisfy the type-narrower — `dittoConfigChanged` returns false
+    // when the two SHAs match anyway, so the fallback is a no-op.
+    const dittoChanged = await dittoConfigChanged(root, beforeSha, afterSha ?? beforeSha);
+    if (dittoChanged) {
+      emit({ line: '[update] scripts/fetch-ditto.mjs changed — rebuilding Ditto bundle (this can take 3-5 min)', stream: 'stdout' });
+    }
+    const buildEnv: Record<string, string> = dittoChanged ? {} : { STATION_SKIP_DITTO: '1' };
+    code = await runStep({ bin: 'npm', args: ['run', 'build', '--silent'], env: buildEnv }, root, emit);
     if (code !== 0) {
       await rollback(root, beforeSha, emit);
       // Best-effort: re-run npm ci so the rolled-back tree has the
