@@ -11,13 +11,15 @@
 //   - isPublicApi correctly distinguishes exact match from prefix
 
 import { useTempHome } from './_home.js';
-useTempHome();
+const TEMP_HOME = useTempHome();
 process.env.STATION_INPROC_RELAY      = '0';
 process.env.STATION_DISABLE_NVPN_TAIL = '1';
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Server } from 'node:http';
 
 const { signProxyUrl, verifyProxySignature } = await import('../src/lib/img-proxy-sign.js');
@@ -189,6 +191,28 @@ test('img-proxy/sign: rejects non-array urls (400)', async (t) => {
     body:   JSON.stringify({ urls: 'not-an-array' }),
   });
   assert.equal(r.status, 400);
+});
+
+test('signProxyUrl: secret persists to ~/.nostr-station/img-proxy-secret so signatures survive a reload', async () => {
+  // The first signProxyUrl call in this test file's setup already wrote
+  // the secret. Read it, blow away the in-memory module via dynamic
+  // re-import after invalidating the module cache, and verify a sig
+  // produced with the OLD module verifies under the FRESH module.
+  const secretFile = path.join(TEMP_HOME, '.nostr-station', 'img-proxy-secret');
+  assert.ok(fs.existsSync(secretFile), 'secret file should exist on disk after first sign');
+  const hex = fs.readFileSync(secretFile, 'utf8').trim();
+  assert.match(hex, /^[0-9a-f]{64}$/, 'secret should be 32 bytes hex');
+
+  const url = 'https://avatar.example.com/persistence.png';
+  const signed = signProxyUrl(url)!;
+  const sig = new URL('http://x' + signed.replace('/api/img-proxy', '')).searchParams.get('s')!;
+
+  // Force a fresh module evaluation. node:test's loader caches by
+  // resolved URL; appending a cache-buster query forces a re-eval that
+  // re-runs the top-level `loadOrCreateSecret()` against the same file.
+  const fresh = await import('../src/lib/img-proxy-sign.js?_cb=' + Date.now());
+  assert.ok(fresh.verifyProxySignature(url, sig),
+    'a freshly-loaded module instance must still verify a signature minted by a prior load');
 });
 
 test('identity/profile/preview: emits a pre-signed picture URL (or null)', async (t) => {

@@ -189,9 +189,10 @@ export async function handleDitto(
       // Pre-sign bgImage so the dashboard's <img>/CSS background renders
       // it via /api/img-proxy without a separate signing roundtrip. The
       // client stashes this in localStorage as nostr-station:ditto-theme
-      // and theme-preload.js uses it as-is on next boot — a process
-      // restart invalidates the signature, but the app.js re-fetch loop
-      // refreshes the stored value on every theme sync.
+      // and theme-preload.js uses it as-is on next boot — the signing
+      // secret persists to ~/.nostr-station/img-proxy-secret (see
+      // img-proxy-sign.ts) so the stored URL keeps verifying across
+      // restarts.
       const signedBg = parsed.bgImage ? signProxyUrl(parsed.bgImage) : null;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
