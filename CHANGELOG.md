@@ -37,6 +37,22 @@ work to make the upgrade roll out cleanly:
   kept coming back. The new failure path tells them exactly which
   directory to check, then transient I/O hiccups self-heal on retry.
 
+**Homepage Status row for grain** (`src/commands/Status.tsx`,
+`src/web/app.js`):
+- Row value now reads `grain <version>` (e.g. `grain 0.7.0`) instead of
+  bare `installed`, sourced from the new marker file so the homepage
+  card matches the rendering style of every other binary row (ngit /
+  nak / claude / opencode / stacks). Pre-marker installs fall back to
+  `installed` for one upgrade cycle, then take on the version once the
+  user clicks Update.
+- Added a `SERVICE_DETAILS.grain` entry so the expanded row carries a
+  summary + an `Open Communities →` panel link. There's no row-level
+  Start/Stop button by design: grain runs once per community
+  (community-process.ts), not as a singleton, so lifecycle ops belong
+  on the Communities panel where each instance has its own state +
+  log buffer. The summary explains this so the row doesn't read as
+  "missing controls."
+
 **Spawn-time config migration** (`src/lib/community-yaml.ts`,
 `src/lib/community-process.ts`):
 - 0.7.0 renamed `backup_relay.url: <str>` → `backup_relay.urls: [<str>]`.
