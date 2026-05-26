@@ -21,12 +21,14 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
 import { findBin } from './detect.js';
 import { COMPONENT_VERSIONS } from './versions.js';
 import { parseNgitVersion } from './ngit-version.js';
+import { grainBinPath, readGrainInstalledVersion } from './grain-installer.js';
 
 export interface ToolUpdate {
-  id:               'nak' | 'ngit' | 'nvpn';
+  id:               'nak' | 'ngit' | 'nvpn' | 'grain';
   name:             string;
   /** True when the binary is on PATH. We only flag updates for installed
    *  tools — a fresh-install user finds these via the Status panel's
@@ -114,6 +116,67 @@ function probeVersion(bin: string, args: string[]): Promise<string | null> {
   });
 }
 
+// Grain is wired separately from the PINNED_TOOLS dispatch because:
+//   1. It has no `--version` flag (exits non-zero on unknown args), so
+//      the shell-out-and-parse approach the other three share can't
+//      tell us what's installed. We use a sibling marker file written
+//      by installGrain instead — see grain-installer.ts:grainVersionMarkerPath.
+//   2. It lives at a managed per-user path (~/.nostr-station/bin/grain),
+//      not on $PATH, so findBin's curated walk isn't the right lookup
+//      either — we check the exact path the supervisor will spawn from.
+//
+// Semantics match the other tools' contract (installed/currentVersion/
+// updateAvailable/installEndpoint), so the Updates modal renders this
+// row identically to the nak/ngit/nvpn rows with no special-casing.
+//
+// The "binary present, marker absent" case maps to currentVersion:null
+// + updateAvailable:true. That's the v0.6.0-upgrade story: existing
+// users have a binary on disk from before the marker file existed, and
+// we want their dashboard to surface the upgrade exactly once — running
+// the install endpoint with ?force=1 overwrites the binary AND writes
+// the marker, so the pill clears on the next gather.
+function gatherGrainUpdate(): ToolUpdate {
+  const pinnedVersion = COMPONENT_VERSIONS['grain']!;
+  const binPath       = grainBinPath();
+  const installEndpoint = '/api/exec/install/grain';
+
+  let installed = false;
+  try {
+    fs.accessSync(binPath, fs.constants.X_OK);
+    installed = true;
+  } catch { /* not installed */ }
+
+  if (!installed) {
+    return {
+      id:              'grain',
+      name:            'grain',
+      installed:       false,
+      currentVersion:  null,
+      pinnedVersion,
+      updateAvailable: false,
+      installEndpoint,
+    };
+  }
+
+  const currentVersion = readGrainInstalledVersion();
+  // Marker missing → pre-marker install (most likely v0.6.0) → offer
+  // the upgrade. Marker present → semver-compare like the others.
+  const updateAvailable =
+    currentVersion === null
+      ? true
+      : compareSemver(currentVersion, pinnedVersion) < 0;
+
+  return {
+    id:              'grain',
+    name:            'grain',
+    installed:       true,
+    currentVersion,
+    pinnedVersion,
+    updateAvailable,
+    installEndpoint,
+  };
+}
+
 export async function gatherToolUpdates(): Promise<ToolUpdate[]> {
   const results = await Promise.all(PINNED_TOOLS.map(async (t): Promise<ToolUpdate | null> => {
     const pinnedVersion = COMPONENT_VERSIONS[t.id];
@@ -160,5 +223,6 @@ export async function gatherToolUpdates(): Promise<ToolUpdate[]> {
       installEndpoint: t.installEndpoint,
     };
   }));
-  return results.filter((r): r is ToolUpdate => r !== null);
+  // Append the grain row — pure synchronous, no PATH probe needed.
+  return [...results.filter((r): r is ToolUpdate => r !== null), gatherGrainUpdate()];
 }

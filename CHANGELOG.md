@@ -5,6 +5,62 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### grain 0.6.0 → 0.7.0 — version-pin bump + upgrade-detection path
+
+Upstream's [v0.7.0](https://github.com/0ceanSlim/grain/releases/tag/v0.7.0)
+adds a web `/admin` dashboard, NIP-86/98 served by default, and gift-wrap-DM
+recipient scoping. nostrdb format is unchanged and the new endpoints are
+additive — for the supervisor it's a transparent swap. Two things did need
+work to make the upgrade roll out cleanly:
+
+**Pinned-binary update path** (`src/lib/grain-installer.ts`,
+`src/lib/tool-updates.ts`):
+- The installer now writes a sibling marker file
+  (`~/.nostr-station/bin/grain.version`) recording the installed semver.
+  grain ships without a `--version` flag, so the marker is the only way
+  to tell what's on disk — the runtime-probe pattern nak/ngit/nvpn share
+  doesn't apply.
+- `gatherToolUpdates` now includes a grain row, computed from
+  `(binary present?) × (marker matches pinned?)`. The "binary present,
+  marker absent" case (every existing v0.6.0 install) maps to
+  `currentVersion:null + updateAvailable:true`, which surfaces the
+  upgrade in the existing Updates modal without any new UI.
+- The installer's "already installed — skip" short-circuit was rewritten
+  to require BOTH the binary AND a matching marker. Previously a fresh
+  install request on a v0.6.0 box would no-op forever; now it falls
+  through and reinstalls when the marker doesn't match the pin.
+
+**Spawn-time config migration** (`src/lib/community-yaml.ts`,
+`src/lib/community-process.ts`):
+- 0.7.0 renamed `backup_relay.url: <str>` → `backup_relay.urls: [<str>]`.
+  Default configs we write never set the field, but a user who hand-
+  edited their `config.yml` to mirror to an upstream relay would see
+  GRAIN refuse to start on the new schema.
+- New `coerceGrainBackupRelay()` helper handles every shape we've seen
+  (`url: <str>`, `url: ""`, `url: [<str>, <str>]`) and refuses to
+  migrate unrecognized shapes (so a typo fails loud rather than getting
+  silently rewritten to nonsense). The supervisor calls it alongside
+  the existing `server.port` coercion in `spawnChild` — single atomic
+  write per spawn when anything actually changed, no rewrite when the
+  config is already in 0.7.0 shape (idempotent — won't churn mtime on
+  every restart).
+
+**SHA256 digests** for v0.7.0 were pulled from upstream's `checksums.txt`
+and pinned in `src/lib/versions.ts`. Asset naming
+(`grain-{os}-{arch}.tar.gz`) is unchanged, so the installer's URL
+construction needed no edits.
+
+**Confirmed non-issues from the v0.7.0 release notes:**
+- `GRAIN_OWNER_PUBKEY`: required only by the new `/admin` UI, not by
+  startup. The supervisor drives admin via NIP-86 in
+  `src/lib/community-admin.ts`, so we don't set the var and grain still
+  boots fine without it.
+- Gift-wrap DM scoping (kind 1059 served only to recipients): pure
+  upstream behavior change; the supervisor doesn't care.
+- New `/admin` + `/setup` endpoints: additive, served by grain itself
+  on the community port. We don't proxy them (the dashboard's own
+  communities surface is the user's entry point), so no conflict.
+
 ### nvpn 4.x — P0 silent-landmine hotfix
 
 > Followup to the 4.0.37 pin bump below. Live VM validation of that PR surfaced

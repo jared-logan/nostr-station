@@ -22,6 +22,7 @@ import {
   readGrainBlacklist, writeGrainBlacklist,
   communityConfigPath, communityWhitelistPath, communityBlacklistPath,
   communitiesRoot,
+  coerceGrainBackupRelay,
 } from '../src/lib/community-yaml.ts';
 
 function mkTmp(): string {
@@ -265,4 +266,95 @@ test('coerceGrainPortValue: rejects out-of-range ports', () => {
   assert.equal(coerceGrainPortValue(70000),   null);
   assert.equal(coerceGrainPortValue('1.2.3.4:0'),     null);
   assert.equal(coerceGrainPortValue('1.2.3.4:65536'), null);
+});
+
+// ── coerceGrainBackupRelay (GRAIN 0.7.0 schema rename) ──────────────────────
+// 0.7.0 reshaped backup_relay.url (string) into backup_relay.urls (list).
+// The supervisor migrates a hand-edited config.yml at spawn time so a user
+// who customized this field on 0.6.0 doesn't see their relay refuse to boot
+// after the version bump. Pin each shape we accept (and the ones we
+// deliberately refuse) so the migration stays predictable.
+
+test('coerceGrainBackupRelay returns null when block is absent or empty', () => {
+  // Nothing to migrate — the supervisor uses null as the "no rewrite
+  // needed" signal so we don't churn the file (and trip GRAIN's
+  // hot-reload) on every restart.
+  assert.equal(coerceGrainBackupRelay(undefined), null);
+  assert.equal(coerceGrainBackupRelay(null), null);
+});
+
+test('coerceGrainBackupRelay returns null when already in urls-list shape', () => {
+  // Idempotent: a config that has already been migrated (or was written
+  // fresh against 0.7.0) must not be rewritten — the file would change
+  // every restart, GRAIN's hot-reload would fire, and the user would
+  // see spurious churn in `git diff` if they version-control configs.
+  assert.equal(
+    coerceGrainBackupRelay({ urls: ['wss://x'] }),
+    null,
+  );
+  assert.equal(
+    coerceGrainBackupRelay({ enabled: true, urls: [] }),
+    null,
+  );
+});
+
+test('coerceGrainBackupRelay folds a single url string into the urls list', () => {
+  // The common 0.6.0 shape — a user pasted one upstream backup URL.
+  assert.deepEqual(
+    coerceGrainBackupRelay({ url: 'wss://backup.example' }),
+    { urls: ['wss://backup.example'] },
+  );
+});
+
+test('coerceGrainBackupRelay preserves sibling keys (e.g. enabled flag)', () => {
+  // We must NOT drop other fields when renaming `url` → `urls`; the
+  // user's enabled/disabled toggle would otherwise silently flip.
+  assert.deepEqual(
+    coerceGrainBackupRelay({ enabled: true, url: 'wss://a' }),
+    { enabled: true, urls: ['wss://a'] },
+  );
+  // And the old `url` key is dropped from the output (GRAIN 0.7.0's
+  // validator ignores it, but leaving it around invites future
+  // confusion when a maintainer reads the file).
+  const out = coerceGrainBackupRelay({ enabled: false, url: 'wss://x' }) as Record<string, unknown>;
+  assert.equal('url' in out, false);
+});
+
+test('coerceGrainBackupRelay folds an empty url string into an empty list', () => {
+  // Some users disabled backups by clearing the URL on 0.6.0; we want
+  // that to map to "no upstreams" on 0.7.0, not "one empty-string URL".
+  assert.deepEqual(
+    coerceGrainBackupRelay({ url: '' }),
+    { urls: [] },
+  );
+});
+
+test('coerceGrainBackupRelay accepts an accidentally-list `url` value', () => {
+  // YAML occasionally lands as a list on the singular key when a user
+  // pasted multiple lines mid-edit. Be lenient — produce the right
+  // 0.7.0 shape so the relay boots even from a slightly malformed file.
+  assert.deepEqual(
+    coerceGrainBackupRelay({ url: ['wss://a', 'wss://b'] }),
+    { urls: ['wss://a', 'wss://b'] },
+  );
+});
+
+test('coerceGrainBackupRelay refuses to migrate unrecognizable shapes', () => {
+  // Conservative fallthrough: if `url` is a number, object, etc., we
+  // can't guess intent. Returning null leaves the file alone; GRAIN's
+  // validator will reject it loudly on the next spawn, and the user
+  // gets a stdout/stderr line pointing at the offending block — much
+  // better than silently writing something we made up.
+  assert.equal(coerceGrainBackupRelay({ url: 42 }), null);
+  assert.equal(coerceGrainBackupRelay({ url: { nested: 'x' } }), null);
+  assert.equal(coerceGrainBackupRelay({ url: null }), null);
+});
+
+test('coerceGrainBackupRelay filters non-string entries out of array `url`', () => {
+  // Defensive: if YAML somehow lands a mixed list, drop the bogus
+  // entries rather than serializing `42` into the new urls list.
+  assert.deepEqual(
+    coerceGrainBackupRelay({ url: ['wss://a', 42, null, 'wss://b'] as unknown[] }),
+    { urls: ['wss://a', 'wss://b'] },
+  );
 });
