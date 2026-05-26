@@ -16,7 +16,11 @@
  *   ⑬ Badges                      — square corners
  *   ⑭ Heading scale               — text-2xl tightened
  *   ⑮ Toast elevation             — heavier shadow
- *   ⑯ Avatar shape preservation   — defense-in-depth
+ *   ⑯ Logo                        — render real SVG colors, not flat mask
+ *   ⑰ Search input                — square the pill
+ *   ⑱ Outer nav-item wrapper      — square the pills (follow-up to ④)
+ *   ⑲ Tab arcs                    — kill curves, flat underline
+ *   ⑳ Avatar shape preservation   — defense-in-depth
  *
  * Applied via a <link> tag injected at the end of dist/ditto/index.html
  * (see applyBranding() in scripts/fetch-ditto.mjs). Loaded after Ditto's
@@ -247,11 +251,22 @@ button[class~="rounded-full"][class~="hover:bg-accent/10"],
  */
 input[class~="h-10"] {
   height: auto !important;
-  padding: 7px 10px !important;
+  padding-top: 7px !important;
+  padding-bottom: 7px !important;
 }
 textarea {
-  padding: 7px 10px !important;
+  padding-top: 7px !important;
+  padding-bottom: 7px !important;
 }
+/* Vertical-only padding override — see PR H follow-up. The earlier
+ * `padding: 7px 10px` shorthand wiped horizontal padding too, which
+ * broke inputs that intentionally pad room for absolute-positioned
+ * adornments (e.g. ProfileSearchDropdown's `pl-10 pr-10` for icons at
+ * left-3 / right-3 — search icon collided with the text cursor and
+ * the placeholder got shoved). Letting Tailwind's existing horizontal
+ * classes (`px-3` default, `pl-N`/`pr-N` for icon-bearing variants)
+ * handle the horizontal axis preserves those layouts. The visual diff
+ * from 10px → 12px on bare inputs is invisible. */
 
 /* ───── Focus — border-color shift, no ring ──────────────────────
  * shadcn's focus pattern is
@@ -377,6 +392,163 @@ button:focus-visible {
  */
 [role="status"][data-state="open"] {
   box-shadow: 0 8px 24px rgba(0,0,0,0.4) !important;
+}
+
+/* ───── Logo — render real SVG colors, not flat --primary mask ──
+ * Ditto's DittoLogo component (src/components/DittoLogo.tsx:115-132)
+ * uses the SVG as a CSS `mask-image` with a flat
+ * `background-color: hsl(var(--primary))` underneath. The mask only
+ * reads the SVG's alpha channel, so every colored stroke in nori.svg
+ * gets flattened to one tone of orange (the --primary token).
+ *
+ * Override: strip the mask, drop the flat fill, and render the SVG
+ * as a `background-image` instead. Preserves the size/positioning
+ * the component set inline. The logo file at /logo.svg is whatever
+ * applyBranding() copied there — nori.svg in our build.
+ *
+ * Selector targets the aria-label that the component sets from
+ * config.appName, which buildDittoConfig() sets to "nostr-station".
+ * If the appName ever changes, this rule needs the matching update.
+ *
+ * Note: the rare pixelated variant (DittoLogo.tsx:135-178, ~1-in-20
+ * chance for logged-in users) sets the mask via inline JS rather
+ * than the CSS-attribute API, so this rule doesn't strip it. The
+ * pixelated branch stays as Ditto-flavored easter-egg behaviour;
+ * killing it would need a /theme.js patch.
+ */
+[role="img"][aria-label="nostr-station"] {
+  background-color: transparent !important;
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+  background-image: url(/logo.svg) !important;
+  background-size: contain !important;
+  background-repeat: no-repeat !important;
+  background-position: center !important;
+}
+
+/* ───── Search input — square the pill ──────────────────────────
+ * ProfileSearchDropdown (src/components/ProfileSearchDropdown.tsx:292-
+ * 311 at DITTO_REF 7a5820c) renders the search input with
+ *   `pl-10 pr-10 rounded-full bg-secondary border-0`
+ * — pill-shaped, with horizontal padding reserving room for the
+ * absolute-positioned search icon (left-3) and loading spinner
+ * (right-3). The 3-class signature `rounded-full + bg-secondary +
+ * pl-10` is unique to this input. Square the pill to --r-sm so it
+ * reads like a dashboard search field instead of a chat-app search
+ * pill; PR D's vertical-only padding fix (above) already lets
+ * pl-10/pr-10 survive, so the icons stay correctly spaced.
+ */
+input[class~="rounded-full"][class~="bg-secondary"][class~="pl-10"] {
+  border-radius: var(--r-sm) !important;
+}
+
+/* ───── Outer nav-item wrapper — square the pills ───────────────
+ * Follow-up to PR C. SidebarNavItem renders each row as TWO nested
+ * rounded-full elements (src/components/SidebarNavItem.tsx at
+ * DITTO_REF 7a5820c):
+ *
+ *   Outer wrapper (line 47):
+ *     div.flex.items-center.rounded-full.transition-colors.relative.bg-background/85
+ *   Inner link (line 63, NavLink):
+ *     a.flex.items-center.gap-4.py-3.rounded-full.hover:bg-secondary/60
+ *
+ * PR C's selector hit only the inner link. The outer wrapper is what
+ * paints the row's bg-background/85 surface at rest, so the resting
+ * row reads as a pill even though the hover state (on the inner
+ * link) paints square. Square the outer wrapper too.
+ *
+ * The 4-attribute combo (rounded-full + bg-background/85 +
+ * transition-colors + relative) excludes:
+ *   - Logo container (LeftSidebar.tsx:92): bg-background/85 + rounded-
+ *     full only — no transition-colors / relative — stays circular.
+ *   - Avatar skeletons: no bg-background/85.
+ *   - The drag-handle wrapper at SidebarNavItem.tsx:107 picks up bg-
+ *     background/85 only while `editing`; OK to square in that state.
+ */
+div[class~="rounded-full"][class~="bg-background/85"][class~="transition-colors"][class~="relative"] {
+  border-radius: var(--r-sm) !important;
+}
+
+/* ───── Tab arcs — kill the curves, draw straight underline ─────
+ * The feed tabs ("Follows / nostr-station / News") use a custom
+ * TabButton + SubHeaderBar stack, not the shadcn Tabs primitive
+ * (PR E's [role="tab"] rules don't reach them). SubHeaderBar paints
+ * three curved SVGs:
+ *
+ *   ArcBackground (SubHeaderBar.tsx:131 + ArcBackground.tsx:56-57)
+ *     — the bar's translucent fill drawn as a path with a curved
+ *     bottom edge, plus a separate `stroke-border` curved stroke
+ *     traced along that bottom.
+ *   Hover arc (SubHeaderBar.tsx:133-146)
+ *     — a `fill-secondary/40` curve painted under the hovered tab.
+ *   Active arc (SubHeaderBar.tsx:148-161)
+ *     — a `stroke-primary` 3px curve painted under the active tab.
+ *
+ * All three share the same SVG signature (viewBox="0 0 100 64",
+ * preserveAspectRatio="none"). Strategy:
+ *
+ *   1. ArcBackground: keep the FILL (so the bar still has its
+ *      translucent surface) but rewrite the path data to a straight
+ *      rectangle via the modern CSS `d` property. Drop the curved
+ *      stroke entirely.
+ *   2. Hover + active arcs: hide both — the active state will be
+ *      signalled by a CSS-drawn underline on the active TabButton
+ *      itself (see below).
+ *   3. Override the inline height (calc(100% + 20px) overhang for
+ *      the arc) since with a straight rect we don't need the
+ *      overhang.
+ *   4. SubHeaderBar wrapper gets a flat border-bottom to replace
+ *      the curved bar edge.
+ *   5. Active TabButton (distinguishable by `text-foreground` vs
+ *      inactive's `text-muted-foreground` — see TabButton.tsx:73-78)
+ *      gets primary text + an absolute-positioned ::after underline.
+ *      Pseudo-element underline sits at bottom: -1px to overlap the
+ *      bar's bottom border, reading as one continuous baseline with
+ *      a colored segment under the active tab.
+ *
+ * CSS `d` property: supported in Chrome 108+ / Safari 13+ / Edge 108+
+ * — well within modern-browser support. The `path()` wrapper around
+ * the path data is part of the CSS Shapes / SVG syntax.
+ */
+svg[viewBox="0 0 100 64"][preserveAspectRatio="none"] {
+  height: 100% !important;
+}
+svg[viewBox="0 0 100 64"][preserveAspectRatio="none"] > path[class*="fill-background"] {
+  d: path('M0,0 L100,0 L100,64 L0,64 Z') !important;
+}
+svg[viewBox="0 0 100 64"][preserveAspectRatio="none"] > path[class*="stroke-border"],
+svg[viewBox="0 0 100 64"][preserveAspectRatio="none"] > path[class*="fill-secondary"],
+svg[viewBox="0 0 100 64"][preserveAspectRatio="none"] > path[class*="stroke-primary"] {
+  display: none !important;
+}
+
+/* Flat bottom border on the SubHeaderBar wrapper. The bar's outer
+ * div has `relative sticky top-mobile-bar sidebar:top-0 z-10`
+ * (SubHeaderBar.tsx:110-118); `top-mobile-bar` is a project-specific
+ * Tailwind class unique to this bar, so the selector won't catch
+ * other sticky elements. */
+div[class~="sticky"][class~="z-10"][class~="top-mobile-bar"] {
+  border-bottom: 1px solid hsl(var(--border)) !important;
+}
+
+/* Active TabButton: primary text + flat underline. TabButton.tsx:73-78
+ * — when active, the `active ? 'text-foreground' : 'text-muted-
+ * foreground'` ternary lands `text-foreground` on the button. The
+ * 4-class combo (flex-1 + text-foreground + py-1.5 + text-sm) is
+ * unique to the active feed tab — inactive variants have
+ * text-muted-foreground instead. */
+button[class~="flex-1"][class~="text-foreground"][class~="text-sm"][class~="py-1.5"] {
+  color: hsl(var(--primary)) !important;
+}
+button[class~="flex-1"][class~="text-foreground"][class~="text-sm"][class~="py-1.5"]::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 16px;
+  right: 16px;
+  height: 2px;
+  background: hsl(var(--primary));
+  pointer-events: none;
 }
 
 /* ───── Avatar shape preservation ────────────────────────────────
