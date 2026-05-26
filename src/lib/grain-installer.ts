@@ -254,17 +254,55 @@ export async function installGrain(
   // value (upgrade attempt that didn't reach this point) so the
   // update-check flow can re-offer the same upgrade next time.
   const markerPath = grainVersionMarkerPath();
-  try {
-    fs.writeFileSync(markerPath, `${pinnedVersion}\n`, { mode: 0o644 });
+  const markerWrite = writeGrainVersionMarker(pinnedVersion);
+  if (markerWrite.ok) {
     log.append(`marker written: ${markerPath} = ${pinnedVersion}`);
-  } catch (e: any) {
-    // Don't fail the install for a marker write failure — the binary
-    // IS installed at the right version, the marker is a UX nicety
-    // for the update-check flow. Logging is enough: gatherToolUpdates
-    // will treat the missing marker as "unknown version" and offer
-    // the upgrade again, which is a benign loop.
-    log.append(`marker write failed (non-fatal): ${(e?.message || '').slice(0, 160)}`);
+    return { ok: true, detail: `installed ${pinnedVersion} at ${destFile}` };
   }
 
-  return { ok: true, detail: `installed ${pinnedVersion} at ${destFile}` };
+  // Marker write failed AFTER a successful binary install. The binary
+  // IS at the right version, but gatherToolUpdates can't read what's
+  // on disk without the marker — so for a *persistent* failure (e.g.
+  // the user chmod'd ~/.nostr-station/bin to read-only) every poll
+  // would re-offer this upgrade indefinitely with no actionable
+  // signal to the user. Surface a warn-shaped result so the Updates
+  // modal renders an actionable yellow row on the first attempt
+  // instead of looping silently. warn:true + ok:false maps to SSE
+  // exit-code 0 (web-server.ts:1606), so the modal doesn't paint a
+  // hard error over what is genuinely a successful binary install —
+  // it surfaces the actionable detail. Transient I/O hiccups self-
+  // heal on the next `?force=1` retry (which the user is now nudged
+  // to attempt).
+  log.append(`marker write failed: ${markerWrite.detail}`);
+  return {
+    ok:     false,
+    warn:   true,
+    detail:
+      `grain ${pinnedVersion} installed at ${destFile}, but the version marker ` +
+      `${markerPath} could not be written: ${markerWrite.detail}. ` +
+      `The binary is in place; check that ${path.dirname(markerPath)} is writable ` +
+      `by this user, then retry the update so future upgrade checks can read the ` +
+      `installed version.`,
+  };
+}
+
+/**
+ * Persist the installed-version marker next to the binary. Split out
+ * from installGrain so tests can exercise the failure path (read-only
+ * destination dir) without mocking the full download chain — and so
+ * the install function's happy/sad branches stay readable side-by-side.
+ *
+ * Best-effort write semantics: success returns `ok:true`; any I/O
+ * failure is captured and returned in `detail` (capped, suitable for
+ * surfacing in the Updates modal). Callers decide whether to escalate
+ * to warn-shaped install result or swallow the failure.
+ */
+export function writeGrainVersionMarker(version: string): { ok: true } | { ok: false; detail: string } {
+  const markerPath = grainVersionMarkerPath();
+  try {
+    fs.writeFileSync(markerPath, `${version}\n`, { mode: 0o644 });
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, detail: (e?.message ?? String(e)).slice(0, 160) };
+  }
 }

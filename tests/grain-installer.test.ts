@@ -13,6 +13,7 @@ import {
   grainBinPath,
   grainVersionMarkerPath,
   readGrainInstalledVersion,
+  writeGrainVersionMarker,
 } from '../src/lib/grain-installer.ts';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from '../src/lib/versions.ts';
 
@@ -87,6 +88,64 @@ test('grain-installer: readGrainInstalledVersion parses a semver marker', () => 
     fs.writeFileSync(grainVersionMarkerPath(), '0.7.0\n');
     assert.equal(readGrainInstalledVersion(), '0.7.0');
   } finally {
+    if (prevBin === undefined) delete process.env.NOSTR_STATION_GRAIN_BIN;
+    else process.env.NOSTR_STATION_GRAIN_BIN = prevBin;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('grain-installer: writeGrainVersionMarker writes the version with trailing newline', () => {
+  // Pins the file shape readGrainInstalledVersion expects to consume —
+  // they're a matched pair, and a future refactor that drops the
+  // newline (or pads the file with extra content) should break this
+  // test, not silently change the marker contract.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'grain-installer-test-'));
+  const prevBin = process.env.NOSTR_STATION_GRAIN_BIN;
+  process.env.NOSTR_STATION_GRAIN_BIN = path.join(tmp, 'grain');
+  try {
+    const r = writeGrainVersionMarker('0.7.0');
+    assert.equal(r.ok, true);
+    const onDisk = fs.readFileSync(grainVersionMarkerPath(), 'utf8');
+    assert.equal(onDisk, '0.7.0\n', 'marker file must end with a newline so a tail/cat looks tidy');
+    assert.equal(readGrainInstalledVersion(), '0.7.0',
+      'write then read must round-trip cleanly');
+  } finally {
+    if (prevBin === undefined) delete process.env.NOSTR_STATION_GRAIN_BIN;
+    else process.env.NOSTR_STATION_GRAIN_BIN = prevBin;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('grain-installer: writeGrainVersionMarker returns ok:false with a capped detail on failure', () => {
+  // Drives the path that produces installGrain's "binary installed
+  // but marker write failed" warn-shaped result. We reproduce a
+  // persistent failure (read-only parent dir) so the marker write
+  // fails with EACCES. The Updates modal renders the detail string,
+  // so it must be short, descriptive, and non-empty — bound it at
+  // 160 chars to keep the SSE log line readable.
+  //
+  // Test honors POSIX permission semantics; skip on root (where chmod
+  // 0o000 doesn't deny write) so CI environments running as root
+  // don't see a misleading pass.
+  if (process.getuid && process.getuid() === 0) {
+    return;
+  }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'grain-installer-test-'));
+  const prevBin = process.env.NOSTR_STATION_GRAIN_BIN;
+  // Point the override at a path INSIDE a chmod-0 directory so the
+  // marker write (a sibling of the binary path) hits EACCES.
+  const readOnlyDir = path.join(tmp, 'locked');
+  fs.mkdirSync(readOnlyDir);
+  process.env.NOSTR_STATION_GRAIN_BIN = path.join(readOnlyDir, 'grain');
+  fs.chmodSync(readOnlyDir, 0o500);  // read+exec, no write
+  try {
+    const r = writeGrainVersionMarker('0.7.0');
+    assert.equal(r.ok, false);
+    assert.ok(r.ok === false && r.detail.length > 0, 'failure must carry a detail');
+    assert.ok(r.ok === false && r.detail.length <= 160, 'detail must be capped at 160 chars');
+  } finally {
+    // Restore writable mode so the rm cleanup can drop the dir.
+    fs.chmodSync(readOnlyDir, 0o700);
     if (prevBin === undefined) delete process.env.NOSTR_STATION_GRAIN_BIN;
     else process.env.NOSTR_STATION_GRAIN_BIN = prevBin;
     fs.rmSync(tmp, { recursive: true, force: true });

@@ -29,6 +29,13 @@ work to make the upgrade roll out cleanly:
   to require BOTH the binary AND a matching marker. Previously a fresh
   install request on a v0.6.0 box would no-op forever; now it falls
   through and reinstalls when the marker doesn't match the pin.
+- Marker write failure (rare: requires a read-only `~/.nostr-station/bin`,
+  which we own) now surfaces a warn-shaped install result with an
+  actionable detail string instead of silently logging. Without this,
+  a persistent failure would re-offer the upgrade every poll and the
+  user would have no signal explaining why their "successful" upgrade
+  kept coming back. The new failure path tells them exactly which
+  directory to check, then transient I/O hiccups self-heal on retry.
 
 **Spawn-time config migration** (`src/lib/community-yaml.ts`,
 `src/lib/community-process.ts`):
