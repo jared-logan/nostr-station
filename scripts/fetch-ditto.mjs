@@ -71,30 +71,84 @@ const BRANDING_SENTINEL = path.join(TARGET_DIR, '.nostr-station-branded');
 // without `npm run update-ditto`.
 const BUILT_FROM_SENTINEL = path.join(TARGET_DIR, '.ditto-built-from');
 
-// Hash of *this script's* current content. Embedded in the branding
-// sentinel so the script can detect when its own applyBranding() logic
-// has changed since the last branding run — e.g. someone bumped what
-// gets copied / patched. Without this, the sentinel-exists check would
-// short-circuit re-branding even after a new applyBranding step lands.
+// Hash of the ditto.json content that buildDittoConfig() would write
+// right now. Embedded in the BUILT_FROM_SENTINEL alongside DITTO_REF so
+// the smart-rebuild logic can detect when our config output has changed
+// since the last successful build — even when DITTO_REF itself is
+// unchanged.
 //
-// Real-world repro: PR #189 added an overlay-CSS copy step. End users
-// pulling that commit saw their dist/ditto/ stay untouched because the
-// existing .nostr-station-branded sentinel matched DITTO_REF and the
-// script's idempotency check exited early before applyBranding could
-// run again. Including a script hash in the sentinel invalidates it on
-// any future fetch-ditto.mjs change.
+// Why this matters: ditto.json is read by Ditto's vite build at build
+// time (see header comment at the top of this file). Changes to
+// buildDittoConfig() only take effect after a full cloneAndBuild() run.
+// Without this hash dimension, edits like dropping customTheme.font
+// would silently fail to propagate via a typical `npm run update` — the
+// existing dist/ditto/ matches DITTO_REF, needsBuild stays false, the
+// stale ditto.json stays baked in. The fix that landed alongside this
+// function makes any buildDittoConfig() diff invalidate the SENTINEL,
+// which flips needsBuild to true on the next run, which triggers the
+// full rebuild that picks up the new config.
 //
-// 16-char sha256 prefix is plenty for uniqueness here — there are only
-// going to be a handful of distinct versions of this script ever, not
-// millions of artifacts to disambiguate.
+// JSON.stringify on the literal object is deterministic in modern Node
+// (key insertion order is preserved) so no manual sort needed — explicit
+// key-order changes in source are real changes worth rebuilding for.
+function currentBuildConfigHash() {
+  const config = buildDittoConfig();
+  return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex').slice(0, 16);
+}
+
+// Hash of all branding inputs. Embedded in the branding sentinel so
+// the script can detect when ANY input that feeds applyBranding() has
+// changed since the last run — the script's own bytes, the overlay
+// CSS, or the logo. Without this, the sentinel-exists check would
+// short-circuit re-branding even after a new branding input lands.
+//
+// Inputs hashed (in order, must stay stable for sentinel comparison):
+//   1. scripts/fetch-ditto.mjs       — this script (so logic changes
+//                                      to applyBranding re-fire)
+//   2. src/web/ditto-overrides.css   — overlay CSS copied to dist/
+//                                      ditto/nostr-station-overrides.css
+//   3. src/web/nori.svg              — logo copied to dist/ditto/logo.svg
+//
+// Real-world repros:
+//   - PR #189 added an overlay-CSS copy step. End users pulling that
+//     commit saw their dist/ditto/ stay untouched because the existing
+//     .nostr-station-branded sentinel matched DITTO_REF and the
+//     script's idempotency check exited early before applyBranding
+//     could run again. PR #191 introduced the script-hash check to
+//     fix that class of bug.
+//   - PR #193 changed ONLY src/web/ditto-overrides.css. The script-
+//     hash check from PR #191 did not invalidate (script bytes were
+//     identical), so applyBranding() short-circuited and the new CSS
+//     never reached dist/. Users had to run `npm run update-ditto`
+//     manually. Folding the CSS + logo into the hash closes that gap:
+//     ANY branding input that changes invalidates the sentinel.
+//
+// A missing input file gets a deterministic marker in the hash so a
+// previously-present-then-removed file still invalidates the
+// sentinel correctly. 16-char sha256 prefix is plenty for uniqueness.
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
-function currentScriptHash() {
+function currentInputsHash() {
+  const hash = crypto.createHash('sha256');
   try {
-    const content = fs.readFileSync(SCRIPT_PATH);
-    return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+    hash.update(fs.readFileSync(SCRIPT_PATH));
   } catch {
+    // Can't read this script's own bytes — extremely unusual; bail
+    // with a sentinel that won't match any real hash. brandingIsCurrent
+    // will return false and the next run will try again.
     return 'unknown';
   }
+  const brandingInputs = [
+    path.join(REPO_ROOT, 'src', 'web', 'ditto-overrides.css'),
+    path.join(REPO_ROOT, 'src', 'web', 'nori.svg'),
+  ];
+  for (const p of brandingInputs) {
+    try {
+      hash.update(fs.readFileSync(p));
+    } catch {
+      hash.update(`<missing:${path.basename(p)}>`);
+    }
+  }
+  return hash.digest('hex').slice(0, 16);
 }
 
 // Returns true when the existing branding sentinel was written by the
@@ -105,14 +159,16 @@ function brandingIsCurrent() {
   if (!fs.existsSync(BRANDING_SENTINEL)) return false;
   try {
     const stored = fs.readFileSync(BRANDING_SENTINEL, 'utf8');
-    // Sentinel format: line 1 = ISO timestamp, line 2 = script hash.
-    // Pre-hash sentinels (timestamp only) lack line 2 — treat as stale,
-    // which is correct: we want to re-brand once after this fix lands
-    // so the script-hash dimension gets stamped onto the sentinel.
+    // Sentinel format: line 1 = ISO timestamp, line 2 = inputs hash
+    // (script bytes + overlay CSS bytes + logo bytes — see
+    // currentInputsHash above). Pre-hash sentinels (timestamp only)
+    // lack line 2 — treat as stale, which is correct: we want to
+    // re-brand once after each fix lands so the new hash dimension
+    // gets stamped onto the sentinel.
     const lines = stored.split('\n');
     const storedHash = lines[1]?.trim();
     if (!storedHash) return false;
-    return storedHash === currentScriptHash();
+    return storedHash === currentInputsHash();
   } catch {
     return false;
   }
@@ -123,8 +179,19 @@ async function main() {
     console.log('[ditto] STATION_SKIP_DITTO=1 — skipping build.');
     return;
   }
-  const builtFrom = readBuiltFrom();
-  const needsBuild    = !fs.existsSync(SENTINEL) || builtFrom !== DITTO_REF;
+  const built       = readBuildSentinel();
+  const configHash  = currentBuildConfigHash();
+  // Three independent triggers for a full clone+build:
+  //   1. No SENTINEL at all (fresh install / wiped dist).
+  //   2. DITTO_REF changed since the last build (upstream pin bumped).
+  //   3. buildDittoConfig() output changed since the last build (our
+  //      ditto.json shape changed; needs to be re-baked into the bundle).
+  // Legacy single-line sentinels (pre-config-hash) parse with
+  // built.configHash === null, so condition 3 fires once after this
+  // logic lands and seeds the new two-line format.
+  const needsBuild    = !fs.existsSync(SENTINEL)
+    || built.ref !== DITTO_REF
+    || built.configHash !== configHash;
   const needsBranding = !brandingIsCurrent();
   if (!needsBuild && !needsBranding) {
     console.log(`[ditto] already built (${DITTO_REF.slice(0, 7)}) + branded at ${path.relative(process.cwd(), TARGET_DIR)} — skipping.`);
@@ -132,8 +199,10 @@ async function main() {
     return;
   }
   if (needsBuild) {
-    if (builtFrom && builtFrom !== DITTO_REF) {
-      console.log(`[ditto] DITTO_REF changed (${builtFrom.slice(0, 7)} → ${DITTO_REF.slice(0, 7)}) — rebuilding.`);
+    if (built.ref && built.ref !== DITTO_REF) {
+      console.log(`[ditto] DITTO_REF changed (${built.ref.slice(0, 7)} → ${DITTO_REF.slice(0, 7)}) — rebuilding.`);
+    } else if (built.configHash !== configHash) {
+      console.log(`[ditto] buildDittoConfig() changed — rebuilding ditto.json + bundle.`);
     }
     const ok = await cloneAndBuild();
     if (!ok) return;
@@ -149,9 +218,22 @@ async function main() {
   }
 }
 
-function readBuiltFrom() {
-  try { return fs.readFileSync(BUILT_FROM_SENTINEL, 'utf8').trim(); }
-  catch { return null; }
+// Parses the BUILT_FROM_SENTINEL into { ref, configHash }.
+//   Line 1: DITTO_REF (e.g. "7a5820ca93f833b5...")
+//   Line 2: buildDittoConfig() output hash (e.g. "52b704d2d3eaaef4")
+// Pre-config-hash sentinels are single-line — line 2 returns null, which
+// the needsBuild check in main() treats as stale (triggers one rebuild
+// to seed the new format).
+function readBuildSentinel() {
+  try {
+    const lines = fs.readFileSync(BUILT_FROM_SENTINEL, 'utf8').split('\n');
+    return {
+      ref:        (lines[0] || '').trim() || null,
+      configHash: (lines[1] || '').trim() || null,
+    };
+  } catch {
+    return { ref: null, configHash: null };
+  }
 }
 
 async function cloneAndBuild() {
@@ -208,8 +290,16 @@ async function cloneAndBuild() {
   fs.mkdirSync(TARGET_DIR, { recursive: true });
   fs.cpSync(builtDist, TARGET_DIR, { recursive: true });
 
+  // Two-line sentinel:
+  //   line 1: DITTO_REF (upstream pin we built against)
+  //   line 2: buildDittoConfig() output hash at build time
+  // Parsed by readBuildSentinel(); needsBuild in main() invalidates the
+  // dist when either line drifts from the current state.
   try {
-    fs.writeFileSync(BUILT_FROM_SENTINEL, DITTO_REF + '\n');
+    fs.writeFileSync(
+      BUILT_FROM_SENTINEL,
+      DITTO_REF + '\n' + currentBuildConfigHash() + '\n',
+    );
   } catch (e) {
     console.warn(`[ditto] WARN: built-from sentinel write failed — ${e.message}`);
   }
@@ -274,17 +364,23 @@ function buildDittoConfig() {
     magicMouse: false,
 
     // ─── Theme ────────────────────────────────────────────────────
-    // Font stack mirrors nostr-station's --font-mono in src/web/app.css
-    // exactly: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code',
-    // Menlo, Consolas, monospace. Applied globally via Ditto's
-    // fontLoader.ts which injects an html { font-family: ... } !important
-    // rule, so it cuts across every component without needing source
-    // patches. titleFont gets the same stack so profile display names
-    // render mono too (matches the dashboard's identity-chip styling).
+    // Only the 3 core colors are baked here. customTheme.font and
+    // customTheme.titleFont are deliberately omitted: setting them
+    // would make Ditto's fontLoader inject
+    //   <style id="theme-font-overrides">html{font-family:!important}</style>
+    // at runtime on every theme apply (src/lib/fontLoader.ts:76-92 in
+    // the pinned Ditto). That tag is appended to <head> AFTER our
+    // overlay <link>, so even though both sides use !important, source
+    // order means Ditto's font would win the cascade.
     //
-    // No `url` on either font config — relying on the host system
-    // having one of these mono faces. Same fallback chain the dashboard
-    // already depends on; no new network requests.
+    // Strategy instead: leave font unset here so the override tag
+    // never gets written in the steady state, and let
+    // src/web/ditto-overrides.css's `html { font-family: ... !important }`
+    // rule define typography unopposed. For the rarer case where a
+    // user publishes a kind-16767 with f-tag fonts (which would cause
+    // fontLoader to write the tag at runtime), a MutationObserver in
+    // /theme.js (see DITTO_THEME_JS_BODY in src/lib/web-server-static.ts)
+    // strips the tag as it appears.
     theme: 'custom',
     customTheme: {
       title: 'nostr-station',
@@ -292,12 +388,6 @@ function buildDittoConfig() {
         background: '0 0% 4%',
         text:       '240 6% 80%',
         primary:    '248 80% 67%',
-      },
-      font: {
-        family: "'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace",
-      },
-      titleFont: {
-        family: "'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace",
       },
     },
 
@@ -471,11 +561,12 @@ function applyBranding() {
   }
 
   try {
-    // Sentinel format: ISO timestamp on line 1, script hash on line 2.
+    // Sentinel format: ISO timestamp on line 1, inputs hash on line 2.
     // brandingIsCurrent() reads line 2 and invalidates when it doesn't
-    // match the running script's hash — so the next time fetch-ditto.mjs
-    // gains a new branding step, the next run re-brands automatically.
-    fs.writeFileSync(BRANDING_SENTINEL, new Date().toISOString() + '\n' + currentScriptHash() + '\n');
+    // match the current inputs hash — so the next time fetch-ditto.mjs,
+    // ditto-overrides.css, or nori.svg changes, the next run re-brands
+    // automatically.
+    fs.writeFileSync(BRANDING_SENTINEL, new Date().toISOString() + '\n' + currentInputsHash() + '\n');
     console.log('[ditto] branding complete.');
   } catch (e) {
     console.warn(`[ditto] WARN: sentinel write failed — ${e.message}`);

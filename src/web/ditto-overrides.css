@@ -1,86 +1,391 @@
 /* nostr-station overrides for Ditto's UI.
  *
+ * Sections (in source order):
+ *   ① Typography                  — font stack, base size, line-height
+ *   ② Border-radius scale         — Tailwind rounded-* → --r-sm/--r/--r-lg
+ *   ③ Layout container            — kill 1200px outer cap + 600px feed cap
+ *   ④ Sidebar nav                 — square the pills, accent-soft active
+ *   ⑤ Dialog elevation            — heavier shadow
+ *   ⑥ Buttons                     — auto height + tight padding (exc. icon)
+ *   ⑦ Post action buttons         — square reply/repost/like/zap
+ *   ⑧ Inputs / textareas          — auto height + tight padding
+ *   ⑨ Focus                       — no ring, border-color shift
+ *   ⑩ Spacing rhythm              — p-6 → 14px 18px
+ *   ⑪ Wider radii (xl / 2xl)      — pin to --r-lg
+ *   ⑫ Tabs                        — underline style
+ *   ⑬ Badges                      — square corners
+ *   ⑭ Heading scale               — text-2xl tightened
+ *   ⑮ Toast elevation             — heavier shadow
+ *   ⑯ Avatar shape preservation   — defense-in-depth
+ *
  * Applied via a <link> tag injected at the end of dist/ditto/index.html
  * (see applyBranding() in scripts/fetch-ditto.mjs). Loaded after Ditto's
- * own compiled CSS — for equal specificity, cascade resolves to ours.
+ * own compiled CSS — at equal specificity, cascade resolves to ours.
  *
  * --------------------------------------------------------------------
- * History: prior attempts targeted only the .rounded-* utility surface
- * (e.g. `.rounded-md { border-radius: 5px !important }`). They were
- * delivered correctly by the server, fetched correctly by the browser,
- * but produced no visible change. Diagnosis (via DevTools + grep of
- * the built Ditto CSS):
+ * Strategy overview
  *
- *   1. Ditto declares `--radius: .75rem` as a CSS custom property and
- *      applies it via `border-radius: var(--radius)` directly in
- *      component rules. No .rounded-* class involved → no class
- *      selector to override.
- *   2. Compiled component CSS bakes raw `border-radius: 0.25rem` /
- *      `.375rem` / `1rem` / `1.25rem` declarations directly into
- *      rules. Also class-less.
- *   3. Tailwind v4's @layer ordering means .rounded-* utility
- *      overrides at equal specificity may still lose the cascade.
+ * Ditto is built with Tailwind v3 + shadcn primitives. Visual properties
+ * reach the DOM via three layers:
  *
- * Strategy: heavy hammer. Square EVERY element's corners by default,
- * then a narrow allow-list to preserve avatars (which Ditto wants
- * round, and the user agrees). Also override the --radius custom
- * property at the root to neutralize var(--radius) usage.
+ *   [1] Ditto's compiled Tailwind output (static, in dist/assets/*.css)
+ *   [2] THIS OVERLAY (static, loaded after [1] via the injected <link>)
+ *   [3] Ditto's runtime <style> tags that useApplyTheme / fontLoader /
+ *       useApplyBackground append to <head> on every theme change:
+ *         <style id="theme-vars">        — :root { color tokens }
+ *         <style id="theme-font-overrides"> — html { font-family: !important }
+ *         <style id="theme-background">  — body { background-image }
  *
- * Allow-list rationale: Ditto's Avatar component
- * (src/components/ui/avatar.tsx) renders `<div class="...
- * shrink-0 overflow-hidden ... rounded-full">` for default circular
- * avatars. Inline image avatars use `<img class="rounded-full">`.
- * Pill nav buttons use `rounded-full` WITHOUT `overflow-hidden`,
- * so the allow-list (which requires both) leaves them squared —
- * which is exactly the look-and-feel goal: nostr-station's sharp
- * dashboard chrome extended to Ditto's surfaces.
+ * For each visual property we pick the cheapest layer that beats the
+ * relevant runtime injection. Radii live here (Ditto's runtime never
+ * touches --radius). Font lock starts here as insurance, with the full
+ * defense — drop customTheme.font from ditto.json + MutationObserver in
+ * /theme.js — landing in PR B. Color tokens are LEFT to Ditto's runtime
+ * derivation from the customTheme.colors baked into ditto.json: the
+ * brief defers user-themable colors (background, accent) to whatever
+ * the user publishes via kind-16767, so we don't fight those.
+ *
+ * Avatar shape preservation
+ *
+ *   - Default circular avatars use Tailwind's `rounded-full` keyword,
+ *     which resolves to border-radius: 9999px — independent of --radius
+ *     and untouched by our class-specific overrides below.
+ *   - Custom emoji-mask avatars use CSS mask-image (no border-radius
+ *     involvement at all — see Ditto's src/lib/avatarShape.ts).
+ *   - The explicit allow-list rule at the bottom of this file is
+ *     defense-in-depth in case a future selector accidentally targets
+ *     a rounded-full avatar wrapper.
  */
 
-/* ───── Font ────────────────────────────────────────────────────
- * Same stack as src/web/app.css's --font-mono. Re-applied here in
- * the overlay because Ditto's runtime theme-sync (fetched from
- * Nostr) can clobber the customTheme.font we baked into ditto.json.
- * Ditto's fontLoader.ts injects `html { font-family: X !important }`
- * — our overlay loads later in the cascade so for equal specificity
- * + !important, ours wins. Specifically targets `html` only (not
- * `*`) so icon fonts that explicitly set their own family still
- * render correctly. */
+/* ───── Typography ───────────────────────────────────────────────
+ * Family mirrors src/web/app.css's --font-mono. Size baseline is
+ * 14px (slightly above the dashboard's 13px to leave Tailwind's
+ * text-xs / text-sm classes — which scale off `html { font-size }` —
+ * landing on 11.2px / 12.25px, close to the dashboard's tight scale).
+ *
+ * Defense map against Ditto's runtime font injection:
+ *   - customTheme.font is NOT set in ditto.json (see buildDittoConfig
+ *     in scripts/fetch-ditto.mjs) so Ditto's fontLoader does not
+ *     write <style id="theme-font-overrides"> in the steady state →
+ *     this rule wins unopposed.
+ *   - If a user publishes a kind-16767 event with f-tag fonts, the
+ *     style tag CAN appear at runtime. A MutationObserver installed
+ *     in /theme.js (see DITTO_THEME_JS_BODY in
+ *     src/lib/web-server-static.ts) strips it as it lands; this rule
+ *     remains unopposed.
+ *
+ * line-height matches the dashboard's body line-height (1.6 in
+ * src/web/app.css:78). Targets `html` (not `*`) so icon fonts and
+ * elements that explicitly opt out (mono-in-mono code blocks, etc.)
+ * still render correctly.
+ */
 html {
   font-family: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace !important;
+  font-size: 14px !important;
+  line-height: 1.6 !important;
 }
 
-/* ───── Kill the --radius custom property ────────────────────────
- * Neutralizes every `border-radius: var(--radius)` rule baked into
- * Ditto's component CSS. Higher-priority root-level declaration
- * shadows Ditto's :root { --radius: .75rem; } default. */
-html {
-  --radius: 0 !important;
-  --radius-sm: 0 !important;
-  --radius-md: 0 !important;
-  --radius-lg: 0 !important;
-  --radius-xl: 0 !important;
+/* ───── Border-radius scale ───────────────────────────────────────
+ * Maps Tailwind's compiled rounded-{lg,md,sm,xs} utilities to nostr-
+ * station's --r-lg (8px) / --r (5px) / --r-sm (3px) / squared scale
+ * from src/web/app.css:38-40.
+ *
+ * Ditto's tailwind.config.ts:131-141 derives each size from a single
+ * --radius custom property via calc():
+ *     rounded-lg → var(--radius)
+ *     rounded-md → calc(var(--radius) - 2px)
+ *     rounded-sm → calc(var(--radius) - 4px)
+ *     rounded-xs → calc(var(--radius) - 8px)
+ *
+ * Setting --radius alone would force a 1px compromise between lg and
+ * md (no single base value produces 8/5/3/0 exactly). Belt-and-
+ * suspenders: also override the compiled .rounded-* classes directly
+ * so any code that bypasses Tailwind utilities and reads var(--radius)
+ * inline still gets a sane value, while class-driven UI hits the
+ * exact dashboard tokens.
+ *
+ * rounded-full is intentionally untouched — preserves circular
+ * avatars (Avatar component, custom emoji-mask shapes) and any other
+ * intentional pill UI. Sidebar nav pills and post action buttons get
+ * narrowly-targeted overrides in PR C / PR D.
+ */
+:root {
+  --radius:    7px !important;
+  --radius-lg: 8px !important;
+  --radius-md: 5px !important;
+  --radius-sm: 3px !important;
+  --radius-xs: 0   !important;
+}
+.rounded-lg { border-radius: 8px !important; }
+.rounded-md { border-radius: 5px !important; }
+.rounded-sm { border-radius: 3px !important; }
+.rounded-xs { border-radius: 0   !important; }
+
+/* ───── Layout container — kill desktop side margins ─────────────
+ * Ditto's MainLayout wraps the three-column shell in
+ *   <div class="flex justify-center mx-auto max-w-[1200px]">
+ * (MainLayout.tsx:59 at DITTO_REF 7a5820c). On wide displays the
+ * Client panel iframe gets the dashboard's full main width minus the
+ * 224px sidebar — roughly 1696px at 1920p — and Ditto's 1200px cap
+ * parks ~250px of empty space on each side. Kill the cap so the
+ * three-column layout fills the panel.
+ *
+ * Also lift the center-column cap (MainLayout.tsx:73's
+ * `sidebar:max-w-[600px]`) so the feed widens into the new space
+ * rather than leaving dead gutter between the feed and the right
+ * rail.
+ *
+ * Both caps only fire above the `sidebar:` breakpoint (900px); mobile
+ * layout is untouched. CSS attribute escapes: `\[` / `\]` / `\:` are
+ * literal characters in class names.
+ */
+.max-w-\[1200px\] { max-width: none !important; }
+.sidebar\:max-w-\[600px\] { max-width: none !important; }
+
+/* ───── Sidebar nav — square the pills ───────────────────────────
+ * Ditto's SidebarNavItem renders nav items as `rounded-full` pills
+ * with `py-3` (12px) vertical padding (SidebarNavItem.tsx:62-67 at
+ * DITTO_REF 7a5820c). nostr-station's .nav a (src/web/app.css:381-399)
+ * uses 3px-corner rectangles with `padding: 8px 10px`. Square them
+ * out and tighten the padding to match.
+ *
+ * Multi-attribute selector `[class~="..."]` requires all listed
+ * classes to be present as space-separated tokens — narrow enough
+ * to hit ONLY the nav-item link, not:
+ *   - the outer pill wrapper (rounded-full but no gap-4/py-3)
+ *   - the logo container at LeftSidebar.tsx:92 (no gap/py)
+ *   - avatar skeletons (no gap-4/py-3)
+ *
+ * Active state: NavLink adds `font-bold text-primary` (line 65).
+ * Layered selector adds an accent-soft background — same pattern as
+ * .nav a.active in src/web/app.css:392-399.
+ *
+ * Account button (LeftSidebar.tsx:147) and "Post" CTA
+ * (LeftSidebar.tsx:135) get their own targeted overrides below.
+ */
+a[class~="rounded-full"][class~="gap-4"][class~="py-3"] {
+  border-radius: var(--r-sm) !important;
+  padding: 8px 10px !important;
+}
+a[class~="rounded-full"][class~="gap-4"][class~="py-3"][class~="font-bold"][class~="text-primary"] {
+  background: color-mix(in srgb, hsl(var(--primary)) 12%, transparent) !important;
 }
 
-/* ───── Heavy hammer: square everything ──────────────────────────
- * Catches all the raw `border-radius: <length>` declarations
- * baked into compiled component CSS that no class selector can
- * reach. Specificity is (0,1,1) which beats most class-only rules,
- * including Tailwind v4 @layer utilities. */
-html * {
+/* Sidebar account button (the user-menu trigger at the bottom of
+ * the rail; LeftSidebar.tsx:147). gap-3 + p-3 + bg-background/85
+ * distinguishes it from the nav links above. */
+button[class~="rounded-full"][class~="p-3"][class~="hover:bg-secondary/60"] {
+  border-radius: var(--r-sm) !important;
+  padding: 8px 10px !important;
+}
+
+/* "Post" CTA — primary action button in the sidebar.
+ * LeftSidebar.tsx:135: `h-10 rounded-full bg-primary
+ * text-primary-foreground`. Square it; height/padding stay as-is
+ * (sized for finger targets). */
+button[class~="rounded-full"][class~="bg-primary"][class~="h-10"] {
+  border-radius: var(--r-sm) !important;
+}
+
+/* ───── Dialog / modal elevation ─────────────────────────────────
+ * shadcn's Dialog uses `shadow-lg` (Tailwind's medium-weight shadow).
+ * nostr-station modals use a heavier `0 20px 60px rgba(0,0,0,0.6)`
+ * (src/web/app.css:3339). Match it. The radius bridge above already
+ * lands rounded-xl close to 8px — visually identical to --r-lg. */
+[role="dialog"] {
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6) !important;
+}
+
+/* ───── Buttons — tighten to dashboard rhythm ────────────────────
+ * shadcn's button variants (Ditto's src/components/ui/button-variants.ts)
+ * size text buttons at h-10 / h-9 / h-11 with px-4/8 padding —
+ * substantially taller and wider than nostr-station's
+ * `padding: 6px 12px` button rule (src/web/app.css:86-96).
+ *
+ * Override to auto-height + dashboard padding. Excludes square icon
+ * buttons: the shadcn `icon` variant pairs h-10 with w-10 (and
+ * occasional h-9/w-9, h-11/w-11 for adjacent sizes). The
+ * `:not([class~="w-N"])` filters preserve those exactly.
+ *
+ * Tailwind `size-*` icon buttons (Ditto uses these extensively in
+ * NoteCard etc.) don't match h-N classes so they pass through
+ * unaffected.
+ */
+button[class~="h-10"]:not([class~="w-10"]),
+button[class~="h-9"]:not([class~="w-9"]),
+button[class~="h-11"]:not([class~="w-11"]) {
+  height: auto !important;
+  padding: 6px 12px !important;
+}
+
+/* ───── Post action buttons — square + tight ─────────────────────
+ * NoteCard reply/repost/like/zap buttons (NoteCard.tsx:879-963 at
+ * DITTO_REF 7a5820c) are `rounded-full text-muted-foreground
+ * hover:text-primary hover:bg-primary/10` icon pills. The dashboard
+ * has no circular icon button — every interactive control is
+ * 3px-corner rectangular (closest analog: .copy-btn at
+ * src/web/app.css:3410-3427). Square them out and tighten padding.
+ *
+ * Repost button uses `hover:bg-accent/10` instead (NoteCard.tsx:898);
+ * second selector covers it. Both are unique to feed action buttons
+ * — avatars don't use hover:bg-primary/accent, sidebar pills don't
+ * either.
+ */
+button[class~="rounded-full"][class~="hover:bg-primary/10"],
+button[class~="rounded-full"][class~="hover:bg-accent/10"],
+[class~="rounded-full"][class~="hover:bg-primary/10"][class~="text-muted-foreground"],
+[class~="rounded-full"][class~="hover:bg-accent/10"][class~="text-muted-foreground"] {
+  border-radius: var(--r-sm) !important;
+  padding: 4px 6px !important;
+}
+
+/* ───── Inputs — tighten to dashboard rhythm ─────────────────────
+ * shadcn input/textarea (Ditto's src/components/ui/input.tsx and
+ * textarea.tsx) use h-10 with px-3 py-2. Dashboard's input rule
+ * (src/web/app.css:118-128) uses `padding: 7px 10px` and lets the
+ * font + padding define the height. Match it.
+ */
+input[class~="h-10"] {
+  height: auto !important;
+  padding: 7px 10px !important;
+}
+textarea {
+  padding: 7px 10px !important;
+}
+
+/* ───── Focus — border-color shift, no ring ──────────────────────
+ * shadcn's focus pattern is
+ *   focus-visible:outline-none focus-visible:ring-2
+ *   focus-visible:ring-ring focus-visible:ring-offset-2
+ * The ring is implemented as box-shadow via Tailwind's
+ * --tw-ring-shadow / --tw-ring-offset-shadow custom properties. Kill
+ * the ring on focus by zeroing those (preserves the always-on
+ * --tw-shadow chain, so shadow-sm/md/lg on cards/dialogs survive a
+ * focus state). Then layer in a border-color shift on inputs and
+ * outlined buttons, matching the dashboard's focus convention
+ * (src/web/app.css:127).
+ */
+*:focus-visible {
+  outline: none !important;
+  --tw-ring-shadow: 0 0 transparent !important;
+  --tw-ring-offset-shadow: 0 0 transparent !important;
+}
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+[role="combobox"]:focus-visible,
+button:focus-visible {
+  border-color: hsl(var(--ring)) !important;
+}
+
+/* ───── Spacing rhythm — tighten p-6 surfaces ────────────────────
+ * shadcn Card/Dialog/Popover lean on `p-6` (24px) for the major
+ * surfaces — Ditto inherits this default. The dashboard's
+ * .panel-head padding is `16px 24px` and .modal-head is `14px 18px`
+ * (src/web/app.css:587-596, 3342-3354) — meaningfully tighter.
+ *
+ * Remap .p-6 globally to a single mid-value that matches the
+ * dashboard's modal padding. Buttons don't use p-6 (they use px-4 /
+ * px-8 for horiz padding only), so this doesn't compress button
+ * geometry. If a specific surface needs different padding it can
+ * get a more specific override in a follow-up.
+ */
+.p-6 {
+  padding: 14px 18px !important;
+}
+
+/* ───── Larger radii surfaces ─────────────────────────────────────
+ * Ditto's tailwind.config.ts borderRadius block only redefines
+ * lg/md/sm/xs (lines 76-80 of /tmp/ditto-investigate/tailwind.config.ts);
+ * `xl` and `2xl` fall through to Tailwind's defaults (0.75rem / 1rem)
+ * which are too generous for the dashboard's --r-lg of 8px. Pin both
+ * to --r-lg so widget cards (`rounded-xl` at WidgetCard.tsx:74-77),
+ * the account popover (`rounded-2xl` at LeftSidebar.tsx:176), and any
+ * other xl-rounded surface land on the dashboard's modal-radius
+ * value.
+ */
+.rounded-xl  { border-radius: 8px !important; }
+.rounded-2xl { border-radius: 8px !important; }
+
+/* ───── Tabs — underline-style active state ─────────────────────
+ * shadcn's Tabs primitive (Ditto's src/components/ui/tabs.tsx:8-52)
+ * uses a "filled-pill" pattern: TabsList has a `bg-muted` rounded
+ * container, and the active TabsTrigger gets a contrasting
+ * background + drop shadow. The dashboard uses a flatter underline
+ * style (src/web/app.css:1751-1771): no list background, active tab
+ * marked by a 2px bottom border in --accent + accent-bright text.
+ *
+ * Targets ARIA roles (Radix-provided, stable across upgrades). The
+ * tab trigger's `margin-bottom: -1px` overlaps its 2px underline on
+ * top of the tablist's 1px bottom border so the line reads as a
+ * single continuous baseline with a colored segment under the
+ * active tab — standard underline-tabs technique.
+ */
+[role="tablist"] {
+  background: transparent !important;
+  padding: 0 !important;
+  border-bottom: 1px solid hsl(var(--border)) !important;
+  height: auto !important;
+}
+[role="tab"] {
   border-radius: 0 !important;
+  padding: 10px 14px !important;
+}
+[role="tab"][data-state="active"] {
+  background: transparent !important;
+  box-shadow: none !important;
+  border-bottom: 2px solid hsl(var(--primary)) !important;
+  color: hsl(var(--primary)) !important;
+  margin-bottom: -1px !important;
 }
 
-/* ───── Avatar preservation ──────────────────────────────────────
- * Ditto's Avatar component (src/components/ui/avatar.tsx) marks
- * default circular avatars with two distinguishing classes:
- * `overflow-hidden` (to clip the image) AND `rounded-full`. Pill
- * nav buttons use `rounded-full` WITHOUT `overflow-hidden`, so they
- * fall through the heavy hammer above.
+/* ───── Badges — square corners ──────────────────────────────────
+ * shadcn Badge (Ditto's src/components/ui/badge.tsx:11-14) renders
+ * pill-shaped `rounded-full border px-2.5 py-0.5 text-xs
+ * font-semibold` chips. nostr-station's .chip pattern
+ * (src/web/app.css:187-197) is a small-radius rectangle. The
+ * specific class combination below is unique to Badge — avatars
+ * (no font-semibold), action buttons (text-sm not text-xs), and
+ * sidebar pills (no px-2.5) all pass through unaffected.
+ */
+[class~="rounded-full"][class~="text-xs"][class~="font-semibold"][class~="border"][class~="px-2.5"] {
+  border-radius: var(--r-sm) !important;
+}
+
+/* ───── Heading scale — tighten text-2xl ─────────────────────────
+ * Ditto's CardTitle uses `text-2xl font-semibold leading-none
+ * tracking-tight` (src/components/ui/card.tsx:5-80 — confirmed in
+ * the surfaces inventory). At our 14px html base, text-2xl resolves
+ * to 21px, well above the dashboard's 15px .panel-head .title and
+ * 14px .modal-head .title (src/web/app.css:596, 3350). The compressed
+ * .p-6 surface (14px 18px from §10) reads oddly with a 21px title in
+ * a 14px-padded card. Drop text-2xl to 15px to keep the head/title
+ * proportional. Other Tailwind text-* sizes already land close to
+ * the dashboard scale at the 14px base.
+ */
+.text-2xl { font-size: 15px !important; }
+
+/* ───── Toast elevation — heavier shadow ─────────────────────────
+ * shadcn Toast (Ditto's src/components/ui/toast.tsx:10-138) uses
+ * `shadow-lg`. The dashboard's .toast uses
+ * `0 8px 24px rgba(0,0,0,0.4)` (src/web/app.css:3304). Match.
  *
- * Also preserve inline <img class="rounded-full"> avatars used in
- * places where Ditto skips the Avatar wrapper.
- *
- * Specificity (0,2,1) reliably beats the heavy hammer's (0,1,1). */
+ * Selector lifts from the Radix-emitted role + the data-state Radix
+ * sets while the toast is visible. Avoids matching status
+ * announcements that aren't toasts.
+ */
+[role="status"][data-state="open"] {
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4) !important;
+}
+
+/* ───── Avatar shape preservation ────────────────────────────────
+ * Defense-in-depth. With the previous heavy-hammer rule
+ * (`html * { border-radius: 0 !important }` from PR #193) removed,
+ * Tailwind's `rounded-full` survives naturally on avatars — but
+ * cheap insurance against any future overlay rule that accidentally
+ * matches an avatar wrapper. Specificity (0,2,1) beats class-only
+ * selectors. */
 html [class~="overflow-hidden"][class~="rounded-full"],
 html img.rounded-full {
   border-radius: 9999px !important;
