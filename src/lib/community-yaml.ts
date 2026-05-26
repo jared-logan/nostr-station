@@ -177,6 +177,64 @@ export function coerceGrainPortValue(raw: unknown): string | null {
   return `:${port}`;
 }
 
+/**
+ * GRAIN 0.7.0 reshaped the `backup_relay` block from a single `url:`
+ * string into a `urls:` list. Any user-edited config.yml that still
+ * carries the v0.6.0-shaped `backup_relay.url: wss://…` will be
+ * rejected at startup by the new validator. This helper coerces the
+ * old shape to the new one without touching other keys.
+ *
+ * Returns:
+ *   - null when there's nothing to migrate (no backup_relay block, or
+ *     it's already in the urls-list shape) — callers treat null as
+ *     "no rewrite needed".
+ *   - the new block to write when migration applies. The supervisor
+ *     splices it back into the parent config and writes atomically
+ *     so GRAIN's hot-reload never sees a torn file.
+ *
+ * Inputs we accept (everything we've ever seen in the wild):
+ *   - `{ url: 'wss://x' }`                 → `{ urls: ['wss://x'] }`
+ *   - `{ url: 'wss://x', enabled: true }`  → `{ enabled: true, urls: ['wss://x'] }`
+ *   - `{ url: '' }`                        → `{ urls: [] }`
+ *   - `{ url: ['wss://a', 'wss://b'] }`    → `{ urls: ['wss://a', 'wss://b'] }`
+ *     (the YAML parser sometimes hands an array even on the singular key)
+ *
+ * Anything we can't make sense of falls through unchanged so a typo or
+ * future-schema key isn't silently clobbered — the user's relay would
+ * fail to start on the next spawn, and the failure stdout/stderr would
+ * point them at the offending line. That's strictly better than
+ * pretending to migrate and writing nonsense.
+ */
+export function coerceGrainBackupRelay(
+  raw: unknown,
+): Record<string, unknown> | null {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  // Already migrated — `urls` is the canonical 0.7.0 shape. We don't
+  // touch the block even if a stale `url` is also present; the user
+  // (or a half-applied earlier migration) likely added both and the
+  // new validator only reads `urls`. Leaving `url` in place is
+  // harmless because YAML round-tripping preserves it.
+  if ('urls' in obj) return null;
+  if (!('url' in obj)) return null;
+
+  const url = obj.url;
+  let urls: string[];
+  if (typeof url === 'string') {
+    urls = url === '' ? [] : [url];
+  } else if (Array.isArray(url)) {
+    urls = url.filter((x): x is string => typeof x === 'string');
+  } else {
+    // Unrecognized shape — refuse to migrate. See doc comment.
+    return null;
+  }
+
+  // Preserve everything else (enabled flag, future keys) and DROP the
+  // old `url` key so the new validator doesn't choke on the rename.
+  const { url: _drop, ...rest } = obj;
+  return { ...rest, urls };
+}
+
 // =====================================================================
 // whitelist.yml — pubkey allowlist
 

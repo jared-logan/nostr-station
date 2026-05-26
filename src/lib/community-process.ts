@@ -43,7 +43,7 @@ import {
 } from './communities.js';
 import {
   readGrainConfig, writeGrainConfig, atomicWriteFileSync,
-  coerceGrainPortValue,
+  coerceGrainPortValue, coerceGrainBackupRelay,
 } from './community-yaml.js';
 import { grainBinPath } from './grain-installer.js';
 import { probeNvpnStatus, readNvpnNetworks, readNvpnRoster } from './nvpn.js';
@@ -469,13 +469,31 @@ async function spawnChild(s: Supervision): Promise<void> {
   const targetPort = `:${s.manifest.port}`;
   try {
     const cfg = readGrainConfig(communityConfigPath(dir));
-    const coerced = coerceGrainPortValue(cfg.server.port) ?? targetPort;
-    if (cfg.server.port !== coerced) {
-      writeGrainConfig(communityConfigPath(dir), {
+    const coercedPort = coerceGrainPortValue(cfg.server.port) ?? targetPort;
+    const portChanged = cfg.server.port !== coercedPort;
+
+    // GRAIN 0.7.0 renamed backup_relay.url (string) → backup_relay.urls
+    // (list). Default configs we wrote never set this key, but a user
+    // who hand-edited their config.yml to mirror to an upstream relay
+    // would see GRAIN refuse to start on the new schema. Migrate the
+    // block in-place (see coerceGrainBackupRelay for the accepted
+    // shapes and the deliberately conservative fallthrough).
+    const coercedBackup = coerceGrainBackupRelay(cfg.backup_relay);
+    const backupChanged = coercedBackup !== null;
+
+    if (portChanged || backupChanged) {
+      const next: typeof cfg = {
         ...cfg,
-        server: { ...cfg.server, port: coerced },
-      });
-      s.log.info(`migrated server.port "${cfg.server.port}" → "${coerced}" (GRAIN requires port-only form)`);
+        server: { ...cfg.server, port: coercedPort },
+      };
+      if (backupChanged) next.backup_relay = coercedBackup;
+      writeGrainConfig(communityConfigPath(dir), next);
+      if (portChanged) {
+        s.log.info(`migrated server.port "${cfg.server.port}" → "${coercedPort}" (GRAIN requires port-only form)`);
+      }
+      if (backupChanged) {
+        s.log.info(`migrated backup_relay.url → backup_relay.urls (GRAIN 0.7.0 schema rename)`);
+      }
     }
   } catch (e: any) {
     const msg = `failed to rewrite config.yml: ${(e?.message ?? '').slice(0, 200)}`;

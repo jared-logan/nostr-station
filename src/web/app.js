@@ -1699,8 +1699,12 @@ const SERVICE_CTAS = {
   'stacks':    { installSlug: 'stacks', configHint: null },
   // grain — managed by Communities. /api/exec/install/grain dispatches
   // to installGrain() in src/lib/grain-installer.ts (downloads the
-  // pinned v0.6.0 tarball, sha256-verifies, drops the binary at
+  // pinned tarball, sha256-verifies, drops the binary at
   // ~/.nostr-station/bin/grain). No sudo prompt; no PATH dependency.
+  // No row-level Start/Stop button: grain runs once per community
+  // (community-process.ts), not as a singleton, so lifecycle ops
+  // happen in the Communities panel — the SERVICE_DETAILS panel
+  // link below takes the user there.
   'grain':     { installSlug: 'grain', configHint: null },
 };
 
@@ -1757,6 +1761,16 @@ const SERVICE_DETAILS = {
     summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Scaffold a Nostr React app with <code class="cmd-inline">stacks mkstack &lt;name&gt;</code>.`,
     summaryErr:  _ => 'Stacks is Soapbox\'s Nostr app scaffolding CLI (ships the mkstack React template). Optional — install adds the <code class="cmd-inline">stacks</code> command to <code class="cmd-inline">~/.cargo/bin</code>.',
     panel: { hash: '#projects', label: 'Open Projects' },
+  },
+  // grain — installed once, run N times (one per community). Summary
+  // explains why there's no row-level Start/Stop button: per-community
+  // lifecycle lives in the Communities panel, where each instance has
+  // its own state + log buffer. The panel link is the row's primary
+  // call-to-action once grain is installed.
+  'grain': {
+    summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Each Community spawns its own grain process — start, stop, and tail logs from the Communities panel.`,
+    summaryErr:  _ => '<code class="cmd-inline">grain</code> is the embedded Nostr relay that powers private Communities. Install it to create your first community; one binary serves N communities.',
+    panel: { hash: '#communities', label: 'Open Communities' },
   },
 };
 

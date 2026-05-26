@@ -7,6 +7,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { compareSemver, gatherToolUpdates } from '../src/lib/tool-updates.ts';
+import { grainBinPath, grainVersionMarkerPath } from '../src/lib/grain-installer.ts';
+import { COMPONENT_VERSIONS } from '../src/lib/versions.ts';
 
 // ── compareSemver ────────────────────────────────────────────────────────
 // This drives the "should we offer an update?" decision in the modal:
@@ -56,10 +58,13 @@ test('compareSemver: unparseable input fails closed at 0', () => {
 
 test('gatherToolUpdates: returns one record per pinned tool', async () => {
   const tools = await gatherToolUpdates();
-  // We pin three: nak, ngit, nvpn. Order isn't part of the contract,
-  // but the set is.
+  // We pin four: nak, ngit, nvpn, grain. Order isn't part of the
+  // contract, but the set is. grain was added when we wired its
+  // upgrade path on the 0.6.0 → 0.7.0 bump — it ships without a
+  // `--version` flag, so the gather code reads the install marker
+  // instead of running the binary (see gatherGrainUpdate).
   const ids = new Set(tools.map(t => t.id));
-  assert.deepEqual([...ids].sort(), ['nak', 'ngit', 'nvpn']);
+  assert.deepEqual([...ids].sort(), ['grain', 'nak', 'ngit', 'nvpn']);
 });
 
 test('gatherToolUpdates: every record has pinnedVersion + installEndpoint', async () => {
@@ -128,6 +133,114 @@ test('gatherToolUpdates: shell-PATH ngit wins over older shadow in ~/.cargo/bin'
     process.env.PATH = origPath;
     fs.rmSync(installDir, { recursive: true, force: true });
     fs.rmSync(shadowPath, { force: true });
+  }
+});
+
+// ── grain: marker-file probing (no --version flag) ───────────────────────
+// Grain ships without a `--version` flag, so the gather code can't reuse
+// the shell-probe pattern. Instead it checks the binary at the managed
+// path (~/.nostr-station/bin/grain) and reads a sibling marker file
+// written by installGrain. Three contract points worth pinning:
+//
+//   1. No binary at all      → installed=false, no update offered.
+//   2. Binary present, no marker → "stale unknown" — update OFFERED.
+//      This is the v0.6.0 → v0.7.0 upgrade signal: pre-marker installs
+//      look like "version unknown" and the modal pulls them forward.
+//   3. Binary + marker == pinned → installed, no update.
+
+function setGrainBinOverride(p: string | null): string | undefined {
+  const prev = process.env.NOSTR_STATION_GRAIN_BIN;
+  if (p === null) delete process.env.NOSTR_STATION_GRAIN_BIN;
+  else process.env.NOSTR_STATION_GRAIN_BIN = p;
+  return prev;
+}
+function restoreGrainBinOverride(prev: string | undefined): void {
+  if (prev === undefined) delete process.env.NOSTR_STATION_GRAIN_BIN;
+  else process.env.NOSTR_STATION_GRAIN_BIN = prev;
+}
+
+test('gatherToolUpdates: grain absent → installed=false, no update', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'grain-updates-test-'));
+  const prev = setGrainBinOverride(path.join(tmp, 'grain'));
+  try {
+    const tools = await gatherToolUpdates();
+    const grain = tools.find(t => t.id === 'grain');
+    assert.ok(grain);
+    assert.equal(grain!.installed, false);
+    assert.equal(grain!.currentVersion, null);
+    assert.equal(grain!.updateAvailable, false);
+    assert.equal(grain!.pinnedVersion, COMPONENT_VERSIONS['grain']);
+    assert.equal(grain!.installEndpoint, '/api/exec/install/grain');
+  } finally {
+    restoreGrainBinOverride(prev);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('gatherToolUpdates: grain binary without marker → flags update (v0.6.0 upgrade signal)', async () => {
+  // Reproduce the existing-v0.6.0-user scenario: the binary is on disk
+  // from a pre-0.7.0 install that didn't yet write a marker. We MUST
+  // surface this as an available update so the user's dashboard pulls
+  // them forward on the first poll after they bump nostr-station.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'grain-updates-test-'));
+  const binPath = path.join(tmp, 'grain');
+  fs.writeFileSync(binPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const prev = setGrainBinOverride(binPath);
+  try {
+    const tools = await gatherToolUpdates();
+    const grain = tools.find(t => t.id === 'grain');
+    assert.ok(grain);
+    assert.equal(grain!.installed, true);
+    assert.equal(grain!.currentVersion, null);
+    assert.equal(grain!.updateAvailable, true,
+      'binary present + marker absent must offer the upgrade (pre-0.7.0 install)');
+  } finally {
+    restoreGrainBinOverride(prev);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('gatherToolUpdates: grain binary + matching marker → no update offered', async () => {
+  // The steady state after a clean v0.7.0 install. Binary present,
+  // marker file present and matches the pinned version → no pill.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'grain-updates-test-'));
+  const binPath = path.join(tmp, 'grain');
+  fs.writeFileSync(binPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const prev = setGrainBinOverride(binPath);
+  try {
+    fs.writeFileSync(grainVersionMarkerPath(), `${COMPONENT_VERSIONS['grain']}\n`);
+    const tools = await gatherToolUpdates();
+    const grain = tools.find(t => t.id === 'grain');
+    assert.ok(grain);
+    assert.equal(grain!.installed, true);
+    assert.equal(grain!.currentVersion, COMPONENT_VERSIONS['grain']);
+    assert.equal(grain!.updateAvailable, false);
+  } finally {
+    restoreGrainBinOverride(prev);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('gatherToolUpdates: grain binary + older marker → flags update', async () => {
+  // Future-proofing: when we bump grain to 0.8.0, existing 0.7.0
+  // installs will read marker=0.7.0, compareSemver against pinned
+  // gives -1, and the pill fires. This guards against a regression
+  // where we accidentally short-circuit on "marker present" alone.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'grain-updates-test-'));
+  const binPath = path.join(tmp, 'grain');
+  fs.writeFileSync(binPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const prev = setGrainBinOverride(binPath);
+  try {
+    fs.writeFileSync(grainVersionMarkerPath(), '0.6.0\n');
+    const tools = await gatherToolUpdates();
+    const grain = tools.find(t => t.id === 'grain');
+    assert.ok(grain);
+    assert.equal(grain!.installed, true);
+    assert.equal(grain!.currentVersion, '0.6.0');
+    assert.equal(grain!.updateAvailable, true);
+  } finally {
+    restoreGrainBinOverride(prev);
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 

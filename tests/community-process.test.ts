@@ -234,3 +234,99 @@ test('prepareCommunityForStart: private-network surfaces a useful reason when nv
     home.restore();
   }
 });
+
+// ---------------------------------------------------------------------
+// Spawn-time config migrations.
+//
+// The supervisor auto-fixes config.yml shapes that older nostr-station
+// versions wrote (server.port host:port form) or that an older GRAIN
+// version accepted (backup_relay.url single string). Without these
+// migrations, a user's existing community would refuse to boot after
+// a version bump. We verify the rewrite happens in-place and the
+// supervisor still spawns cleanly.
+
+test('startCommunity migrates legacy backup_relay.url → urls list at spawn time', async () => {
+  // GRAIN 0.7.0 renamed `backup_relay.url: <str>` → `backup_relay.urls:
+  // [<str>]`. A user who hand-edited their config on 0.6.0 to add a
+  // single upstream backup must NOT see GRAIN refuse to start after
+  // we bump them; the supervisor coerces the old shape and writes it
+  // back atomically before spawn.
+  const home = useTempHome();
+  const stub = useGrainStub([
+    `trap 'exit 0' TERM`,
+    `while true; do sleep 1; done`,
+  ].join('\n'));
+  try {
+    _resetSupervisorForTests();
+    const m = await createCommunity({
+      name: 'backup-migrate', privacyMode: 'local', adminPubkey: HEX_64,
+    });
+
+    // Hand-write the legacy shape into the community's config.yml,
+    // simulating a user who pasted in a backup_relay block on 0.6.0.
+    const cfgPath = path.join(home.home, 'communities', m.id, 'config.yml');
+    const original = fs.readFileSync(cfgPath, 'utf8');
+    fs.writeFileSync(
+      cfgPath,
+      original + '\nbackup_relay:\n  enabled: true\n  url: "wss://upstream.example"\n',
+    );
+
+    const r1 = await startCommunity(m.id);
+    assert.equal(r1.status, 'running');
+
+    // Re-read the file — the migration must have run synchronously
+    // before spawn, so by the time startCommunity resolves the file
+    // is already in the new shape.
+    const after = fs.readFileSync(cfgPath, 'utf8');
+    assert.match(after, /urls:/, 'config.yml should now use the urls-list key');
+    assert.match(after, /wss:\/\/upstream\.example/,
+      'the upstream URL must survive the migration');
+    assert.doesNotMatch(after, /^\s*url:\s*"?wss:\/\/upstream/m,
+      'the old `url:` key must be dropped so GRAIN 0.7.0\'s validator doesn\'t see both');
+
+    await stopCommunity(m.id);
+  } finally {
+    _resetSupervisorForTests();
+    stub.restore();
+    home.restore();
+  }
+});
+
+test('startCommunity leaves an already-urls-list backup_relay block untouched', async () => {
+  // Idempotency check: a config that's already in the 0.7.0 shape
+  // must not be rewritten on every spawn (would churn the file and
+  // fire GRAIN's hot-reload for no reason).
+  const home = useTempHome();
+  const stub = useGrainStub([
+    `trap 'exit 0' TERM`,
+    `while true; do sleep 1; done`,
+  ].join('\n'));
+  try {
+    _resetSupervisorForTests();
+    const m = await createCommunity({
+      name: 'backup-noop', privacyMode: 'local', adminPubkey: HEX_64,
+    });
+
+    const cfgPath = path.join(home.home, 'communities', m.id, 'config.yml');
+    const original = fs.readFileSync(cfgPath, 'utf8');
+    const customized = original +
+      '\nbackup_relay:\n  enabled: true\n  urls:\n    - "wss://upstream.example"\n';
+    fs.writeFileSync(cfgPath, customized);
+    const mtimeBefore = fs.statSync(cfgPath).mtimeMs;
+
+    // Tiny pause so any rewrite would show a different mtime.
+    await sleep(20);
+    const r1 = await startCommunity(m.id);
+    assert.equal(r1.status, 'running');
+
+    const mtimeAfter = fs.statSync(cfgPath).mtimeMs;
+    assert.equal(mtimeAfter, mtimeBefore,
+      'config.yml must not be rewritten when no migration applies');
+
+    await stopCommunity(m.id);
+  } finally {
+    _resetSupervisorForTests();
+    stub.restore();
+    home.restore();
+  }
+});

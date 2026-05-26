@@ -25,12 +25,21 @@ export const COMPONENT_VERSIONS: Partial<Record<string, string>> = {
   // Communities feature. One binary per community, supervised by the
   // dashboard, bound to an nvpn tunnel IP — never installed for solo-
   // dev use. Per-target tarball; bump in lockstep with BINARY_SHA256.grain
-  // below. Tied to an undocumented quirk of the upstream config: the
-  // `server.port` field accepts `host:port` (passed straight to Go's
-  // http.Server.Addr), which is how we honor the bind-IP security rule.
-  // If a future GRAIN release stops accepting that format, the
-  // supervisor's bind-address probe will catch the regression.
-  'grain': '0.6.0',
+  // below.
+  //
+  // Bumping to 0.7.0 is data-format-compatible (upstream notes:
+  // "nostrdb format unchanged. Everything new is additive"), but ships
+  // one config schema break worth knowing: `backup_relay.url: <str>`
+  // is now `backup_relay.urls: [<str>]`. Our defaultGrainConfig doesn't
+  // write that field, but the spawn-time migration in community-process.ts
+  // coerces any hand-edited single-URL form so users who customized
+  // their config.yml don't see their relay refuse to boot.
+  //
+  // The other 0.7.0 additions (web /admin + /setup UIs, NIP-86/98 served
+  // by default, gift-wrap-DM scoping) are transparent to the supervisor —
+  // we already drive admin via NIP-86 from community-admin.ts, and we
+  // don't proxy /admin to the user.
+  'grain': '0.7.0',
 };
 
 // Per-target SHA256 hex digests for binaries we download directly from
@@ -74,11 +83,11 @@ export const BINARY_SHA256: Record<string, Record<string, string>> = {
   // grain asset filename: grain-{os}-{arch}.tar.gz
   // os: darwin | linux ;  arch: amd64 | arm64
   // Digests pulled from
-  // https://github.com/0ceanSlim/grain/releases/download/v0.6.0/checksums.txt
+  // https://github.com/0ceanSlim/grain/releases/download/v0.7.0/checksums.txt
   grain: {
-    'darwin-amd64': 'c89caf6ae3cc199c41f6ffff5fc3ecc637b7ed13941b356b14c7984bb35bb000',
-    'darwin-arm64': 'b1a13e89be0f954c868923c297473a0cb7eb3776f6b6b39c8da053818c8610bb',
-    'linux-amd64':  'e32b7e69df4b1ac659c776a9866a58d601e2240630016ddfad1e87b9f7677e92',
-    'linux-arm64':  'cf89eae527899858d39ee09b48db7e78f096c869c6af7b955ec94f8b73693d50',
+    'darwin-amd64': '1668be6e7f0ed436b8e89e56b4bee656d45859f2ce1a65102a4a30ac0963754b',
+    'darwin-arm64': 'a79ca0bbcef969c2e3c993c12234e38b59da333d4d6da076be62324bbfc3eb19',
+    'linux-amd64':  '3c60ae43653ca02ff19875a85274f49b6145a4d946859fb23cb8eddfcdede8fb',
+    'linux-arm64':  'f14661b6beff9898fac41e1a24768056a7d3e2d864ca378f0a4e6008339b5594',
   },
 };

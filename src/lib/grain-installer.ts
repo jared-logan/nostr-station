@@ -55,6 +55,35 @@ export function grainBinPath(): string {
   return path.join(os.homedir(), '.nostr-station', 'bin', 'grain');
 }
 
+// Sibling marker file written at successful install completion. Holds
+// the pinned version string (e.g. "0.7.0") so the update-check flow in
+// tool-updates.ts can decide whether the on-disk binary is stale —
+// grain ships without a `--version` flag, so the runtime-probe approach
+// nak/ngit use isn't an option. The marker is best-effort: callers must
+// treat "binary present, marker missing" as a stale unknown-version
+// install (most likely a pre-0.7.0 install from before this file
+// existed), which fires the "Update" pill rather than silently letting
+// the user run an old binary forever.
+export function grainVersionMarkerPath(): string {
+  return `${grainBinPath()}.version`;
+}
+
+// Read the installed-version marker. Returns null when:
+//   - the marker file doesn't exist (pre-0.7.0 install, or a manual
+//     binary drop that bypassed installGrain)
+//   - the contents aren't a semver-shaped string (defensive — we don't
+//     want a corrupted marker to claim a fake version)
+// Callers (tool-updates) interpret null + binary-present as stale.
+export function readGrainInstalledVersion(): string | null {
+  try {
+    const raw = fs.readFileSync(grainVersionMarkerPath(), 'utf8').trim();
+    if (/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?$/.test(raw)) return raw;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // GRAIN's release-asset naming: grain-{os}-{arch}.tar.gz. Go-style
 // (darwin/linux × amd64/arm64), same shape as nak — but a tarball
 // rather than a single binary.
@@ -115,23 +144,36 @@ export async function installGrain(
 
   const destFile = grainBinPath();
 
-  // Short-circuit when already installed at our managed path — unless
-  // the caller asked for `force` (the per-tool update flow does so
-  // after version-comparing and deciding the on-disk binary needs to
-  // be swapped). We probe the well-known path, not $PATH, since we
-  // own the binary's location.
+  const pinnedVersion = COMPONENT_VERSIONS['grain'];
+  if (!pinnedVersion) {
+    return log.fail('config', 'no pinned grain version in versions.ts');
+  }
+
+  // Short-circuit when already installed at our managed path AT the
+  // pinned version — unless the caller asked for `force` (the per-tool
+  // update flow does so after version-comparing and deciding the on-disk
+  // binary needs to be swapped). We probe the well-known path, not
+  // $PATH, since we own the binary's location.
+  //
+  // The marker-file check is what makes the v0.7.0 upgrade auto-roll
+  // to existing v0.6.0 users: previously the binary's mere existence
+  // skipped every subsequent install, leaving the user stuck on v0.6.0
+  // forever. With the marker, a binary present but lacking a marker
+  // for the current pinnedVersion falls through to install — which
+  // overwrites with the new version and writes a fresh marker.
   if (!opts.force) {
     log.step('checking for existing install');
     try {
       fs.accessSync(destFile, fs.constants.X_OK);
-      log.append('already installed — skipping');
-      return { ok: true, detail: 'already installed' };
-    } catch { /* fall through to install */ }
-  }
-
-  const pinnedVersion = COMPONENT_VERSIONS['grain'];
-  if (!pinnedVersion) {
-    return log.fail('config', 'no pinned grain version in versions.ts');
+      const installed = readGrainInstalledVersion();
+      if (installed === pinnedVersion) {
+        log.append(`already installed at ${installed} — skipping`);
+        return { ok: true, detail: 'already installed' };
+      }
+      log.append(
+        `binary present but marker=${installed ?? 'absent'} ≠ pinned=${pinnedVersion} — upgrading`,
+      );
+    } catch { /* binary missing — fall through to install */ }
   }
   const expectedSha = BINARY_SHA256.grain?.[target.key];
   if (!expectedSha) {
@@ -206,5 +248,61 @@ export async function installGrain(
     return log.fail('verify', `grain not executable at ${destFile}: ${(e?.message || '').slice(0, 160)}`);
   }
 
-  return { ok: true, detail: `installed at ${destFile}` };
+  // Write the version marker LAST — only after the binary is in place
+  // and verified executable. If anything above failed, we want the
+  // marker to either stay missing (fresh install) or keep its previous
+  // value (upgrade attempt that didn't reach this point) so the
+  // update-check flow can re-offer the same upgrade next time.
+  const markerPath = grainVersionMarkerPath();
+  const markerWrite = writeGrainVersionMarker(pinnedVersion);
+  if (markerWrite.ok) {
+    log.append(`marker written: ${markerPath} = ${pinnedVersion}`);
+    return { ok: true, detail: `installed ${pinnedVersion} at ${destFile}` };
+  }
+
+  // Marker write failed AFTER a successful binary install. The binary
+  // IS at the right version, but gatherToolUpdates can't read what's
+  // on disk without the marker — so for a *persistent* failure (e.g.
+  // the user chmod'd ~/.nostr-station/bin to read-only) every poll
+  // would re-offer this upgrade indefinitely with no actionable
+  // signal to the user. Surface a warn-shaped result so the Updates
+  // modal renders an actionable yellow row on the first attempt
+  // instead of looping silently. warn:true + ok:false maps to SSE
+  // exit-code 0 (web-server.ts:1606), so the modal doesn't paint a
+  // hard error over what is genuinely a successful binary install —
+  // it surfaces the actionable detail. Transient I/O hiccups self-
+  // heal on the next `?force=1` retry (which the user is now nudged
+  // to attempt).
+  log.append(`marker write failed: ${markerWrite.detail}`);
+  return {
+    ok:     false,
+    warn:   true,
+    detail:
+      `grain ${pinnedVersion} installed at ${destFile}, but the version marker ` +
+      `${markerPath} could not be written: ${markerWrite.detail}. ` +
+      `The binary is in place; check that ${path.dirname(markerPath)} is writable ` +
+      `by this user, then retry the update so future upgrade checks can read the ` +
+      `installed version.`,
+  };
+}
+
+/**
+ * Persist the installed-version marker next to the binary. Split out
+ * from installGrain so tests can exercise the failure path (read-only
+ * destination dir) without mocking the full download chain — and so
+ * the install function's happy/sad branches stay readable side-by-side.
+ *
+ * Best-effort write semantics: success returns `ok:true`; any I/O
+ * failure is captured and returned in `detail` (capped, suitable for
+ * surfacing in the Updates modal). Callers decide whether to escalate
+ * to warn-shaped install result or swallow the failure.
+ */
+export function writeGrainVersionMarker(version: string): { ok: true } | { ok: false; detail: string } {
+  const markerPath = grainVersionMarkerPath();
+  try {
+    fs.writeFileSync(markerPath, `${version}\n`, { mode: 0o644 });
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, detail: (e?.message ?? String(e)).slice(0, 160) };
+  }
 }

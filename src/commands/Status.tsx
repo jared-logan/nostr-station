@@ -8,6 +8,7 @@ import path from 'path';
 import { findBin, hasBin } from '../lib/detect.js';
 import { HEARTBEAT_FILE } from '../lib/watchdog.js';
 import { listCommunities, listCommunityMembers } from '../lib/communities.js';
+import { readGrainInstalledVersion } from '../lib/grain-installer.js';
 
 interface StatusProps { json: boolean; }
 
@@ -294,11 +295,21 @@ export function gatherStatus(): ServiceStatus[] {
   const stacksV    = stacksPath ? cmd(`${stacksPath} --version 2>/dev/null`) : null;
 
   // grain ships without a --version flag (exits non-zero on unknown
-  // args), so we report bare "installed" rather than running it. The
-  // findBin probe walks ~/.nostr-station/bin (added in detect.ts) so
-  // our managed install shows up without special-casing.
+  // args), so we can't reuse the `<bin> --version` probe the other
+  // binaries share. Instead we read the marker file installGrain writes
+  // at ~/.nostr-station/bin/grain.version — same source of truth the
+  // Updates modal uses to decide whether to flag an upgrade. The
+  // marker is absent on pre-0.7.0 installs (added in this commit's
+  // upgrade-detection wire-up), so we fall back to bare "installed"
+  // when the binary exists without one. After the first marker-aware
+  // install / upgrade, the row reads "grain X.Y.Z" — matches the
+  // ngit / nak / stacks "<bin> <version>" style consumers expect.
   const grainPath = findBin('grain');
   const grainBin  = grainPath !== null;
+  const grainV    = grainBin ? readGrainInstalledVersion() : null;
+  const grainValue = grainV
+    ? `grain ${grainV}`
+    : grainBin ? 'installed' : 'not installed';
 
   const claudeBin   = claudePath !== null;
   const opencodeBin = opencodePath !== null;
@@ -329,7 +340,7 @@ export function gatherStatus(): ServiceStatus[] {
     { id: 'opencode',  label: 'opencode',    value: opencodeV ?? (opencodeBin ? 'installed' : 'not installed'),                              ok: opencodeBin,  state: opencodeState, kind: 'binary' },
     { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState,      kind: 'binary' },
     { id: 'stacks',    label: 'Stacks',      value: stacksV  ?? (stacksBin ? 'installed' : 'not installed'),                               ok: stacksBin,    state: stacksState,   kind: 'binary' },
-    { id: 'grain',     label: 'grain',       value: grainBin ? 'installed' : 'not installed',                                              ok: grainBin,     state: grainState,    kind: 'binary' },
+    { id: 'grain',     label: 'grain',       value: grainValue,                                                                            ok: grainBin,     state: grainState,    kind: 'binary' },
   ];
 }
 
