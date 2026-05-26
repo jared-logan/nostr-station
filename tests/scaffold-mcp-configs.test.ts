@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { writeMcpConfigs } from '../src/lib/project-scaffold.js';
+import { writeMcpConfigs, copyNoriIcon } from '../src/lib/project-scaffold.js';
 
 function makeTempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'ns-scaffold-mcp-'));
@@ -61,4 +61,34 @@ test('writeMcpConfigs: idempotent — running twice does not throw', () => {
   writeMcpConfigs(dir);
   // Sanity check: file still parses after the second pass.
   JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
+});
+
+// ── Nori icon pre-seed (MKStack footer asset) ────────────────────────────
+
+test('copyNoriIcon: drops nori.svg into public/ and reports success', () => {
+  const dir = makeTempProject();
+  const ok = copyNoriIcon(dir);
+  assert.equal(ok, true, 'expected copyNoriIcon to succeed');
+  const dest = path.join(dir, 'public', 'nori.svg');
+  assert.ok(fs.existsSync(dest), 'public/nori.svg missing');
+  // The SVG asset should be non-empty and start with the XML/SVG prolog.
+  const raw = fs.readFileSync(dest, 'utf8');
+  assert.ok(raw.length > 0, 'nori.svg is empty');
+  assert.match(raw.slice(0, 200), /<svg/i, 'nori.svg does not look like SVG');
+});
+
+test('copyNoriIcon: creates public/ when it does not exist', () => {
+  const dir = makeTempProject();
+  assert.equal(fs.existsSync(path.join(dir, 'public')), false, 'precondition failed');
+  copyNoriIcon(dir);
+  assert.ok(fs.existsSync(path.join(dir, 'public')), 'public/ should have been created');
+});
+
+test('copyNoriIcon: idempotent — second call overwrites cleanly', () => {
+  const dir = makeTempProject();
+  assert.equal(copyNoriIcon(dir), true);
+  assert.equal(copyNoriIcon(dir), true);
+  // Sanity check: file still parses as SVG after the second pass.
+  const raw = fs.readFileSync(path.join(dir, 'public', 'nori.svg'), 'utf8');
+  assert.match(raw.slice(0, 200), /<svg/i);
 });

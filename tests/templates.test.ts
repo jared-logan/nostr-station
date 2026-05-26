@@ -195,3 +195,18 @@ test('readTemplates: writes file with mode 0600', () => {
   const mode = stat.mode & 0o777;
   assert.equal(mode, 0o600, `expected 0o600, got 0o${mode.toString(8)}`);
 });
+
+// ── MKStack branding guidance ─────────────────────────────────────────────
+
+test('MKStack template ships the "Powered by nostr-station" branding guidance', () => {
+  const t = BUILTINS.find(x => x.id === 'mkstack');
+  assert.ok(t, 'mkstack builtin missing');
+  const ctx = t!.defaults?.projectContext ?? '';
+  // The AI needs to know: the convention name, the asset to render,
+  // and the link target. Each is asserted individually so a future
+  // edit can rewrite the prose without breaking the test as long as
+  // the three load-bearing facts survive.
+  assert.match(ctx, /Powered by nostr-station/);
+  assert.match(ctx, /\/nori\.svg/);
+  assert.match(ctx, /nostr-station\.nsite\.lol/);
+});
