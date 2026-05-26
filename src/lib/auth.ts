@@ -13,6 +13,10 @@
  *
  * Localhost exemption: if identity.json sets requireAuth:false and the
  * request comes from 127.0.0.1 / ::1, auth is skipped. Opt-in only.
+ * Requests carrying reverse-proxy headers (X-Forwarded-*, Forwarded,
+ * X-Real-IP) are NOT treated as loopback even when the socket says they
+ * are — see isLocalhost() for the reasoning. STATION_TRUST_PROXY=1 opts
+ * back in for trusted single-tenant proxy setups.
  */
 
 import crypto from 'crypto';
@@ -349,9 +353,39 @@ export function verifyNip98(input: VerifyInput): VerifyResult {
 
 // ── Localhost exemption ─────────────────────────────────────────────────────
 
+// Headers a reverse proxy adds when forwarding a request. Their presence on
+// a request whose socket appears to be loopback means the request did NOT
+// originate on this machine — a same-host nginx/Caddy/cloudflared rewrites
+// the Host header to `127.0.0.1:<port>` (passing our DNS-rebinding gate)
+// and connects from `127.0.0.1`, but the real client is anywhere on the
+// internet. Treating a proxied request as "localhost" would silently grant
+// the no-auth exemption (requireAuth:false or setupComplete:false) to
+// remote attackers. We refuse rather than guess at proxy intent.
+const PROXY_HEADERS = [
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-real-ip',
+  'forwarded',
+] as const;
+
+function hasProxyHeader(req: http.IncomingMessage): boolean {
+  for (const h of PROXY_HEADERS) {
+    if (req.headers[h] != null) return true;
+  }
+  return false;
+}
+
 export function isLocalhost(req: http.IncomingMessage): boolean {
   const ra = req.socket.remoteAddress || '';
-  return ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
+  const loopback = ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
+  if (!loopback) return false;
+  // Escape hatch for power users who deliberately front the dashboard with a
+  // single-tenant trusted proxy (e.g. a Tailscale-only ingress) and want the
+  // loopback exemption preserved. Default-off — exposing the dashboard with
+  // requireAuth:false behind a public proxy is a footgun, not a feature.
+  if (process.env.STATION_TRUST_PROXY === '1') return true;
+  return !hasProxyHeader(req);
 }
 
 export function localhostExempt(req: http.IncomingMessage): boolean {
