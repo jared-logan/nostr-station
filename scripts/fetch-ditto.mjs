@@ -71,6 +71,31 @@ const BRANDING_SENTINEL = path.join(TARGET_DIR, '.nostr-station-branded');
 // without `npm run update-ditto`.
 const BUILT_FROM_SENTINEL = path.join(TARGET_DIR, '.ditto-built-from');
 
+// Hash of the ditto.json content that buildDittoConfig() would write
+// right now. Embedded in the BUILT_FROM_SENTINEL alongside DITTO_REF so
+// the smart-rebuild logic can detect when our config output has changed
+// since the last successful build — even when DITTO_REF itself is
+// unchanged.
+//
+// Why this matters: ditto.json is read by Ditto's vite build at build
+// time (see header comment at the top of this file). Changes to
+// buildDittoConfig() only take effect after a full cloneAndBuild() run.
+// Without this hash dimension, edits like dropping customTheme.font
+// would silently fail to propagate via a typical `npm run update` — the
+// existing dist/ditto/ matches DITTO_REF, needsBuild stays false, the
+// stale ditto.json stays baked in. The fix that landed alongside this
+// function makes any buildDittoConfig() diff invalidate the SENTINEL,
+// which flips needsBuild to true on the next run, which triggers the
+// full rebuild that picks up the new config.
+//
+// JSON.stringify on the literal object is deterministic in modern Node
+// (key insertion order is preserved) so no manual sort needed — explicit
+// key-order changes in source are real changes worth rebuilding for.
+function currentBuildConfigHash() {
+  const config = buildDittoConfig();
+  return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex').slice(0, 16);
+}
+
 // Hash of all branding inputs. Embedded in the branding sentinel so
 // the script can detect when ANY input that feeds applyBranding() has
 // changed since the last run — the script's own bytes, the overlay
@@ -154,8 +179,19 @@ async function main() {
     console.log('[ditto] STATION_SKIP_DITTO=1 — skipping build.');
     return;
   }
-  const builtFrom = readBuiltFrom();
-  const needsBuild    = !fs.existsSync(SENTINEL) || builtFrom !== DITTO_REF;
+  const built       = readBuildSentinel();
+  const configHash  = currentBuildConfigHash();
+  // Three independent triggers for a full clone+build:
+  //   1. No SENTINEL at all (fresh install / wiped dist).
+  //   2. DITTO_REF changed since the last build (upstream pin bumped).
+  //   3. buildDittoConfig() output changed since the last build (our
+  //      ditto.json shape changed; needs to be re-baked into the bundle).
+  // Legacy single-line sentinels (pre-config-hash) parse with
+  // built.configHash === null, so condition 3 fires once after this
+  // logic lands and seeds the new two-line format.
+  const needsBuild    = !fs.existsSync(SENTINEL)
+    || built.ref !== DITTO_REF
+    || built.configHash !== configHash;
   const needsBranding = !brandingIsCurrent();
   if (!needsBuild && !needsBranding) {
     console.log(`[ditto] already built (${DITTO_REF.slice(0, 7)}) + branded at ${path.relative(process.cwd(), TARGET_DIR)} — skipping.`);
@@ -163,8 +199,10 @@ async function main() {
     return;
   }
   if (needsBuild) {
-    if (builtFrom && builtFrom !== DITTO_REF) {
-      console.log(`[ditto] DITTO_REF changed (${builtFrom.slice(0, 7)} → ${DITTO_REF.slice(0, 7)}) — rebuilding.`);
+    if (built.ref && built.ref !== DITTO_REF) {
+      console.log(`[ditto] DITTO_REF changed (${built.ref.slice(0, 7)} → ${DITTO_REF.slice(0, 7)}) — rebuilding.`);
+    } else if (built.configHash !== configHash) {
+      console.log(`[ditto] buildDittoConfig() changed — rebuilding ditto.json + bundle.`);
     }
     const ok = await cloneAndBuild();
     if (!ok) return;
@@ -180,9 +218,22 @@ async function main() {
   }
 }
 
-function readBuiltFrom() {
-  try { return fs.readFileSync(BUILT_FROM_SENTINEL, 'utf8').trim(); }
-  catch { return null; }
+// Parses the BUILT_FROM_SENTINEL into { ref, configHash }.
+//   Line 1: DITTO_REF (e.g. "7a5820ca93f833b5...")
+//   Line 2: buildDittoConfig() output hash (e.g. "52b704d2d3eaaef4")
+// Pre-config-hash sentinels are single-line — line 2 returns null, which
+// the needsBuild check in main() treats as stale (triggers one rebuild
+// to seed the new format).
+function readBuildSentinel() {
+  try {
+    const lines = fs.readFileSync(BUILT_FROM_SENTINEL, 'utf8').split('\n');
+    return {
+      ref:        (lines[0] || '').trim() || null,
+      configHash: (lines[1] || '').trim() || null,
+    };
+  } catch {
+    return { ref: null, configHash: null };
+  }
 }
 
 async function cloneAndBuild() {
@@ -239,8 +290,16 @@ async function cloneAndBuild() {
   fs.mkdirSync(TARGET_DIR, { recursive: true });
   fs.cpSync(builtDist, TARGET_DIR, { recursive: true });
 
+  // Two-line sentinel:
+  //   line 1: DITTO_REF (upstream pin we built against)
+  //   line 2: buildDittoConfig() output hash at build time
+  // Parsed by readBuildSentinel(); needsBuild in main() invalidates the
+  // dist when either line drifts from the current state.
   try {
-    fs.writeFileSync(BUILT_FROM_SENTINEL, DITTO_REF + '\n');
+    fs.writeFileSync(
+      BUILT_FROM_SENTINEL,
+      DITTO_REF + '\n' + currentBuildConfigHash() + '\n',
+    );
   } catch (e) {
     console.warn(`[ditto] WARN: built-from sentinel write failed — ${e.message}`);
   }
