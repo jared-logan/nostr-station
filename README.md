@@ -21,6 +21,13 @@ builds it, links the `nostr-station` command globally, and launches the
 dashboard. Total time: ~30-45 seconds on a warm machine. No Docker, no
 Rust toolchain, no system service files, no `sudo`.
 
+The build also compiles a bundled [Ditto](https://about.ditto.pub/)
+client from source (pinned upstream SHA, baked with nostr-station theme
++ NIP-89 attribution) so the dashboard's **Client** panel works out of
+the box. Skip with `STATION_SKIP_DITTO=1` for air-gapped installs or
+CI; the dashboard still boots and the Client panel surfaces a clear
+"Build Ditto now" button.
+
 Re-running the same one-liner upgrades an existing install (fast-forward
 pull, rebuild, relaunch). Git is the only added prerequisite — every
 mainstream macOS / Linux setup ships with it, and the installer prints
@@ -67,6 +74,10 @@ The happy path for a project you own. No branches, no PRs, no terminal.
 
 That's the full loop. Scaffold to "live on Nostr" in five clicks plus a
 phone tap or two.
+
+> MKStack-templated projects scaffold with a "Powered by nostr-station"
+> footer convention — a tiny, removable nod so visitors can find their
+> way back here. Delete or restyle it like any other component.
 
 ---
 
@@ -155,15 +166,18 @@ After you've reviewed and want to land it.
 
 ## Panels
 
-The dashboard has eight panels in the sidebar. What each one does and when
-to reach for it.
+The dashboard organizes panels into three sidebar groups — **Operations**
+(what you do daily), **Infrastructure** (what runs underneath), and
+**Status** (live health rollup). What each panel does and when to reach
+for it.
 
 ### Dashboard
 
-The landing panel. Service-health overview: relay, watchdog, nostr-vpn,
-optional tools (ngit, claude-code, opencode, nak, Stacks). Each row shows
-state (green / yellow / red) plus an Install button when something's
-missing.
+The landing panel. At-a-glance overview cards (identity, projects, relay,
+AI) plus a collapsible service-health rollup: relay, watchdog, nostr-vpn,
+Communities, optional tools (ngit, nak, stacks, nsyte, grain). Each row
+shows state (green / yellow / red) plus an Install / Start button when
+something's missing.
 
 The status here is the same data `nostr-station status` shows in the
 terminal — same source. Cached for 3 s on the dashboard so flipping
@@ -191,6 +205,14 @@ projects from the picker; the system prompt updates.
 Two providers per surface is fine — Claude Code in your terminal while
 Ollama backs the dashboard chat is a normal setup. See `nostr-station ai
 default` in the [CLI reference](#cli-reference).
+
+### Mail
+
+Encrypted email over Nostr — NIP-17 gift-wrapped messages, threaded.
+Inbox / Requests / Blocked buckets, custom folders, compose with the
+same Amber-signed pipeline as everything else. Manages your kind-10050
+inbox-relay list directly from the panel; the unread badge surfaces
+in the sidebar so you see new messages without opening the panel.
 
 ### Projects
 
@@ -232,6 +254,67 @@ Click into a card to open the project view, which has these tabs:
 See [Project operations](#project-operations) and
 [User journeys](#user-journeys) for the verbs.
 
+### nsite
+
+Browser-style panel for browsing decentralized sites: Nostr addressing
+(`npub1…`, `user@host`, `nsite://name`), Blossom-hosted bytes,
+SHA256-verified before render. Tabbed, back / forward / reload,
+bookmarks, address-bar menu (Bookmarks · Site info · Settings · Dev
+tools). Each tab renders inside a strict sandbox at a per-site origin
+(`<siteId>.nsite.localhost:<port>`) so SOP keeps sites isolated from
+the dashboard and from each other. See [docs/nsite-isolation.md](docs/nsite-isolation.md)
+for the isolation model. Use `nostr-station nsite publish` to publish
+a project's static build (separate from the browser side of this panel).
+
+### Client
+
+Embedded public Nostr client — a source-compiled [Ditto](https://about.ditto.pub/)
+SPA bundled into nostr-station, served from `/ditto/`. Read your feed,
+post notes, browse profiles inside the dashboard without leaving for
+another app. The bundle is built at install time with a baked
+`ditto.json` (theme colors matched to nostr-station's palette, the
+nori logo as favicon, and `appName: "nostr-station"` so every kind-1
+/ 6 / 7 / 1111 published from here carries the full NIP-89 client
+tag pointing at our kind-31990 handler). When Ditto isn't bundled
+(STATION_SKIP_DITTO=1 at install, or an offline machine that
+couldn't clone), the panel shows a one-click "Build Ditto now"
+button. To force a rebuild: `npm run update-ditto`.
+
+### Communities — experimental (beta)
+
+> Off by default. Enable in **Config → Experimental**, click through
+> the first-use acknowledgement, then the sidebar entry appears.
+
+Managed private Nostr relays for the people you actually know. Each
+community is a supervised [GRAIN](https://github.com/0ceanSlim/grain)
+(Go Nostr relay) child process bound 1:1 to an
+[nostr-vpn](#nostr-vpn) mesh, with its own allowlist, banlist, LMDB
+datastore, and NIP-86 admin interface. The dashboard provides the
+control plane; GRAIN provides the relay; nvpn provides the network.
+Different communities never share a mesh.
+
+- **Create** — wizard: name, owner pubkey, mesh selection, auto-
+  allocated port (from 7778).
+- **Members** — npub allowlist; only listed pubkeys can read or
+  publish. Add by npub or hex.
+- **Moderation** — banwords + per-pubkey bans via NIP-86.
+- **Settings** — name, privacy mode, mesh binding.
+- **Logs** — per-community tail with crash-restart history.
+
+Privacy modes today: **Local only** (loopback) and **Private network**
+(binds to the community's nvpn tunnel IP — never `0.0.0.0`).
+Public-internet mode is deferred. The dashboard refuses meshes with
+subnet-routing or exit-node flags set, to prevent accidental LAN
+exposure.
+
+GRAIN itself ships via `nostr-station add grain` (per-user install at
+`~/.nostr-station/bin/grain`, no sudo, sha256-pinned). The Communities
+panel surfaces a one-click installer when grain isn't present.
+
+The full operator reference — supervision policy, healthcheck cadence,
+NIP-86 verb set, what's deferred to v2 — lives at
+[docs/communities.md](docs/communities.md).
+
 ### Relay
 
 ![Relay panel — status cards, whitelist, common nak commands](https://i.nostr.build/m75937aQOREIXNsS.png)
@@ -243,31 +326,72 @@ Your local Nostr relay's control surface. Backed by `better-sqlite3` at
 
 - **Start / stop / restart** the relay (in-process, no separate daemon).
 - **Live event feed** — every event the relay accepts, streaming.
+- **Search corpus** — full-text search across every event the relay
+  has cached locally, backed by SQLite FTS5 over `events.content`.
+  Accepts plain keywords, quoted phrases, and FTS5 boolean syntax.
+- **Materialized profiles** — kind-0 metadata is decoded and stored
+  in a `profiles` table at ingest, so the dashboard resolves pubkeys
+  to names + avatars locally without re-parsing JSON on every render.
+  Profile rows outlive the underlying kind-0 event when the event-cap
+  evicts, so author names keep resolving for history you've already
+  pulled. Also powers `@-mention` autocomplete in the issue / PR
+  composers.
 - **Manual publish** — paste a signed event JSON, send to the relay.
 - **NIP-11 metadata** — name, contact, supported NIPs, version (visible
   to remote clients querying the relay).
 - **Whitelist** — which pubkeys are allowed to write (defaults: your
-  npub + the seed npub).
+  npub + the seed npub). NIP-42 write gating is on by default — only
+  the station owner and whitelisted pubkeys can publish.
 - **Database** — size, event count, export, wipe (with confirmation).
+  Composite indexes on `(pubkey, kind, created_at)` and
+  `(tag_name, tag_value, created_at)` keep tag-filter queries fast as
+  the corpus grows. Bulk import / export via JSONL through the CLI:
+  `nostr-station relay export <path>` and `nostr-station relay import
+  <path>`.
 
 Future events with `created_at > now + 15min` are rejected (NIP-01
 clock-skew slack) so a bad client can't poison the recent-event window.
+
+The in-process relay is intentionally minimal — a single-user dev
+relay. For private group / community relays use the
+[Communities](#communities--experimental-beta) panel (managed GRAIN
+processes); for public-internet relays use `strfry` / `nostr-rs-relay`.
+
+### Blossom
+
+Local blob storage browser — an in-process Blossom server bundled with
+nostr-station. Browse, preview, filter, and delete blobs stored at
+`~/.nostr-station/data/blobs/`. Bulk-select + delete; wipe-all. Used
+as the default Blossom target for nsite publishes from this machine,
+and as a content-addressed store for any client that points at
+`http://localhost:3000/blossom`.
 
 ### nostr-vpn
 
 Optional. A peer-to-peer mesh over Nostr — connect your laptop to your
 home server without port forwarding, public hostnames, or a third-party
-VPN. Useful when working across machines; skip it if you only develop
-locally.
+VPN. Useful when working across machines (and required for Communities
+that use Private-network mode); skip it if you only develop locally.
 
-- **Install** button downloads + sha256-verifies a pinned binary, then
-  registers a systemd / launchd service.
-- **Start / stop / restart** controls.
-- **Tunnel IP** displayed when connected.
+Six sub-tabs in the panel:
 
-The wizard explicitly asks if you want this with a *Skip for now* button
-right next to *Install*. Default answer is Skip. You can always install
-later from the Status panel or this panel.
+- **Status** — live peer list, tunnel IP, identity, stale-status
+  banner when the daemon's view drifts from the dashboard's.
+- **Network** — meshes you've joined, members, current bind.
+- **Relays** — discovery-relay health, signal/coordination
+  diagnostics.
+- **Settings** — daemon config, **Mobile access** toggle (formerly
+  in the Identity drawer) — when on, the dashboard accepts traffic
+  from the mesh tunnel IP, not just loopback.
+- **Service** — install / start / stop / restart, systemd / launchd
+  controls. Routed through `systemctl` because the nvpn CLI doesn't
+  expose `service start/stop`.
+- **Diagnostics** — captures for bug reports.
+
+The first-run wizard explicitly asks if you want nvpn with a *Skip for
+now* button right next to *Install*. Default answer is Skip. Installs
+are sha256-pinned and pin-bumped deliberately — current pin
+`v4.0.37`+.
 
 For deployment topologies (cloud VM vs home server vs container), how to
 verify each layer of the stack, and the common failure modes, see
@@ -296,14 +420,26 @@ Each channel has a banner at the top showing live status
 The settings + identity surface:
 
 - **Identity** — your npub, profile (kind-0 metadata), read / write
-  relays.
+  relays. NIP-65 (kind-10002) relay list edits round-trip to the
+  network on Save.
 - **ngit account** — Amber bunker pairing for git operations. Connect /
   disconnect.
 - **AI providers** — keychain status per provider, default for chat vs
-  terminal, base URLs for custom providers.
+  terminal, base URLs for custom providers. Rows are collapsible to
+  keep the panel scannable; Maple AI ships as a curated provider with
+  a local proxy.
 - **Project AI overrides** — per-project system prompt, context overlay,
   permissions, chat-provider override.
-- **Theme** — Ditto theme sync (kind-30078) when configured.
+- **Project templates** — built-in MKStack + user-added registry; full
+  CRUD with self-healing of the built-in entry.
+- **Watchdog** — enable / disable the heartbeat that pings the local
+  relay every 5 minutes. On by default; toggle off for headless or
+  CI-shared installs where you don't want extra events landing in the
+  store.
+- **Experimental** — opt-in toggle for **Communities** (off by
+  default, gated behind a first-use acknowledgement modal that
+  describes the privacy trade-offs). Future experimental features
+  surface here too.
 - **Editor target** — `NOSTR_STATION.md` ↔ tool-specific filename
   symlink (`CLAUDE.md`, `.cursorrules`, etc.).
 
@@ -395,8 +531,37 @@ nostr-station add <tool> --yes        Install without prompting
 ```
 
 Available today: `ngit` (Nostr-native git), `nak` (event/relay CLI),
-`stacks` (Soapbox app scaffolder), `nsyte` (static-site publishing).
-The wizard never asks about these — opt in when you need each one.
+`stacks` (Soapbox app scaffolder), `nsyte` (static-site publishing),
+`grain` (Go Nostr relay — installed automatically when you enable
+Communities). The wizard never asks about these — opt in when you
+need each one.
+
+### Relay event store
+
+JSONL import / export for the in-process relay's event database.
+Script-friendly, no interactive prompts.
+
+```
+nostr-station relay export <path>            Stream every event as JSONL
+nostr-station relay import <path>            Ingest a JSONL file into the relay
+nostr-station relay import <path> --dry-run  Count rows without writing
+nostr-station relay import <path> --no-verify  Skip signature verification (trusted re-imports)
+```
+
+### Relay list (NIP-65)
+
+Manage your kind-10002 relay list — distinct from the `relay` command,
+which manages the local event database. The `s` matters.
+
+```
+nostr-station relays list                  Show local read/write lists
+nostr-station relays add <wss://url>       Add (read + write, NIP-65 default)
+nostr-station relays add <wss://url> --read   Mark read-only (inbox)
+nostr-station relays add <wss://url> --write  Mark write-only (outbox)
+nostr-station relays remove <wss://url>    Remove from both lists
+nostr-station relays pull [--yes]          Fetch published kind-10002 + diff + apply
+nostr-station relays publish [--yes]       Build kind-10002 + sign via bunker + broadcast
+```
 
 ### Publish & deploy
 
@@ -517,34 +682,55 @@ Every outbound network call is initiated by an explicit user action:
 
 ### Network and process boundaries
 
-- **Dashboard binds to `127.0.0.1` only.** Not reachable from your LAN
-  or the internet — only programs running on your machine can talk to
-  it.
+- **Dashboard binds to `127.0.0.1` only** by default. Not reachable
+  from your LAN or the internet — only programs running on your
+  machine can talk to it. The optional **Mobile access** toggle (nvpn
+  panel → Settings) extends the bind to the mesh tunnel IP, which
+  exposes the dashboard *only* to peers on your nvpn network.
 - **Loopback-Host check** on every request rejects DNS-rebinding
   attacks (a malicious website tricking your browser into making
   cross-origin requests to localhost).
 - **CSRF guard** — state-changing requests require a session token or
   a same-origin Referer header.
+- **CSP without `unsafe-inline`** — the dashboard's Content-Security-
+  Policy disallows inline scripts; all browser-side code is loaded
+  from same-origin files.
+- **Server-side image + WebSocket proxies** — external image URLs
+  resolve through `/api/img-proxy` with HMAC-signed URLs (the HMAC
+  secret is generated per-install and persisted to
+  `~/.nostr-station/img-proxy-secret`, mode `0600`), and external
+  relay WebSocket connections route through a server-side proxy so
+  `wss://` is dropped from the page's connect-src CSP.
+- **WebSocket frame cap** at 1 MiB (down from the `ws` default of
+  100 MiB) — a malicious sender can't pin RAM by streaming a single
+  oversized frame.
 - **No `sudo` by default.** Installing optional tools that need write
   access to `/usr/local/bin` uses `sudo -n` (non-interactive) — fails
   fast with a clear "run this command in your terminal" hint if your
   sudo cred cache is empty. We never pipe `curl | sudo bash`.
 - **Tool installs are sha256-pinned.** Every downloaded binary
-  (`ngit`, `nak`, `nvpn`) is verified against a pinned hash *before*
-  any extraction or install step. A tampered upstream tarball is
-  refused, not unpacked.
+  (`ngit`, `nak`, `nvpn`, `grain`) is verified against a pinned hash
+  *before* any extraction or install step. A tampered upstream
+  tarball is refused, not unpacked.
+- **Atomic config-file writes** — every JSON config file the
+  dashboard owns is written via temp-file + atomic rename so a
+  power-loss / SIGKILL mid-write can't corrupt user state.
 - **No system service files installed by default.** The dashboard is
   a foreground process; the relay is in-process. The only system
-  service is nostr-vpn's `nvpn` daemon if you explicitly install it.
+  services are nostr-vpn's `nvpn` daemon (if installed) and the
+  optional `~/.config/systemd/user/nostr-station.service` you can
+  enable via the always-on installer.
 - **No background daemons** persist after `nostr-station stop` — Ctrl+C
   (or the stop command) tears down the dashboard, the relay, the
-  watchdog, and any pty sessions in one go.
+  watchdog, supervised GRAIN community processes, and any pty
+  sessions in one go.
 
 ### Trust boundaries to be aware of
 
-- **Local relay accepts any signed event** on loopback (NIP-42
-  enforcement is not yet implemented). It's a single-user dev relay —
-  don't expose it to a public network.
+- **Local relay accepts only whitelisted signed events** on loopback
+  (NIP-42 write gating is on; defaults to your npub + the seed npub,
+  with the whitelist editable in the Relay panel). The relay is a
+  single-user dev relay — don't expose it to a public network.
 - **AI providers see your prompts.** If you pick a hosted API provider
   (Anthropic, OpenAI, etc.), your messages and project context go to
   them. Pick a local provider (Ollama, LM Studio) if that matters for
@@ -552,6 +738,12 @@ Every outbound network call is initiated by an explicit user action:
 - **The Terminal panel runs your shell** with your normal privileges.
   Anything you'd run in `bash` you can run there, with all the same
   consequences.
+- **Communities (experimental).** Each community is a GRAIN process
+  bound to an nvpn tunnel IP, never `0.0.0.0`. The dashboard refuses
+  meshes with subnet routing or exit-node flags set. Still: this is
+  experimental and gated off by default. Read
+  [docs/communities.md](docs/communities.md) and the in-app first-use
+  acknowledgement before enabling.
 
 See `SECURITY.md` for reporting issues + the full threat model.
 
@@ -561,26 +753,46 @@ See `SECURITY.md` for reporting issues + the full threat model.
 
 One Node process. The relay (NIP-01 + NIP-11, `better-sqlite3`-backed)
 and the dashboard HTTP server live in the same process tree. Lifecycle
-is one PID file at `~/.nostr-station/pid`. Data:
+is one PID file at `~/.nostr-station/pid`. Supervised child processes
+(GRAIN community relays, when enabled; the `nvpn` daemon, when
+installed) inherit the lifecycle and tear down with the parent. Data:
 
 ```
 ~/.nostr-station/
-├── pid                       Dashboard PID (used by `nostr-station stop`)
-├── data/relay.db             Local relay's SQLite event store
-├── bunker-client.json        Saved NIP-46 pairing for silent re-auth
-└── ai-config.json            Provider config + per-surface defaults
+├── pid                          Dashboard PID (used by `nostr-station stop`)
+├── data/relay.db                Local relay's SQLite event store
+│                                (events + tags + materialized
+│                                 profiles + FTS5 events_fts)
+├── data/blobs/                  In-process Blossom store
+├── bunker-client.json           Saved NIP-46 pairing for silent re-auth
+├── ai-config.json               Provider config + per-surface defaults
+├── communities-feature.json     Experimental-feature gate + acknowledgement
+├── communities/<id>/            Per-community state (only when enabled)
+│   ├── community.json           nostr-station-owned manifest
+│   ├── config.yml               GRAIN config
+│   ├── whitelist.yml            Pubkey allowlist
+│   ├── blacklist.yml            Pubkey + word denylist
+│   ├── data/                    GRAIN's LMDB datastore
+│   └── grain.pid                Supervisor's PID record
+└── bin/grain                    Managed GRAIN binary (when installed)
 
 ~/.config/nostr-station/
-├── identity.json             npub, read relays, setupComplete
-└── secrets                   Encrypted keychain (Linux fallback)
+├── identity.json                npub, read relays, setupComplete
+├── chat.pid                     Dashboard pid (alternate path)
+└── secrets                      Encrypted keychain (Linux fallback)
 
-~/nostr-station/projects/     Default projects directory
+~/nostr-station/                 Source clone (when installed via curl)
+├── dist/ditto/                  Source-built Ditto bundle (Client panel)
+└── projects/                    Default projects directory
 ```
 
 Why pure Node: install is one curl command. No Docker, no signed-binary
-distribution, no Rust toolchain, no Apple Developer account. The relay
-is intentionally minimal — it's a single-user local dev relay, not a
-production-grade deployment.
+distribution, no Rust toolchain, no Apple Developer account. The
+in-process relay is intentionally minimal — it's a single-user local
+dev relay, not a production-grade deployment. The production-relay
+answer is the **Communities** feature: managed GRAIN child processes,
+one per community, each on its own port and nvpn mesh, with NIP-86
+admin.
 
 ---
 
@@ -599,6 +811,30 @@ Tests:
 npm test             # node:test via tsx
 npm run typecheck    # type-check without emit
 ```
+
+Bundled Ditto client:
+
+```bash
+npm run update-ditto     # wipe dist/ditto/ and force a fresh source build
+STATION_SKIP_DITTO=1 npm run build   # skip the Ditto build (faster
+                                     # inner-loop iteration; the Client
+                                     # panel surfaces an in-app
+                                     # "Build Ditto now" button)
+```
+
+The bundled Ditto build lives in `scripts/fetch-ditto.mjs` — clones
+`soapbox-pub/ditto` at a pinned SHA, bakes our `ditto.json` (theme,
+relays, `appName=nostr-station` for NIP-89 attribution), runs
+`npm ci && npm run build`, then copies `dist/` into `dist/ditto/`.
+Smart-rebuild detection re-fires the build when the pin, the baked
+config, our overlay CSS (`src/web/ditto-overrides.css`), or the
+fetch script itself changes — so a `git pull` that bumps the upstream
+pin or our theme produces the right output without needing
+`npm run update-ditto` manually.
+
+For the Communities subsystem (GRAIN supervisor, NIP-86 admin client,
+per-community state model), see
+[docs/communities.md](docs/communities.md).
 
 Clean-install testing in a fresh VM (recommended for any install-path
 changes) — Multipass or OrbStack VMs both work:

@@ -33,8 +33,11 @@ test('isValidParticipant rejects empty / wrong length / non-hex', () => {
 
 test('isValidParticipant rejects nsec / random strings', () => {
   // nsec1 prefix should never validate as a participant pubkey.
+  // Deliberately checksum-invalid: we only need the shape to be wrong
+  // for the participant check, and a checksum-valid bech32 in a public
+  // repo invites "is this a real key?" questions from future auditors.
   assert.equal(
-    isValidParticipant('nsec17rrkehmvq85r44ntp863qal0w283h8x59nl8es5fy28w3cxnyzcqwls6nq'),
+    isValidParticipant('nsec1' + 'q'.repeat(58)),
     false,
   );
   assert.equal(isValidParticipant('hello world'), false);
