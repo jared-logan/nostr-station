@@ -130,7 +130,24 @@ export async function gatherToolUpdates(): Promise<ToolUpdate[]> {
         installEndpoint: t.installEndpoint,
       };
     }
-    const currentVersion = await probeVersion(binPath, t.versionArgs);
+    // Probe by bin NAME first so the spawn's PATH lookup matches the
+    // user's interactive `<bin>` command — same lookup the installer's
+    // verifyVersionOnPath uses post-install. findBin's augmentedBinDirs-
+    // first walk (detect.ts:11-33) puts ~/.cargo/bin, ~/.local/bin, etc.
+    // AHEAD of /usr/local/bin so we catch cargo-installed binaries on
+    // fresh setups, but that order can return a shadowing OLD binary
+    // even when shell PATH (and `which`) would resolve the NEW one we
+    // just installed at /usr/local/bin. That mismatch was what caused
+    // the "Worked then came back" report: the installer's verify saw
+    // 2.4.3 on shell PATH, but gatherToolUpdates saw an older binary
+    // via findBin's curated walk and the pill came back the moment the
+    // modal closed. Falling back to the absolute findBin path covers
+    // the original use case (Node inherits a restricted PATH, ngit is
+    // only findable via our curated dirs).
+    let currentVersion = await probeVersion(t.binary, t.versionArgs);
+    if (currentVersion === null) {
+      currentVersion = await probeVersion(binPath, t.versionArgs);
+    }
     const updateAvailable =
       currentVersion !== null && compareSemver(currentVersion, pinnedVersion) < 0;
     return {
