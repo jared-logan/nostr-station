@@ -12653,8 +12653,12 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
         try {
           const project = await registerAfterNgitClone(resolved, name, url, identity);
           toast('Project imported', project.name, 'ok');
+          // Land on the Projects list (consistent with New local + scan-clone):
+          // the new card joins the list. Set view before reload() so its
+          // render() paints the list, not whatever detail was last open.
+          state.view = 'list';
+          state.projectId = null;
           await reload();
-          try { openDetail(project.id); } catch {}
         } catch (e) {
           toast('Registration failed', e.message, 'err');
         }
@@ -12669,8 +12673,10 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
         });
         if (result.ok && result.info?.project) {
           toast('Project imported', result.info.project.name, 'ok');
+          // Land on the Projects list (consistent with New local + scan-clone).
+          state.view = 'list';
+          state.projectId = null;
           await reload();
-          try { openDetail(result.info.project.id); } catch {}
         } else if (!result.ok) {
           toast('Import failed', `exit ${result.code}`, 'err');
         }

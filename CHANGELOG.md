@@ -40,7 +40,9 @@ MKStack now lives where new projects are born:
 - After creating a project the user **lands on the Projects list** (not
   the detail view) so the new card appears among their projects — a subtle
   confirmation, with Open-in-AI / terminal / open-detail affordances right
-  there.
+  there. This now applies consistently across **all** creation paths —
+  New local, Import (ngit + git-url), and scan-clone — so they no longer
+  diverge on where you end up.
 
 git stays a co-equal capability; the adopt-existing-folder, Import-by-URL,
 and Browse/scratch flows are untouched.
