@@ -6519,6 +6519,16 @@ const ProjectsPanel = (() => {
     // anything to show here. The slot paints async — Status renders
     // immediately, About fills in once /api/projects/:id/repo returns.
     const wantsAbout = p.capabilities.ngit && p.remotes.ngit;
+
+    // First-publish wizard. Lives on Overview (moved off the Code tab) so
+    // the user reviews the repo's files / README / commits in Code first,
+    // then announces from here. Shown only for not-yet-published projects
+    // that have a path; published projects (ngit remote set) get the
+    // operational blocks + About instead. Paints async since publish-state
+    // needs a backend round-trip — the rest of Overview renders immediately
+    // and the wizard slots in below when ready.
+    const wantsPublishWizard = !!p.path && !p.remotes.ngit;
+
     container.innerHTML = `
       ${gitBlock}${ngitBlock}${nsiteBlock}
       <div class="tab-section">
@@ -6528,6 +6538,7 @@ const ProjectsPanel = (() => {
           ${p.capabilities.nsite ? '<button class="quick-deploy">Deploy</button>' : ''}
         </div>
       </div>
+      ${wantsPublishWizard ? `<div class="overview-publish-slot"><div class="tab-section"><div class="muted">loading publish…</div></div></div>` : ''}
       ${wantsAbout ? `<div class="overview-about-slot"><div class="tab-section"><div class="muted">loading about…</div></div></div>` : ''}
     `;
     container.querySelector('.open-chat-btn')?.addEventListener('click', () => openInChat(p));
@@ -6541,6 +6552,19 @@ const ProjectsPanel = (() => {
       e.preventDefault();
       openChangesInCodeTab(p, projectStatus);
     });
+
+    if (wantsPublishWizard) {
+      const slot = container.querySelector('.overview-publish-slot');
+      if (slot) {
+        api(`/api/projects/${p.id}/publish-state`).then((pubState) => {
+          // Already published between render and fetch, or fetch failed —
+          // drop the slot rather than show a stale/empty wizard.
+          if (!pubState || pubState.status !== 'local-only') { slot.remove(); return; }
+          slot.innerHTML = '';
+          slot.appendChild(renderPublishPanel(p, pubState));
+        }).catch(() => slot.remove());
+      }
+    }
 
     if (wantsAbout) {
       const slot = container.querySelector('.overview-about-slot');
@@ -7042,14 +7066,26 @@ const ProjectsPanel = (() => {
       container.appendChild(renderScratchBanner(p));
     }
 
-    // Local-only fork: full-tab publish wizard. We deliberately skip
-    // the file browser / commits in this state because (a) there's
-    // no nostr context to anchor them in and (b) the publish form
-    // becomes the obvious next step rather than a side-panel.
-    // Phase 1c rendered a tiny stub here; 1d turns it into the real
-    // first-publish experience.
-    if (pubState && pubState.status === 'local-only') {
-      container.appendChild(renderPublishPanel(p, pubState));
+    // The publish wizard now lives on the Overview tab (so you can review
+    // files / README / commits here in Code *before* announcing). Code only
+    // short-circuits when there's genuinely no git repo on disk yet — the
+    // file browser has nothing to render against. A scaffolded-but-unpublished
+    // project (MKStack: a real git repo, no ngit remote) falls through to the
+    // full browser below.
+    if (pubState && !pubState.isGitRepo) {
+      const stub = document.createElement('div');
+      stub.className = 'code-publish-warn';
+      stub.innerHTML = `
+        This project doesn't have a local git repository yet. Head to the
+        <a href="#" class="goto-overview-publish">Overview tab</a> to initialize
+        git and publish it to ngit.
+      `;
+      stub.querySelector('.goto-overview-publish').addEventListener('click', (e) => {
+        e.preventDefault();
+        state.tab = 'overview';
+        render();
+      });
+      container.appendChild(stub);
       return;
     }
 

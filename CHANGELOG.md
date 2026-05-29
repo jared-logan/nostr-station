@@ -5,6 +5,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Projects: publish wizard moves to Overview (review-then-announce)
+
+The first-publish ngit wizard used to take over the **Code** tab for any
+not-yet-published project — which meant you couldn't browse the repo's
+files, README, or commit history before announcing it. The wizard now lives
+on the **Overview** tab instead:
+
+- **Code always shows the file browser / commits**, even pre-publish, so
+  you can review what you're about to announce. It only short-circuits when
+  there's genuinely no git repo on disk yet, with a small note pointing to
+  Overview.
+- **Overview renders the publish wizard inline** (below the summary) for
+  projects that have a path but no ngit remote yet — including the
+  "Initialize git" path for projects with no repo. Publishing from here
+  swaps the wizard for the operational ngit block + About metadata, same as
+  before.
+
 ### Projects: badge accuracy + scan-clone polish (follow-up fixes)
 
 Three fixes from testing the onboarding flow:
