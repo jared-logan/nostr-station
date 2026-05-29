@@ -5,6 +5,46 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Projects: smoother "get rolling" UX — scan-clone defaults + starter moves to New project
+
+Two related UX passes on the project-onboarding flow, both aimed at
+fewer decisions between "I want a project" and "I'm coding."
+
+**Scan → Add to projects lands you faster** (`src/web/app.js`,
+`src/web/app.css`). When the Add Project drawer is seeded from a scanned
+ngit repo, the first step used to lead with an empty "Local path" field +
+a generic Continue button — reading as a required chore even though the
+server owns the clone target (`~/projects/<name>`, constructed in
+`routes/ngit.ts`). Now:
+- The **"Clone this repo"** CTA leads; the manual path controls move
+  behind an *"or use an existing local path"* disclosure (still there for
+  adopting an on-disk folder, invisible otherwise).
+- The chosen destination shows as a quiet `~/projects/<name>` preview so
+  the path reads as pre-decided, not a prompt.
+- After a successful clone the drawer **jumps to the final review + "Add
+  project" step** instead of parking back on Step 1 with three
+  already-answered Continues — steps 1–3 collapse into done-summaries with
+  edit links.
+
+**Starter templates move from Import → New local project.** A starter is
+a "create something new" concept, not an "import an existing repo" one, so
+MKStack now lives where new projects are born:
+- New local project gains a **Starter** picker defaulting to **MKStack**
+  ("recommended"), with **Blank — folder + README, no git** as the
+  offline-friendly second option. Picking a starter sends `templateId` to
+  the existing `/api/projects/new` (server resolves the git-url source,
+  wipes inherited history, seeds project-context + dev environment); Blank
+  keeps the original `local-only` path. No backend change.
+- The Import modal's template picker is **removed** — Import is now purely
+  "clone a repo that already exists at a URL (ngit or git)."
+- After creating a project the user **lands on the Projects list** (not
+  the detail view) so the new card appears among their projects — a subtle
+  confirmation, with Open-in-AI / terminal / open-detail affordances right
+  there.
+
+git stays a co-equal capability; the adopt-existing-folder, Import-by-URL,
+and Browse/scratch flows are untouched.
+
 ### grain 0.6.0 → 0.7.0 — version-pin bump + upgrade-detection path
 
 Upstream's [v0.7.0](https://github.com/0ceanSlim/grain/releases/tag/v0.7.0)

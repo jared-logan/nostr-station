@@ -12230,7 +12230,7 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
     body.innerHTML = `
       ${chooserCard(
         'New local project',
-        'Fresh directory with git init, initial commit. BYO stack and AI agent.'
+        'Start fresh — scaffold from MKStack (or a blank folder). Code with your AI agent.'
       )}
       ${chooserCard(
         'Existing local project',
@@ -12262,6 +12262,28 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
     let ownerNpub = null;
     try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
 
+    // Starter templates live here now (moved off the Import modal — a
+    // starter is a "new project" concept, not an "import an existing repo"
+    // one). git-url templates scaffold from a real codebase; "Blank" is the
+    // instant, offline-friendly folder+README path. MKStack is the seeded
+    // default so a new project is a working Nostr app from the first second,
+    // matching shakespeare.diy. Failure to load the registry is non-fatal —
+    // we fall back to Blank-only.
+    let templates = [];
+    try {
+      const r = await api('/api/templates');
+      if (r && Array.isArray(r.templates)) templates = r.templates;
+    } catch { /* leave empty — only the Blank option renders */ }
+    const gitTemplates = templates.filter(t => t.source?.type === 'git-url');
+    // MKStack first if present, then any other git-url templates the user
+    // added, then the Blank sentinel (empty value).
+    gitTemplates.sort((a, b) => (a.id === 'mkstack' ? -1 : b.id === 'mkstack' ? 1 : 0));
+    const starterOpts = gitTemplates.map((t, i) =>
+      `<option value="${escapeHtml(t.id)}"${i === 0 ? ' selected' : ''}>${escapeHtml(t.name)}${t.id === 'mkstack' ? ' — recommended' : ''}</option>`
+    ).join('');
+    // Default starter = first git template (MKStack) when one exists.
+    let selectedStarter = gitTemplates[0]?.id || '';
+
     const body = document.createElement('div');
     body.className = 'new-project-form';
     body.innerHTML = `
@@ -12272,12 +12294,14 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
           Path: <code id="np-path-preview">${escapeHtml(`${(window.__homeDir || '~')}/projects/…`)}</code>
         </div>
       </label>
-      <div class="np-hint">
-        Creates a folder with a minimal README. No git init — opt into version
-        control when you're ready. Use any AI agent (Claude Code, Dork, aider)
-        or editor from there. Sync to ngit or another git host via the project
-        card's Publish action when you want to push.
-      </div>
+      <label class="np-field">
+        <span class="np-label">Starter</span>
+        <select id="np-starter">
+          ${starterOpts}
+          <option value="">Blank — folder + README, no git</option>
+        </select>
+      </label>
+      <div class="np-hint" id="np-starter-hint"></div>
       ${renderIdentitySection(identity, ownerNpub, 'new')}
     `;
 
@@ -12302,8 +12326,22 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
       footer: foot,
     });
 
-    const nameInput = body.querySelector('#np-name');
-    const preview   = body.querySelector('#np-path-preview');
+    const nameInput   = body.querySelector('#np-name');
+    const preview     = body.querySelector('#np-path-preview');
+    const starterSel  = body.querySelector('#np-starter');
+    const starterHint = body.querySelector('#np-starter-hint');
+    const BLANK_HINT =
+      'Creates a folder with a minimal README. No git init — opt into ' +
+      'version control when you\'re ready. Use any AI agent (Claude Code, ' +
+      'Dork, aider) or editor from there.';
+    const updateStarterHint = () => {
+      selectedStarter = starterSel.value;
+      if (!selectedStarter) { starterHint.textContent = BLANK_HINT; return; }
+      const t = gitTemplates.find(x => x.id === selectedStarter);
+      starterHint.textContent = t ? t.description : '';
+    };
+    starterSel.addEventListener('change', updateStarterHint);
+    updateStarterHint();
     const updatePreview = () => {
       const slug = slugifyClient(nameInput.value);
       preview.textContent = slug
@@ -12376,21 +12414,31 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
       }
 
       modal.close();
+      // A selected starter → scaffold from the template (server resolves the
+      // git-url source from the registry, wipes inherited history, seeds the
+      // template's project-context + dev environment). Blank → the original
+      // local-only folder+README path.
+      const reqBody = selectedStarter
+        ? { name, templateId: selectedStarter, identity: identityPayload(identity) }
+        : { name, source: { type: 'local-only' }, identity: identityPayload(identity) };
       const result = await openExecModal({
         title: `Creating ${coll.slug}`,
-        subtitle: `Local project at ${coll.path}`,
+        subtitle: selectedStarter
+          ? `Scaffolding ${selectedStarter} at ${coll.path}`
+          : `Local project at ${coll.path}`,
         endpoint: '/api/projects/new',
-        body: {
-          name,
-          source: { type: 'local-only' },
-          identity: identityPayload(identity),
-        },
+        body: reqBody,
       });
 
       if (result.ok && result.info?.project) {
         toast('Project created', result.info.project.name, 'ok');
+        // Land on the Projects list (not detail): the new card appears among
+        // the user's projects — a subtle confirm it's been added — with its
+        // own Open-in-AI / terminal / open-detail affordances right there.
+        // Set list view before reload() so its render() paints the list.
+        state.view = 'list';
+        state.projectId = null;
         await reload();
-        try { openDetail(result.info.project.id); } catch {}
       } else if (!result.ok) {
         toast('Create failed', `exit ${result.code}`, 'err');
       }
@@ -12402,10 +12450,10 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
   //   nostr://… | naddr1…   → /api/ngit/clone + detect + register
   //   https/git/ssh git URL → /api/projects/new with source:'git-url'
   //
-  // The "Template" dropdown reads /api/templates and quick-fills the URL
-  // for whatever entry the user picks. MKStack is the seeded default.
-  // Users can add their own templates in Config → Project Templates;
-  // they show up here automatically.
+  // Starter templates (MKStack etc.) deliberately do NOT live here — a
+  // starter is a "new project" concept and now lives in the New local
+  // project modal. Import is purely for bringing in a repo that already
+  // exists at a URL.
   //
   // "Scan my ngit repos" closes this modal and opens the Discover flow
   // — slightly faster than pasting an naddr for users who just want to
@@ -12477,19 +12525,6 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
     let ownerNpub = null;
     try { const cfg = await api('/api/identity/config'); ownerNpub = cfg.npub || null; } catch {}
 
-    // Load the templates registry up front so the picker is rendered
-    // with the live list. Failures here are non-fatal — the modal still
-    // works for raw-URL imports; the user just doesn't see the picker.
-    let templates = [];
-    try {
-      const r = await api('/api/templates');
-      if (r && Array.isArray(r.templates)) templates = r.templates;
-    } catch { /* leave empty — picker is omitted */ }
-    const gitTemplates = templates.filter(t => t.source?.type === 'git-url');
-    const templateOpts = gitTemplates.map(t =>
-      `<option value="${escapeHtml(t.id)}" data-url="${escapeHtml(t.source.url)}">${escapeHtml(t.name)}</option>`
-    ).join('');
-
     const body = document.createElement('div');
     body.className = 'import-repo-form';
     body.innerHTML = `
@@ -12500,16 +12535,6 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
           Path: <code id="ir-path-preview">${escapeHtml(`${(window.__homeDir || '~')}/projects/…`)}</code>
         </div>
       </label>
-      ${gitTemplates.length ? `
-      <label class="np-field">
-        <span class="np-label">Template <span style="color:var(--text-dim);font-weight:400">(optional)</span></span>
-        <select id="ir-template">
-          <option value="">— Pick a template to quick-fill the URL —</option>
-          ${templateOpts}
-        </select>
-        <div class="np-hint" id="ir-template-hint" style="margin-top:6px"></div>
-      </label>
-      ` : ''}
       <label class="np-field">
         <span class="np-label">Repository URL</span>
         <input id="ir-url" type="text" autocomplete="off"
@@ -12550,16 +12575,7 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
     const nameInput = body.querySelector('#ir-name');
     const urlInput  = body.querySelector('#ir-url');
     const preview   = body.querySelector('#ir-path-preview');
-    const tmplSel   = body.querySelector('#ir-template');
-    const tmplHint  = body.querySelector('#ir-template-hint');
     const scanBtn   = body.querySelector('.ir-quick-scan');
-
-    // Tracks which templateId the user picked (if any). When a template
-    // is selected we forward `templateId` to /api/projects/new so the
-    // server resolves the source server-side AND records the template
-    // on the project. If the user types a URL by hand instead, this
-    // stays null and we send `source: { type: 'git-url', url }`.
-    let pickedTemplateId = null;
 
     const updateState = () => {
       const slug = slugifyClient(nameInput.value);
@@ -12569,39 +12585,10 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
       createBtn.disabled = !slug || !urlOk;
     };
     nameInput.addEventListener('input', updateState);
-    urlInput.addEventListener('input', () => {
-      // Clearing the picker when the user edits the URL by hand keeps
-      // the form honest — we don't want to send a stale templateId for
-      // a URL the user replaced.
-      if (tmplSel && tmplSel.value && urlInput.value !== templates.find(t => t.id === tmplSel.value)?.source?.url) {
-        tmplSel.value = '';
-        pickedTemplateId = null;
-        if (tmplHint) tmplHint.textContent = '';
-      }
-      updateState();
-    });
+    urlInput.addEventListener('input', updateState);
     nameInput.focus();
 
     cancelBtn.addEventListener('click', () => modal.close());
-
-    if (tmplSel) {
-      tmplSel.addEventListener('change', () => {
-        const id = tmplSel.value;
-        if (!id) {
-          pickedTemplateId = null;
-          if (tmplHint) tmplHint.textContent = '';
-          return;
-        }
-        const t = templates.find(x => x.id === id);
-        if (!t) return;
-        pickedTemplateId = id;
-        urlInput.value = t.source?.url || '';
-        if (!nameInput.value.trim()) nameInput.value = `${t.id}-app`;
-        if (tmplHint) tmplHint.textContent = t.description;
-        updateState();
-        nameInput.focus();
-      });
-    }
 
     scanBtn.addEventListener('click', () => {
       modal.close();
@@ -12674,17 +12661,11 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
       } else {
         // Standard git URL — goes through the scaffold endpoint which
         // clones, wipes inherited history, and registers in one shot.
-        // When the user picked a template, send templateId so the
-        // server resolves the source from the registry AND records the
-        // template on the project; otherwise send source.url verbatim.
-        const reqBody = pickedTemplateId
-          ? { name, templateId: pickedTemplateId, identity: identityPayload(identity) }
-          : { name, source: { type: 'git-url', url }, identity: identityPayload(identity) };
         const result = await openExecModal({
           title: `Importing ${coll.slug}`,
           subtitle: `git clone ${url} → ${coll.path}`,
           endpoint: '/api/projects/new',
-          body: reqBody,
+          body: { name, source: { type: 'git-url', url }, identity: identityPayload(identity) },
         });
         if (result.ok && result.info?.project) {
           toast('Project imported', result.info.project.name, 'ok');
