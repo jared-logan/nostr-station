@@ -144,6 +144,25 @@ function writeDone(res: http.ServerResponse, code: number): void {
 // fail with "please tell me who you are"; the user can commit themselves
 // once they configure git. Best-effort throughout — failures here don't
 // fail the scaffold (the project files are already correct on disk).
+// Install dependencies for scaffolded projects that ship a package.json
+// (MKStack and any other Node-based git-url template/import). Streamed so
+// the user watches progress in the create modal — by the time they land on
+// the project card it's ready to "npm run dev" / open in AI with one click,
+// instead of greeting them with a missing-node_modules error on first run.
+// Non-fatal: a failed install (or npm not on PATH) still leaves a fully
+// registered project the user can finish with "npm install" themselves, so
+// we surface a clear, actionable warning rather than discarding their work.
+export async function maybeInstallDeps(target: string, res: http.ServerResponse): Promise<void> {
+  if (!fs.existsSync(path.join(target, 'package.json'))) return;
+  writeLine(res, 'sys', 'Installing dependencies (npm install)…');
+  const code = await runStreamed('npm', ['install'], target, res);
+  if (code !== 0) {
+    writeLine(res, 'stderr', `npm install exited with code ${code} — open the project and run "npm install" to finish setup.`);
+  } else {
+    writeLine(res, 'sys', 'Dependencies installed — ready to run.');
+  }
+}
+
 async function freshenGitRepo(target: string, message: string, res: http.ServerResponse): Promise<void> {
   // Wipe inherited history. Safe even if the dir was created without one.
   try { fs.rmSync(path.join(target, '.git'), { recursive: true, force: true }); }
@@ -485,6 +504,13 @@ export async function scaffoldProject(
   }
 
   writeLine(res, 'sys', `Registered as project "${created.project.name}".`);
+
+  // Make scaffolded Node projects ready to run/open immediately. Runs after
+  // registration + git history reset so node_modules is never swept into the
+  // initial commit, and is a no-op for blank local-only projects (no
+  // package.json).
+  await maybeInstallDeps(target, res);
+
   writeInfo(res, 'project', created.project);
   writeDone(res, 0);
 }

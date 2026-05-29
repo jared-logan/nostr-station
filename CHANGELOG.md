@@ -37,6 +37,16 @@ MKStack now lives where new projects are born:
   keeps the original `local-only` path. No backend change.
 - The Import modal's template picker is **removed** — Import is now purely
   "clone a repo that already exists at a URL (ngit or git)."
+- **Scaffolded Node projects auto-install dependencies** (`npm install`,
+  `project-scaffold.ts`). Any project scaffolded with a `package.json` —
+  MKStack and any other Node-based git-url template/import — now runs
+  `npm install` as a streamed step in the create modal, so the user lands
+  on a project that's ready to `npm run dev` / open in AI with one click
+  instead of hitting a missing-`node_modules` error on first run. Gated on
+  `package.json` presence, so blank local-only projects skip it. Non-fatal:
+  a failed install (or `npm` not on PATH) still leaves a fully registered
+  project with a clear "run npm install to finish setup" warning rather
+  than discarding the user's work.
 - After creating a project the user **lands on the Projects list** (not
   the detail view) so the new card appears among their projects — a subtle
   confirmation, with Open-in-AI / terminal / open-detail affordances right
