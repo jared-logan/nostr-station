@@ -32,9 +32,27 @@
   const MIN_HEIGHT_PX = 180;
   const MAX_HEIGHT_VH = 70;
 
+  // Auto-reconnect backoff for dropped WebSockets. The server keeps the PTY
+  // alive for its grace window, so a transient drop should silently rejoin.
+  // Schedule: 0.5s, 1s, 2s, 4s, 8s, 15s, 15s, 15s — ~60s of retries before we
+  // give up and ask the user to refresh (which re-runs restoreTabs and
+  // rejoins). We never kill the session from the client on exhaustion.
+  const RECONNECT_BASE_MS     = 500;
+  const RECONNECT_MAX_ATTEMPTS = 8;
+
   let available    = null;   // null = not probed; true/false after probe
   let xtermLoaded  = false;
   let xtermLoading = null;   // Promise when the library fetch is in flight
+
+  // Opt-in TX tracing. When on, every byte that leaves xterm toward the PTY
+  // (real keystrokes, pastes, AND xterm's automatic replies to device/focus
+  // queries) is logged to the console with the originating tab. This is the
+  // ground-truth tool for diagnosing phantom input — e.g. a stray `/clear`
+  // appearing in a Claude session after a collapse/restore. Flip it from the
+  // DevTools console with `NSTerminal.setDebug(true)`, reproduce, and read
+  // the `[ns-term tx]` lines to see exactly what (if anything) the browser
+  // transmits. Persisted so it survives a refresh during a repro session.
+  let debugTx = localStorage.getItem('ns-term-debug') === '1';
 
   /** @type {Array<Tab>} */
   const tabs = [];
@@ -157,9 +175,16 @@
     const panel = $('term-panel');
     if (panel) panel.hidden = false;
     localStorage.setItem(LS_EXPANDED, '1');
-    // Defer fit until CSS transition is underway — fitting while the host
-    // has zero height produces cols=rows=0 and xterm refuses to render.
-    requestAnimationFrame(() => requestAnimationFrame(scheduleFit));
+    // Defer fit until the CSS height transition is underway — fitting while
+    // the host is still clipped to ~0 height produces cols=rows=0 and xterm
+    // refuses to render. Once the drawer is open, refocus the active tab so
+    // collapsing mid-chat and reopening drops the user straight back into the
+    // session they left, ready to type — without clicking into the panel.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      scheduleFit();
+      const active = tabs[activeIdx];
+      if (active) { try { active.term.focus(); } catch {} }
+    }));
   }
 
   function collapse() {
@@ -276,9 +301,28 @@
     const tab = {
       id, label, host, term, fitAddon,
       ws: null, pendingInput: [], ro: null, exited: false,
+      // Reconnect bookkeeping (see connectWs / scheduleReconnect).
+      closing: false,          // true once the user/server is tearing this tab down
+      reconnectAttempts: 0,    // resets to 0 on a successful open
+      reconnectTimer: null,    // pending backoff timer, if any
+      // True for a brief window right after (re)connect while the server
+      // replays scrollback — see the open handler in connectWs.
+      suppressTx: false,
     };
 
     term.onData((data) => {
+      if (debugTx) {
+        // JSON.stringify renders control bytes as  etc. so escape
+        // sequences are legible and a literal "/clear" stands out plainly.
+        try { console.debug('[ns-term tx]', tab.label, tab.suppressTx ? '(suppressed)' : '', JSON.stringify(data)); } catch {}
+      }
+      // While the server is replaying historical output on (re)connect, drop
+      // xterm's automatic answers to any device/cursor queries embedded in
+      // that scrollback. Replaying old query bytes makes xterm reply *now*,
+      // and those stale answers would land in the live prompt as junk input.
+      // Real keystrokes are extremely unlikely in this sub-second window, and
+      // pre-connect input is preserved separately via pendingInput.
+      if (tab.suppressTx) return;
       if (tab.ws && tab.ws.readyState === 1) {
         tab.ws.send(JSON.stringify({ type: 'input', data }));
       } else {
@@ -303,6 +347,10 @@
   function destroyTab(idx, fromServerClose = false) {
     const tab = tabs[idx];
     if (!tab) return;
+    // Mark deliberate teardown BEFORE closing the socket so the ws 'close'
+    // handler doesn't mistake this for a transient drop and try to reconnect.
+    tab.closing = true;
+    if (tab.reconnectTimer) { clearTimeout(tab.reconnectTimer); tab.reconnectTimer = null; }
     if (!fromServerClose) {
       // Fire-and-forget the DELETE — the server's destroySession also
       // fires a 'closed' control frame that would otherwise race our WS
@@ -413,8 +461,23 @@
     if (fitHandle) cancelAnimationFrame(fitHandle);
     fitHandle = requestAnimationFrame(() => {
       fitHandle = null;
+      // Never refit while the drawer is collapsed. When collapsed the panel
+      // is clipped to the bar height (see body:not(.term-expanded) in
+      // app.css), so the active xterm host measures ~0px tall. fitAddon.fit()
+      // would then compute a degenerate 1-row geometry and resize the live
+      // PTY down to it — firing a SIGWINCH at the attached full-screen TUI
+      // (Claude Code, ngit prompts) on every collapse, and again on expand.
+      // That resize churn is what made a mid-chat collapse/restore disrupt
+      // the running session. Hold the last good size until the drawer is
+      // genuinely open and laid out; the cols>0 check below only ever
+      // guarded the *send*, not the fit() itself.
+      if (!isExpanded()) return;
       const tab = tabs[activeIdx];
       if (!tab || !tab.fitAddon) return;
+      // Mid-expand the height transition may not have handed the host any
+      // usable rows yet; skip until it has real height — a later
+      // ResizeObserver tick fires once the transition lands the final size.
+      if (tab.host.clientHeight < 1) return;
       try {
         tab.fitAddon.fit();
         if (tab.ws && tab.ws.readyState === 1 && tab.term.cols > 0 && tab.term.rows > 0) {
@@ -424,6 +487,27 @@
     });
   }
   window.addEventListener('resize', scheduleFit);
+
+  // Re-attach any tab whose socket dropped the moment we plausibly have
+  // connectivity again — the laptop woke, the tab regained focus, or the
+  // network came back. Backoff retries can exhaust during a long sleep (timers
+  // don't fire reliably while suspended), so these events are the safety net
+  // that makes "close the lid, come back tomorrow" land you straight back in
+  // the still-running session without a manual refresh.
+  function reconnectDroppedTabs() {
+    for (const tab of tabs) {
+      if (tab.closing || tab.exited) continue;
+      // Skip tabs that are connecting (0) or already open (1).
+      if (tab.ws && (tab.ws.readyState === 0 || tab.ws.readyState === 1)) continue;
+      tab.reconnectAttempts = 0;
+      if (tab.reconnectTimer) { clearTimeout(tab.reconnectTimer); tab.reconnectTimer = null; }
+      scheduleReconnect(tab);
+    }
+  }
+  window.addEventListener('online', reconnectDroppedTabs);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) reconnectDroppedTabs();
+  });
 
   // ── WebSocket wiring ─────────────────────────────────────────────────────
 
@@ -437,6 +521,16 @@
     tab.ws = ws;
 
     ws.addEventListener('open', () => {
+      // A clean open means any prior drop is resolved — reset the backoff so
+      // the next genuine drop starts its retry schedule fresh.
+      tab.reconnectAttempts = 0;
+      // Open the replay-suppression window: the server replays scrollback as
+      // the first frame(s) after attach, and xterm will auto-reply to any
+      // device/cursor queries inside it. Drop those replies (see onData) for a
+      // brief window so they can't dirty the live prompt. Pre-open keystrokes
+      // are flushed below via ws.send directly, so they're unaffected.
+      tab.suppressTx = true;
+      setTimeout(() => { tab.suppressTx = false; }, 300);
       // Flush keystrokes typed before the WS was ready.
       while (tab.pendingInput.length) {
         ws.send(JSON.stringify({ type: 'input', data: tab.pendingInput.shift() }));
@@ -478,16 +572,72 @@
     });
 
     ws.addEventListener('close', () => {
-      // The server's 5-min grace window keeps the PTY alive; don't dispose
-      // the xterm here so a reconnect drops straight back in. If the
-      // session was actually destroyed (e.g. process exit), the server
-      // sent a control frame first and handleControl() takes care of it.
-      if (tab.ws === ws) tab.ws = null;
+      // Ignore closes for a socket we've already replaced (a deliberate
+      // reconnect or teardown swapped tab.ws to a new socket / null). Only the
+      // currently-live socket dropping should drive reconnect logic.
+      if (tab.ws !== ws) return;
+      tab.ws = null;
+      // The server's grace window keeps the PTY alive across a WS drop; don't
+      // dispose the xterm here so a reconnect drops straight back in. If the
+      // session was actually destroyed (process exit / explicit close), the
+      // server sent a 'closed'/'exit' control frame first and handleControl()
+      // already flipped tab.exited — so we skip reconnect in that case.
+      if (tab.exited || tab.closing) return;
+      scheduleReconnect(tab);
     });
 
     ws.addEventListener('error', () => {
-      tab.term.writeln('\r\n\x1b[31m[terminal] websocket error\x1b[0m');
+      // An 'error' is almost always immediately followed by 'close', which
+      // drives the reconnect path — so don't spam the terminal with a red
+      // line on every transient blip. Surface only when TX tracing is on.
+      if (debugTx) { try { console.debug('[ns-term] ws error', tab.label); } catch {} }
     });
+  }
+
+  // Reconnect a tab whose WebSocket dropped unexpectedly. The PTY survives on
+  // the server for the grace window, so a transient blip (laptop sleep, wifi
+  // flap, a server restart mid-session) should silently rejoin rather than
+  // freeze the tab until a manual refresh.
+  function scheduleReconnect(tab) {
+    if (tab.closing || tab.exited) return;
+    if (tab.reconnectTimer) return;                 // already scheduled
+    if (tab.ws && tab.ws.readyState === 1) return;  // already back
+    const attempt = tab.reconnectAttempts || 0;
+    if (attempt >= RECONNECT_MAX_ATTEMPTS) {
+      tab.term.writeln('\r\n\x1b[33m[terminal] disconnected — refresh to reconnect\x1b[0m');
+      return;
+    }
+    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt), 15000);
+    tab.reconnectAttempts = attempt + 1;
+    tab.reconnectTimer = setTimeout(async () => {
+      tab.reconnectTimer = null;
+      if (tab.closing || tab.exited) return;
+      if (tab.ws && tab.ws.readyState === 1) return;
+      // Confirm the session still exists before reattaching, so we can tell a
+      // transient network drop (keep retrying) apart from a session the server
+      // actually retired (stop and clean up). null = couldn't reach the server.
+      let listed = null;
+      try {
+        const res = await fetch('/api/terminal', { headers: authHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          listed = (data.sessions || []).some(s => s.id === tab.id && !s.exited);
+        }
+      } catch { /* server unreachable — treat as indeterminate, keep backing off */ }
+      if (tab.closing || tab.exited) return;
+      if (listed === true) { connectWs(tab); return; }
+      if (listed === false) {
+        // Server is reachable and the session is gone — retire the tab cleanly
+        // instead of looping against an id that will never come back.
+        tab.exited = true;
+        tab.term.writeln('\r\n\x1b[2m[session ended]\x1b[0m');
+        const idx = tabs.indexOf(tab);
+        if (idx >= 0) destroyTab(idx, true);
+        return;
+      }
+      // Indeterminate (server unreachable): keep the backoff going.
+      scheduleReconnect(tab);
+    }, delay);
   }
 
   function handleControl(tab, ctrl) {
@@ -631,6 +781,14 @@
     collapse,
     isAvailable: () => !!available,
     getUnavailableReason: () => window.__nsTerminalUnavailableReason || null,
+    // Toggle TX tracing (see debugTx above). `NSTerminal.setDebug(true)` in
+    // the console, reproduce the phantom input, then read the `[ns-term tx]`
+    // lines to see exactly what the browser sends to the PTY.
+    setDebug: (on) => {
+      debugTx = !!on;
+      try { localStorage.setItem('ns-term-debug', debugTx ? '1' : '0'); } catch {}
+      return debugTx;
+    },
     // Number of live tabs — used by the sidebar Terminal nav to decide
     // whether clicking should spawn a shell or just expand an existing one.
     tabCount: () => tabs.length,
