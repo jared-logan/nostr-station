@@ -567,6 +567,21 @@ input:focus, textarea:focus, select:focus {
 }
 .clone-ready-title { color: var(--text-bright); font-size: 13px; }
 
+/* Secondary "or use an existing local path" escape hatch under the Clone
+   CTA in the scan→clone flow. Kept quiet so it doesn't compete with the
+   primary Clone action. */
+.manual-path-disclosure > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 4px 0;
+  list-style: none;
+}
+.manual-path-disclosure > summary::-webkit-details-marker { display: none; }
+.manual-path-disclosure > summary::marker { content: ''; }
+.manual-path-disclosure > summary:hover { color: var(--text-bright); }
+.manual-path-disclosure .manual-path-body { margin-top: 8px; }
+
 /* ── main ─────────────────────────────────────────────────────────────── */
 
 .main {
