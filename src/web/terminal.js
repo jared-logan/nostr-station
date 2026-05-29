@@ -488,6 +488,27 @@
   }
   window.addEventListener('resize', scheduleFit);
 
+  // Re-attach any tab whose socket dropped the moment we plausibly have
+  // connectivity again — the laptop woke, the tab regained focus, or the
+  // network came back. Backoff retries can exhaust during a long sleep (timers
+  // don't fire reliably while suspended), so these events are the safety net
+  // that makes "close the lid, come back tomorrow" land you straight back in
+  // the still-running session without a manual refresh.
+  function reconnectDroppedTabs() {
+    for (const tab of tabs) {
+      if (tab.closing || tab.exited) continue;
+      // Skip tabs that are connecting (0) or already open (1).
+      if (tab.ws && (tab.ws.readyState === 0 || tab.ws.readyState === 1)) continue;
+      tab.reconnectAttempts = 0;
+      if (tab.reconnectTimer) { clearTimeout(tab.reconnectTimer); tab.reconnectTimer = null; }
+      scheduleReconnect(tab);
+    }
+  }
+  window.addEventListener('online', reconnectDroppedTabs);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) reconnectDroppedTabs();
+  });
+
   // ── WebSocket wiring ─────────────────────────────────────────────────────
 
   function connectWs(tab) {

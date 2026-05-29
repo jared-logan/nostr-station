@@ -404,21 +404,27 @@ interface Session {
   // mid-stream, so we don't need to align boundaries.
   buffer:    string[];
   bufferBytes: number;
-  // Live clients receiving frames.
+  // Live clients receiving frames. A session can have zero attached clients
+  // (the drawer is collapsed, the dashboard is closed, the laptop is asleep)
+  // and still keep running — sessions are tied to the process lifetime, not
+  // to any viewer. See detachClient.
   clients:   Set<WebSocket>;
-  // Set when clients.size hits 0; fires kill() unless a client rejoins.
-  graceTimer: NodeJS.Timeout | null;
 }
 
 const sessions = new Map<string, Session>();
 
-// How long a PTY stays alive after its last viewer detaches. Sized so a user
-// can close the dashboard / sleep the laptop / lose network and come back
-// within the hour to an intact Claude session — the whole point of the
-// persistent terminal drawer. The client auto-reconnects within this window
-// (see scheduleReconnect in terminal.js), so transient drops never start it;
-// it only fires for a genuinely abandoned session, reclaiming the process.
-const GRACE_MS = 60 * 60 * 1000;      // 60 min
+// Session lifetime is deliberately NOT tied to whether anyone is watching.
+// A PTY lives until one of three things happens:
+//   1. The user explicitly closes the tab (DELETE /api/terminal/:id), or
+//   2. The process inside it exits (`/exit`, Ctrl-D, crash → onExit), or
+//   3. The server itself stops (the PTYs are its children).
+// There is intentionally no idle/detach timeout: collapse the drawer, close
+// the dashboard, sleep the laptop, leave for work — and the Claude session is
+// right where you left it when you return, as long as the server stays up.
+// The cost is that abandoned sessions hold their process until closed; on a
+// single-user local dev box that's the intended trade. The client
+// auto-reconnects (see scheduleReconnect in terminal.js) so a dropped viewer
+// silently rejoins the still-running session.
 const BUFFER_MAX_BYTES = 1 * 1024 * 1024; // 1 MiB per session
 
 function appendBuffer(sess: Session, chunk: string): void {
@@ -483,7 +489,6 @@ export async function createSession(
     exited: false, exitCode: null,
     buffer: [], bufferBytes: 0,
     clients: new Set(),
-    graceTimer: null,
   };
   sessions.set(id, sess);
 
@@ -537,12 +542,6 @@ export function attachClient(id: string, ws: WebSocket): Session | null {
   const sess = sessions.get(id);
   if (!sess) return null;
 
-  // Cancel any in-flight kill — the client came back in time.
-  if (sess.graceTimer) {
-    clearTimeout(sess.graceTimer);
-    sess.graceTimer = null;
-  }
-
   sess.clients.add(ws);
 
   // Replay scrollback so the client renders the session as-was. xterm.js
@@ -557,12 +556,12 @@ export function attachClient(id: string, ws: WebSocket): Session | null {
 export function detachClient(id: string, ws: WebSocket): void {
   const sess = sessions.get(id);
   if (!sess) return;
+  // Drop the viewer but leave the session running. No idle timer: the PTY
+  // survives with zero attached clients until the user closes the tab or the
+  // process exits (see the lifetime note by BUFFER_MAX_BYTES). Output keeps
+  // accumulating in the ring buffer so a later reattach replays what was
+  // missed.
   sess.clients.delete(ws);
-  if (sess.clients.size === 0 && !sess.exited) {
-    // Last viewer left — start the grace window. If no one rejoins within
-    // GRACE_MS, kill the PTY so we don't leak processes from abandoned tabs.
-    sess.graceTimer = setTimeout(() => destroySession(id, 'idle-timeout'), GRACE_MS);
-  }
 }
 
 export function writeInput(id: string, data: string): boolean {
@@ -592,7 +591,6 @@ export function destroySession(id: string, reason: string): boolean {
   // Belt-and-suspenders: onExit also releases, but it's not guaranteed to
   // fire if the PTY's already-dead path is hit. Idempotent in the registry.
   releaseDevServerSession(id);
-  if (sess.graceTimer) clearTimeout(sess.graceTimer);
   // Notify any still-attached client with a final control frame before we
   // tear down — some clients see the WS close handler before the onExit
   // event otherwise.
