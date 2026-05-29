@@ -36,6 +36,16 @@
   let xtermLoaded  = false;
   let xtermLoading = null;   // Promise when the library fetch is in flight
 
+  // Opt-in TX tracing. When on, every byte that leaves xterm toward the PTY
+  // (real keystrokes, pastes, AND xterm's automatic replies to device/focus
+  // queries) is logged to the console with the originating tab. This is the
+  // ground-truth tool for diagnosing phantom input — e.g. a stray `/clear`
+  // appearing in a Claude session after a collapse/restore. Flip it from the
+  // DevTools console with `NSTerminal.setDebug(true)`, reproduce, and read
+  // the `[ns-term tx]` lines to see exactly what (if anything) the browser
+  // transmits. Persisted so it survives a refresh during a repro session.
+  let debugTx = localStorage.getItem('ns-term-debug') === '1';
+
   /** @type {Array<Tab>} */
   const tabs = [];
   let activeIdx = -1;
@@ -286,6 +296,11 @@
     };
 
     term.onData((data) => {
+      if (debugTx) {
+        // JSON.stringify renders control bytes as  etc. so escape
+        // sequences are legible and a literal "/clear" stands out plainly.
+        try { console.debug('[ns-term tx]', tab.label, JSON.stringify(data)); } catch {}
+      }
       if (tab.ws && tab.ws.readyState === 1) {
         tab.ws.send(JSON.stringify({ type: 'input', data }));
       } else {
@@ -653,6 +668,14 @@
     collapse,
     isAvailable: () => !!available,
     getUnavailableReason: () => window.__nsTerminalUnavailableReason || null,
+    // Toggle TX tracing (see debugTx above). `NSTerminal.setDebug(true)` in
+    // the console, reproduce the phantom input, then read the `[ns-term tx]`
+    // lines to see exactly what the browser sends to the PTY.
+    setDebug: (on) => {
+      debugTx = !!on;
+      try { localStorage.setItem('ns-term-debug', debugTx ? '1' : '0'); } catch {}
+      return debugTx;
+    },
     // Number of live tabs — used by the sidebar Terminal nav to decide
     // whether clicking should spawn a shell or just expand an existing one.
     tabCount: () => tabs.length,
