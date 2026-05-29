@@ -32,6 +32,14 @@
   const MIN_HEIGHT_PX = 180;
   const MAX_HEIGHT_VH = 70;
 
+  // Auto-reconnect backoff for dropped WebSockets. The server keeps the PTY
+  // alive for its grace window, so a transient drop should silently rejoin.
+  // Schedule: 0.5s, 1s, 2s, 4s, 8s, 15s, 15s, 15s — ~60s of retries before we
+  // give up and ask the user to refresh (which re-runs restoreTabs and
+  // rejoins). We never kill the session from the client on exhaustion.
+  const RECONNECT_BASE_MS     = 500;
+  const RECONNECT_MAX_ATTEMPTS = 8;
+
   let available    = null;   // null = not probed; true/false after probe
   let xtermLoaded  = false;
   let xtermLoading = null;   // Promise when the library fetch is in flight
@@ -293,14 +301,28 @@
     const tab = {
       id, label, host, term, fitAddon,
       ws: null, pendingInput: [], ro: null, exited: false,
+      // Reconnect bookkeeping (see connectWs / scheduleReconnect).
+      closing: false,          // true once the user/server is tearing this tab down
+      reconnectAttempts: 0,    // resets to 0 on a successful open
+      reconnectTimer: null,    // pending backoff timer, if any
+      // True for a brief window right after (re)connect while the server
+      // replays scrollback — see the open handler in connectWs.
+      suppressTx: false,
     };
 
     term.onData((data) => {
       if (debugTx) {
         // JSON.stringify renders control bytes as  etc. so escape
         // sequences are legible and a literal "/clear" stands out plainly.
-        try { console.debug('[ns-term tx]', tab.label, JSON.stringify(data)); } catch {}
+        try { console.debug('[ns-term tx]', tab.label, tab.suppressTx ? '(suppressed)' : '', JSON.stringify(data)); } catch {}
       }
+      // While the server is replaying historical output on (re)connect, drop
+      // xterm's automatic answers to any device/cursor queries embedded in
+      // that scrollback. Replaying old query bytes makes xterm reply *now*,
+      // and those stale answers would land in the live prompt as junk input.
+      // Real keystrokes are extremely unlikely in this sub-second window, and
+      // pre-connect input is preserved separately via pendingInput.
+      if (tab.suppressTx) return;
       if (tab.ws && tab.ws.readyState === 1) {
         tab.ws.send(JSON.stringify({ type: 'input', data }));
       } else {
@@ -325,6 +347,10 @@
   function destroyTab(idx, fromServerClose = false) {
     const tab = tabs[idx];
     if (!tab) return;
+    // Mark deliberate teardown BEFORE closing the socket so the ws 'close'
+    // handler doesn't mistake this for a transient drop and try to reconnect.
+    tab.closing = true;
+    if (tab.reconnectTimer) { clearTimeout(tab.reconnectTimer); tab.reconnectTimer = null; }
     if (!fromServerClose) {
       // Fire-and-forget the DELETE — the server's destroySession also
       // fires a 'closed' control frame that would otherwise race our WS
@@ -474,6 +500,16 @@
     tab.ws = ws;
 
     ws.addEventListener('open', () => {
+      // A clean open means any prior drop is resolved — reset the backoff so
+      // the next genuine drop starts its retry schedule fresh.
+      tab.reconnectAttempts = 0;
+      // Open the replay-suppression window: the server replays scrollback as
+      // the first frame(s) after attach, and xterm will auto-reply to any
+      // device/cursor queries inside it. Drop those replies (see onData) for a
+      // brief window so they can't dirty the live prompt. Pre-open keystrokes
+      // are flushed below via ws.send directly, so they're unaffected.
+      tab.suppressTx = true;
+      setTimeout(() => { tab.suppressTx = false; }, 300);
       // Flush keystrokes typed before the WS was ready.
       while (tab.pendingInput.length) {
         ws.send(JSON.stringify({ type: 'input', data: tab.pendingInput.shift() }));
@@ -515,16 +551,72 @@
     });
 
     ws.addEventListener('close', () => {
-      // The server's 5-min grace window keeps the PTY alive; don't dispose
-      // the xterm here so a reconnect drops straight back in. If the
-      // session was actually destroyed (e.g. process exit), the server
-      // sent a control frame first and handleControl() takes care of it.
-      if (tab.ws === ws) tab.ws = null;
+      // Ignore closes for a socket we've already replaced (a deliberate
+      // reconnect or teardown swapped tab.ws to a new socket / null). Only the
+      // currently-live socket dropping should drive reconnect logic.
+      if (tab.ws !== ws) return;
+      tab.ws = null;
+      // The server's grace window keeps the PTY alive across a WS drop; don't
+      // dispose the xterm here so a reconnect drops straight back in. If the
+      // session was actually destroyed (process exit / explicit close), the
+      // server sent a 'closed'/'exit' control frame first and handleControl()
+      // already flipped tab.exited — so we skip reconnect in that case.
+      if (tab.exited || tab.closing) return;
+      scheduleReconnect(tab);
     });
 
     ws.addEventListener('error', () => {
-      tab.term.writeln('\r\n\x1b[31m[terminal] websocket error\x1b[0m');
+      // An 'error' is almost always immediately followed by 'close', which
+      // drives the reconnect path — so don't spam the terminal with a red
+      // line on every transient blip. Surface only when TX tracing is on.
+      if (debugTx) { try { console.debug('[ns-term] ws error', tab.label); } catch {} }
     });
+  }
+
+  // Reconnect a tab whose WebSocket dropped unexpectedly. The PTY survives on
+  // the server for the grace window, so a transient blip (laptop sleep, wifi
+  // flap, a server restart mid-session) should silently rejoin rather than
+  // freeze the tab until a manual refresh.
+  function scheduleReconnect(tab) {
+    if (tab.closing || tab.exited) return;
+    if (tab.reconnectTimer) return;                 // already scheduled
+    if (tab.ws && tab.ws.readyState === 1) return;  // already back
+    const attempt = tab.reconnectAttempts || 0;
+    if (attempt >= RECONNECT_MAX_ATTEMPTS) {
+      tab.term.writeln('\r\n\x1b[33m[terminal] disconnected — refresh to reconnect\x1b[0m');
+      return;
+    }
+    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt), 15000);
+    tab.reconnectAttempts = attempt + 1;
+    tab.reconnectTimer = setTimeout(async () => {
+      tab.reconnectTimer = null;
+      if (tab.closing || tab.exited) return;
+      if (tab.ws && tab.ws.readyState === 1) return;
+      // Confirm the session still exists before reattaching, so we can tell a
+      // transient network drop (keep retrying) apart from a session the server
+      // actually retired (stop and clean up). null = couldn't reach the server.
+      let listed = null;
+      try {
+        const res = await fetch('/api/terminal', { headers: authHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          listed = (data.sessions || []).some(s => s.id === tab.id && !s.exited);
+        }
+      } catch { /* server unreachable — treat as indeterminate, keep backing off */ }
+      if (tab.closing || tab.exited) return;
+      if (listed === true) { connectWs(tab); return; }
+      if (listed === false) {
+        // Server is reachable and the session is gone — retire the tab cleanly
+        // instead of looping against an id that will never come back.
+        tab.exited = true;
+        tab.term.writeln('\r\n\x1b[2m[session ended]\x1b[0m');
+        const idx = tabs.indexOf(tab);
+        if (idx >= 0) destroyTab(idx, true);
+        return;
+      }
+      // Indeterminate (server unreachable): keep the backoff going.
+      scheduleReconnect(tab);
+    }, delay);
   }
 
   function handleControl(tab, ctrl) {

@@ -10,7 +10,7 @@
  *      server resolves it into a fixed argv.
  *   3. Track live sessions in memory with a scrollback ring buffer. Clients
  *      reconnecting after a WS drop (navigation, refresh, transient network)
- *      rejoin by id within a 5-minute grace window and replay the buffer
+ *      rejoin by id within a 60-minute grace window and replay the buffer
  *      before live frames resume.
  *   4. Broadcast PTY output to every attached client so multi-tab / multi-
  *      viewer cases (e.g. split panes in the future) behave predictably.
@@ -412,7 +412,13 @@ interface Session {
 
 const sessions = new Map<string, Session>();
 
-const GRACE_MS = 5 * 60 * 1000;       // 5 min — matches spec
+// How long a PTY stays alive after its last viewer detaches. Sized so a user
+// can close the dashboard / sleep the laptop / lose network and come back
+// within the hour to an intact Claude session — the whole point of the
+// persistent terminal drawer. The client auto-reconnects within this window
+// (see scheduleReconnect in terminal.js), so transient drops never start it;
+// it only fires for a genuinely abandoned session, reclaiming the process.
+const GRACE_MS = 60 * 60 * 1000;      // 60 min
 const BUFFER_MAX_BYTES = 1 * 1024 * 1024; // 1 MiB per session
 
 function appendBuffer(sess: Session, chunk: string): void {
