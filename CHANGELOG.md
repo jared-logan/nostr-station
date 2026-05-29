@@ -5,6 +5,47 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Projects: publish wizard moves to Overview (review-then-announce)
+
+The first-publish ngit wizard used to take over the **Code** tab for any
+not-yet-published project — which meant you couldn't browse the repo's
+files, README, or commit history before announcing it. The wizard now lives
+on the **Overview** tab instead:
+
+- **Code always shows the file browser / commits**, even pre-publish, so
+  you can review what you're about to announce. It only short-circuits when
+  there's genuinely no git repo on disk yet, with a small note pointing to
+  Overview.
+- **Overview renders the publish wizard inline** (below the summary) for
+  projects that have a path but no ngit remote yet — including the
+  "Initialize git" path for projects with no repo. Publishing from here
+  swaps the wizard for the operational ngit block + About metadata, same as
+  before.
+
+### Projects: badge accuracy + scan-clone polish (follow-up fixes)
+
+Three fixes from testing the onboarding flow:
+
+- **Scan-cloned ngit repos no longer show a spurious `git` badge.** A
+  NIP-34 `clone` tag usually carries the GRASP server's own HTTP transport
+  (`https://git.shakespeare.diy/…`, `relay.ngit.dev`) rather than a
+  separate GitHub/GitLab origin. The Discover → Add-to-projects prefill now
+  compares each clone URL's host against the GRASP servers we actually
+  queried (`res.queried`) and only lights the `git` capability for a clone
+  URL whose host is *not* a GRASP host. A pure-ngit repo shows just `ngit`,
+  as expected (`app.js`).
+- **Template scaffolds no longer record the template's upstream as their
+  git remote.** A New local project scaffolded from MKStack used to carry
+  `gitlab.com/soapbox-pub/mkstack.git` as its recorded GitHub remote — the
+  template *source*, never a remote you'd push to. `freshenGitRepo` already
+  wipes the on-disk remote; now a template scaffold (templateId set) also
+  records no remote and no `git` capability, landing as a local-only git
+  repo — same "publish to ngit when ready" model as a blank project. A
+  direct git-url *import* (no templateId) still records its source for
+  reference (`project-scaffold.ts`).
+- **Long `nostr://` clone URLs wrap inside the scan-clone box** instead of
+  pushing it off the drawer's right edge (`app.css`).
+
 ### Projects: smoother "get rolling" UX — scan-clone defaults + starter moves to New project
 
 Two related UX passes on the project-onboarding flow, both aimed at
