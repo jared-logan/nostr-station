@@ -5222,6 +5222,10 @@ const ProjectDrawer = (() => {
       return;
     }
     toast('Clone complete', resolved, 'ok');
+    // The clone's resolved absolute path is authoritative regardless of
+    // whether the follow-up detect succeeds — record it before detecting so
+    // the summary + save never fall back to an empty path.
+    draft.path = resolved;
     try {
       const d = await api('/api/projects/detect', {
         method: 'POST',
@@ -5229,7 +5233,6 @@ const ProjectDrawer = (() => {
         body: JSON.stringify({ path: resolved }),
       });
       detect = d;
-      draft.path = resolved;
       if (d.exists && d.isGitRepo) {
         draft.capabilities.git = true;
         if (d.githubRemote) draft.remotes.github = d.githubRemote;
@@ -5238,6 +5241,13 @@ const ProjectDrawer = (() => {
       }
       if (d.suggestedName && !draft.name) draft.name = d.suggestedName;
     } catch {}
+    // Clone succeeded and every downstream step is now answered (path from the
+    // resolved target, caps from detect, identity defaulting to the station,
+    // name from the d-tag). Jump straight to the final review + "Add project"
+    // step instead of parking the user back on Step 1 with three pre-answered
+    // Continues ahead. Steps 1–3 collapse into their done-summaries with edit
+    // links if the user wants to change anything.
+    if (mode === 'add') expanded = 4;
     render();
   }
 
@@ -5254,20 +5264,27 @@ const ProjectDrawer = (() => {
       && draft.capabilities.ngit
       && !draft.path
       && (ngitRemote.startsWith('naddr1') || ngitRemote.startsWith('nostr://'));
+    const cloneTarget = `~/projects/${draft.name || 'repo'}`;
     const cloneBlock = canClone ? `
       <div class="clone-ready">
         <div class="clone-ready-title">Clone <b>${escapeHtml(draft.name || 'this repo')}</b> to your machine</div>
         <div class="muted" style="font-size:11px;margin-top:4px">
-          Will run <code>git clone ${escapeHtml(ngitRemote)} ~/projects/${escapeHtml(draft.name || 'repo')}</code>
-          (expanded to an absolute path server-side).
+          Lands at <code>${escapeHtml(cloneTarget)}</code> — the path is chosen for you
+          (expanded to an absolute path server-side). Runs
+          <code>git clone ${escapeHtml(ngitRemote)}</code>.
         </div>
         <div class="step-actions" style="margin-top:10px">
           <button class="primary clone-repo-btn">Clone this repo</button>
         </div>
       </div>
     ` : '';
-    el.innerHTML = `
-      ${cloneBlock}
+    // The manual-path controls (type/paste a path, or mark nsite-only) are
+    // the right tool for *adopting an existing folder on disk* — but in the
+    // scan→clone flow they read as a required chore even though the server
+    // owns the clone target. When `canClone` is set we lead with the Clone
+    // action and tuck this block behind a disclosure so the path is there if
+    // you need it, invisible if you don't.
+    const manualPathBlock = `
       <label class="field-label">Local path</label>
       <div class="field-row">
         <input type="text" class="path-input" placeholder="/Users/you/projects/my-project" value="${escapeHtml(draft.path)}" ${draft.noPath ? 'disabled' : ''}>
@@ -5281,6 +5298,16 @@ const ProjectDrawer = (() => {
       <div class="step-actions">
         <button class="primary next-btn">Continue</button>
       </div>
+    `;
+    el.innerHTML = canClone ? `
+      ${cloneBlock}
+      <details class="manual-path-disclosure">
+        <summary>or use an existing local path</summary>
+        <div class="manual-path-body">${manualPathBlock}</div>
+      </details>
+    ` : `
+      ${cloneBlock}
+      ${manualPathBlock}
     `;
     const input = el.querySelector('.path-input');
     const noPathCb = el.querySelector('.no-path-cb');
