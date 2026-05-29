@@ -157,9 +157,16 @@
     const panel = $('term-panel');
     if (panel) panel.hidden = false;
     localStorage.setItem(LS_EXPANDED, '1');
-    // Defer fit until CSS transition is underway — fitting while the host
-    // has zero height produces cols=rows=0 and xterm refuses to render.
-    requestAnimationFrame(() => requestAnimationFrame(scheduleFit));
+    // Defer fit until the CSS height transition is underway — fitting while
+    // the host is still clipped to ~0 height produces cols=rows=0 and xterm
+    // refuses to render. Once the drawer is open, refocus the active tab so
+    // collapsing mid-chat and reopening drops the user straight back into the
+    // session they left, ready to type — without clicking into the panel.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      scheduleFit();
+      const active = tabs[activeIdx];
+      if (active) { try { active.term.focus(); } catch {} }
+    }));
   }
 
   function collapse() {
@@ -413,8 +420,23 @@
     if (fitHandle) cancelAnimationFrame(fitHandle);
     fitHandle = requestAnimationFrame(() => {
       fitHandle = null;
+      // Never refit while the drawer is collapsed. When collapsed the panel
+      // is clipped to the bar height (see body:not(.term-expanded) in
+      // app.css), so the active xterm host measures ~0px tall. fitAddon.fit()
+      // would then compute a degenerate 1-row geometry and resize the live
+      // PTY down to it — firing a SIGWINCH at the attached full-screen TUI
+      // (Claude Code, ngit prompts) on every collapse, and again on expand.
+      // That resize churn is what made a mid-chat collapse/restore disrupt
+      // the running session. Hold the last good size until the drawer is
+      // genuinely open and laid out; the cols>0 check below only ever
+      // guarded the *send*, not the fit() itself.
+      if (!isExpanded()) return;
       const tab = tabs[activeIdx];
       if (!tab || !tab.fitAddon) return;
+      // Mid-expand the height transition may not have handed the host any
+      // usable rows yet; skip until it has real height — a later
+      // ResizeObserver tick fires once the transition lands the final size.
+      if (tab.host.clientHeight < 1) return;
       try {
         tab.fitAddon.fit();
         if (tab.ws && tab.ws.readyState === 1 && tab.term.cols > 0 && tab.term.rows > 0) {
