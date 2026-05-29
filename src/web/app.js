@@ -578,6 +578,28 @@ function copyBtn(text, title = 'copy') {
   return btn;
 }
 
+// Gives a button instant "working" feedback: disables it and swaps in a
+// spinner + label while `fn` runs, restoring the original markup when it
+// settles. Closes the gap where an async click handler has fired but
+// nothing visible has changed yet (e.g. an exec modal still fading in) —
+// which is exactly the window where users click Install twice. The
+// disabled guard also drops re-entrant clicks. Restores on both success
+// and failure so a failed action stays retryable; if `fn` re-rendered the
+// button away (the common success path), the restore lands on a detached
+// node and is harmlessly ignored.
+async function withButtonBusy(btn, busyLabel, fn) {
+  if (!btn || btn.disabled) return;
+  const prevHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span> ${escapeHtml(busyLabel)}`;
+  try {
+    return await fn();
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = prevHtml;
+  }
+}
+
 // ── Modal primitives ─────────────────────────────────────────────────────
 
 function openModal({ title, subtitle, body, footer }) {
@@ -20264,7 +20286,8 @@ const SetupWizard = (() => {
     );
 
     root.querySelector('.setup-back').addEventListener('click', back);
-    root.querySelector('#setup-git-ident-next').addEventListener('click', async () => {
+    const gitIdentNextBtn = root.querySelector('#setup-git-ident-next');
+    gitIdentNextBtn.addEventListener('click', () => withButtonBusy(gitIdentNextBtn, 'Saving…', async () => {
       const mode = root.querySelector('input[name="setup-git-ident-mode"]:checked')?.value || 'skip';
       let payload = null;
       if (mode === 'custom') {
@@ -20296,7 +20319,7 @@ const SetupWizard = (() => {
         }
       }
       next();
-    });
+    }));
   }
 
   // ── ngit signing ─────────────────────────────────────────────────────
@@ -20396,7 +20419,7 @@ const SetupWizard = (() => {
           </div>
         `;
         const btn = $('setup-ngit-install-btn');
-        btn.addEventListener('click', async () => {
+        btn.addEventListener('click', () => withButtonBusy(btn, 'Installing…', async () => {
           const r = await openExecModal({
             title:    'Install ngit',
             subtitle: 'Installing ngit…',
@@ -20412,7 +20435,7 @@ const SetupWizard = (() => {
           } else {
             toast(`ngit install exited ${r.code}`, '', 'err');
           }
-        });
+        }));
       }
     };
 
@@ -20445,23 +20468,35 @@ const SetupWizard = (() => {
 
     const amberBtn = $('setup-ngit-amber-btn');
     if (amberBtn) {
-      amberBtn.addEventListener('click', async () => {
+      amberBtn.addEventListener('click', () => {
+        if (amberBtn.disabled) return;
         if (!window.NSTerminal?.isAvailable?.()) {
           toast('Terminal unavailable', 'Use Config → ngit → Re-login after setup', 'warn');
           return;
         }
+        // Instant feedback: the terminal drawer animates up over the
+        // wizard, so without acknowledging the click the button reads as
+        // dead for a beat. Lock it into a "Connecting…" state for the
+        // duration of the Amber flow; the return pill restores it so the
+        // user can re-run `ngit account login` if the first scan lapsed.
+        const restore = amberBtn.innerHTML;
+        amberBtn.disabled = true;
+        amberBtn.innerHTML = '<span class="spinner"></span> Connecting…';
         // Raise the terminal drawer above the wizard overlay so the QR
         // is actually visible; a small "Return to setup" pill lets the
         // user jump back without closing the terminal.
         document.body.classList.add('setup-term-hoist');
         window.NSTerminal.expand();
         window.NSTerminal.open('ngit-login');
-        mountReturnPill();
+        mountReturnPill(() => {
+          amberBtn.disabled = false;
+          amberBtn.innerHTML = restore;
+        });
       });
     }
   }
 
-  function mountReturnPill() {
+  function mountReturnPill(onReturn) {
     let pill = document.getElementById('setup-return-pill');
     if (pill) return;
     pill = document.createElement('button');
@@ -20472,6 +20507,7 @@ const SetupWizard = (() => {
       document.body.classList.remove('setup-term-hoist');
       window.NSTerminal?.collapse?.();
       pill.remove();
+      if (typeof onReturn === 'function') onReturn();
     });
     document.body.appendChild(pill);
   }
@@ -20532,9 +20568,11 @@ const SetupWizard = (() => {
       const appendStep = (label) => {
         const row = document.createElement('div');
         row.className = 'setup-step-row current';
+        // title mirrors the label so the full text is recoverable on hover
+        // once the CSS clamps a long step name to an ellipsis.
         row.innerHTML = `
           <span class="dot"><span class="spinner"></span></span>
-          <span class="label">${escapeHtml(label)}</span>
+          <span class="label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
         `;
         stepsEl.appendChild(row);
       };
@@ -20576,6 +20614,7 @@ const SetupWizard = (() => {
                   const det = document.createElement('span');
                   det.className = 'muted';
                   det.textContent = msg.detail;
+                  det.title = msg.detail; // full detail on hover once clamped
                   last.appendChild(det);
                 }
               }

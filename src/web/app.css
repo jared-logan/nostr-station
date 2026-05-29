@@ -4801,13 +4801,31 @@ body.sidebar-open .sidebar-toggle-bars span:nth-child(3) { transform: translateY
   font-size: 12px;
   padding: 4px 8px;
   border-left: 2px solid var(--border);
+  min-width: 0; /* let the truncating children below shrink past content size */
 }
 .setup-step-row.ok      { border-left-color: var(--success); }
 .setup-step-row.err     { border-left-color: var(--error); }
 .setup-step-row.current { border-left-color: var(--accent); }
 .setup-step-row .dot { margin-top: 2px; flex-shrink: 0; }
-.setup-step-row .label { color: var(--text-bright); flex-shrink: 0; }
-.setup-step-row .muted { font-size: 11px; }
+/* A long step name or error detail used to run off the card edge — the
+   row is single-line, so clamp to an ellipsis instead (full text stays
+   available via the title tooltip set in renderVpn). */
+.setup-step-row .label {
+  color: var(--text-bright);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-step-row .muted {
+  font-size: 11px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* nvpn install stage — same step-row styling as the relay bootstrap. */
 .setup-vpn-steps {
