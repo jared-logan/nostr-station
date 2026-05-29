@@ -566,6 +566,10 @@ input:focus, textarea:focus, select:focus {
   background: rgba(123, 180, 255, 0.04);
 }
 .clone-ready-title { color: var(--text-bright); font-size: 13px; }
+/* Long nostr:// clone URLs are a single unbroken token — without an
+   explicit break they shove the dashed box (and its right edge) off the
+   drawer. Break on any char so the URL wraps inside the box. */
+.clone-ready code { word-break: break-all; overflow-wrap: anywhere; }
 
 /* Secondary "or use an existing local path" escape hatch under the Clone
    CTA in the scan→clone flow. Kept quiet so it doesn't compete with the

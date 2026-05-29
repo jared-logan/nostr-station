@@ -11992,7 +11992,24 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
           const nostrUrl = repo.cloneUrl
             || repo.clone.find(u => u.startsWith('nostr://'))
             || '';
-          const gitUrl   = repo.clone.find(u => /^(git|https?|ssh):\/\//i.test(u)) || '';
+          // A NIP-34 `clone` tag usually carries the GRASP server's own
+          // HTTP transport (https://git.shakespeare.diy/…, relay.ngit.dev),
+          // NOT a separate GitHub/GitLab origin. We queried those GRASP
+          // servers by relay URL (`res.queried`), so a clone URL whose host
+          // matches one of them is ngit plumbing — recording it as a `git`
+          // remote double-badges a pure-ngit repo. Only treat an https/ssh
+          // clone URL as a real git origin when its host is NOT a queried
+          // GRASP host.
+          const graspHosts = new Set(
+            (res.queried || [])
+              .map(u => { try { return new URL(u).host; } catch { return null; } })
+              .filter(Boolean)
+          );
+          const gitUrl = repo.clone.find(u => {
+            if (!/^(git|https?|ssh):\/\//i.test(u)) return false;
+            let host; try { host = new URL(u).host; } catch { return false; }
+            return !graspHosts.has(host);  // exclude GRASP transport URLs
+          }) || '';
           ProjectDrawer.openAddPrefilled({
             name: repo.name,
             capabilities: { git: !!gitUrl, ngit: true },

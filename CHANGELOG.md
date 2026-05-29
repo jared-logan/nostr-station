@@ -5,6 +5,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Projects: badge accuracy + scan-clone polish (follow-up fixes)
+
+Three fixes from testing the onboarding flow:
+
+- **Scan-cloned ngit repos no longer show a spurious `git` badge.** A
+  NIP-34 `clone` tag usually carries the GRASP server's own HTTP transport
+  (`https://git.shakespeare.diy/…`, `relay.ngit.dev`) rather than a
+  separate GitHub/GitLab origin. The Discover → Add-to-projects prefill now
+  compares each clone URL's host against the GRASP servers we actually
+  queried (`res.queried`) and only lights the `git` capability for a clone
+  URL whose host is *not* a GRASP host. A pure-ngit repo shows just `ngit`,
+  as expected (`app.js`).
+- **Template scaffolds no longer record the template's upstream as their
+  git remote.** A New local project scaffolded from MKStack used to carry
+  `gitlab.com/soapbox-pub/mkstack.git` as its recorded GitHub remote — the
+  template *source*, never a remote you'd push to. `freshenGitRepo` already
+  wipes the on-disk remote; now a template scaffold (templateId set) also
+  records no remote and no `git` capability, landing as a local-only git
+  repo — same "publish to ngit when ready" model as a blank project. A
+  direct git-url *import* (no templateId) still records its source for
+  reference (`project-scaffold.ts`).
+- **Long `nostr://` clone URLs wrap inside the scan-clone box** instead of
+  pushing it off the drawer's right edge (`app.css`).
+
 ### Projects: smoother "get rolling" UX — scan-clone defaults + starter moves to New project
 
 Two related UX passes on the project-onboarding flow, both aimed at

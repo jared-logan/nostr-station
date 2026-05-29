@@ -422,11 +422,23 @@ export async function scaffoldProject(
       writeLine(res, 'stderr', `git clone exited with code ${code}`);
       return writeDone(res, code);
     }
-    // Record github/gitlab/etc. as the github remote so it's visible on
-    // the project card. The multi-remote UI (future) will generalize
-    // this field name to support arbitrary named remotes.
-    if (/^https?:\/\//i.test(source.url)) githubRemote = source.url;
-    gitCapability = true;
+    // Template scaffolds (templateId set) are "new local projects" born
+    // from a starter — the upstream (e.g. mkstack's gitlab) is the
+    // template source, NOT a remote you'd ever push to. freshenGitRepo
+    // wipes the on-disk remote pointer regardless; recording it as the
+    // project's github remote just surfaces a misleading "GitHub:
+    // gitlab.com/soapbox-pub/mkstack" on the card. So a template scaffold
+    // lands as a local-only git repo (git repo on disk, no remote, no git
+    // chip) — the user publishes to ngit / adds a remote when ready, same
+    // model as a blank New local project.
+    //
+    // A direct git-url *import* (no templateId) keeps the source recorded
+    // as its github remote for reference — the user is adopting a specific
+    // repo and wants to remember where it came from.
+    if (templateId === null) {
+      if (/^https?:\/\//i.test(source.url)) githubRemote = source.url;
+      gitCapability = true;
+    }
     await freshenGitRepo(target, `Initial commit`, res);
   }
 
