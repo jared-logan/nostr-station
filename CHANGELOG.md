@@ -5,6 +5,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nvpn pin bump 4.0.37 → 4.0.48
+
+Tracks the upstream 4.0.x line forward. Existing users see the upgrade as
+an `nvpn` row in the dashboard's Updates modal (installed `< 4.0.48`), and
+applying it streams through the usual force-install path — download +
+sha256-verify the new tarball, `install-cli --force` to swap the on-PATH
+binary, `service install --force` to repoint the systemd/launchd unit, then
+a restart hint. Fresh installs pick up 4.0.48 directly.
+
+- `versions.ts` — `nvpn` pin `4.0.37` → `4.0.48`; all three pinned-target
+  sha256 digests refreshed (`aarch64-apple-darwin`,
+  `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl`). Verified
+  against the published GitHub release asset digests.
+- No CLI-surface changes across 4.0.38–4.0.48 — `init`, `service install`,
+  `install-cli`, `start`, and `status --json` are unchanged, so no call
+  sites in `nvpn.ts` / installer need touching. The one in-band change is
+  nvpn's own config-secret migration to sidecar files (4.0.40), which the
+  daemon performs itself on first start of the new binary.
+- Heads-up for a future bump: 4.0.48 ships nvpn's own secure
+  (hashtree/Nostr/Blossom) self-updater. If that becomes the default update
+  channel, the installed binary's version could drift ahead of our pin
+  on its own — worth deciding whether we keep driving updates via the pin
+  or step back and let nvpn self-update.
+
 ### Projects: publish wizard moves to Overview (review-then-announce)
 
 The first-publish ngit wizard used to take over the **Code** tab for any
