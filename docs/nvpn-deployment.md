@@ -203,9 +203,10 @@ If all six are green, your station is ready to host a mesh.
 
 ## nvpn 4.x behavioural notes
 
-The pinned binary jumped from 0.3.12 → 4.0.37 in the 2026-05-19 release.
-Two behaviours changed that aren't bugs but will surprise users coming
-from older docs or older installs.
+The pinned binary jumped from 0.3.12 → 4.0.37 in the 2026-05-19 release,
+and now tracks the 4.0.x line (current pin 4.0.48). Two behaviours
+changed at the 4.x boundary that aren't bugs but will surprise users
+coming from older docs or older installs.
 
 ### Exit-node leak protection (v4.0.1+)
 

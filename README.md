@@ -391,7 +391,7 @@ Six sub-tabs in the panel:
 The first-run wizard explicitly asks if you want nvpn with a *Skip for
 now* button right next to *Install*. Default answer is Skip. Installs
 are sha256-pinned and pin-bumped deliberately — current pin
-`v4.0.37`+.
+`v4.0.48`+.
 
 For deployment topologies (cloud VM vs home server vs container), how to
 verify each layer of the stack, and the common failure modes, see
