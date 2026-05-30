@@ -10,8 +10,14 @@
  *   3. authorize — ONE kind:24242 batch token covering all blob hashes
  *   4. upload   — PUT each blob to the effective Blossom servers
  *   5. manifest — publish kind:35128 (NIP-5A v2 named site, d=<slug>)
- *   6. announce — refresh the kind:30617 repo announcement's `web` tag
- *   7. url      — base36(pubkey)+slug+gateway → persist + log
+ *   6. url      — base36(pubkey)+slug+gateway → persist + log
+ *
+ * Deploy deliberately does NOT touch the repo's kind:30617 announcement.
+ * The nsite advertises itself through its own kind:35128 manifest (the
+ * "deployed an nsite" event); the repo announcement owns the repo link.
+ * Overloading the announcement's `web` tag with the deployed URL conflated
+ * those two, so the repo card pointed at the running app instead of the
+ * repo browser — we keep the two concerns separate.
  *
  * Signing and relay-publishing are INJECTED (DeployDeps) so this module
  * stays free of bunker/identity/websocket imports and is unit-testable
@@ -27,7 +33,7 @@
 import fs from 'fs';
 import path from 'path';
 import { sha256Hex, buildUploadAuthTemplate, uploadBlobs, type BlobToUpload, type BlobUploadResult } from './blossom-upload.js';
-import { CLIENT_TAG, stampClientTag } from './client-tag.js';
+import { CLIENT_TAG } from './client-tag.js';
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 
@@ -36,7 +42,6 @@ import { CLIENT_TAG, stampClientTag } from './client-tag.js';
 export const DEFAULT_NSITE_GATEWAY = 'nsite.lol';
 
 const NSITE_MANIFEST_KIND_NAMED = 35128;  // NIP-5A v2 named manifest
-const REPO_ANNOUNCE_KIND        = 30617;  // NIP-34 repo announcement
 const MAX_FILE_BYTES            = 100 * 1024 * 1024;  // 100 MiB per-file ceiling
 
 // ── Injected dependencies ────────────────────────────────────────────────────
@@ -63,7 +68,7 @@ export interface DeployInput {
   projectPath: string;
   /** Site title — slugified into the kind:35128 `d` tag and the URL path. */
   siteTitle: string;
-  /** Optional description → manifest + 30617 `description` tags. */
+  /** Optional description → manifest `description` tag. */
   description?: string;
   /** Effective Blossom upload targets (https://…). */
   blossomServers: string[];
@@ -78,8 +83,6 @@ export interface DeployInput {
   gateway?: string;
   /** nostr:// source coordinate for the manifest `source` tag (optional). */
   source?: string;
-  /** Prior 30617 announcement to carry through + refresh, if known. */
-  priorAnnounce?: { tags: string[][]; content: string } | null;
   /** Progress sink — drives the SSE stream. */
   onProgress?: (line: string) => void;
 }
@@ -90,7 +93,6 @@ export interface DeployResult {
   fileCount: number;
   blobCount: number;
   manifest: { event: SignedEvent; publish: RelayPublishOutcome[]; accepted: number };
-  announce: { event: SignedEvent; publish: RelayPublishOutcome[]; accepted: number } | null;
   uploads: BlobUploadResult[];
 }
 
@@ -323,31 +325,6 @@ export function buildManifestTemplate(input: ManifestInput): { kind: number; cre
   };
 }
 
-/**
- * Refresh a prior 30617 announcement's `web` tag to point at the freshly
- * deployed URL, preserving every other tag. When there's no prior event we
- * return null — the deploy route falls back to the dedicated announce flow
- * (which knows how to construct a 30617 from scratch). Pure.
- */
-export function refreshAnnounceWebTag(
-  prior: { tags: string[][]; content: string },
-  url: string,
-): { tags: string[][]; content: string } {
-  const tags = prior.tags
-    .filter(t => Array.isArray(t) && t[0] !== 'web')
-    .map(t => t.slice());
-  tags.push(['web', url]);
-  // Stamp the NIP-89 client tag (4-element form → links to the kind-31990
-  // handler) if a nostr-station client tag isn't already present. We're the
-  // one republishing this 30617, so the deploy is attributable to
-  // nostr-station — mirroring shakespeare.diy. We DON'T strip an existing
-  // client tag from another client: both can coexist, preserving provenance.
-  // Note: ngit-CLI-generated 30617s carry no client tag at all, which is
-  // why a freshly `ngit push`ed repo shows none until its first deploy.
-  stampClientTag(tags);
-  return { tags, content: prior.content };
-}
-
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
 /**
@@ -417,36 +394,15 @@ export async function deployFiles(
     throw new Error('site manifest was rejected by every relay — nsite would not resolve');
   }
 
-  // (6) Refresh the 30617 web tag (only when we have a prior to carry through).
-  let announce: DeployResult['announce'] = null;
-  if (input.priorAnnounce) {
-    try {
-      const refreshed = refreshAnnounceWebTag(input.priorAnnounce, url);
-      const annTpl = {
-        kind: REPO_ANNOUNCE_KIND,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: refreshed.tags,
-        content: refreshed.content,
-      };
-      log('refreshing repo announcement web tag (kind 30617)…');
-      const annEvent = await deps.signEvent(annTpl);
-      const annPublish = await deps.publish(annEvent, input.relays);
-      announce = { event: annEvent, publish: annPublish, accepted: annPublish.filter(r => r.ok).length };
-      log(`announcement accepted by ${announce.accepted}/${annPublish.length} relays`);
-    } catch (e: any) {
-      // Non-fatal: the site is already live via the manifest. Surface but
-      // don't fail the deploy.
-      log(`warning: web-tag refresh failed (${e?.message || e}) — site is still live`);
-    }
-  }
-
+  // Deploy stops at the manifest. The repo's kind:30617 announcement is left
+  // untouched — its `web` tag belongs to the repo browser, not the deployed
+  // site (which is already advertised by the manifest above).
   log(`done → ${url}`);
   return {
     url, slug,
     fileCount: files.length,
     blobCount: blobs.length,
     manifest: { event: manifestEvent, publish: manifestPublish, accepted: manifestAccepted },
-    announce,
     uploads,
   };
 }

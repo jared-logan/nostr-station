@@ -21,11 +21,10 @@ import { spawn } from 'child_process';
 import { nip19 } from 'nostr-tools';
 import type { Project } from '../projects.js';
 import { updateProject, projectEnvContract } from '../projects.js';
-import { readIdentity, getGraspServers, isValidRelayUrl } from '../identity.js';
+import { readIdentity } from '../identity.js';
 import { readNsiteConfig, effectiveDeployBlossomServers, effectiveDeployRelays } from '../nsite-config.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { publishEventToRelays } from './repo.js';
-import { queryRelays } from '../nostr-query.js';
 import { detectBuildCommand } from '../ai-tools/build.js';
 import {
   deployFiles, resolveBuildDir, walkBuildDir, withSpaFallbacks, ngitRemoteDTag,
@@ -34,7 +33,6 @@ import {
 import { readBody } from './_shared.js';
 
 const REPO_ANNOUNCE_KIND      = 30617;
-const RELAY_QUERY_TIMEOUT_MS  = 8_000;
 const BUILD_TIMEOUT_MS        = 600_000;  // 10 min ceiling for big builds
 const SIGN_TIMEOUT_MS         = 60_000;   // Amber round-trip budget per event
 
@@ -119,8 +117,8 @@ export async function handleProjectsNsiteDeploy(
     if (servers.length === 0) { fail('no Blossom servers configured for deploy (Config → nsite deploy)'); return true; }
     if (relays.length === 0)  { fail('no relays configured for deploy (Config → nsite deploy)'); return true; }
 
-    // ── Prior 30617 (to refresh its web tag) + source coordinate ─────────
-    const { priorAnnounce, source } = await resolvePriorAnnounce(project, ownerHex);
+    // ── Manifest source coordinate (deploy never touches the 30617) ──────
+    const source = resolveSourceCoordinate(project, ownerHex);
 
     // ── Wire signing + publishing into the pure pipeline ─────────────────
     const deps: DeployDeps = {
@@ -149,7 +147,6 @@ export async function handleProjectsNsiteDeploy(
       ownerPubkeyHex: ownerHex,
       gateway,
       source,
-      priorAnnounce,
       onProgress: (l) => log(l),
     }, deps);
 
@@ -200,63 +197,34 @@ function runBuildStreaming(
   });
 }
 
-// ── Prior 30617 lookup ───────────────────────────────────────────────────────
-
-interface PriorResult {
-  priorAnnounce: { tags: string[][]; content: string } | null;
-  source:        string | undefined;
-}
+// ── Manifest source coordinate ───────────────────────────────────────────────
 
 /**
- * Fetch the project's existing kind:30617 announcement so the deploy can
- * refresh its `web` tag in place (preserving clone/relays/maintainers/etc).
- * Derives the manifest `source` coordinate from the project's ngit remote
- * when available. Best-effort: any failure yields a null prior (the deploy
- * still publishes the manifest; it just won't touch the 30617).
+ * Derive the manifest `source` coordinate (a nostr:// URL) from the project's
+ * ngit remote, when one exists — purely to stamp provenance on the kind:35128
+ * manifest. Deploy does NOT read or modify the repo's kind:30617 announcement,
+ * so there's no relay lookup here. Returns undefined for no decodable remote.
  */
-async function resolvePriorAnnounce(project: Project, ownerHex: string): Promise<PriorResult> {
+function resolveSourceCoordinate(project: Project, ownerHex: string): string | undefined {
   const remote = project.remotes?.ngit || '';
-  let identifier = '';
-  let source: string | undefined;
 
-  // Decode (pubkey, d-tag) from the ngit remote — same shapes repo.ts handles.
   if (remote.startsWith('naddr1')) {
     try {
       const d = nip19.decode(remote);
-      if (d.type === 'naddr' && d.data.kind === REPO_ANNOUNCE_KIND) identifier = d.data.identifier;
+      if (d.type === 'naddr' && d.data.kind === REPO_ANNOUNCE_KIND) {
+        const npub = ident_npubOf(ownerHex);
+        return npub ? `nostr://${npub}/${d.data.identifier}` : undefined;
+      }
     } catch {}
-  } else if (remote.startsWith('nostr://')) {
-    // The d-tag is the LAST path segment for both the 2-part and 3-part
-    // (relay-host) ngit remote shapes — see ngitRemoteDTag. The full
-    // nostr:// path is kept as `source` (matches Shakespeare's coordinate).
-    const dtag = ngitRemoteDTag(remote);
-    if (dtag) { identifier = dtag; source = remote; }
+    return undefined;
   }
-  if (!identifier) return { priorAnnounce: null, source };
-  if (!source && ident_npubOf(ownerHex)) source = `nostr://${ident_npubOf(ownerHex)}/${identifier}`;
-
-  const relays = [
-    ...getGraspServers().map(s => /^wss?:/i.test(s) ? s : `wss://${s}`),
-    ...(project.readRelays || []),
-  ].filter(isValidRelayUrl).filter((r, i, a) => a.indexOf(r) === i).slice(0, 8);
-  if (relays.length === 0) return { priorAnnounce: null, source };
-
-  try {
-    const r = await queryRelays({
-      filter: { kinds: [REPO_ANNOUNCE_KIND], authors: [ownerHex], tags: { d: identifier }, limit: 1 },
-      relays,
-      timeoutMs: RELAY_QUERY_TIMEOUT_MS,
-      stream: false,
-      acceptUntil: (evs) => evs.length >= 1,
-    });
-    let prior: any = null;
-    for (const ev of r.events) {
-      if (ev.kind !== REPO_ANNOUNCE_KIND) continue;
-      if (!prior || ev.created_at > prior.created_at) prior = ev;
-    }
-    if (prior) return { priorAnnounce: { tags: prior.tags, content: prior.content || '' }, source };
-  } catch { /* non-fatal */ }
-  return { priorAnnounce: null, source };
+  if (remote.startsWith('nostr://')) {
+    // The full nostr:// path is the source coordinate (matches Shakespeare).
+    // ngitRemoteDTag also validates the shape (and yields the d-tag) — we
+    // only keep the remote as `source` when it decodes to a real d-tag.
+    return ngitRemoteDTag(remote) ? remote : undefined;
+  }
+  return undefined;
 }
 
 function ident_npubOf(hex: string): string | null {
