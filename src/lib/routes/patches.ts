@@ -441,12 +441,18 @@ function decodeNgitRemote(project: Project): RepoCoords | null {
     } catch { return null; }
   }
   if (remote.startsWith('nostr://')) {
+    // d-tag is the FINAL path segment; segments between the npub and it are
+    // embedded relay hints. See the longer note in repo.ts decodeNgitRemote.
     const m = remote.match(/^nostr:\/\/(npub1[0-9a-z]+)\/(.+)$/);
     if (!m) return null;
     try {
       const d = nip19.decode(m[1]);
       if (d.type !== 'npub' || typeof d.data !== 'string') return null;
-      return { pubkey: d.data, identifier: m[2], relayHints: [] };
+      const segs = m[2].split('/').filter(Boolean);
+      if (segs.length === 0) return null;
+      const identifier = segs[segs.length - 1];
+      const relayHints = segs.slice(0, -1).map(h => `wss://${h.replace(/^wss?:\/\//, '')}`);
+      return { pubkey: d.data, identifier, relayHints };
     } catch { return null; }
   }
   return null;

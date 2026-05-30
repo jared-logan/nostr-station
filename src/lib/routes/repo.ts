@@ -210,7 +210,7 @@ interface RepoCoords {
  * ngit remote or the value can't be decoded — that's the local-only /
  * unpublished state.
  */
-function decodeNgitRemote(project: Project): RepoCoords | null {
+export function decodeNgitRemote(project: Project): RepoCoords | null {
   const remote = project.remotes?.ngit ?? '';
   if (!remote) return null;
   if (remote.startsWith('naddr1')) {
@@ -225,15 +225,24 @@ function decodeNgitRemote(project: Project): RepoCoords | null {
     } catch { return null; }
   }
   if (remote.startsWith('nostr://')) {
-    // Per ngit, `nostr://<npub-or-nip05>/<d-tag>` is the canonical form.
-    // Accept only the npub form here — NIP-05 resolution would require
-    // an extra .well-known fetch we'd rather defer.
+    // ngit's nostr remote is `nostr://<npub>[/<relay-host>…]/<d-tag>` — the
+    // d-tag is the FINAL path segment; any segments BETWEEN the npub and it
+    // are embedded relay hints (the GRASP host the repo lives on). Taking
+    // the whole post-npub path as the d-tag is wrong: for a 3-part remote
+    // it yields `relay.ngit.dev/<repo>` instead of `<repo>`, forking every
+    // lookup (and re-announce) onto a phantom coordinate — the exact bug
+    // that produced a duplicate repo on gitworkshop. NIP-05 npub-or-nip05
+    // forms aside, accept only the npub form (NIP-05 would need a fetch).
     const m = remote.match(/^nostr:\/\/(npub1[0-9a-z]+)\/(.+)$/);
     if (!m) return null;
     try {
       const d = nip19.decode(m[1]);
       if (d.type !== 'npub' || typeof d.data !== 'string') return null;
-      return { pubkey: d.data, identifier: m[2], relayHints: [] };
+      const segs = m[2].split('/').filter(Boolean);
+      if (segs.length === 0) return null;
+      const identifier = segs[segs.length - 1];
+      const relayHints = segs.slice(0, -1).map(h => `wss://${h.replace(/^wss?:\/\//, '')}`);
+      return { pubkey: d.data, identifier, relayHints };
     } catch { return null; }
   }
   return null;
