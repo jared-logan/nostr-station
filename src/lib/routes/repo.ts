@@ -304,7 +304,12 @@ async function readPublishState(project: Project): Promise<any> {
     } catch { /* no origin */ }
   }
   const grasp = getGraspServers().filter(isValidRelayUrl);
-  const suggestedGraspServer = grasp[0] ?? 'wss://relay.ngit.dev';
+  // Singular kept for back-compat; plural is the full Config-panel grasp
+  // list so the publish wizard can inherit ALL configured servers (a repo
+  // announced to multiple grasp servers gets redundancy + wider discovery)
+  // rather than just the first one.
+  const suggestedGraspServer  = grasp[0] ?? 'wss://relay.ngit.dev';
+  const suggestedGraspServers = grasp.length ? grasp : ['wss://relay.ngit.dev'];
 
   // State derivation:
   //   published       → has an ngit remote (we can compute coordinates)
@@ -324,6 +329,7 @@ async function readPublishState(project: Project): Promise<any> {
     detectedBranch,
     suggestedHashtags,
     suggestedGraspServer,
+    suggestedGraspServers,
   };
 }
 

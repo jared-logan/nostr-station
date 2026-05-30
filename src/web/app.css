@@ -5776,6 +5776,7 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
   display: flex; gap: 6px; margin-bottom: 6px;
 }
 .field-row input { flex: 1; }
+.field-row textarea { flex: 1; resize: vertical; font-family: var(--font-mono); font-size: 12px; }
 
 .checkbox-row {
   display: inline-flex; align-items: center; gap: 6px;
