@@ -306,3 +306,75 @@ test('writeNsiteConfig: omitting bookmarks preserves the existing list', () => {
   const r = writeNsiteConfig({ contentRelays: ['wss://example'] });
   assert.equal(r.bookmarks.length, 1, 'editing a different field must not clear bookmarks');
 });
+
+// ── deploy targets (App / Your model + effective union) ──────────────────────
+
+const {
+  effectiveDeployBlossomServers, effectiveDeployRelays,
+} = mod;
+
+test('defaultNsiteConfig: deploy lists empty, app toggles on', () => {
+  const d = defaultNsiteConfig();
+  assert.deepEqual(d.deployBlossomServers, []);
+  assert.deepEqual(d.deployRelays, []);
+  assert.equal(d.deployBlossomAppEnabled, true);
+  assert.equal(d.deployRelayAppEnabled, true);
+});
+
+test('effectiveDeployBlossomServers: app defaults when user list empty + toggle on', () => {
+  const cfg = defaultNsiteConfig();
+  const eff = effectiveDeployBlossomServers(cfg);
+  assert.ok(eff.includes('https://blossom.ditto.pub'));
+  assert.ok(eff.length >= 3);
+});
+
+test('effectiveDeployBlossomServers: user list first, app defaults unioned after', () => {
+  const cfg = { ...defaultNsiteConfig(), deployBlossomServers: ['https://my.blossom'] };
+  const eff = effectiveDeployBlossomServers(cfg);
+  assert.equal(eff[0], 'https://my.blossom');
+  assert.ok(eff.includes('https://blossom.ditto.pub'));
+});
+
+test('effectiveDeployBlossomServers: toggle off → user list alone', () => {
+  const cfg = { ...defaultNsiteConfig(), deployBlossomServers: ['https://my.blossom'], deployBlossomAppEnabled: false };
+  assert.deepEqual(effectiveDeployBlossomServers(cfg), ['https://my.blossom']);
+});
+
+test('effectiveDeployBlossomServers: toggle off + empty user list → falls back to defaults (never zero targets)', () => {
+  const cfg = { ...defaultNsiteConfig(), deployBlossomServers: [], deployBlossomAppEnabled: false };
+  const eff = effectiveDeployBlossomServers(cfg);
+  assert.ok(eff.length >= 3, 'a deploy must never have zero blossom targets');
+});
+
+test('effectiveDeployBlossomServers: dedupes user/app overlap case-insensitively', () => {
+  const cfg = { ...defaultNsiteConfig(), deployBlossomServers: ['https://blossom.ditto.pub'] };
+  const eff = effectiveDeployBlossomServers(cfg);
+  assert.equal(eff.filter(s => s.toLowerCase() === 'https://blossom.ditto.pub').length, 1);
+});
+
+test('effectiveDeployRelays: app defaults include the gateway relay', () => {
+  const eff = effectiveDeployRelays(defaultNsiteConfig());
+  assert.ok(eff.includes('wss://relay.nsite.lol'));
+});
+
+test('readNsiteConfig: round-trips deploy fields + toggles', () => {
+  rmCfg();
+  writeNsiteConfig({
+    deployBlossomServers: ['https://a.blossom', 'not-a-url', 'https://b.blossom'],
+    deployRelays: ['wss://r.one', 'http://bad'],
+    deployBlossomAppEnabled: false,
+    deployRelayAppEnabled: true,
+  });
+  const c = readNsiteConfig();
+  assert.deepEqual(c.deployBlossomServers, ['https://a.blossom', 'https://b.blossom']); // bad row dropped
+  assert.deepEqual(c.deployRelays, ['wss://r.one']);                                    // non-wss dropped
+  assert.equal(c.deployBlossomAppEnabled, false);
+  assert.equal(c.deployRelayAppEnabled, true);
+});
+
+test('writeNsiteConfig: empty deploy array clears the user list', () => {
+  rmCfg();
+  writeNsiteConfig({ deployBlossomServers: ['https://x.blossom'] });
+  const cleared = writeNsiteConfig({ deployBlossomServers: [] });
+  assert.deepEqual(cleared.deployBlossomServers, []);
+});

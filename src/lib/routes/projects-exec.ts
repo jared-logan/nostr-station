@@ -5,12 +5,14 @@
  *
  *   POST /api/projects/:id/stacks/deploy — SSE: npm run deploy (mkstack)
  *   POST /api/projects/:id/exec          — SSE: whitelisted read-only commands
- *   POST /api/projects/:id/nsite/deploy  — SSE: nostr-station nsite deploy --yes
  *
- * All three use the shared streamExec helper to wrap a child process in
- * the dashboard's SSE exec-modal protocol. The `exec` route is the only
- * one that takes a JSON body (`{ cmd }`); the others read project context
- * directly.
+ * (nsite/deploy moved to projects-nsite-deploy.ts — the native in-process
+ * pipeline replaced the old `nostr-station nsite deploy --yes` shell-out.)
+ *
+ * Both verbs here use the shared streamExec helper to wrap a child process
+ * in the dashboard's SSE exec-modal protocol. The `exec` route is the only
+ * one that takes a JSON body (`{ cmd }`); stacks/deploy reads project
+ * context directly.
  *
  * Contract identical to handleProjects: returns true iff a response was
  * written; false lets the parent fall through.
@@ -20,7 +22,7 @@ import { isStacksProject, projectEnvContract } from '../projects.js';
 import type { Project } from '../projects.js';
 import {
   readBody, streamExec, streamExecError,
-  CLI_BIN, type CmdSpec,
+  type CmdSpec,
 } from './_shared.js';
 
 export async function handleProjectsExec(
@@ -76,23 +78,8 @@ export async function handleProjectsExec(
     return true;
   }
 
-  if (tail === 'nsite/deploy' && method === 'POST') {
-    const cwd = project.path || process.cwd();
-    streamExec(
-      // timeoutMs:0 — Blossom uploads + relay publishes for a real
-      // site can legitimately span minutes; the consecutive-line
-      // cap inside streamExec still guards against retry-loop
-      // floods regardless.
-      {
-        bin: process.execPath,
-        args: [CLI_BIN, 'nsite', 'deploy', '--yes'],
-        env: { NO_COLOR: '1', TERM: 'dumb', ...projectEnvContract(project) },
-        timeoutMs: 0,
-      },
-      res, req, cwd,
-    );
-    return true;
-  }
+  // nsite/deploy is handled natively by projects-nsite-deploy.ts (the
+  // in-process pipeline), dispatched ahead of this module in projects.ts.
 
   return false;
 }
