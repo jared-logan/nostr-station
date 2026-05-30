@@ -274,3 +274,96 @@ export async function uploadBlobs(opts: UploadBlobsOptions): Promise<BlobUploadR
   await Promise.all(workers);
   return results;
 }
+
+// ── Post-deploy verification ─────────────────────────────────────────────────
+//
+// Re-fetch each deployed blob's headers from the configured servers to
+// confirm it's actually retrievable AND served with the Content-Type we
+// expect. This catches the failure modes that "the upload returned 201"
+// can't: a server that accepted the bytes but serves them as text/plain
+// (so a browser refuses to apply the CSS), or a blob that's present on
+// zero servers a gateway would consult. Read-only — no auth needed.
+
+export interface BlobVerifyOutcome {
+  server:       string;
+  ok:           boolean;       // 200 with bytes present
+  status?:      number;
+  contentType?: string | null;
+  /** True when the served Content-Type's base type doesn't match expected. */
+  mimeMismatch: boolean;
+}
+
+export interface BlobVerifyResult {
+  sha256:       string;
+  path?:        string;
+  expectedMime: string;
+  servers:      BlobVerifyOutcome[];
+  /** Available on ≥1 server. */
+  available:    boolean;
+  /** Available somewhere, but NO server serves the expected base MIME — the
+   *  signature of "asset loads but the browser won't apply it". */
+  mimeProblem:  boolean;
+}
+
+/** Compare just the base type (`text/css` vs `text/css; charset=utf-8`). */
+function baseMime(ct: string | null | undefined): string {
+  return String(ct || '').split(';')[0].trim().toLowerCase();
+}
+
+export interface VerifyBlobsOptions {
+  servers:    string[];
+  blobs:      Array<{ sha256: string; path?: string; mime: string }>;
+  timeoutMs?: number;
+  concurrency?: number;
+}
+
+/**
+ * GET each blob from each server and report availability + Content-Type.
+ * Uses GET (not HEAD) because some Blossom servers omit Content-Type on
+ * HEAD; we read only the headers and discard the body. Never throws.
+ */
+export async function verifyDeployedBlobs(opts: VerifyBlobsOptions): Promise<BlobVerifyResult[]> {
+  const servers     = opts.servers.map(normalizeServer).filter(Boolean);
+  const timeoutMs   = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
+  const total       = opts.blobs.length;
+  const results: BlobVerifyResult[] = new Array(total);
+  let next = 0;
+
+  const checkOne = async (server: string, sha: string, expectedBase: string): Promise<BlobVerifyOutcome> => {
+    try {
+      const res = await fetchWithTimeout(`${server}/${sha}`, { method: 'GET' }, timeoutMs);
+      const ct  = res.headers.get('content-type');
+      try { await res.arrayBuffer(); } catch {} // drain so the socket frees
+      const ok = res.status === 200;
+      return {
+        server, ok, status: res.status, contentType: ct,
+        mimeMismatch: ok && !!expectedBase && baseMime(ct) !== expectedBase,
+      };
+    } catch (e: any) {
+      return { server, ok: false, error: e?.name === 'AbortError' ? 'timeout' : (e?.message || String(e)), mimeMismatch: false } as any;
+    }
+  };
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = next++;
+      if (i >= total) return;
+      const b = opts.blobs[i];
+      const expectedBase = baseMime(b.mime);
+      const outcomes = await Promise.all(servers.map(s => checkOne(s, b.sha256, expectedBase)));
+      const available = outcomes.some(o => o.ok);
+      results[i] = {
+        sha256: b.sha256, path: b.path, expectedMime: b.mime,
+        servers: outcomes,
+        available,
+        // A MIME problem only matters if the asset is otherwise available
+        // and NO server serves it with the right type.
+        mimeProblem: available && outcomes.filter(o => o.ok).every(o => o.mimeMismatch),
+      };
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+  return results;
+}

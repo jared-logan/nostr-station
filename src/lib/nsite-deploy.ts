@@ -26,7 +26,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { sha256Hex, buildUploadAuthTemplate, uploadBlobs, type BlobToUpload, type BlobUploadResult } from './blossom-upload.js';
+import { sha256Hex, buildUploadAuthTemplate, uploadBlobs, verifyDeployedBlobs, type BlobToUpload, type BlobUploadResult } from './blossom-upload.js';
 import { CLIENT_TAG, stampClientTag } from './client-tag.js';
 
 // ── Tunables ────────────────────────────────────────────────────────────────
@@ -82,6 +82,9 @@ export interface DeployInput {
   priorAnnounce?: { tags: string[][]; content: string } | null;
   /** Progress sink — drives the SSE stream. */
   onProgress?: (line: string) => void;
+  /** Run the post-upload availability/Content-Type verification (default
+   *  true). Tests against mock servers set false to stay hermetic. */
+  verify?: boolean;
 }
 
 export interface DeployResult {
@@ -401,6 +404,33 @@ export async function deployFiles(
       `${failed.length}/${uploads.length} blobs failed to upload to any server` +
       ` (first: ${failed[0].path || failed[0].sha256.slice(0, 12)})`,
     );
+  }
+
+  // (4b) Verify — re-fetch each blob's headers and flag availability /
+  // Content-Type problems. Non-fatal: the site is uploaded either way, but
+  // a mime mismatch ("served as text/plain, browser won't apply the CSS")
+  // is exactly the kind of silent post-deploy issue worth surfacing.
+  if (input.verify !== false) {
+    try {
+      const checks = await verifyDeployedBlobs({
+        servers: input.blossomServers,
+        blobs: blobs.map(b => ({ sha256: b.sha256, path: b.path, mime: b.mime })),
+      });
+      const unavailable = checks.filter(c => !c.available);
+      const mimeProblems = checks.filter(c => c.mimeProblem);
+      for (const c of unavailable) {
+        log(`⚠ warning: ${c.path || c.sha256.slice(0, 12)} is not retrievable from any server`);
+      }
+      for (const c of mimeProblems) {
+        const served = c.servers.find(s => s.ok)?.contentType || 'unknown';
+        log(`⚠ warning: ${c.path || c.sha256.slice(0, 12)} served as "${served}" (expected ${c.expectedMime}) — browsers may refuse to apply it`);
+      }
+      if (unavailable.length === 0 && mimeProblems.length === 0) {
+        log(`verified ${checks.length} assets retrievable with correct content types`);
+      }
+    } catch (e: any) {
+      log(`note: post-deploy verification skipped (${e?.message || e})`);
+    }
   }
 
   // (5) Manifest.

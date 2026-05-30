@@ -267,10 +267,22 @@ test('refreshAnnounceWebTag: idempotent — does not double-stamp on re-deploy',
 import http from 'node:http';
 import { verifyEvent } from 'nostr-tools/pure';
 
-function startBlossomMock(store = new Map<string, Buffer>()) {
+// Mock Blossom server. `mimeFor` lets a test control the Content-Type the
+// server replies with on GET (to exercise the post-deploy verification);
+// default echoes a sensible type by sniffing the stored path is not known,
+// so tests pass an explicit override when they care.
+function startBlossomMock(store = new Map<string, Buffer>(), mimeFor?: (sha: string) => string) {
   const server = http.createServer((req, res) => {
     const p = (req.url || '/').replace(/^\//, '');
     if (req.method === 'HEAD') { res.writeHead(store.has(p) ? 200 : 404); res.end(); return; }
+    if (req.method === 'GET') {
+      const buf = store.get(p);
+      if (!buf) { res.writeHead(404); res.end(); return; }
+      const ct = mimeFor ? mimeFor(p) : 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': ct });
+      res.end(buf);
+      return;
+    }
     if (req.method === 'PUT' && p === 'upload') {
       const chunks: Buffer[] = [];
       req.on('data', c => chunks.push(c));
@@ -322,6 +334,7 @@ test('deployFiles: signs, uploads, publishes manifest, returns deterministic URL
     ownerPubkeyHex: pk,
     priorAnnounce: { tags: [['d', 'nostr-vm'], ['name', 'NostrVM'], ['web', 'https://old']], content: '' },
     onProgress: (l) => lines.push(l),
+    verify: false,  // pipeline test — verification has its own tests below
   }, deps);
 
   try {
@@ -374,7 +387,7 @@ test('deployFiles: no priorAnnounce → no 30617 (manifest only)', async () => {
 
   const result = await deployFiles(files, {
     projectPath: '/tmp/x', siteTitle: 'Solo', blossomServers: [`http://127.0.0.1:${port}`],
-    relays: ['wss://relay.test'], ownerPubkeyHex: pk,
+    relays: ['wss://relay.test'], ownerPubkeyHex: pk, verify: false,
   }, deps);
 
   try {

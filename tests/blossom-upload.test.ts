@@ -12,6 +12,7 @@ const {
   buildUploadAuthTemplate,
   encodeAuthHeader,
   uploadBlobs,
+  verifyDeployedBlobs,
   UPLOAD_AUTH_TTL_S,
   // @ts-expect-error — runtime import of .ts
 } = await import('../src/lib/blossom-upload.ts');
@@ -259,4 +260,67 @@ test('uploadBlobs: tolerates trailing slashes on server URLs', async () => {
   const results = await uploadBlobs({ servers: [`${s1.url}/`], blobs, authEvent: auth });
   assert.equal(results[0].ok, true);
   assert.ok(s1.store.has(blobs[0].sha256));
+});
+
+// ── verifyDeployedBlobs ──────────────────────────────────────────────────────
+// A tiny GET-serving Blossom mock whose Content-Type per blob is scriptable,
+// so we can exercise availability + mime-mismatch detection deterministically.
+
+function startVerifyMock(blobs: Array<{ sha: string; ct: string | null; present?: boolean }>): Promise<MockServer> {
+  const map = new Map(blobs.map(b => [b.sha, b]));
+  const server = http.createServer((req, res) => {
+    const sha = (req.url || '/').replace(/^\//, '');
+    const b = map.get(sha);
+    if (!b || b.present === false) { res.writeHead(404); res.end(); return; }
+    const headers: Record<string, string> = {};
+    if (b.ct) headers['Content-Type'] = b.ct;
+    res.writeHead(200, headers);
+    res.end(Buffer.from('x'));
+  });
+  return new Promise(resolve => {
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address() as any;
+      resolve({ url: `http://127.0.0.1:${addr.port}`, store: new Map(), calls: { head: 0, put: 0 }, close: () => new Promise<void>(r => server.close(() => r())) } as any);
+    });
+  });
+}
+
+test('verifyDeployedBlobs: reports available + correct mime as clean', async () => {
+  const css = 'aa'.repeat(32), js = 'bb'.repeat(32);
+  const s1 = await startVerifyMock([{ sha: css, ct: 'text/css; charset=utf-8' }, { sha: js, ct: 'text/javascript' }]);
+  servers.push(s1);
+  const out = await verifyDeployedBlobs({
+    servers: [s1.url],
+    blobs: [{ sha256: css, path: '/app.css', mime: 'text/css' }, { sha256: js, path: '/app.js', mime: 'text/javascript' }],
+  });
+  assert.ok(out.every((r: any) => r.available && !r.mimeProblem));
+});
+
+test('verifyDeployedBlobs: flags a mime mismatch (served as text/plain)', async () => {
+  // The exact "CSS present but browser refuses to apply it" symptom.
+  const css = 'cc'.repeat(32);
+  const s1 = await startVerifyMock([{ sha: css, ct: 'text/plain' }]);
+  servers.push(s1);
+  const out = await verifyDeployedBlobs({ servers: [s1.url], blobs: [{ sha256: css, path: '/app.css', mime: 'text/css' }] });
+  assert.equal(out[0].available, true);
+  assert.equal(out[0].mimeProblem, true);
+});
+
+test('verifyDeployedBlobs: NOT a mime problem if ANY server serves the right type', async () => {
+  const css = 'dd'.repeat(32);
+  const bad  = await startVerifyMock([{ sha: css, ct: 'text/plain' }]);
+  const good = await startVerifyMock([{ sha: css, ct: 'text/css' }]);
+  servers.push(bad, good);
+  const out = await verifyDeployedBlobs({ servers: [bad.url, good.url], blobs: [{ sha256: css, path: '/app.css', mime: 'text/css' }] });
+  assert.equal(out[0].available, true);
+  assert.equal(out[0].mimeProblem, false);
+});
+
+test('verifyDeployedBlobs: flags unavailable blob (404 everywhere)', async () => {
+  const missing = 'ee'.repeat(32);
+  const s1 = await startVerifyMock([{ sha: missing, ct: 'text/css', present: false }]);
+  servers.push(s1);
+  const out = await verifyDeployedBlobs({ servers: [s1.url], blobs: [{ sha256: missing, path: '/gone.css', mime: 'text/css' }] });
+  assert.equal(out[0].available, false);
+  assert.equal(out[0].mimeProblem, false); // unavailable ≠ mime problem
 });
