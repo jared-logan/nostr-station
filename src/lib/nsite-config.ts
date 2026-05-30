@@ -23,6 +23,8 @@ import { atomicWriteJson } from './atomic-write.js';
 import {
   DEFAULT_CONTENT_RELAYS,
   DEFAULT_BLOSSOM_SERVERS,
+  DEFAULT_DEPLOY_BLOSSOM_SERVERS,
+  DEFAULT_DEPLOY_RELAYS,
   DEFAULT_NSIT_INDEXER_PUBKEY,
   DEFAULT_NSIT_INDEXER_RELAYS,
   PROFILE_DISCOVERY_RELAYS,
@@ -39,6 +41,25 @@ export interface NsiteConfig {
   nsitIndexerPubkey:    string;
   /** Relays the NSIT indexer publishes to. */
   nsitIndexerRelays:    string[];
+
+  // ── nsite DEPLOY (publish-side) ───────────────────────────────────────
+  // Separate from the browsing fields above. These govern where THIS
+  // station publishes its OWN nsites: the Blossom servers it uploads
+  // file blobs to and the relays it publishes the kind:35128 manifest to.
+  // Each pairs an app-default list (toggleable) with the user's own list,
+  // mirroring the Client Relays "App Relays / Your Relays" model. The
+  // effective target set is computed by effectiveDeployBlossomServers() /
+  // effectiveDeployRelays() below.
+
+  /** User's own Blossom upload targets ("Your Blossom Servers"). May be a
+   *  kind:10063 list synced in from Nostr or hand-edited. */
+  deployBlossomServers:    string[];
+  /** When true (default), DEFAULT_DEPLOY_BLOSSOM_SERVERS are unioned in. */
+  deployBlossomAppEnabled: boolean;
+  /** User's own manifest-publish relays ("Your Relays" for deploy). */
+  deployRelays:            string[];
+  /** When true (default), DEFAULT_DEPLOY_RELAYS are unioned in. */
+  deployRelayAppEnabled:   boolean;
   /** Author pubkeys (64-hex) the user has explicitly allowed to load external
    *  HTTPS resources (esm.sh modules, nostr.build images, fonts, fetch
    *  endpoints). When an nsite's resolved pubkey is in this list, the
@@ -100,7 +121,49 @@ export function defaultNsiteConfig(): NsiteConfig {
     nsitIndexerRelays:     DEFAULT_NSIT_INDEXER_RELAYS.slice(),
     trustedExternalNsites: [],
     bookmarks:             [],
+    // Deploy: user lists start empty (app defaults carry the load until
+    // the user adds or syncs their own). App toggles default ON so deploy
+    // works out of the box.
+    deployBlossomServers:    [],
+    deployBlossomAppEnabled: true,
+    deployRelays:            [],
+    deployRelayAppEnabled:   true,
   };
+}
+
+/** Effective Blossom upload targets for a deploy: the user's own list,
+ *  unioned with the app defaults when the app toggle is on. De-duped,
+ *  app defaults last so a user's preferred server is tried first.
+ *  Falls back to app defaults if the union is empty (toggle off + no
+ *  user list) so a deploy never silently has zero targets. */
+export function effectiveDeployBlossomServers(cfg: NsiteConfig): string[] {
+  const out = dedupeUrls([
+    ...cfg.deployBlossomServers,
+    ...(cfg.deployBlossomAppEnabled ? DEFAULT_DEPLOY_BLOSSOM_SERVERS : []),
+  ]);
+  return out.length ? out : DEFAULT_DEPLOY_BLOSSOM_SERVERS.slice();
+}
+
+/** Effective manifest-publish relays for a deploy. Same union semantics
+ *  as effectiveDeployBlossomServers. */
+export function effectiveDeployRelays(cfg: NsiteConfig): string[] {
+  const out = dedupeUrls([
+    ...cfg.deployRelays,
+    ...(cfg.deployRelayAppEnabled ? DEFAULT_DEPLOY_RELAYS : []),
+  ]);
+  return out.length ? out : DEFAULT_DEPLOY_RELAYS.slice();
+}
+
+function dedupeUrls(urls: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const u of urls) {
+    const k = u.trim().replace(/\/+$/, '').toLowerCase();
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(u.trim().replace(/\/+$/, ''));
+  }
+  return out;
 }
 
 /** Sanitize a Bookmark off the wire / off disk. Drops obviously
@@ -165,6 +228,12 @@ export function readNsiteConfig(): NsiteConfig {
         })
         .sort((a: Bookmark, b: Bookmark) => b.addedAt - a.addedAt)
     : [];
+  // Deploy lists are forgiving like the others, but DON'T fall back to a
+  // non-empty default when absent: an empty user list is a valid, meaningful
+  // state (it means "rely on the app defaults via the toggle"). The app
+  // toggles default ON unless explicitly stored false.
+  const deployBlobs = sanitizeUrls(raw.deployBlossomServers, /^https?:\/\//i);
+  const deployRel   = sanitizeUrls(raw.deployRelays,         /^wss?:\/\//i);
   return {
     contentRelays:         wss.length   ? wss   : fallback.contentRelays,
     discoveryRelays:       disc.length  ? disc  : fallback.discoveryRelays,
@@ -173,6 +242,10 @@ export function readNsiteConfig(): NsiteConfig {
     nsitIndexerRelays:     nsit.length  ? nsit  : fallback.nsitIndexerRelays,
     trustedExternalNsites: trusted,
     bookmarks,
+    deployBlossomServers:    deployBlobs,
+    deployBlossomAppEnabled: raw.deployBlossomAppEnabled === false ? false : true,
+    deployRelays:            deployRel,
+    deployRelayAppEnabled:   raw.deployRelayAppEnabled === false ? false : true,
   };
 }
 
@@ -200,6 +273,13 @@ export function writeNsiteConfig(input: Partial<NsiteConfig>): NsiteConfig {
   const c2 = cleanWss(input.discoveryRelays);     if (c2 !== undefined) merged.discoveryRelays   = c2;
   const c3 = cleanHttp(input.blossomServers);     if (c3 !== undefined) merged.blossomServers    = c3;
   const c4 = cleanWss(input.nsitIndexerRelays);   if (c4 !== undefined) merged.nsitIndexerRelays = c4;
+
+  // Deploy lists + toggles. cleanHttp/cleanWss return [] (defined) for an
+  // empty input array, so the user can deliberately clear their list.
+  const d1 = cleanHttp(input.deployBlossomServers); if (d1 !== undefined) merged.deployBlossomServers = d1;
+  const d2 = cleanWss(input.deployRelays);          if (d2 !== undefined) merged.deployRelays         = d2;
+  if (typeof input.deployBlossomAppEnabled === 'boolean') merged.deployBlossomAppEnabled = input.deployBlossomAppEnabled;
+  if (typeof input.deployRelayAppEnabled   === 'boolean') merged.deployRelayAppEnabled   = input.deployRelayAppEnabled;
 
   if (typeof input.nsitIndexerPubkey === 'string') {
     const v = input.nsitIndexerPubkey.trim();

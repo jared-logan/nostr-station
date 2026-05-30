@@ -5678,6 +5678,36 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 
 .deploy-log { font-family: var(--font-mono); font-size: 11px; }
 
+/* ── Deploy tab (nsite) ─────────────────────────────────────────────── */
+.deploy-intro { margin: 4px 0 16px; max-width: 60ch; line-height: 1.5; }
+.deploy-field { margin-bottom: 16px; max-width: 560px; }
+.deploy-label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.deploy-input, .deploy-textarea {
+  width: 100%; box-sizing: border-box;
+  background: var(--bg-input, var(--bg-elev, #1a1a1a));
+  border: 1px solid var(--border, #333); border-radius: 8px;
+  color: var(--text-bright); font-size: 13px; padding: 9px 11px;
+  font-family: inherit;
+}
+.deploy-textarea { resize: vertical; min-height: 64px; }
+.deploy-input:focus, .deploy-textarea:focus {
+  outline: none; border-color: var(--accent, #8b5cf6);
+}
+.deploy-help { font-size: 11px; margin-top: 5px; line-height: 1.4; }
+.deploy-url-preview {
+  display: block; padding: 9px 11px; border-radius: 8px;
+  background: var(--bg-elev, #161616); border: 1px solid var(--border, #333);
+  color: var(--accent, #a78bfa); font-size: 12px; word-break: break-all;
+}
+.deploy-actions { margin-top: 8px; }
+.deploy-actions .deploy-go { font-size: 14px; padding: 10px 22px; }
+
+/* nsite deploy Config section: heading row with a trailing toggle/button */
+.cfg-deploy-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 4px;
+}
+
 /* ── Project drawer (stepper) ───────────────────────────────────────── */
 
 .drawer.project-drawer { width: 480px; }

@@ -69,6 +69,7 @@ import { handleProjectsNgit } from './projects-ngit.js';
 import { handleProjectsGit }  from './projects-git.js';
 import { handleProjectsSync } from './projects-sync.js';
 import { handleProjectsExec } from './projects-exec.js';
+import { handleProjectsNsiteDeploy } from './projects-nsite-deploy.js';
 import { handleTestIdentities } from './test-identities.js';
 import { promote } from '../promote.js';
 import {
@@ -371,7 +372,13 @@ export async function handleProjects(
       if (await handleProjectsGit(req, res, project, tail, method)) return true;
     }
 
-    if (tail === 'stacks/deploy' || tail === 'exec' || tail === 'nsite/deploy') {
+    // Native nsite deploy (in-process pipeline over SSE). Must run before
+    // handleProjectsExec so the old CLI shell-out can't claim the route.
+    if (tail === 'nsite/deploy') {
+      if (await handleProjectsNsiteDeploy(req, res, project, tail, method)) return true;
+    }
+
+    if (tail === 'stacks/deploy' || tail === 'exec') {
       if (await handleProjectsExec(req, res, project, tail, method)) return true;
     }
 

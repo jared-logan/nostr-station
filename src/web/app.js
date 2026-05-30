@@ -6691,6 +6691,7 @@ const ProjectsPanel = (() => {
         labelHtml: true,
       },
       p.capabilities.nsite && { key: 'nsite', label: 'nsite' },
+      { key: 'deploy', label: 'Deploy' },
       { key: 'settings', label: 'Settings' },
     ].filter(Boolean);
     if (!tabs.find(t => t.key === state.tab)) state.tab = 'overview';
@@ -6811,6 +6812,7 @@ const ProjectsPanel = (() => {
     else if (state.tab === 'proposals') renderProposalsTab(container, p);
     else if (state.tab === 'issues')    renderIssuesTab(container, p);
     else if (state.tab === 'nsite')     renderNsiteTab(container, p);
+    else if (state.tab === 'deploy')    renderDeployTab(container, p);
     else if (state.tab === 'settings')  renderSettingsTab(container, p);
   }
 
@@ -11079,7 +11081,115 @@ const ProjectsPanel = (() => {
         <div class="deploy-log empty-state">No deploy history yet</div>
       </div>
     `;
-    container.querySelector('.deploy-btn').addEventListener('click', () => runProjectDeploy(p));
+    container.querySelector('.deploy-btn').addEventListener('click', () => switchTab('deploy'));
+  }
+
+  // Switch the active project-detail tab programmatically (re-renders).
+  function switchTab(key) { state.tab = key; render(); }
+
+  // Frontend mirror of nsite-deploy.ts:slugifyTitle — keeps the URL
+  // preview in lockstep with the d-tag the backend will actually mint.
+  function slugifyTitle(title) {
+    const slug = String(title || '').trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    return slug || 'site';
+  }
+
+  // Frontend mirror of nsite-deploy.ts:pubkeyToBase36 — the 50-char
+  // base36 host prefix NIP-5A gateways use for named sites. Returns null
+  // on a malformed pubkey so the preview degrades to a placeholder.
+  const B36_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz';
+  function pubkeyToBase36(pubkeyHex) {
+    const hex = String(pubkeyHex || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hex)) return null;
+    let n = BigInt('0x' + hex);
+    let out = '';
+    while (n > 0n) { out = B36_ALPHABET[Number(n % 36n)] + out; n = n / 36n; }
+    return out.padStart(50, '0');
+  }
+
+  // The Deploy tab. nsite is the only provider (per design) — no provider
+  // chooser. Site Title → d-tag (and URL path); Description → manifest +
+  // 30617. Deploy streams the native pipeline through the exec modal.
+  function renderDeployTab(container, p) {
+    const lastUrl = p.nsite?.url || '';
+    const defaultTitle = p.name || 'site';
+    container.innerHTML = `
+      <div class="tab-section deploy-tab">
+        <h3>Deploy to nsite</h3>
+        <p class="muted deploy-intro">
+          Publish this project to the Nostr network as an
+          <strong>nsite</strong> — your built files are uploaded to Blossom
+          servers and a signed manifest is published to relays. Anyone can
+          load it through a public gateway. Deploying again under the same
+          identity and title updates the same site at the same URL.
+        </p>
+
+        <div class="deploy-field">
+          <label class="deploy-label" for="deploy-title">Site Title</label>
+          <input type="text" id="deploy-title" class="deploy-input"
+            maxlength="120" value="${escapeHtml(defaultTitle)}"
+            placeholder="${escapeHtml(defaultTitle)}">
+          <div class="deploy-help muted">
+            Becomes the site's name in the manifest and its address path.
+          </div>
+        </div>
+
+        <div class="deploy-field">
+          <label class="deploy-label" for="deploy-desc">Description <span class="muted">(optional)</span></label>
+          <textarea id="deploy-desc" class="deploy-textarea" rows="3"
+            maxlength="500" placeholder="A short description of this site…"></textarea>
+          <div class="deploy-help muted">Included as a description tag in the manifest.</div>
+        </div>
+
+        <div class="deploy-field">
+          <div class="deploy-label">Predicted URL</div>
+          <code class="deploy-url-preview" id="deploy-url-preview">resolving…</code>
+          <div class="deploy-help muted">
+            The first segment is derived from your Nostr identity; the rest
+            is your Site Title. Same identity + title ⇒ same URL.
+          </div>
+        </div>
+
+        <div class="deploy-actions">
+          <button class="primary deploy-go">🚀 Deploy</button>
+        </div>
+      </div>
+
+      <div class="tab-section">
+        <h3>Deployed site</h3>
+        ${lastUrl
+          ? `<a href="${escapeHtml(lastUrl)}" target="_blank" rel="noreferrer" class="nsite-url-big">${escapeHtml(lastUrl)}</a>
+             <div class="overview-kv" style="margin-top:12px"><div class="k">last deploy</div><div class="v">${escapeHtml(fmtAgoIso(p.nsite?.lastDeploy))}</div></div>`
+          : `<div class="empty-state">Not deployed yet. Fill in a title and hit Deploy.</div>`}
+      </div>
+    `;
+
+    const titleInp = container.querySelector('#deploy-title');
+    const descInp  = container.querySelector('#deploy-desc');
+    const preview  = container.querySelector('#deploy-url-preview');
+
+    // Resolve the base36(pubkey) prefix once from the station identity, then
+    // recompute the path segment live as the title changes. base36 is
+    // computed client-side from the hex pubkey (mirrors
+    // nsite-deploy.ts:pubkeyToBase36) so no extra endpoint is needed.
+    let b36 = null;
+    const paintPreview = () => {
+      const slug = slugifyTitle(titleInp.value || p.name);
+      if (b36) preview.textContent = `https://${b36}${slug}.nsite.lol/`;
+      else      preview.textContent = `https://…${slug}.nsite.lol/`;
+    };
+    api('/api/identity/config', undefined, { silent: true })
+      .then(cfg => { b36 = cfg?.pubkeyHex ? pubkeyToBase36(cfg.pubkeyHex) : null; paintPreview(); })
+      .catch(() => paintPreview());
+    titleInp.addEventListener('input', paintPreview);
+    paintPreview();
+
+    container.querySelector('.deploy-go').addEventListener('click', () => {
+      const siteTitle   = (titleInp.value || '').trim() || p.name;
+      const description = (descInp.value  || '').trim();
+      runProjectDeploy(p, { siteTitle, description });
+    });
   }
 
   // Phase 7: Git and ngit operational controls are now Settings
@@ -12217,28 +12327,30 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
     });
   }
 
-  async function runProjectDeploy(p) {
-    const ok = await confirmDestructive({
-      title: `Deploy · ${p.name}`,
-      description: 'Runs `nostr-station nsite deploy --yes` in this project.',
-      confirmLabel: 'Deploy',
-    });
-    if (!ok) return;
-    // Terminal gets the coloured progress + any blossom server prompts
-    // that the SSE modal flattens. Fallback to SSE when node-pty is
-    // unavailable keeps the feature working end-to-end.
-    if (window.NSTerminal?.isAvailable?.()) {
-      window.NSTerminal.open('nsite-deploy', { projectId: p.id });
-      return;
-    }
-    openExecModal({
+  async function runProjectDeploy(p, opts = {}) {
+    // Native in-process pipeline: build → upload to Blossom → publish
+    // kind:35128 manifest → refresh kind:30617 web tag. The endpoint
+    // streams progress in the exec-modal SSE protocol and side-channels
+    // the resolved nsite URL as an `info` frame.
+    const body = {
+      siteTitle:   opts.siteTitle   || p.name,
+      description: opts.description  || '',
+    };
+    const r = await openExecModal({
       title: `deploy · ${p.name}`,
       subtitle: p.path || '',
       endpoint: `/api/projects/${p.id}/nsite/deploy`,
-    }).then(r => {
-      if (r.ok) toast('Deploy complete', p.name, 'ok');
-      else      toast('Deploy failed', `exit ${r.code}`, 'err');
+      body,
     });
+    if (r.ok) {
+      const url = r.info?.url;
+      toast('Deploy complete', url || p.name, 'ok');
+      // Refresh the project so the Deployed-site panel + URL reflect the
+      // freshly-persisted project.nsite.{url,lastDeploy}.
+      reload();
+    } else {
+      toast('Deploy failed', r.code != null ? `exit ${r.code}` : 'see log', 'err');
+    }
   }
 
   function openInChat(p) {
@@ -16037,11 +16149,26 @@ const ConfigPanel = (() => {
            and the NSIT name indexer pubkey. Body filled lazily by JS. -->
       <details class="config-section cfg-collapsible" id="cfg-nsite-section">
         <summary>
-          <h3>nsite</h3>
+          <h3>nsite browsing</h3>
           <span class="cfg-summary-meta" id="cfg-nsite-summary">loading…</span>
         </summary>
         <div class="cfg-section-body" id="cfg-nsite-body">
           <div class="muted">loading nsite config…</div>
+        </div>
+      </details>
+
+      <!-- nsite DEPLOY (publish-side). Distinct from "nsite browsing"
+           above: this governs where THIS station publishes its OWN
+           nsites — the Blossom servers it uploads file blobs to and the
+           relays it publishes the kind:35128 manifest to. App/Your model
+           mirrors Client Relays. Body filled lazily by JS. -->
+      <details class="config-section cfg-collapsible" id="cfg-deploy-section">
+        <summary>
+          <h3>nsite deploy</h3>
+          <span class="cfg-summary-meta" id="cfg-deploy-summary">loading…</span>
+        </summary>
+        <div class="cfg-section-body" id="cfg-deploy-body">
+          <div class="muted">loading deploy config…</div>
         </div>
       </details>
 
@@ -16693,6 +16820,7 @@ const ConfigPanel = (() => {
     paintMailConfigSection();
     paintWatchdogConfigSection();
     paintNsiteConfigSection();
+    paintDeployConfigSection();
   }
 
   // ── Communities section ────────────────────────────────────────────
@@ -17197,6 +17325,149 @@ const ConfigPanel = (() => {
         toast('nsite config reset', 'Restored Titan-mirrored defaults.');
         paintNsiteConfigSection();
       } catch { /* api() already toasted */ }
+    });
+  }
+
+  // ── nsite deploy section ───────────────────────────────────────────────
+  // Publish-side targets, separate from "nsite browsing" above. Mirrors the
+  // Client Relays "App Relays / Your Relays" model: an app-default list with
+  // an on/off toggle, plus the user's own editable list. Two pairs: Blossom
+  // upload servers and manifest-publish relays. The "Sync from Nostr" action
+  // on Blossom pulls the user's own kind:10063 (BUD-03) list and merges it.
+  async function paintDeployConfigSection() {
+    const body    = $('cfg-deploy-body');
+    const summary = $('cfg-deploy-summary');
+    if (!body) return;
+    const data = await api('/api/nsite/config', undefined, { silent: true }).catch(() => null);
+    if (!data) {
+      if (summary) summary.textContent = 'unavailable';
+      body.innerHTML = `<div class="muted">nsite endpoint not reachable.</div>`;
+      return;
+    }
+    const cfg = data.config, appd = data.deployAppDefaults || { blossomServers: [], relays: [] };
+    const linesOf = (arr) => Array.isArray(arr) ? arr.join('\n') : '';
+    const effBlossom = (cfg.deployBlossomServers.length || (cfg.deployBlossomAppEnabled ? appd.blossomServers.length : 0));
+    if (summary) summary.textContent = `${effBlossom} blossom server${effBlossom === 1 ? '' : 's'}`;
+
+    const appList = (urls) => urls.length
+      ? urls.map(u => `<div class="relay-row"><code>${escapeHtml(u)}</code></div>`).join('')
+      : `<div class="muted" style="font-size:11px">none</div>`;
+
+    body.innerHTML = `
+      <div class="cfg-nsite-intro">
+        Where this station publishes <strong>your own</strong> deployed
+        nsites. <strong>Blossom servers</strong> receive your built file
+        blobs; <strong>relays</strong> receive the site manifest so gateways
+        can resolve it. Separate from <em>nsite browsing</em> above (which is
+        only about reading other people's sites). Each list pairs the app
+        defaults (toggleable) with your own — the effective set is their union.
+      </div>
+
+      <div class="cfg-nsite-field">
+        <div class="cfg-deploy-head">
+          <h4 style="margin:0">App Blossom Servers</h4>
+          <label class="autoscroll-toggle">
+            <input type="checkbox" id="cfg-deploy-blossom-app" ${cfg.deployBlossomAppEnabled ? 'checked' : ''}>
+            enabled
+          </label>
+        </div>
+        <div class="cfg-nsite-help muted">
+          Battle-tested public servers that ship with nostr-station, so
+          deploy works out of the box. Unioned with your list below when on.
+        </div>
+        <div class="relay-list">${appList(appd.blossomServers)}</div>
+      </div>
+
+      <div class="cfg-nsite-field">
+        <div class="cfg-deploy-head">
+          <h4 style="margin:0">Your Blossom Servers</h4>
+          <button id="cfg-deploy-blossom-sync" type="button" title="Fetch your kind:10063 (BUD-03) server list from Nostr and merge it in">Sync from Nostr</button>
+        </div>
+        <div class="cfg-nsite-help muted">
+          Your personal upload targets. Synced to/from Nostr as kind 10063.
+        </div>
+        <textarea id="cfg-deploy-blossom" rows="3" spellcheck="false"
+          placeholder="https://blossom.example.com">${escapeHtml(linesOf(cfg.deployBlossomServers))}</textarea>
+        <div class="cfg-nsite-hint muted">one <code>https://</code> URL per line</div>
+      </div>
+
+      <div class="cfg-nsite-field">
+        <div class="cfg-deploy-head">
+          <h4 style="margin:0">App Relays</h4>
+          <label class="autoscroll-toggle">
+            <input type="checkbox" id="cfg-deploy-relay-app" ${cfg.deployRelayAppEnabled ? 'checked' : ''}>
+            enabled
+          </label>
+        </div>
+        <div class="cfg-nsite-help muted">
+          Default relays the kind:35128 manifest is published to (includes the
+          nsite.lol gateway relay for fast first-resolve).
+        </div>
+        <div class="relay-list">${appList(appd.relays)}</div>
+      </div>
+
+      <div class="cfg-nsite-field">
+        <h4 style="margin:0 0 6px">Your Relays</h4>
+        <div class="cfg-nsite-help muted">Additional relays to publish your manifest to.</div>
+        <textarea id="cfg-deploy-relays" rows="3" spellcheck="false"
+          placeholder="wss://relay.example.com">${escapeHtml(linesOf(cfg.deployRelays))}</textarea>
+        <div class="cfg-nsite-hint muted">one <code>wss://</code> URL per line</div>
+      </div>
+
+      <div class="cfg-nsite-actions">
+        <button class="primary" id="cfg-deploy-save">Save</button>
+        <button id="cfg-deploy-reset">Reset</button>
+      </div>
+    `;
+
+    const linesFrom = (id) => ($(id)?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const save = async (payload, okMsg) => {
+      try {
+        await api('/api/nsite/config', {
+          method: 'PUT', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        toast('Deploy config saved', okMsg || '');
+        paintDeployConfigSection();
+      } catch { /* api() already toasted */ }
+    };
+
+    $('cfg-deploy-save')?.addEventListener('click', () => save({
+      deployBlossomServers:    linesFrom('cfg-deploy-blossom'),
+      deployRelays:            linesFrom('cfg-deploy-relays'),
+      deployBlossomAppEnabled: !!$('cfg-deploy-blossom-app')?.checked,
+      deployRelayAppEnabled:   !!$('cfg-deploy-relay-app')?.checked,
+    }, 'Targets updated.'));
+
+    $('cfg-deploy-reset')?.addEventListener('click', () => save({
+      deployBlossomServers: [], deployRelays: [],
+      deployBlossomAppEnabled: true, deployRelayAppEnabled: true,
+    }, 'Restored app defaults.'));
+
+    // Toggles persist immediately (matches the App Relays toggle UX).
+    $('cfg-deploy-blossom-app')?.addEventListener('change', (e) =>
+      save({ deployBlossomAppEnabled: !!e.target.checked }, e.target.checked ? 'App Blossom servers on' : 'App Blossom servers off'));
+    $('cfg-deploy-relay-app')?.addEventListener('change', (e) =>
+      save({ deployRelayAppEnabled: !!e.target.checked }, e.target.checked ? 'App relays on' : 'App relays off'));
+
+    // Sync from Nostr — pull the owner's kind:10063 list and merge into the
+    // Your-Blossom textarea (user still has to Save). Read-only on Nostr's
+    // side; we never publish a 10063 from here.
+    $('cfg-deploy-blossom-sync')?.addEventListener('click', async (e) => {
+      const btn = e.target; const orig = btn.textContent;
+      btn.disabled = true; btn.textContent = 'syncing…';
+      try {
+        const r = await api('/api/nsite/blossom-list/sync', { method: 'POST' });
+        const servers = Array.isArray(r?.servers) ? r.servers : [];
+        if (servers.length === 0) { toast('Sync from Nostr', 'No kind:10063 server list found for your npub.', 'warn'); return; }
+        const ta = $('cfg-deploy-blossom');
+        const existing = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+        const merged = [...new Set([...existing, ...servers])];
+        const added = merged.length - existing.length;
+        ta.value = merged.join('\n');
+        toast('Synced from Nostr', added === 0 ? 'Already up to date — review and Save.' : `Added ${added} server${added === 1 ? '' : 's'} — review and Save.`, 'ok');
+      } catch { /* api() toasted */ }
+      finally { btn.disabled = false; btn.textContent = orig; }
     });
   }
 

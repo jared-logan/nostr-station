@@ -133,6 +133,31 @@ export const DEFAULT_BLOSSOM_SERVERS: string[] = [
   'https://nostr.download',
 ];
 
+// Deploy-side defaults — the Blossom servers an nsite deploy UPLOADS to
+// (kind:24242 PUT), distinct from DEFAULT_BLOSSOM_SERVERS above (the
+// read-side fetch fallbacks). These three are the production set that
+// already powers shakespeare.diy and nostrhub.io: they reliably accept
+// uploads and are widely mirrored, so a project deploys "out of the box"
+// with no Blossom config. Surfaced in Config → nsite deploy as the
+// toggleable "App Blossom Servers" list (unioned with the user's own).
+export const DEFAULT_DEPLOY_BLOSSOM_SERVERS: string[] = [
+  'https://blossom.ditto.pub',
+  'https://blossom.dreamith.to',
+  'https://blossom.primal.net',
+];
+
+// Deploy-side relay defaults — where the kind:35128 manifest is published
+// so gateways (nsite.lol et al.) can resolve the site. Includes the
+// gateway's own relay first for fastest first-resolve, plus broad public
+// relays. Surfaced as the toggleable "App Relays" list for nsite deploy.
+export const DEFAULT_DEPLOY_RELAYS: string[] = [
+  'wss://relay.nsite.lol',
+  'wss://relay.ditto.pub',
+  'wss://relay.primal.net',
+  'wss://relay.damus.io',
+  'wss://nos.lol',
+];
+
 const NSITE_FILE_KIND_V1        = 34128;  // NIP-5A v1: one event per file
 const NSITE_MANIFEST_KIND_NAMED = 35128;  // NIP-5A v2: name-keyed manifest (addressable, d-tag = name)
 const NSITE_MANIFEST_KIND_ROOT  = 15128;  // NIP-5A v2: root manifest (replaceable)
