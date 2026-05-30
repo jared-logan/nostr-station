@@ -6026,8 +6026,8 @@ const ProjectsPanel = (() => {
 
     // Open-proposals badge (Phase 6). A persistent chip next to the
     // git-state badge linking to the proposals view, shown when a prior
-    // sync reported open proposals. runProjectSync repaints this via
-    // setCardPropBadge after each sync; we seed it here from cache.
+    // proposals fetch reported open proposals. The Pull-requests tab
+    // populates proposalsCache; we seed the chip here from that cache.
     {
       const cached = p.id && proposalsCache.has(p.id) ? proposalsCache.get(p.id) : null;
       const n = Array.isArray(cached) ? cached.length : 0;
@@ -6456,10 +6456,9 @@ const ProjectsPanel = (() => {
   // ── Card open-proposals badge (Phase 6) ───────────────────────────────
   //
   // A small persistent chip on the card's `.pc-badges` row, shown when a
-  // sync (or a prior proposals fetch) reported N>0 open proposals. Clicking
-  // it jumps straight to the project's proposals view. Distinct from the
-  // transient `.pc-banner` "N open proposals" message runProjectSync also
-  // paints — the banner is a one-shot toast, this chip persists.
+  // proposals fetch reported N>0 open proposals. Clicking it jumps straight
+  // to the project's proposals view. Distinct from the transient
+  // `.pc-banner` "N open proposals" toast — that's one-shot, this persists.
   function setCardPropBadge(card, p, n) {
     const badge = card.querySelector('.pc-prop-badge');
     if (!badge) return;
