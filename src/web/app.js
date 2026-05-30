@@ -5925,7 +5925,7 @@ const ProjectsPanel = (() => {
     card.innerHTML = `
       <div class="pc-head">
         <div class="pc-name">${escapeHtml(p.name || '(unnamed)')}</div>
-        <div class="pc-actions"></div>
+        <div class="pc-actions"><span class="sync-pop-host pc-sync-host"></span></div>
       </div>
       <div class="pc-path">${p.path ? `<code>${escapeHtml(p.path)}</code>` : '<em class="muted">no local path</em>'}</div>
       <div class="pc-badges">${projectCapBadges(p.capabilities, p.remotes)}${projectEnvBadge(p)}<span class="pc-state-host"><span class="pc-state" hidden></span></span><a class="pc-prop-badge" hidden></a></div>
@@ -5934,12 +5934,30 @@ const ProjectsPanel = (() => {
         <div class="pc-meta-row"><span class="k">last activity</span><span class="v pc-last-activity">${lastAct}</span></div>
       </div>
       <div class="pc-banner" hidden></div>
+      <div class="pc-work-actions"></div>
     `;
 
-    // Quick action icons — "new chat session" only. Resuming an existing
-    // session happens via the nested nav under Projects, so the card
-    // button is unambiguously "start a fresh thread for this project".
-    const actionsEl = card.querySelector('.pc-actions');
+    // "Sync ▾" — top-right trigger for the repo-ops popover (Commit /
+    // Sync / Pull / Push). Shown for any project with a local checkout
+    // (the popover itself handles the local-only "Commit only" case).
+    const syncHost = card.querySelector('.sync-pop-host');
+    if (p.path && (p.capabilities.git || p.capabilities.ngit)) {
+      const syncBtn = document.createElement('button');
+      syncBtn.className = 'pc-sync-trigger';
+      syncBtn.type = 'button';
+      syncBtn.textContent = 'Sync ▾';
+      syncBtn.title = 'Commit / sync / pull / push';
+      attachSyncPopover(syncBtn, p);
+      syncHost.appendChild(syncBtn);
+    }
+
+    // WORK / session cluster — bottom-right of the card. New chat, the
+    // terminal-AI launcher, Stacks agent/dev, and the deploy verbs. Each
+    // keeps its existing handler; only the placement moved.
+    const workEl = card.querySelector('.pc-work-actions');
+
+    // "new chat session" — start a fresh thread for this project. Resuming
+    // an existing session happens via the nested nav under Projects.
     const newChatBtn = iconBtn('chat-new', 'New chat session',
       `<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 1 1 18 0Z" stroke-linejoin="round"/><line x1="12" y1="8" x2="12" y2="14"/><line x1="9" y1="11" x2="15" y2="11"/></svg>`);
     newChatBtn.addEventListener('click', (e) => {
@@ -5947,7 +5965,7 @@ const ProjectsPanel = (() => {
       const s = SessionStore.createForProject(p.id, p.name);
       location.hash = `#chat/s/${s.id}`;
     });
-    actionsEl.appendChild(newChatBtn);
+    workEl.appendChild(newChatBtn);
 
     // "Open in <Terminal AI>" — spawns the configured terminal-native
     // provider (Claude Code, OpenCode, …) in a terminal tab with cwd
@@ -5964,45 +5982,14 @@ const ProjectsPanel = (() => {
         e.stopPropagation();
         window.NSTerminal.open(terminalAi.key, { projectId: p.id });
       });
-      actionsEl.appendChild(btn);
+      workEl.appendChild(btn);
     }
 
-    // Sync (Item 4) — git fetch + ff-only merge for git, ngit fetch +
-    // proposals query for ngit. Hidden on local-only cards (no remote
-    // story). Inline result lands in `.pc-banner` so the user sees the
-    // outcome without a modal hop.
-    if (p.path && (p.capabilities.git || p.capabilities.ngit)) {
-      const syncBtn = iconBtn('sync', 'Sync',
-        `<svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`);
-      syncBtn.classList.add('pc-sync-btn');
-      syncBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectSync(p, card, syncBtn); });
-      actionsEl.appendChild(syncBtn);
-    }
-
-    // Save snapshot (Item 4) — local commit primitive. Available on all
-    // backends with a local path (every project is a git repo locally,
-    // including ngit and nsite-only repos that opted into a path).
-    if (p.path) {
-      const snapBtn = iconBtn('snapshot', 'Save snapshot',
-        `<svg viewBox="0 0 24 24"><path d="M21 19V8l-3-4H6L3 8v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2z"/><circle cx="12" cy="14" r="3"/></svg>`);
-      snapBtn.classList.add('pc-snap-btn');
-      snapBtn.addEventListener('click', (e) => { e.stopPropagation(); openSnapshotDialog(p, card); });
-      actionsEl.appendChild(snapBtn);
-    }
-
-    // Push lives on the project drawer's git/ngit tabs (Publish-to-ngit
-    // / Push triad), where the verbs and dialog copy are explicit.
-    // Pre-fix this card-grid icon duplicated the same action with a
-    // generic up-arrow + "Publish" tooltip — for ngit-only projects
-    // it actually ran ngit push, label-vs-action mismatch noted in
-    // the PR #5 followup. Removing it eliminates the duplication;
-    // sync/snapshot stay because one-click refresh + commit still
-    // benefit from grid-level access.
     if (p.capabilities.nsite) {
       const deployBtn = iconBtn('deploy', 'Deploy',
         `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M2 12h20M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>`);
       deployBtn.addEventListener('click', (e) => { e.stopPropagation(); runProjectDeploy(p); });
-      actionsEl.appendChild(deployBtn);
+      workEl.appendChild(deployBtn);
     }
 
     // Stacks/MKStack-specific actions — Dork agent, Vite dev server,
@@ -6017,7 +6004,7 @@ const ProjectsPanel = (() => {
         e.stopPropagation();
         window.NSTerminal.open('stacks-agent', { projectId: p.id });
       });
-      actionsEl.appendChild(dorkBtn);
+      workEl.appendChild(dorkBtn);
 
       const devBtn = iconBtn('stacks-dev', 'Run dev server (per-project port)',
         `<svg viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg>`);
@@ -6025,7 +6012,7 @@ const ProjectsPanel = (() => {
         e.stopPropagation();
         window.NSTerminal.open('stacks-dev', { projectId: p.id });
       });
-      actionsEl.appendChild(devBtn);
+      workEl.appendChild(devBtn);
     }
     if (p.stacksProject && p.path) {
       const stacksDeployBtn = iconBtn('stacks-deploy', 'Deploy to NostrDeploy',
@@ -6034,17 +6021,7 @@ const ProjectsPanel = (() => {
         e.stopPropagation();
         runStacksDeploy(p);
       });
-      actionsEl.appendChild(stacksDeployBtn);
-    }
-
-    // Status-anchored Sync popover (Phase 1). The `.pc-state` badge
-    // becomes the click trigger for the consolidated sync/pull/push hub
-    // when the project is git/ngit-capable and has a nostr remote. The
-    // poller still owns the badge's text/hidden state; we only layer the
-    // popover toggle behaviour on top.
-    if (p.path && (p.capabilities.git || p.capabilities.ngit) && p.remotes.ngit) {
-      const badgeEl = card.querySelector('.pc-state');
-      if (badgeEl) attachSyncPopover(badgeEl, p);
+      workEl.appendChild(stacksDeployBtn);
     }
 
     // Open-proposals badge (Phase 6). A persistent chip next to the
@@ -6081,16 +6058,17 @@ const ProjectsPanel = (() => {
     return btn;
   }
 
-  // ── Status-anchored Sync popover (the git/sync/publish hub) ───────────
+  // ── Sync popover (the repo-ops hub) ──────────────────────────────────
   //
-  // One popover, anchored to a card's `.pc-state` badge, that consolidates
-  // the Sync/Pull/Push triad + auto-sync + proposals/signing links that
-  // used to be scattered across the card, Overview, and Settings ngit tab.
-  // Modeled on shakespeare.diy's status popover and on the existing
-  // renderStatusControl open/close/click-outside pattern.
+  // One popover, opened from the "Sync ▾" trigger (card top-right + detail
+  // header), that consolidates the Commit + Sync/Pull/Push triad +
+  // proposals/signing links that used to be scattered across the card,
+  // Overview, and Settings ngit tab. Modeled on shakespeare.diy's status
+  // popover and on the existing renderStatusControl open/close/click-
+  // outside pattern.
   //
-  // The handler bodies are reused verbatim from renderNgitTab — these are
-  // the SAME openExecModal / NSTerminal / PATCH calls, just relocated.
+  // The op handler bodies reuse the SAME openExecModal / NSTerminal calls
+  // as renderNgitTab, plus the JSON /sync + /snapshot endpoints.
 
   // Jump from a card (list view) into a project's detail tab. Mirrors the
   // openDetail(id) path but lets the caller land on a specific tab
@@ -6105,130 +6083,219 @@ const ProjectsPanel = (() => {
     if (p) refreshTabCounts(p);
   }
 
-  // Build the inner controls for the Sync popover. Factored out so the
-  // same markup + wiring can be reused wherever a sync hub is wanted.
-  // `gs` is an optional pre-fetched /git-state payload; when absent the
-  // popover probes it itself and repaints the status line + primary
-  // button once it lands.
+  // Build the inner controls for the Sync popover — the single repo-ops
+  // hub. Adapts to the project's remotes: a Nostr (ngit) plane signs with
+  // Amber, a GitHub-only plane uses plain git, and a local-only repo gets
+  // Commit-only. `gs` is an optional pre-fetched /git-state payload; when
+  // absent the popover probes it itself and repaints once it lands.
+  //
+  // Plane selection (Nostr-first for dual repos):
+  //   hasNgit → Nostr endpoints + Amber markers, PRs → proposals tab.
+  //   hasGit only → git endpoints, no Amber, PRs → the github repo's /pulls.
+  //   dual → Nostr plane + a secondary "GitHub remote →" footer link.
+  //   local → Commit only, no sync/pull/push.
   function buildSyncPopoverContents(p, gs) {
     const wrap = document.createElement('div');
     wrap.className = 'sync-pop-body';
 
-    const remote = p.remotes.ngit || '';
-    const isUrl  = /^https?:\/\//i.test(remote);
+    const hasNgit = !!(p.capabilities.ngit && p.remotes.ngit);
+    const hasGit  = !!(p.capabilities.git  && p.remotes.github);
+    const local   = !hasNgit && !hasGit;
+
+    // Header — destination label + remote URL with copy/open. Nostr takes
+    // precedence on dual repos (Nostr-first plane).
+    const destLabel = hasNgit ? 'Nostr' : (hasGit ? remoteHostLabel(p.remotes) : 'Local');
+    const remote    = hasNgit ? (p.remotes.ngit || '') : (hasGit ? (p.remotes.github || '') : '');
+    const isUrl     = /^https?:\/\//i.test(remote);
     const remoteRow = remote
       ? `<div class="sync-pop-remote">
+           <span class="sync-pop-dest">${escapeHtml(destLabel)}</span>
            <code class="sync-pop-remote-url">${escapeHtml(remote)}</code>
            <span class="copy-slot" data-copy="${escapeHtml(remote)}"></span>
            ${isUrl ? `<a class="sync-pop-ext" href="${escapeHtml(remote)}" target="_blank" rel="noreferrer" title="Open remote">↗</a>` : ''}
          </div>`
-      : `<div class="sync-pop-remote muted">no nostr remote configured</div>`;
+      : `<div class="sync-pop-remote muted">No remote configured</div>`;
+
+    // Footer links. Nostr/dual → proposals tab; github-only → the repo's
+    // /pulls in a new tab. Signing & remote always points at Settings;
+    // dual adds a secondary GitHub-remote pointer.
+    let prFooter;
+    if (hasNgit) {
+      prFooter = `<button class="link sync-pop-proposals">PRs →</button>`;
+    } else if (hasGit) {
+      prFooter = `<button class="link sync-pop-gh-prs">PRs →</button>`;
+    } else {
+      prFooter = '';
+    }
+    const secondaryFooter = (hasNgit && hasGit)
+      ? `<button class="link sync-pop-github">GitHub remote →</button>`
+      : `<button class="link sync-pop-signing">Signing &amp; remote →</button>`;
 
     wrap.innerHTML = `
       ${remoteRow}
       <div class="sync-pop-status muted">checking…</div>
-      <button class="primary sync-pop-primary" disabled>Sync</button>
-      <div class="sync-pop-half">
-        <button class="sync-pop-pull">Pull</button>
-        <button class="sync-pop-push">Push ${amberSignMarker()}</button>
+      <div class="sync-pop-commit" hidden>
+        <input type="text" class="sync-pop-commit-input" placeholder="Describe this commit (optional)" maxlength="200" autocomplete="off">
       </div>
-      <label class="sync-pop-autosync" title="Pull only. Fetches every 5 min. Never pushes or signs without you.">
-        <input type="checkbox" class="sync-pop-autosync-input" ${p.autoSync ? 'checked' : ''}>
-        <span>
-          <strong>Automatic sync</strong>
-          <span class="muted sync-pop-autosync-sub">Pull only. Fetches every 5 min. Never pushes or signs without you.</span>
-        </span>
-      </label>
+      <button class="primary sync-pop-primary" disabled>Sync</button>
+      <div class="sync-pop-half"${local ? ' hidden' : ''}>
+        <button class="sync-pop-pull">Pull</button>
+        <button class="sync-pop-push">Push${hasNgit ? ' ' + amberSignMarker() : ''}</button>
+      </div>
       <div class="sync-pop-footer">
-        <button class="link sync-pop-proposals">Nostr proposals →</button>
-        <button class="link sync-pop-signing">Signing &amp; remote →</button>
-        ${p.remotes.github ? `<button class="link sync-pop-github">GitHub remote →</button>` : ''}
+        ${prFooter}
+        ${secondaryFooter}
       </div>
     `;
 
     wrap.querySelectorAll('.copy-slot').forEach(s => s.appendChild(copyBtn(s.dataset.copy)));
 
-    // ── Handler bodies (verbatim from renderNgitTab) ──
+    // ── Plane handler bodies ──
+    // Nostr plane streams via openExecModal (ngit ops emit live output +
+    // Amber prompts); the github-only plane uses the JSON /sync endpoint
+    // + a toast. Each returns a promise resolving to ok:boolean so the
+    // commit-then-sync chain can decide whether to refresh state.
+    const refreshAfter = () => {
+      if (state.view === 'detail' && state.projectId === p.id) render();
+      else pollGitStateOne(p.id);
+    };
     const runSync = () => {
-      openExecModal({
-        title:    `ngit sync · ${p.name}`,
-        subtitle: 'Pull from your relays + GRASP server, then push your commits. Amber signs.',
-        endpoint: `/api/projects/${p.id}/ngit/sync`,
-      }).then(r => {
-        if (r.ok) toast('ngit sync complete', '', 'ok');
-        else      toast('ngit sync failed', `exit ${r.code}`, 'err');
-        if (state.view === 'detail' && state.projectId === p.id) render();
-      });
+      if (hasNgit) {
+        return openExecModal({
+          title:    `ngit sync · ${p.name}`,
+          subtitle: 'Pull from your relays + GRASP server, then push your commits. Amber signs.',
+          endpoint: `/api/projects/${p.id}/ngit/sync`,
+        }).then(r => {
+          if (r.ok) toast('ngit sync complete', '', 'ok');
+          else      toast('ngit sync failed', `exit ${r.code}`, 'err');
+          refreshAfter();
+          return !!r.ok;
+        });
+      }
+      // GitHub-only: JSON syncProject (fetch + ff + push the git remote).
+      return api(`/api/projects/${p.id}/sync`, { method: 'POST' }).then(r => {
+        if (r && r.ok !== false) {
+          toast('Sync complete', '', 'ok');
+          refreshAfter();
+          return true;
+        }
+        const counts = (r && typeof r.ahead === 'number' && typeof r.behind === 'number')
+          ? ` (${r.ahead} ahead, ${r.behind} behind)` : '';
+        toast('Sync failed', `${r?.message || 'sync failed'}${counts}`, 'err');
+        refreshAfter();
+        return false;
+      }).catch(e => { toast('Sync failed', e?.message || '', 'err'); return false; });
     };
     const runPull = () => {
-      openExecModal({
-        title:    `ngit pull · ${p.name}`,
-        subtitle: 'Fetch and fast-forward from your relays + GRASP server.',
+      if (hasNgit) {
+        return openExecModal({
+          title:    `ngit pull · ${p.name}`,
+          subtitle: 'Fetch and fast-forward from your relays + GRASP server.',
+          endpoint: `/api/projects/${p.id}/git/pull`,
+        }).then(r => {
+          if (r.ok) toast('ngit pull complete', '', 'ok');
+          else      toast('ngit pull failed', `exit ${r.code}`, 'err');
+          refreshAfter();
+          return !!r.ok;
+        });
+      }
+      return openExecModal({
+        title:    `git pull · ${p.name}`,
+        subtitle: 'Fetch and fast-forward from the git remote.',
         endpoint: `/api/projects/${p.id}/git/pull`,
       }).then(r => {
-        if (r.ok) toast('ngit pull complete', '', 'ok');
-        else      toast('ngit pull failed', `exit ${r.code}`, 'err');
-        if (state.view === 'detail' && state.projectId === p.id) render();
+        if (r.ok) toast('git pull complete', '', 'ok');
+        else      toast('git pull failed', `exit ${r.code}`, 'err');
+        refreshAfter();
+        return !!r.ok;
       });
     };
     const runPush = () => {
-      if (window.NSTerminal?.isAvailable?.()) {
-        window.NSTerminal.open('ngit-push', { projectId: p.id });
-        return;
+      if (hasNgit) {
+        // Terminal ngit-push preferred (live Amber prompts); falls back to
+        // the streamed exec modal when no terminal is available.
+        if (window.NSTerminal?.isAvailable?.()) {
+          window.NSTerminal.open('ngit-push', { projectId: p.id });
+          return Promise.resolve(true);
+        }
+        return openExecModal({
+          title:    `ngit push · ${p.name}`,
+          subtitle: 'Publish your commits to the ngit remote. Amber signs on your phone.',
+          endpoint: `/api/projects/${p.id}/ngit/push`,
+        }).then(r => {
+          if (r.ok) toast('ngit push complete', '', 'ok');
+          else      toast('ngit push failed', `exit ${r.code}`, 'err');
+          refreshAfter();
+          return !!r.ok;
+        });
       }
-      openExecModal({
-        title:    `ngit push · ${p.name}`,
-        subtitle: 'Publish your commits to the ngit remote. Amber signs on your phone.',
-        endpoint: `/api/projects/${p.id}/ngit/push`,
+      return openExecModal({
+        title:    `git push · ${p.name}`,
+        subtitle: 'Push your commits to the git remote.',
+        endpoint: `/api/projects/${p.id}/git/push`,
       }).then(r => {
-        if (r.ok) toast('ngit push complete', '', 'ok');
-        else      toast('ngit push failed', `exit ${r.code}`, 'err');
+        if (r.ok) toast('git push complete', '', 'ok');
+        else      toast('git push failed', `exit ${r.code}`, 'err');
+        refreshAfter();
+        return !!r.ok;
       });
     };
 
     const pull = wrap.querySelector('.sync-pop-pull');
     const push = wrap.querySelector('.sync-pop-push');
-    pull.addEventListener('click', runPull);
-    push.addEventListener('click', runPush);
+    pull?.addEventListener('click', runPull);
+    push?.addEventListener('click', runPush);
 
-    // Auto-sync toggle — reuses the persisted PATCH {autoSync} logic.
-    const autoInput = wrap.querySelector('.sync-pop-autosync-input');
-    autoInput.addEventListener('change', async () => {
-      const next = !!autoInput.checked;
-      autoInput.disabled = true;
-      try {
-        await api(`/api/projects/${p.id}`, {
-          method:  'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body:    JSON.stringify({ autoSync: next }),
-        });
-        p.autoSync = next;
-        toast(next ? 'Automatic sync on' : 'Automatic sync off', '', 'ok');
-      } catch (e) {
-        autoInput.checked = !next;
-        toast('Automatic sync update failed', e?.message || '', 'err');
-      } finally {
-        autoInput.disabled = false;
-      }
-    });
-
-    // Footer links — proposals view + project Settings (signing/remote).
-    wrap.querySelector('.sync-pop-proposals').addEventListener('click', () => {
+    // Footer links.
+    wrap.querySelector('.sync-pop-proposals')?.addEventListener('click', () => {
       openProjectTab(p.id, 'proposals');
     });
-    wrap.querySelector('.sync-pop-signing').addEventListener('click', () => {
+    wrap.querySelector('.sync-pop-gh-prs')?.addEventListener('click', () => {
+      // Derive the github repo's pulls page from the remote URL (strip a
+      // trailing .git, append /pulls). Best-effort — only opens for http(s).
+      const url = (p.remotes.github || '').replace(/\.git$/, '');
+      if (/^https?:\/\//i.test(url)) window.open(`${url}/pulls`, '_blank', 'noreferrer');
+    });
+    wrap.querySelector('.sync-pop-signing')?.addEventListener('click', () => {
       openProjectTab(p.id, 'settings');
     });
-    // GitHub plane lives in Settings too — this link just signals it
-    // exists; the popover itself stays Nostr-only (no push from here).
     wrap.querySelector('.sync-pop-github')?.addEventListener('click', () => {
       openProjectTab(p.id, 'settings');
     });
 
-    // Status line + adaptive primary button. Paints from `gs` if given,
-    // otherwise probes /git-state and repaints once it lands.
+    // ── Commit flow + adaptive primary ──
+    // When dirty, the popover surfaces a commit-message input + Commit &
+    // Sync / Commit only buttons. When clean, the existing adaptive
+    // primary (Push N / Pull N / Sync N↑M↓ / Up-to-date) takes over.
     const statusEl  = wrap.querySelector('.sync-pop-status');
+    const commitEl  = wrap.querySelector('.sync-pop-commit');
+    const commitInp = wrap.querySelector('.sync-pop-commit-input');
     const primaryEl = wrap.querySelector('.sync-pop-primary');
+    const halfEl    = wrap.querySelector('.sync-pop-half');
+
+    // POST the snapshot endpoint (same contract as openSnapshotDialog).
+    // Returns ok:boolean. Commit-message value goes to the API as JSON —
+    // never into innerHTML.
+    const runCommit = async () => {
+      const message = commitInp ? commitInp.value : '';
+      try {
+        const r = await api(`/api/projects/${p.id}/snapshot`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ message }),
+        });
+        if (!r || r.ok === false) {
+          toast('Commit failed', r?.error || '', 'err');
+          return false;
+        }
+        toast(r.error === 'nothing to commit' ? 'Nothing to commit' : 'Committed', '', 'ok');
+        return true;
+      } catch (e) {
+        toast('Commit failed', e?.message || '', 'err');
+        return false;
+      }
+    };
+
     const paint = (s) => {
       const ahead  = Number(s?.ahead  || 0);
       const behind = Number(s?.behind || 0);
@@ -6236,96 +6303,152 @@ const ProjectsPanel = (() => {
       // Status line.
       let line;
       if (dirty)                    line = 'Uncommitted changes';
+      else if (local)               line = 'No remote configured';
       else if (ahead && behind)     line = `${ahead} ahead · ${behind} behind`;
       else if (ahead)               line = `${ahead} ahead`;
       else if (behind)              line = `${behind} behind`;
-      else                          line = 'In sync';
+      else if (s)                   line = 'In sync';
+      else                          line = 'checking…';
       statusEl.textContent = line;
       statusEl.classList.toggle('muted', !dirty && !ahead && !behind);
-      // Adaptive primary button.
+
       primaryEl.classList.remove('sync-pop-hint');
       primaryEl.disabled = false;
-      // Sync + Push are Nostr-signed (Amber) — tag them with the marker.
-      // Pull (fetch) is unsigned, so it stays bare.
+      primaryEl.onclick = null;
+
       if (dirty) {
-        primaryEl.textContent = 'Save changes first';
-        primaryEl.classList.add('sync-pop-hint');
+        // Dirty is now actionable: commit input + Commit&Sync / Commit only.
+        commitEl.hidden = false;
+        if (halfEl) halfEl.hidden = true;
+        if (local) {
+          // Local-only: Commit only (no sync to chain).
+          primaryEl.textContent = 'Commit';
+          primaryEl.onclick = async () => {
+            primaryEl.disabled = true;
+            const ok = await runCommit();
+            primaryEl.disabled = false;
+            if (ok) repaint();
+          };
+          removeSecondary();
+        } else {
+          primaryEl.innerHTML = `Commit &amp; Sync${hasNgit ? ' ' + amberSignMarker() : ''}`;
+          primaryEl.onclick = async () => {
+            primaryEl.disabled = true;
+            const ok = await runCommit();
+            if (ok) await runSync();
+            primaryEl.disabled = false;
+            repaint();
+          };
+          ensureSecondary('Commit only', async (btn) => {
+            btn.disabled = true;
+            const ok = await runCommit();
+            btn.disabled = false;
+            if (ok) repaint();
+          });
+        }
+        return;
+      }
+
+      // Clean — hide the commit affordance, restore the Pull/Push halves.
+      commitEl.hidden = true;
+      removeSecondary();
+      if (halfEl) halfEl.hidden = local;
+
+      if (local) {
+        // Local-only clean: nothing to do.
+        primaryEl.textContent = 'Up to date';
         primaryEl.disabled = true;
-        primaryEl.onclick = null;
       } else if (ahead && behind) {
-        primaryEl.innerHTML = `Sync (${ahead}↑${behind}↓) ${amberSignMarker()}`;
-        primaryEl.onclick = runSync;
+        primaryEl.innerHTML = `Sync (${ahead}↑${behind}↓)${hasNgit ? ' ' + amberSignMarker() : ''}`;
+        primaryEl.onclick = () => runSync();
       } else if (ahead) {
-        primaryEl.innerHTML = `Push ${ahead} commit${ahead === 1 ? '' : 's'} ${amberSignMarker()}`;
-        primaryEl.onclick = runPush;
+        primaryEl.innerHTML = `Push ${ahead} commit${ahead === 1 ? '' : 's'}${hasNgit ? ' ' + amberSignMarker() : ''}`;
+        primaryEl.onclick = () => runPush();
       } else if (behind) {
         primaryEl.textContent = `Pull ${behind}`;
-        primaryEl.onclick = runPull;
+        primaryEl.onclick = () => runPull();
       } else if (s) {
         primaryEl.textContent = 'Up to date';
         primaryEl.disabled = true;
-        primaryEl.onclick = null;
       } else {
         // Unknown / probe failed — fall back to the generic Sync verb.
-        primaryEl.innerHTML = `Sync ${amberSignMarker()}`;
-        primaryEl.onclick = runSync;
+        primaryEl.innerHTML = `Sync${hasNgit ? ' ' + amberSignMarker() : ''}`;
+        primaryEl.onclick = () => runSync();
       }
     };
+
+    // Secondary button (the "Commit only" half) lives just under the
+    // primary; created/removed as the dirty state toggles.
+    let secondaryBtn = null;
+    function ensureSecondary(label, onClick) {
+      if (!secondaryBtn) {
+        secondaryBtn = document.createElement('button');
+        secondaryBtn.className = 'sync-pop-secondary';
+        primaryEl.insertAdjacentElement('afterend', secondaryBtn);
+      }
+      secondaryBtn.textContent = label;
+      secondaryBtn.onclick = () => onClick(secondaryBtn);
+    }
+    function removeSecondary() {
+      if (secondaryBtn) { secondaryBtn.remove(); secondaryBtn = null; }
+    }
+
+    // Re-probe /git-state and repaint. Used after commit/sync so the
+    // popover reflects the new ahead/behind/dirty without a full render.
+    const repaint = async () => {
+      let s = null;
+      try { s = await api(`/api/projects/${p.id}/git-state`); } catch {}
+      paint(s && !s.error ? s : null);
+    };
+
     if (gs) paint(gs);
     else {
       paint(null);
-      (async () => {
-        let s = null;
-        try { s = await api(`/api/projects/${p.id}/git-state`); } catch {}
-        if (s && !s.error) paint(s); else paint(null);
-      })();
+      repaint();
     }
 
     return wrap;
   }
 
-  // Wire a `.pc-state` badge as the trigger for the Sync popover. Only
-  // called for git/ngit-capable cards that have a nostr remote. The badge
-  // itself stays a <span> (the poller writes into it); we layer the
-  // popover host + toggle behaviour on top without disturbing that text.
-  function attachSyncPopover(badgeEl, p) {
-    badgeEl.classList.add('pc-state-trigger');
-    badgeEl.setAttribute('role', 'button');
-    badgeEl.setAttribute('tabindex', '0');
-    badgeEl.setAttribute('aria-haspopup', 'true');
-    badgeEl.setAttribute('aria-expanded', 'false');
-    badgeEl.title = 'Sync / pull / push';
+  // Wire a trigger element (the "Sync ▾" button on a card or the detail
+  // header) as the opener for the Sync popover. The menu hosts inside the
+  // trigger's positioned parent (`.sync-pop-host`) so it anchors to the
+  // trigger and isn't clipped. Works on both the card and the detail
+  // header — the only requirement is a positioned parent wrapper.
+  function attachSyncPopover(triggerEl, p) {
+    triggerEl.setAttribute('aria-haspopup', 'true');
+    triggerEl.setAttribute('aria-expanded', 'false');
 
     let menu = null;
     const close = () => {
       if (menu) { menu.remove(); menu = null; }
-      badgeEl.setAttribute('aria-expanded', 'false');
+      triggerEl.setAttribute('aria-expanded', 'false');
     };
     const open = () => {
       if (menu) return;
       menu = document.createElement('div');
       menu.className = 'sync-pop-menu';
       // Clicks inside the popover must not bubble to the card-level
-      // openDetail handler — every Pull/Push/toggle would otherwise also
+      // openDetail handler — every Pull/Push/Commit would otherwise also
       // navigate into the detail view.
       menu.addEventListener('click', (e) => e.stopPropagation());
       menu.appendChild(buildSyncPopoverContents(p));
-      // Host inside the badge's positioned wrapper so it anchors to the
-      // badge and isn't clipped by the card.
-      badgeEl.parentElement.appendChild(menu);
-      badgeEl.setAttribute('aria-expanded', 'true');
+      // Host inside the trigger's positioned wrapper so it anchors to the
+      // trigger and isn't clipped by the card / header.
+      (triggerEl.closest('.sync-pop-host') || triggerEl.parentElement).appendChild(menu);
+      triggerEl.setAttribute('aria-expanded', 'true');
     };
     const toggle = (e) => {
       e.stopPropagation();
       if (menu) close(); else open();
     };
-    badgeEl.addEventListener('click', toggle);
-    badgeEl.addEventListener('keydown', (e) => {
+    triggerEl.addEventListener('click', toggle);
+    triggerEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(e); }
     });
     document.addEventListener('click', (e) => {
       if (!menu) return;
-      if (badgeEl.contains(e.target) || menu.contains(e.target)) return;
+      if (triggerEl.contains(e.target) || menu.contains(e.target)) return;
       close();
     });
   }
@@ -6472,13 +6595,13 @@ const ProjectsPanel = (() => {
   }
 
   function openSnapshotDialog(p, card) {
-    // Render the dialog form into the banner. Single text input + Save
+    // Render the dialog form into the banner. Single text input + Commit
     // + Cancel. Empty input is fine — the server falls back to an
     // ISO timestamp message.
     setCardBanner(card, `
       <form class="pcb-snap-form" novalidate>
-        <input type="text" class="pcb-snap-input" placeholder="Describe this snapshot (optional)" maxlength="200" autocomplete="off">
-        <button type="submit" class="primary pcb-snap-save">Save</button>
+        <input type="text" class="pcb-snap-input" placeholder="Describe this commit (optional)" maxlength="200" autocomplete="off">
+        <button type="submit" class="primary pcb-snap-save">Commit</button>
         <button type="button" class="pcb-snap-cancel">Cancel</button>
       </form>
     `, { kind: 'dialog' });
@@ -6511,7 +6634,7 @@ const ProjectsPanel = (() => {
       if (saveBtn.disabled) return;
       saveBtn.disabled = true;
       cancelBtn.disabled = true;
-      saveBtn.textContent = 'Saving…';
+      saveBtn.textContent = 'Committing…';
       const message = input.value;
       try {
         const r = await api(`/api/projects/${p.id}/snapshot`, {
@@ -6535,7 +6658,7 @@ const ProjectsPanel = (() => {
           : '';
         const headline = r.error === 'nothing to commit'
           ? 'Nothing to commit'
-          : 'Saved';
+          : 'Committed';
         setCardBanner(card,
           `<span class="pcb-msg">${headline}${tail}</span>`,
           { kind: 'ok' },
@@ -6580,22 +6703,20 @@ const ProjectsPanel = (() => {
     subtitle.textContent = p.path ? p.path : 'nsite-only project';
 
     headActions.innerHTML = '';
-    if (p.path && window.NSTerminal?.isAvailable?.() && terminalAi) {
-      const btn = document.createElement('button');
-      btn.textContent = `Open in ${terminalAi.displayName}`;
-      btn.addEventListener('click', () => window.NSTerminal.open(terminalAi.key, { projectId: p.id }));
-      headActions.appendChild(btn);
-    }
-    if (p.capabilities.git || p.capabilities.ngit) {
-      // Phase 3: "Publish" no longer labels a plain push. For ngit repos
-      // this is Sync (pull then push, via the ngit/sync endpoint); git-
-      // only repos keep the publish-to-remote flow but read as "Sync".
+    // Single "Sync ▾" — opens the repo-ops popover (Commit / Sync / Pull /
+    // Push). "Open in <terminal AI>" moved off the header into the Overview
+    // tab's actions row, next to "Open in chat".
+    if (p.path && (p.capabilities.git || p.capabilities.ngit)) {
+      const host = document.createElement('span');
+      host.className = 'sync-pop-host';
       const syncBtn = document.createElement('button');
-      syncBtn.className = 'primary';
-      syncBtn.textContent = 'Sync';
-      syncBtn.addEventListener('click', () =>
-        p.capabilities.ngit ? runProjectNgitSync(p) : runProjectPublish(p));
-      headActions.appendChild(syncBtn);
+      syncBtn.className = 'primary pc-sync-trigger';
+      syncBtn.type = 'button';
+      syncBtn.textContent = 'Sync ▾';
+      syncBtn.title = 'Commit / sync / pull / push';
+      attachSyncPopover(syncBtn, p);
+      host.appendChild(syncBtn);
+      headActions.appendChild(host);
     }
     if (p.capabilities.nsite) {
       const deployBtn = document.createElement('button');
@@ -6881,12 +7002,16 @@ const ProjectsPanel = (() => {
     // and the wizard slots in below when ready.
     const wantsPublishWizard = !!p.path && !p.remotes.ngit;
 
+    // "Open in <terminal AI>" — moved off the detail header into this
+    // actions row, next to "Open in chat". Sync moved entirely into the
+    // header's "Sync ▾" popover, so the old quick-push button is gone.
+    const wantsOpenInTerminal = !!p.path && window.NSTerminal?.isAvailable?.() && terminalAi;
     container.innerHTML = `
       ${gitBlock}${ngitBlock}${nsiteBlock}
       <div class="tab-section">
         <div class="overview-actions">
           <button class="primary open-chat-btn">Open in chat</button>
-          ${(p.capabilities.git || p.capabilities.ngit) ? '<button class="quick-push">Sync</button>' : ''}
+          ${wantsOpenInTerminal ? `<button class="open-terminal-btn">Open in ${escapeHtml(terminalAi.displayName)}</button>` : ''}
           ${p.capabilities.nsite ? '<button class="quick-deploy">Deploy</button>' : ''}
         </div>
       </div>
@@ -6894,11 +7019,8 @@ const ProjectsPanel = (() => {
       ${wantsAbout ? `<div class="overview-about-slot"><div class="tab-section"><div class="muted">loading about…</div></div></div>` : ''}
     `;
     container.querySelector('.open-chat-btn')?.addEventListener('click', () => openInChat(p));
-    // Phase 3: "Publish" relabeled to "Sync" — push is no longer called
-    // Publish. ngit repos sync (pull+push); git-only repos keep the
-    // publish-to-remote flow under the Sync label.
-    container.querySelector('.quick-push')?.addEventListener('click', () =>
-      p.capabilities.ngit ? runProjectNgitSync(p) : runProjectPublish(p));
+    container.querySelector('.open-terminal-btn')?.addEventListener('click', () =>
+      window.NSTerminal.open(terminalAi.key, { projectId: p.id }));
     container.querySelector('.quick-deploy')?.addEventListener('click', () => runProjectDeploy(p));
     container.querySelector('.deploy-btn')?.addEventListener('click', () => runProjectDeploy(p));
     container.querySelectorAll('.copy-slot').forEach(slot => {
@@ -7589,7 +7711,7 @@ const ProjectsPanel = (() => {
   // published to ngit yet. The Review step inserts a confirmation
   // sheet between the form and the actual `ngit init` SSE so the
   // user sees exactly what event will be signed and where the repo
-  // will be reachable, plus an opt-in for auto-sync.
+  // will be reachable.
   //
   // The panel is intentionally a sibling implementation of the
   // long-standing ngit-tab init form rather than a refactor: the
@@ -7793,20 +7915,6 @@ const ProjectsPanel = (() => {
         </ul>
       </div>
 
-      <div class="rev-section">
-        <h4>Automatic sync</h4>
-        <label class="rev-autosync">
-          <input type="checkbox" class="rev-autosync-toggle">
-          <span>
-            <strong>Automatic sync</strong>
-            <div class="muted" style="font-size:12px;margin-top:2px">
-              Pull only — fetches every 5 min. Never pushes or signs.
-              Toggle later from the repo status menu.
-            </div>
-          </span>
-        </label>
-      </div>
-
       ${!account?.loggedIn ? `
         <div class="rev-warn">
           <strong>Amber not paired.</strong> ngit init publishes a signed
@@ -7838,13 +7946,12 @@ const ProjectsPanel = (() => {
 
     cancel.addEventListener('click', () => modal.close());
     publish.addEventListener('click', () => {
-      const enableAutoSync = body.querySelector('.rev-autosync-toggle').checked;
       modal.close();
-      runPublishFlow(p, formData, enableAutoSync);
+      runPublishFlow(p, formData);
     });
   }
 
-  async function runPublishFlow(p, formData, enableAutoSync) {
+  async function runPublishFlow(p, formData) {
     const r = await openExecModal({
       title:    `Publish ${p.name}`,
       subtitle: `ngit init --name ${formData.name}`,
@@ -7857,10 +7964,9 @@ const ProjectsPanel = (() => {
     });
     if (!r.ok) return;  // exec modal stays open with the error stream
 
-    // Sync the project record so the new ngit remote + autoSync flag
-    // land before the next render. We re-detect first (picks up the
-    // ngit URL ngit init wrote into git config), then PATCH any
-    // additional flags the user opted into.
+    // Sync the project record so the new ngit remote lands before the
+    // next render. We re-detect first (picks up the ngit URL ngit init
+    // wrote into git config), then PATCH the remote.
     try {
       const det = await api('/api/projects/detect', {
         method: 'POST',
@@ -7871,7 +7977,6 @@ const ProjectsPanel = (() => {
       if (det.ngitRemote) {
         patch.remotes = { github: p.remotes.github || null, ngit: det.ngitRemote };
       }
-      if (enableAutoSync) patch.autoSync = true;
       if (Object.keys(patch).length > 0) {
         await api(`/api/projects/${p.id}`, {
           method: 'PATCH',
@@ -7882,8 +7987,7 @@ const ProjectsPanel = (() => {
       // Mark for the one-time success banner; cleared on the next
       // renderCodeTab pass so it doesn't reappear on tab switches.
       state.justPublishedProjectId = p.id;
-      toast('Published to Nostr',
-            enableAutoSync ? 'auto-sync enabled' : 'manual sync', 'ok');
+      toast('Published to Nostr', '', 'ok');
     } catch (e) {
       toast('Post-publish sync failed', e?.message || '', 'warn');
     }
@@ -9302,8 +9406,8 @@ const ProjectsPanel = (() => {
     const alsoGit = p.capabilities.git
       ? `<div class="muted" style="margin-top:8px"><code>nostr-station publish</code> handles both the GitHub and Nostr remotes simultaneously.</div>`
       : '';
-    // Phase 2: the Sync/Pull/Push triad + auto-sync now live in the
-    // status-badge popover on the project card (buildSyncPopoverContents).
+    // Phase 2: the Sync/Pull/Push triad now lives in the
+    // Sync popover on the project card (buildSyncPopoverContents).
     // This tab keeps the durable config — Nostr remote URL, Signing, and
     // the init path — plus the Send-as-proposal (PR) affordance, which is
     // a publish-a-patch-series action, not a plain sync. A muted pointer
@@ -9372,10 +9476,10 @@ const ProjectsPanel = (() => {
       }
     })();
 
-    // Phase 2: the auto-sync checkbox and the Sync/Pull/Push triad
-    // handlers were removed here — those controls moved to the status-
-    // badge popover (buildSyncPopoverContents). The Send-as-proposal
-    // gate above is the only interactive control this tab keeps.
+    // Phase 2: the Sync/Pull/Push triad handlers were removed here —
+    // those controls moved to the Sync popover
+    // (buildSyncPopoverContents). The Send-as-proposal gate above is
+    // the only interactive control this tab keeps.
   }
 
   // Truncate a 64-hex pubkey for display. Used by the proposals list —
@@ -9754,7 +9858,6 @@ const ProjectsPanel = (() => {
         <div class="proposals-head">
           <div>
             <h3 style="margin:0">Pull requests</h3>
-            <div class="muted" style="font-size:11px;margin-top:2px">Patch series over Nostr (NIP-34)</div>
           </div>
           <div class="proposals-head-actions">
             <button class="proposals-view-patch">View latest patch</button>

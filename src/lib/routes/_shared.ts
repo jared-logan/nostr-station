@@ -251,23 +251,6 @@ export function setActiveChatProjectId(id: string | null): void {
   activeChatProjectId = id;
 }
 
-// Auto-sync manager bridge. The orchestrator (`web-server.ts`) instantiates
-// AutoSyncManager at startup and registers it here; the project PATCH
-// route reads it back to call `reconcile(id)` after a toggle, so the
-// flag takes effect inside the request/response cycle. Same shape as
-// the chat-context bridge above — single source of truth, no cyclic
-// imports between routes/* and web-server.ts.
-//
-// Typed loosely (`unknown`) to keep this module free of the heavier
-// AutoSyncManager class import; consumers narrow at the call site.
-let autoSyncRef: { reconcile: (id: string) => void } | null = null;
-export function getAutoSyncRef(): { reconcile: (id: string) => void } | null {
-  return autoSyncRef;
-}
-export function setAutoSyncRef(ref: { reconcile: (id: string) => void } | null): void {
-  autoSyncRef = ref;
-}
-
 // In-process local-infra port bridges. `web-server.ts` calls the setters
 // when the in-process relay (and, in Phase C, Blossom) finish starting up;
 // `project-scaffold.ts` reads via the getters so new local projects seed
@@ -282,7 +265,8 @@ export function getInprocBlossomPort():  number | null { return inprocBlossomPor
 export function setInprocRelayPort(p:   number | null): void { inprocRelayPort   = p; }
 export function setInprocBlossomPort(p: number | null): void { inprocBlossomPort = p; }
 
-// Whitelist bridge — same pattern as autoSyncRef. The in-process relay's
+// Whitelist bridge — same single-source-of-truth pattern as the
+// chat-context bridge above. The in-process relay's
 // WhitelistStore is owned by web-server.ts (via the Relay instance). The
 // test-identities module (created in Phase B) needs to add new test
 // pubkeys to the whitelist on create + remove them on delete. Wiring

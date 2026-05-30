@@ -41,7 +41,6 @@ import { LogBuffer, type LogLine } from './log-buffer.js';
 import { nvpnRelayHealth } from './nvpn-relay-health.js';
 import { getTool, installTool, TOOLS } from './tools.js';
 import { Watchdog } from './watchdog.js';
-import { AutoSyncManager } from './auto-sync.js';
 import { installNostrVpn } from './nvpn-installer.js';
 import {
   probeNvpnStatus, probeNvpnServiceStatus, startNvpnLogTail, vpnBannerRunningFor,
@@ -77,7 +76,6 @@ import {
   readBody, streamExec, streamExecError,
   CLI_BIN, CLI_SPAWN,
   getActiveChatProjectId,
-  setAutoSyncRef,
   setInprocRelayPort,
   setInprocBlossomPort,
   setWhitelistRef,
@@ -204,17 +202,6 @@ nvpnRelayHealth().attach(logBuffers.vpn);
 // opts out for tests / minimal deployments.
 let watchdog: Watchdog | null = null;
 
-// Auto-sync scheduler. Module-level singleton so the PATCH /api/projects/:id
-// route handler can reach in and reconcile a single project after the
-// user toggles the persisted autoSync flag — letting the change take
-// effect inside the request/response cycle rather than waiting for the
-// next interval tick. Lazy-init below so tests that don't boot the
-// server never spin up the timer set.
-let autoSync: AutoSyncManager | null = null;
-export function getAutoSyncManager(): AutoSyncManager | null {
-  return autoSync;
-}
-
 // nvpn daemon log tailer. Started best-effort once at server boot; pumps
 // the daemon's own log file into logBuffers.vpn so /api/logs/vpn streams
 // real lines instead of the static "tail it manually" hint that used to
@@ -310,13 +297,6 @@ async function maybeStartInprocRelay(): Promise<void> {
   logBuffers.relay.info(`relay listening on ws://127.0.0.1:${port}`);
   await maybeStartWatchdog();
   await ensureSeedPubkeyWhitelisted();
-  if (process.env.STATION_DISABLE_AUTO_SYNC !== '1') {
-    autoSync = new AutoSyncManager();
-    autoSync.start();
-    // Bridge the singleton through routes/_shared.ts so the project
-    // PATCH route can call reconcile(id) without a cyclic import.
-    setAutoSyncRef(autoSync);
-  }
 }
 
 // ── In-process Blossom (Phase C) ─────────────────────────────────────────

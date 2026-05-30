@@ -78,13 +78,6 @@ export interface Project {
   // promote (Phase E) flow ships.
   readRelays:   string[] | null;
   environment?: ProjectEnvironment;
-  // Per-project auto-sync (pull-only on a 5-minute interval). Stored on
-  // the Project record so it survives dashboard restarts; the in-memory
-  // AutoSyncManager (src/lib/auto-sync.ts) reads this on boot to arm
-  // intervals for any project where the user previously toggled it on.
-  // Optional / undefined-as-false so legacy entries written before this
-  // field landed read as "off" without a migration step.
-  autoSync?:    boolean;
   createdAt:    string;
   updatedAt:    string;
 }
@@ -308,11 +301,6 @@ function normalize(raw: any): Project | null {
     },
     readRelays,
     ...(environment ? { environment } : {}),
-    // autoSync is optional — coerce truthy non-bool to true (defensive
-    // against legacy entries written before strict coercion landed in
-    // updateProject) and leave undefined as undefined so the field
-    // stays absent on rows that never opted in.
-    ...(raw.autoSync !== undefined ? { autoSync: !!raw.autoSync } : {}),
     createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
   };
@@ -626,7 +614,6 @@ export function updateProject(id: string, patch: UpdateInput): { ok: true; proje
     // an environment block is present, OR carries over from `current`
     // for projects that never adopted the environment block.
     readRelays:   current.readRelays,
-    autoSync:     patch.autoSync     !== undefined ? !!patch.autoSync : current.autoSync,
     updatedAt:    new Date().toISOString(),
   };
   if (nextEnvironment) {

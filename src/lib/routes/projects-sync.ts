@@ -45,9 +45,7 @@ export async function handleProjectsSync(
     }
     // push:true — the dashboard's Sync button is an explicit user
     // action, and users expect bidirectional sync (pull + push) like
-    // Shakespeare. AutoSyncManager calls syncProject without this opt
-    // to preserve its read-only contract (unattended schedules must
-    // never push WIP commits without consent).
+    // Shakespeare. Read-only callers call syncProject without this opt.
     const result = await syncProject(project, { push: true });
     // syncProject's own SyncResult shape carries both ok/error
     // semantics AND the per-backend payload (proposals[] for ngit,
