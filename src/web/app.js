@@ -6522,78 +6522,6 @@ const ProjectsPanel = (() => {
     if (banner) banner.dataset.scheduledClear = String(ms);
   }
 
-  async function runProjectSync(p, card, syncBtn) {
-    if (syncBtn.disabled) return;  // dedup double-clicks
-    syncBtn.disabled = true;
-    syncBtn.classList.add('pc-sync-active');
-    const originalTitle = syncBtn.title;
-    syncBtn.title = 'Syncing…';
-    setCardBanner(card, `<span class="pcb-msg">Syncing…</span>`, { kind: 'pending' });
-    try {
-      const r = await api(`/api/projects/${p.id}/sync`, { method: 'POST' });
-      if (!r) {
-        setCardBanner(card, `<span class="pcb-msg">Sync failed</span>`, { kind: 'err' });
-        return;
-      }
-      if (r.ok === false) {
-        // Diverged or dirty — actionable inline message. Surface the
-        // ahead/behind counts when the backend gave them so the user
-        // knows the scale of the divergence at a glance.
-        const counts = (typeof r.ahead === 'number' && typeof r.behind === 'number')
-          ? ` (${r.ahead} ahead, ${r.behind} behind)`
-          : '';
-        setCardBanner(card,
-          `<span class="pcb-msg">${escapeHtml(r.message || 'sync failed')}${counts}</span>`,
-          { kind: 'err' },
-        );
-        return;
-      }
-      // ok branch.
-      // ngit case: surface the proposals count badge first-class —
-      // the brief is explicit that proposals must NOT be flattened
-      // into a generic message. No proposals view exists yet, so we
-      // render a non-linked count chip; clicking the card itself
-      // opens the detail view where a future proposals tab will
-      // surface the list.
-      let proposalsHtml = '';
-      if (Array.isArray(r.proposals) && r.proposals.length > 0) {
-        const n = r.proposals.length;
-        proposalsHtml = ` <span class="pcb-prop-count">${n} open proposal${n === 1 ? '' : 's'}</span>`;
-        // Phase 6: cache the series + paint the persistent chip so the
-        // count survives the banner's 5 s auto-clear and links to the
-        // proposals view.
-        proposalsCache.set(p.id, r.proposals);
-        setCardPropBadge(card, p, n);
-      } else if (Array.isArray(r.proposals)) {
-        // Sync ran clean with zero open proposals — clear any stale chip.
-        proposalsCache.set(p.id, r.proposals);
-        setCardPropBadge(card, p, 0);
-      }
-      setCardBanner(card,
-        `<span class="pcb-msg">${escapeHtml(r.message || 'synced')}</span>${proposalsHtml}`,
-        { kind: 'ok' },
-      );
-      // ok messages auto-clear so the card doesn't end up with a
-      // stale "fast-forwarded" line three days later. Errors stick
-      // until the next user action — they're actionable, not noise.
-      clearCardBannerLater(card, 5000);
-      // Refresh the badge so the user sees the new state — fast-
-      // forward erases the "behind" pill, ff fetch may flip "up to
-      // date" into "ahead" for ngit-only fetches that brought new
-      // remote commits without a local merge.
-      pollGitStateOne(p.id);
-    } catch (e) {
-      setCardBanner(card,
-        `<span class="pcb-msg">Sync failed: ${escapeHtml(String(e?.message || e || 'unknown'))}</span>`,
-        { kind: 'err' },
-      );
-    } finally {
-      syncBtn.disabled = false;
-      syncBtn.classList.remove('pc-sync-active');
-      syncBtn.title = originalTitle;
-    }
-  }
-
   function openSnapshotDialog(p, card) {
     // Render the dialog form into the banner. Single text input + Commit
     // + Cancel. Empty input is fine — the server falls back to an
@@ -12270,20 +12198,6 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
     }).then(r => {
       if (r.ok) toast('Pulled', p.name, 'ok');
       else      toast('Pull failed', `exit ${r.code}`, 'err');
-      if (state.view === 'detail' && state.projectId === p.id) render();
-    });
-  }
-  // Phase 3: Sync = pull then push to main. Reuses the ngit/sync endpoint
-  // (the same one the status-badge popover drives). Used where "Publish"
-  // used to mislabel a plain push on already-published repos.
-  function runProjectNgitSync(p) {
-    openExecModal({
-      title:    `ngit sync · ${p.name}`,
-      subtitle: 'Pull from your relays + GRASP server, then push your commits. Amber signs.',
-      endpoint: `/api/projects/${p.id}/ngit/sync`,
-    }).then(r => {
-      if (r.ok) toast('ngit sync complete', '', 'ok');
-      else      toast('ngit sync failed', `exit ${r.code}`, 'err');
       if (state.view === 'detail' && state.projectId === p.id) render();
     });
   }
