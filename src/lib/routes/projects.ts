@@ -72,7 +72,7 @@ import { handleProjectsExec } from './projects-exec.js';
 import { handleTestIdentities } from './test-identities.js';
 import { promote } from '../promote.js';
 import {
-  readBody, setActiveChatProjectId, getAutoSyncRef,
+  readBody, setActiveChatProjectId,
 } from './_shared.js';
 
 export async function handleProjects(
@@ -279,10 +279,6 @@ export async function handleProjects(
         res.end(JSON.stringify({ error: r.error }));
         return true;
       }
-      // If autoSync changed (or any other field — cheap to always
-      // call), reconcile the manager so the toggle takes effect
-      // inside this response, not on the next interval tick.
-      try { getAutoSyncRef()?.reconcile(id); } catch {}
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(r.project));
       return true;

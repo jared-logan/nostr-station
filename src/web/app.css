@@ -5264,7 +5264,31 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
   color: var(--text-bright);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.project-card .pc-actions { display: flex; gap: 6px; }
+.project-card .pc-actions { display: flex; gap: 6px; align-items: center; }
+
+/* Positioned wrapper that anchors the Sync popover to its trigger
+   (card top-right or detail header). */
+.sync-pop-host { position: relative; display: inline-flex; }
+
+/* "Sync ▾" trigger — full-text button on the card's top-right and in the
+   detail header. The card variant is compact; the header variant inherits
+   the .primary styling layered on top. */
+.pc-sync-trigger {
+  font-size: 11px; font-weight: 600;
+  padding: 4px 9px;
+  white-space: nowrap;
+  border-radius: var(--r-sm);
+}
+.pc-sync-trigger[aria-expanded="true"] { border-color: var(--accent-dim); }
+
+/* WORK / session cluster — bottom-right of the card. */
+.project-card .pc-work-actions {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.project-card .pc-work-actions:empty { display: none; }
+
 .pc-icon-btn {
   width: 28px; height: 28px;
   padding: 0;
@@ -5388,20 +5412,21 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .pc-state.pcs-ahead-behind{ background: var(--accent-soft);     color: var(--accent-bright); border: 1px solid var(--accent-dim); }
 .pc-state.pcs-diverged    { background: rgba(255, 80, 80, 0.10); color: var(--error);      border: 1px solid rgba(255, 80, 80, 0.32); }
 
-/* ── Status-anchored Sync popover (Phase 1) ──────────────────────────────
-   The `.pc-state` badge becomes a clickable trigger for the consolidated
-   Sync/Pull/Push hub. `.pc-state-host` is the positioned wrapper that the
-   absolutely-positioned `.sync-pop-menu` anchors to — mirrors the
-   `.status-control` / `.status-control-menu` pattern. */
+/* ── Sync popover (the repo-ops hub) ─────────────────────────────────────
+   The "Sync ▾" trigger (card top-right + detail header) opens the
+   consolidated Commit/Sync/Pull/Push hub. `.sync-pop-host` is the
+   positioned wrapper the absolutely-positioned `.sync-pop-menu` anchors
+   to — mirrors the `.status-control` / `.status-control-menu` pattern.
+   `.pc-state-host` (the read-only git-state pill's wrapper) is kept for
+   layout but is no longer a trigger. */
 .pc-state-host { position: relative; display: inline-flex; }
-.pc-state-trigger { cursor: pointer; }
-.pc-state-trigger:hover { filter: brightness(1.15); }
-.pc-state-trigger:focus-visible { outline: 1px solid var(--accent-dim); outline-offset: 1px; }
 
 .sync-pop-menu {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
+  /* Right-anchored: the trigger always lives top-right of its container
+     (card head / detail header), so the menu opens leftward to stay on-grid. */
+  right: 0;
   z-index: 30;
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -5411,9 +5436,6 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
   width: 280px;
   max-width: 88vw;
 }
-/* Flip to right-align near the card's right edge so the menu isn't clipped
-   off the grid. Cards near the left keep the default left anchor. */
-.project-card:nth-child(even) .sync-pop-menu { left: auto; right: 0; }
 
 .sync-pop-body { display: flex; flex-direction: column; gap: 10px; }
 .sync-pop-remote {
@@ -5441,14 +5463,27 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .sync-pop-half { display: flex; gap: 6px; }
 .sync-pop-half > button { flex: 1; }
 
-.sync-pop-autosync {
-  display: flex; align-items: flex-start; gap: 8px;
-  font-size: 12px; cursor: pointer;
-  padding-top: 4px; border-top: 1px solid var(--border);
+/* Destination label (Nostr / GitHub / Local) in the popover header. */
+.sync-pop-dest {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-dim);
 }
-.sync-pop-autosync input { margin-top: 2px; flex-shrink: 0; }
-.sync-pop-autosync > span { display: flex; flex-direction: column; gap: 1px; }
-.sync-pop-autosync-sub { font-size: 11px; }
+
+/* Commit-message input — shown only when the repo is dirty. */
+.sync-pop-commit { display: flex; }
+.sync-pop-commit-input {
+  width: 100%;
+  font-size: 12px;
+  padding: 5px 8px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+
+/* "Commit only" secondary button, slotted under the primary. */
+.sync-pop-secondary { width: 100%; }
 
 .sync-pop-footer {
   display: flex; justify-content: space-between; gap: 8px;
@@ -7573,17 +7608,6 @@ body.term-expanded .term-bar-toggle .term-chevron {
   border-radius: 3px;
   font-size: 11px;
 }
-.rev-autosync {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  cursor: pointer;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-elev, var(--bg-card));
-}
-.rev-autosync-toggle { margin-top: 3px; flex-shrink: 0; }
 .rev-warn {
   margin-top: 12px;
   padding: 10px 12px;

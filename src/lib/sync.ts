@@ -64,7 +64,7 @@ export interface GitState {
   // poll. Distinguishing this from "really a clean repo" was the whole
   // reason the field exists; the prior code conflated them and produced
   // a "dirty -> up to date -> dirty" flicker every time a poll raced an
-  // ngit fetch or auto-sync tick.
+  // ngit fetch.
   error?:   string;
 }
 
@@ -213,8 +213,8 @@ export async function getProjectGitState(project: Project): Promise<GitState> {
     return parseGitState(stdout, backend);
   } catch (e: any) {
     // Transient: timeout (5 s), index.lock held by a concurrent git op
-    // (auto-sync, the user clicking Publish in another tab, an editor's
-    // own git integration), EACCES on the .git dir, etc. We surface the
+    // (the user clicking Publish in another tab, an editor's own git
+    // integration), EACCES on the .git dir, etc. We surface the
     // failure via `error` so the polling client preserves whatever badge
     // it last drew successfully instead of momentarily painting a dirty
     // repo as clean.
@@ -228,9 +228,8 @@ export async function getProjectGitState(project: Project): Promise<GitState> {
 export interface SyncOptions {
   // Include a `git push origin HEAD` phase after the pull/merge.
   //
-  // Off by default to preserve the AutoSyncManager's read-only contract:
-  // unattended scheduled syncs must never push WIP commits without the
-  // user's consent. Explicit user actions (the dashboard's Sync button)
+  // Off by default so callers that only want a read-only pull/merge stay
+  // read-only. Explicit user actions (the dashboard's Sync button)
   // pass push:true to get bidirectional behavior — what users expect
   // when they reach for a "Sync" verb, and what Shakespeare's clean
   // sync popover does on every click.
@@ -399,8 +398,7 @@ export async function syncProject(
 
   // Push phase — opt-in (see SyncOptions.push). Runs only when the
   // caller explicitly asked for bidirectional sync. The dashboard's
-  // Sync button passes push:true; AutoSyncManager keeps the default
-  // (read-only).
+  // Sync button passes push:true; read-only callers keep the default.
   if (opts.push) {
     try {
       await execFileAsync(gitBinNgit, ['push', 'origin', 'HEAD'],
