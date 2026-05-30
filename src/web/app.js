@@ -8574,28 +8574,42 @@ const ProjectsPanel = (() => {
         customTags,
       };
       try {
-        // silent: true so api() doesn't auto-toast on non-2xx — we
-        // produce a higher-quality, action-specific toast in the
-        // catch (with per-relay reasons or the bunker error).
-        const r = await api(`/api/projects/${p.id}/announce`, {
+        // Direct fetch (not api()) so we can read the JSON body on a 502.
+        // The announce endpoint returns 502 with a full per-relay `publish`
+        // breakdown when signing succeeded but no relay accepted — api()
+        // throws on non-2xx, which would discard that body and leave us with
+        // only "announce 502". Reading it here lets us show WHICH relays
+        // rejected and why, instead of a bare status code.
+        const token = getSessionToken();
+        const resp = await fetch(`/api/projects/${p.id}/announce`, {
           method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body:    JSON.stringify(payload),
-        }, { silent: true });
-        if (r?.ok && r?.accepted > 0) {
+        });
+        let r = null;
+        try { r = await resp.json(); } catch { /* non-JSON body */ }
+
+        if (resp.ok && r?.ok && r?.accepted > 0) {
           toast('Repository updated', `${r.accepted}/${r.targets} relays accepted the new announcement`, 'ok');
           modal.close();
           if (typeof onSaved === 'function') onSaved();
+        } else if (r && Array.isArray(r.publish)) {
+          // Signed, but no relay accepted. Surface per-relay reasons — far
+          // more actionable than "502". Common case: re-announcing after a
+          // NIP-09 delete, where some relays refuse to re-accept the event.
+          const reasons = r.publish.filter(x => !x.ok)
+            .map(x => `${x.relay}: ${x.reason || 'no OK'}`).slice(0, 4).join('\n');
+          toast('No relays accepted', reasons || r.error || 'unknown error', 'err');
+          save.disabled = false;
+          save.textContent = 'Save changes';
         } else {
-          // Partial failure: at least we signed. Surface relay reasons.
-          const reasons = (r?.publish || []).filter(x => !x.ok).map(x => `${x.relay}: ${x.reason || 'no OK'}`).slice(0, 3).join('\n');
-          toast('No relays accepted', reasons || r?.error || 'unknown error', 'err');
+          // No structured body (e.g. a 400 before publish, or sign failure).
+          toast('Announce failed', r?.error || `HTTP ${resp.status}`, 'err');
           save.disabled = false;
           save.textContent = 'Save changes';
         }
       } catch (e) {
-        // Stack trace into the console for actual debugging — toast is
-        // for the user, console.warn is for us when they paste a screenshot.
+        // Network-level failure (couldn't reach the endpoint at all).
         console.warn('[edit-repo] announce failed:', e);
         toast('Save failed', String(e?.message || e), 'err');
         save.disabled = false;

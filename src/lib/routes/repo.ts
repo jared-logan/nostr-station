@@ -50,7 +50,7 @@ import { WebSocket } from 'ws';
 import { getProject, type Project } from '../projects.js';
 import { MAX_WS_PAYLOAD } from '../ws-limits.js';
 import { findBin } from '../detect.js';
-import { isValidRelayUrl, getGraspServers, readIdentity } from '../identity.js';
+import { isValidRelayUrl, getGraspServers, getEffectiveReadRelays, readIdentity } from '../identity.js';
 import { safeHttpUrl } from '../url-safety.js';
 import {
   queryRelaysDirect as queryRelays,
@@ -946,13 +946,21 @@ async function handleAnnounce(
     });
   }
 
-  // Publish to the union of: the input's own relay list, user's grasp
-  // servers, and read-relays. De-duped + capped at 8 to keep the
-  // request bounded.
+  // Publish to the union of: the input's own relay list, the user's grasp
+  // servers, AND their effective read/write relays. The read-relays were
+  // documented here but never actually included — which meant an
+  // announcement published ONLY to grasp servers (e.g. relay.ngit.dev +
+  // git.shakespeare.diy). GRASP relays can reject or drop a plain
+  // kind-30617 publish (auth/rate-limit), so with no general public relay
+  // in the set, every target could fail → a 502 even though signing
+  // succeeded. Including the read-relays gives the event reliable,
+  // broadly-queryable homes (damus/nos.lol/primal/…) so discovery works
+  // and a grasp rejection isn't fatal. De-duped + capped at 8.
   const publishTargets = [...new Set([
     ...input.relays || [],
     ...getGraspServers().map(s => /^wss?:/i.test(s) ? s : `wss://${s}`),
-  ])].filter(isValidRelayUrl).slice(0, 8);
+    ...getEffectiveReadRelays(),
+  ])].filter(isValidRelayUrl).slice(0, 12);
 
   const results = publishTargets.length > 0
     ? await publishEventToRelays(signed.signedEvent, publishTargets)
