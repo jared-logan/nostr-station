@@ -9533,20 +9533,37 @@ const ProjectsPanel = (() => {
   async function synthRepoPrefill(p, meta) {
     const remote = p.remotes.ngit || '';
     // A 3-part remote (nostr://<npub>/<relay-host>/<repo>) embeds the grasp
-    // relay host the repo currently lives on — always include it.
+    // relay host the repo currently lives on — always include it. The repo
+    // identifier is the LAST path segment (matches ngitRemoteDTag server-side).
     let remoteGrasp = '';
-    const m = remote.match(/^nostr:\/\/npub1[0-9a-z]+\/([^/]+)\/[^/]+\/?$/);
-    if (m) remoteGrasp = `wss://${m[1]}`;
+    let identifier  = '';
+    const m = remote.match(/^nostr:\/\/(npub1[0-9a-z]+)\/(.+)$/);
+    if (m) {
+      const segs = m[2].split('/').filter(Boolean);
+      identifier = segs[segs.length - 1] || '';
+      if (segs.length >= 2) remoteGrasp = `wss://${segs[0]}`;
+    }
+    if (!identifier) identifier = p.name || 'repo';
 
-    // Inherit the user's configured GRASP servers (Config → Git). Falls
-    // back to the remote host alone if the fetch fails or the list is empty.
+    // Inherit the user's configured GRASP servers + npub (Config → Git).
+    // Falls back to the remote host alone if the fetch fails.
     let configGrasp = [];
+    let npub = '';
     try {
       const cfg = await api('/api/identity/config', undefined, { silent: true });
       if (Array.isArray(cfg?.graspServers)) configGrasp = cfg.graspServers;
+      if (typeof cfg?.npub === 'string') npub = cfg.npub;
     } catch { /* fall back to remote host below */ }
 
     const grasp = [...new Set([...(remoteGrasp ? [remoteGrasp] : []), ...configGrasp])];
+    // One clone URL per grasp server — same pattern the publish wizard uses
+    // (openPublishReview). Without these, gitworkshop can't classify the
+    // grasp servers (it keys on clone∩relays) and, more importantly, nobody
+    // can actually `git clone` the re-announced repo. Requires npub; if we
+    // couldn't resolve it, leave clone empty rather than emit a broken URL.
+    const clone = npub
+      ? grasp.map(g => `https://${String(g).replace(/^wss?:\/\//, '')}/${npub}/${identifier}.git`)
+      : [];
 
     return {
       name:        p.name || '',
@@ -9554,7 +9571,7 @@ const ProjectsPanel = (() => {
       web:         [],
       hashtags:    [],
       euc:         '',
-      clone:       [],
+      clone,
       relays:      grasp,
       maintainers: [],
       // pubkey is informational only here — the backend /announce derives
