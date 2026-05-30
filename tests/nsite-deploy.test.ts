@@ -18,7 +18,6 @@ const {
   walkBuildDir,
   withSpaFallbacks,
   buildManifestTemplate,
-  refreshAnnounceWebTag,
   deployFiles,
   mimeForPath,
   DEFAULT_NSITE_GATEWAY,
@@ -224,45 +223,11 @@ test('buildManifestTemplate: path tags + server/relay hints + client stamp', () 
   assert.ok(tpl.tags.some((t: string[]) => t[0] === 'client' && t[1] === 'nostr-station'));
 });
 
-// ── 30617 web-tag refresh ────────────────────────────────────────────────────
-
-test('refreshAnnounceWebTag: replaces web tag, preserves the rest', () => {
-  const prior = {
-    tags: [
-      ['d', 'nostr-vm'], ['name', 'NostrVM'],
-      ['web', 'https://old.example'], ['client', 'shakespeare.diy'],
-    ],
-    content: '',
-  };
-  const out = refreshAnnounceWebTag(prior, 'https://new.nsite.lol/');
-  const webs = out.tags.filter((t: string[]) => t[0] === 'web');
-  assert.equal(webs.length, 1);
-  assert.equal(webs[0][1], 'https://new.nsite.lol/');
-  // other tags preserved
-  assert.ok(out.tags.some((t: string[]) => t[0] === 'name' && t[1] === 'NostrVM'));
-  // pre-existing client tag is preserved (provenance kept)…
-  assert.ok(out.tags.some((t: string[]) => t[0] === 'client' && t[1] === 'shakespeare.diy'));
-  // …and our own client stamp is added alongside it.
-  assert.ok(out.tags.some((t: string[]) => t[0] === 'client' && t[1] === 'nostr-station'));
-});
-
-test('refreshAnnounceWebTag: stamps client:nostr-station on a tagless prior (ngit-CLI 30617)', () => {
-  // ngit push generates a 30617 with no client tag — the hello-world case.
-  const prior = { tags: [['d', 'hello-world'], ['name', 'hello-world'], ['web', 'https://gitworkshop.dev/x']], content: '' };
-  const out = refreshAnnounceWebTag(prior, 'https://abc.nsite.lol/');
-  const clients = out.tags.filter((t: string[]) => t[0] === 'client');
-  assert.equal(clients.length, 1);
-  assert.equal(clients[0][1], 'nostr-station');
-  assert.equal(out.tags.filter((t: string[]) => t[0] === 'web')[0][1], 'https://abc.nsite.lol/');
-});
-
-test('refreshAnnounceWebTag: idempotent — does not double-stamp on re-deploy', () => {
-  const prior = { tags: [['d', 'x'], ['client', 'nostr-station'], ['web', 'https://old']], content: '' };
-  const out = refreshAnnounceWebTag(prior, 'https://new/');
-  assert.equal(out.tags.filter((t: string[]) => t[0] === 'client' && t[1] === 'nostr-station').length, 1);
-});
-
 // ── deployFiles end-to-end (stubbed sign + publish + real upload mock) ───────
+//
+// Deploy publishes the nsite (kind:24242 auth + kind:35128 manifest) and
+// deliberately leaves the repo's kind:30617 announcement untouched — its
+// `web` tag belongs to the repo browser, not the deployed site.
 
 import http from 'node:http';
 import { verifyEvent } from 'nostr-tools/pure';
@@ -320,7 +285,6 @@ test('deployFiles: signs, uploads, publishes manifest, returns deterministic URL
     blossomServers: [`http://127.0.0.1:${port}`],
     relays: ['wss://relay.test'],
     ownerPubkeyHex: pk,
-    priorAnnounce: { tags: [['d', 'nostr-vm'], ['name', 'NostrVM'], ['web', 'https://old']], content: '' },
     onProgress: (l) => lines.push(l),
   }, deps);
 
@@ -336,28 +300,21 @@ test('deployFiles: signs, uploads, publishes manifest, returns deterministic URL
     // Blobs actually landed on the mock server.
     assert.ok(blobStore.has(files[0].sha256));
 
-    // Signed: 24242 auth, 35128 manifest, 30617 announce = 3 events.
+    // Signed: 24242 auth + 35128 manifest only — NO 30617 (deploy never
+    // touches the repo announcement).
     const kinds = signed.map(e => e.kind).sort((a, b) => a - b);
-    assert.deepEqual(kinds, [24242, 30617, 35128]);
+    assert.deepEqual(kinds, [24242, 35128]);
     for (const ev of signed) assert.ok(verifyEvent(ev));
+    assert.equal(published.find(e => e.kind === 30617), undefined);
 
-    // Manifest accepted; announce present + accepted.
     assert.equal(result.manifest.accepted, 1);
-    assert.ok(result.announce);
-    assert.equal(result.announce.accepted, 1);
-
-    // Manifest carries the refreshed web tag? (that's on the 30617, check it)
-    const announce = published.find(e => e.kind === 30617);
-    const web = announce.tags.find((t: string[]) => t[0] === 'web');
-    assert.equal(web[1], result.url);
-
     assert.ok(lines.some(l => /done →/.test(l)));
   } finally {
     await new Promise<void>(r => mock.close(() => r()));
   }
 });
 
-test('deployFiles: no priorAnnounce → no 30617 (manifest only)', async () => {
+test('deployFiles: never signs a 30617 (manifest only, repo announcement untouched)', async () => {
   const sk = generateSecretKey();
   const pk = getPublicKey(sk);
   const mock = startBlossomMock();
@@ -378,7 +335,6 @@ test('deployFiles: no priorAnnounce → no 30617 (manifest only)', async () => {
   }, deps);
 
   try {
-    assert.equal(result.announce, null);
     assert.deepEqual(signed.map(e => e.kind).sort((a, b) => a - b), [24242, 35128]);
   } finally {
     await new Promise<void>(r => mock.close(() => r()));
