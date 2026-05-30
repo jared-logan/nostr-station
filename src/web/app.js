@@ -7656,6 +7656,13 @@ const ProjectsPanel = (() => {
     const name = pubState.detectedName || p.name || '';
     const desc = pubState.detectedDescription || '';
     const tags = (pubState.suggestedHashtags || []).join(', ');
+    // Inherit ALL configured grasp servers (Config → Git), one per line.
+    // Falls back to the singular field, then the hardcoded default — so an
+    // older backend that doesn't send the plural still works.
+    const graspList = Array.isArray(pubState.suggestedGraspServers) && pubState.suggestedGraspServers.length
+      ? pubState.suggestedGraspServers
+      : [pubState.suggestedGraspServer || 'wss://relay.ngit.dev'];
+    const graspDefault = graspList.join('\n');
     const noPath  = !pubState.isGitRepo;
     const hasOriginNonNostr = pubState.hasOrigin
       && pubState.originUrl
@@ -7715,13 +7722,15 @@ const ProjectsPanel = (() => {
                  placeholder="nostr  app  rust" ${noPath ? 'disabled' : ''}>
         </div>
 
-        <label class="field-label" style="margin-top:12px">GRASP server</label>
+        <label class="field-label" style="margin-top:12px">GRASP servers</label>
         <div class="field-row">
-          <input type="text" class="cp-grasp" value="${escapeHtml(pubState.suggestedGraspServer || 'wss://relay.ngit.dev')}"
-                 placeholder="wss://relay.ngit.dev" ${noPath ? 'disabled' : ''}>
+          <textarea class="cp-grasp" rows="2" spellcheck="false"
+                 placeholder="wss://relay.ngit.dev" ${noPath ? 'disabled' : ''}>${escapeHtml(graspDefault)}</textarea>
         </div>
         <div class="muted" style="font-size:11px;margin-top:4px">
-          Where your git data lives. Anyone can host one;
+          Where your git data lives — one <code>wss://</code> URL per line.
+          Inherited from <a href="#config" data-panel="config">Config → Git</a>;
+          edit here to override for this repo. Anyone can host one;
           <a href="https://gitgrasp.com" target="_blank" rel="noreferrer">learn more</a>.
         </div>
 
@@ -7779,36 +7788,48 @@ const ProjectsPanel = (() => {
   function readPublishFormData(wrap) {
     const name        = wrap.querySelector('.cp-name').value.trim();
     const description = wrap.querySelector('.cp-description').value.trim();
-    const grasp       = wrap.querySelector('.cp-grasp').value.trim();
+    // Grasp servers: one wss:// URL per line. Inherited from Config but
+    // editable here. Dedupe (case-insensitive) so a repeated line doesn't
+    // pass `--grasp-server` twice.
+    const graspServers = [];
+    const seenGrasp = new Set();
+    for (const line of (wrap.querySelector('.cp-grasp').value || '').split('\n')) {
+      const url = line.trim();
+      if (!url) continue;
+      if (!/^wss?:\/\//i.test(url)) {
+        toast('Invalid GRASP server URL', `must start with wss:// or ws://: ${url}`, 'err');
+        return null;
+      }
+      const k = url.toLowerCase();
+      if (seenGrasp.has(k)) continue;
+      seenGrasp.add(k);
+      graspServers.push(url);
+    }
     const hashtags    = wrap.querySelector('.cp-hashtags').value.trim()
       .split(/[\s,]+/).filter(Boolean).slice(0, 8);
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
       toast('Invalid name', '1-64 chars: alphanumerics, dot, dash, underscore', 'err');
       return null;
     }
-    if (grasp && !/^wss?:\/\//i.test(grasp)) {
-      toast('Invalid GRASP server URL', 'must start with wss:// or ws://', 'err');
-      return null;
-    }
-    return { name, description, hashtags, graspServers: grasp ? [grasp] : [] };
+    return { name, description, hashtags, graspServers };
   }
 
   function openPublishReview(p, formData, owner, account, pubState) {
     const npub = owner?.npub || '(no npub configured)';
-    const grasp = formData.graspServers[0] || 'wss://relay.ngit.dev';
-    const graspHost = String(grasp).replace(/^wss?:\/\//, '');
-    const cloneUrl  = `https://${graspHost}/${npub}/${formData.name}.git`;
+    const graspServers = formData.graspServers.length ? formData.graspServers : ['wss://relay.ngit.dev'];
+    // One clone URL per grasp server (ngit announces a clone entry for each).
+    const cloneUrls = graspServers.map(g => `https://${String(g).replace(/^wss?:\/\//, '')}/${npub}/${formData.name}.git`);
     const shareUrl  = `nostr://${npub}/${formData.name}`;
 
     // Tag rows pinned to NIP-34 §1.2 — this is the contract the user
     // is reviewing. Keep field names verbatim so a curious reader can
-    // cross-check against the spec.
+    // cross-check against the spec. clone + relays list every grasp server.
     const tagRows = [
       ['d',           formData.name],
       ['name',        formData.name],
       formData.description ? ['description', formData.description] : null,
-      ['clone',       cloneUrl],
-      ['relays',      grasp],
+      ['clone',       cloneUrls.join('  ')],
+      ['relays',      graspServers.join('  ')],
       ...formData.hashtags.map(t => ['t', t]),
     ].filter(Boolean);
 
