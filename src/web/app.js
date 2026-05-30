@@ -7022,7 +7022,19 @@ const ProjectsPanel = (() => {
     }
     const repo = repoMeta?.repo;
     if (!repo) {
-      slot.innerHTML = `
+      // Distinguish "never announced" (no remote) from "announcement
+      // missing on relays" (remote exists but no 30617 resolved — deleted
+      // or not yet propagated). The latter is recoverable via re-announce
+      // in Settings → Nostr remote, NOT `ngit init` (already inited).
+      const hasRemote = repoMeta?.hasRemote;
+      slot.innerHTML = hasRemote
+        ? `
+        <div class="tab-section">
+          <h3>About</h3>
+          <div class="muted">No announcement found on relays — it may have been deleted or hasn’t propagated yet. Re-announce from <strong>Settings → Nostr remote &amp; signing → Announcement</strong> to restore it (your commits are unaffected).</div>
+        </div>
+      `
+        : `
         <div class="tab-section">
           <h3>About</h3>
           <div class="muted">Not yet announced to nostr — run <code>ngit init</code> to publish the kind-30617 announcement.</div>
@@ -8291,8 +8303,12 @@ const ProjectsPanel = (() => {
       // a derived UI grouping. For the form we recompute the GRASP set
       // (hosts appearing in both relays + clone of any announcement) so
       // the user can edit each group independently. On submit we
-      // collapse back to a single relays list + clone list.
-      graspServers: deriveGraspHostsForEdit(ms),
+      // collapse back to a single relays list + clone list. When there's
+      // no maintainerSet (re-announcing a deleted/missing 30617), fall back
+      // to the repo's own relays so the form still seeds the grasp list.
+      graspServers: deriveGraspHostsForEdit(ms).length
+                      ? deriveGraspHostsForEdit(ms)
+                      : (repo.relays || []).slice(),
       otherRelays:  deriveOtherRelaysForEdit(ms),
       cloneUrls:    (repo.clone || []).slice(),
       otherMaintainers: ((ms?.events || [])
@@ -9374,6 +9390,19 @@ const ProjectsPanel = (() => {
         </div>
       </div>
       <div class="tab-section">
+        <h3>Announcement</h3>
+        <div class="ngit-announce-status muted" style="font-size:12px">checking relays…</div>
+        <div class="ngit-announce-actions" style="margin-top:8px">
+          <button class="ngit-announce-btn" style="display:none"></button>
+        </div>
+        <div class="muted" style="margin-top:6px;font-size:11px">
+          The kind-30617 repo announcement is what lists your repo on
+          gitworkshop.dev, nostrhub.io, etc. It's separate from <code>git push</code>
+          (which only moves commits) — re-announce here if it's missing or you
+          want to refresh its metadata. Amber signs on your phone.
+        </div>
+      </div>
+      <div class="tab-section">
         <h3>Propose</h3>
         <div class="ngit-send-section">
           <button class="ngit-send-btn" style="display:none"></button>
@@ -9430,6 +9459,79 @@ const ProjectsPanel = (() => {
     // those controls moved to the Sync popover
     // (buildSyncPopoverContents). The Send-as-proposal gate above is
     // the only interactive control this tab keeps.
+
+    // Announcement status + (re-)announce. Probes whether the kind-30617
+    // currently resolves on relays. Three states:
+    //   - published          → repo found: offer "Re-announce" (refresh metadata)
+    //   - missing (deleted /  → has remote but no repo: offer "Announce now"
+    //     not propagated)        with an explanatory note
+    //   - no remote           → shouldn't reach here (renderNgitInitForm
+    //                            handles the no-remote case), but guard anyway
+    (async () => {
+      const statusEl = container.querySelector('.ngit-announce-status');
+      const btn      = container.querySelector('.ngit-announce-btn');
+      if (!statusEl || !btn) return;
+      let meta = null;
+      // refresh=1 so we don't read a stale cached 30617 — the user may have
+      // JUST deleted it on a relay browser and wants the truth.
+      try { meta = await api(`/api/projects/${p.id}/repo?refresh=1`); } catch {}
+      const repo = meta?.repo || null;
+      const hasRemote = meta?.hasRemote ?? !!p.remotes.ngit;
+
+      const wireReannounce = (label) => {
+        btn.style.display = '';
+        btn.textContent = label;
+        btn.addEventListener('click', () => {
+          // Reuse the Edit Repository modal. When repo is null (deleted /
+          // missing), synthesize a prefill from the project + maintainerSet
+          // so the form opens populated; the backend derives the d-tag from
+          // the ngit remote regardless.
+          const prefill = repo || synthRepoPrefill(p, meta);
+          openEditRepositoryModal(p, prefill, meta?.maintainerSet || null, () => {
+            renderTab(document.querySelector('.project-tab-content'), p);
+          });
+        });
+      };
+
+      if (repo) {
+        statusEl.textContent = 'Published — found on relays.';
+        wireReannounce(`Re-announce (refresh metadata) ${amberSignMarker()}`);
+      } else if (hasRemote) {
+        statusEl.innerHTML = '<span style="color:var(--warn,#e0a23a)">Not found on relays</span> — the announcement may have been deleted or hasn’t propagated. Your commits are unaffected.';
+        wireReannounce(`Announce now ${amberSignMarker()}`);
+      } else {
+        statusEl.textContent = 'No Nostr remote configured.';
+      }
+    })();
+  }
+
+  // Build a minimal repo-shaped object for the Edit Repository modal when
+  // no live 30617 exists (deleted / not-yet-propagated). Pulls what we can
+  // from the project record; the backend fills the coordinate (d-tag) from
+  // the ngit remote on submit, so name/description/grasp are enough to seed
+  // a valid re-announcement. Grasp servers come from the project's stored
+  // remote host when present.
+  function synthRepoPrefill(p, meta) {
+    const remote = p.remotes.ngit || '';
+    // A 3-part remote (nostr://<npub>/<relay-host>/<repo>) embeds the grasp
+    // relay host; seed it so the form's grasp list isn't empty.
+    let graspUrl = '';
+    const m = remote.match(/^nostr:\/\/npub1[0-9a-z]+\/([^/]+)\/[^/]+\/?$/);
+    if (m) graspUrl = `wss://${m[1]}`;
+    return {
+      name:        p.name || '',
+      description: p.description || '',
+      web:         [],
+      hashtags:    [],
+      euc:         '',
+      clone:       [],
+      relays:      graspUrl ? [graspUrl] : [],
+      maintainers: [],
+      // pubkey is informational only here — the backend /announce derives
+      // the real signer pubkey + coordinate from the ngit remote. Left
+      // blank when unknown; the modal's owner-only logic is server-enforced.
+      pubkey:      '',
+    };
   }
 
   // Truncate a 64-hex pubkey for display. Used by the proposals list —
