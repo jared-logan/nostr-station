@@ -4130,19 +4130,7 @@ body.sidebar-open .sidebar-toggle-bars span:nth-child(3) { transform: translateY
   font-family: var(--font-mono);
 }
 
-/* ── ngit verb triad (Sync / Pull / Push) ─────────────────────────────── */
-.ngit-verb-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.ngit-verb-row .primary {
-  /* Sync is the headline verb — give it more visual weight than the
-     secondary Pull/Push buttons, matching shakespeare.diy's hierarchy. */
-  padding: 8px 18px;
-  font-weight: 500;
-}
+
 
 /* ── ngit proposals list ──────────────────────────────────────────────── */
 .proposal-row {
@@ -5382,6 +5370,92 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .pc-state.pcs-dirty       { background: rgba(255, 184, 0, 0.10); color: var(--warn);       border: 1px solid rgba(255, 184, 0, 0.32); }
 .pc-state.pcs-ahead-behind{ background: var(--accent-soft);     color: var(--accent-bright); border: 1px solid var(--accent-dim); }
 .pc-state.pcs-diverged    { background: rgba(255, 80, 80, 0.10); color: var(--error);      border: 1px solid rgba(255, 80, 80, 0.32); }
+
+/* ── Status-anchored Sync popover (Phase 1) ──────────────────────────────
+   The `.pc-state` badge becomes a clickable trigger for the consolidated
+   Sync/Pull/Push hub. `.pc-state-host` is the positioned wrapper that the
+   absolutely-positioned `.sync-pop-menu` anchors to — mirrors the
+   `.status-control` / `.status-control-menu` pattern. */
+.pc-state-host { position: relative; display: inline-flex; }
+.pc-state-trigger { cursor: pointer; }
+.pc-state-trigger:hover { filter: brightness(1.15); }
+.pc-state-trigger:focus-visible { outline: 1px solid var(--accent-dim); outline-offset: 1px; }
+
+.sync-pop-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4);
+  padding: 10px;
+  width: 280px;
+  max-width: 88vw;
+}
+/* Flip to right-align near the card's right edge so the menu isn't clipped
+   off the grid. Cards near the left keep the default left anchor. */
+.project-card:nth-child(even) .sync-pop-menu { left: auto; right: 0; }
+
+.sync-pop-body { display: flex; flex-direction: column; gap: 10px; }
+.sync-pop-remote {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; min-width: 0;
+}
+.sync-pop-remote-url {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--bg-hover); padding: 2px 6px; border-radius: 4px;
+}
+.sync-pop-ext { color: var(--text-dim); text-decoration: none; flex-shrink: 0; }
+.sync-pop-ext:hover { color: var(--accent-bright); }
+
+.sync-pop-status { font-size: 12px; font-weight: 600; }
+
+.sync-pop-primary { width: 100%; }
+.sync-pop-primary.sync-pop-hint {
+  background: rgba(255, 184, 0, 0.10);
+  color: var(--warn);
+  border: 1px solid rgba(255, 184, 0, 0.32);
+  cursor: default;
+}
+
+.sync-pop-half { display: flex; gap: 6px; }
+.sync-pop-half > button { flex: 1; }
+
+.sync-pop-autosync {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 12px; cursor: pointer;
+  padding-top: 4px; border-top: 1px solid var(--border);
+}
+.sync-pop-autosync input { margin-top: 2px; flex-shrink: 0; }
+.sync-pop-autosync > span { display: flex; flex-direction: column; gap: 1px; }
+.sync-pop-autosync-sub { font-size: 11px; }
+
+.sync-pop-footer {
+  display: flex; justify-content: space-between; gap: 8px;
+  border-top: 1px solid var(--border); padding-top: 8px;
+}
+.sync-pop-footer .link {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--accent-bright); font: inherit; font-size: 11px;
+}
+.sync-pop-footer .link:hover { text-decoration: underline; }
+
+/* Open-proposals badge (Phase 6) — persistent chip on the .pc-badges row,
+   links to the proposals view. Hidden until a sync/fetch reports N>0. */
+.pc-prop-badge {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+  border-radius: 999px;
+  text-decoration: none;
+  background: var(--accent-soft); color: var(--accent-bright);
+  border: 1px solid var(--accent-dim);
+}
+.pc-prop-badge[hidden] { display: none; }
+.pc-prop-badge:hover { filter: brightness(1.15); }
 
 /* Sync-active state on the per-card sync icon — slow rotation while
    the POST /api/projects/:id/sync request is in flight. The button
