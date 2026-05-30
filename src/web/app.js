@@ -9480,13 +9480,16 @@ const ProjectsPanel = (() => {
 
       const wireReannounce = (label) => {
         btn.style.display = '';
-        btn.textContent = label;
-        btn.addEventListener('click', () => {
+        // innerHTML (not textContent): label embeds amberSignMarker()'s
+        // <span>. Both halves are hardcoded literals — no user input — so
+        // this matches the Send-as-proposal button's idiom above.
+        btn.innerHTML = label;
+        btn.addEventListener('click', async () => {
           // Reuse the Edit Repository modal. When repo is null (deleted /
-          // missing), synthesize a prefill from the project + maintainerSet
-          // so the form opens populated; the backend derives the d-tag from
-          // the ngit remote regardless.
-          const prefill = repo || synthRepoPrefill(p, meta);
+          // missing), synthesize a prefill from the project + Config → Git
+          // grasp servers so the form opens populated; the backend derives
+          // the d-tag from the ngit remote regardless.
+          const prefill = repo || await synthRepoPrefill(p, meta);
           openEditRepositoryModal(p, prefill, meta?.maintainerSet || null, () => {
             renderTab(document.querySelector('.project-tab-content'), p);
           });
@@ -9506,18 +9509,31 @@ const ProjectsPanel = (() => {
   }
 
   // Build a minimal repo-shaped object for the Edit Repository modal when
-  // no live 30617 exists (deleted / not-yet-propagated). Pulls what we can
-  // from the project record; the backend fills the coordinate (d-tag) from
-  // the ngit remote on submit, so name/description/grasp are enough to seed
-  // a valid re-announcement. Grasp servers come from the project's stored
-  // remote host when present.
-  function synthRepoPrefill(p, meta) {
+  // no live 30617 exists (deleted / not-yet-propagated). The d-tag comes
+  // from the ngit remote server-side, so name/description/grasp are enough
+  // to seed a valid re-announcement. GRASP servers are inherited from
+  // Config → Git (the same source the publish wizard uses, post-#214),
+  // unioned with the host embedded in the project's own remote — so a
+  // re-announce reflects the user's full configured grasp set, not just
+  // the single host the repo was originally pushed to.
+  async function synthRepoPrefill(p, meta) {
     const remote = p.remotes.ngit || '';
     // A 3-part remote (nostr://<npub>/<relay-host>/<repo>) embeds the grasp
-    // relay host; seed it so the form's grasp list isn't empty.
-    let graspUrl = '';
+    // relay host the repo currently lives on — always include it.
+    let remoteGrasp = '';
     const m = remote.match(/^nostr:\/\/npub1[0-9a-z]+\/([^/]+)\/[^/]+\/?$/);
-    if (m) graspUrl = `wss://${m[1]}`;
+    if (m) remoteGrasp = `wss://${m[1]}`;
+
+    // Inherit the user's configured GRASP servers (Config → Git). Falls
+    // back to the remote host alone if the fetch fails or the list is empty.
+    let configGrasp = [];
+    try {
+      const cfg = await api('/api/identity/config', undefined, { silent: true });
+      if (Array.isArray(cfg?.graspServers)) configGrasp = cfg.graspServers;
+    } catch { /* fall back to remote host below */ }
+
+    const grasp = [...new Set([...(remoteGrasp ? [remoteGrasp] : []), ...configGrasp])];
+
     return {
       name:        p.name || '',
       description: p.description || '',
@@ -9525,7 +9541,7 @@ const ProjectsPanel = (() => {
       hashtags:    [],
       euc:         '',
       clone:       [],
-      relays:      graspUrl ? [graspUrl] : [],
+      relays:      grasp,
       maintainers: [],
       // pubkey is informational only here — the backend /announce derives
       // the real signer pubkey + coordinate from the ngit remote. Left
