@@ -4988,10 +4988,31 @@ function fmtAgoIso(iso) {
   return fmtAgoMs(new Date(iso).getTime());
 }
 
-function projectCapBadges(caps) {
+// Map the git remote URL to a human destination label (the "plane" the
+// code lands on), rather than the bare protocol name. Falls back to the
+// raw host, then a generic "Git remote" when there's no/invalid URL.
+function remoteHostLabel(remotes) {
+  let host;
+  try { host = new URL(remotes?.github || '').host; } catch { host = null; }
+  if (!host) return 'Git remote';
+  if (host.includes('github.'))    return 'GitHub';
+  if (host.includes('gitlab.'))    return 'GitLab';
+  if (host.includes('codeberg.'))  return 'Codeberg';
+  if (host.includes('bitbucket.')) return 'Bitbucket';
+  return host;
+}
+
+// Inline "this action signs with Amber on your phone" marker. Put it
+// ONLY on Nostr-signed actions (Sync / Push / Send-as-proposal / Merge),
+// never on GitHub/git actions or on unsigned fetches (Pull).
+function amberSignMarker() {
+  return '<span class="amber-sign" title="Signs with Amber on your phone">⚷ Amber</span>';
+}
+
+function projectCapBadges(caps, remotes) {
   const badges = [];
-  if (caps.git)   badges.push(`<span class="cap-chip cap-git">git</span>`);
-  if (caps.ngit)  badges.push(`<span class="cap-chip cap-ngit">ngit</span>`);
+  if (caps.git)   badges.push(`<span class="cap-chip cap-git">${escapeHtml(remoteHostLabel(remotes))}</span>`);
+  if (caps.ngit)  badges.push(`<span class="cap-chip cap-ngit">Nostr</span>`);
   if (caps.nsite) badges.push(`<span class="cap-chip cap-nsite">nsite</span>`);
   return badges.join('');
 }
@@ -5150,7 +5171,7 @@ const ProjectDrawer = (() => {
       banner.className = 'prefill-banner';
       banner.innerHTML = `
         <div class="prefill-head">
-          <span class="prefill-label">Pre-filled from scanned ngit repo</span>
+          <span class="prefill-label">Pre-filled from scanned Nostr repo</span>
           <button class="prefill-dismiss" type="button" title="Clear pre-fill">×</button>
         </div>
         <div class="prefill-body">
@@ -5209,7 +5230,7 @@ const ProjectDrawer = (() => {
       if (draft.noPath) return '<em>No local path (nsite-only)</em>';
       return `<code>${escapeHtml(draft.path || '—')}</code>`;
     }
-    if (n === 2) return projectCapBadges(draft.capabilities) || '<em class="muted">none</em>';
+    if (n === 2) return projectCapBadges(draft.capabilities, draft.remotes) || '<em class="muted">none</em>';
     if (n === 3) return draft.identity.useDefault
       ? 'Station identity'
       : `Project: <code>${escapeHtml(truncNpub(draft.identity.npub))}</code>`;
@@ -5450,7 +5471,7 @@ const ProjectDrawer = (() => {
         <label class="cap-toggle">
           <input type="checkbox" class="cap-git" ${draft.capabilities.git ? 'checked' : ''} ${gitDisabled}>
           <div class="cap-body">
-            <div class="cap-title"><span class="cap-chip cap-git">git</span> GitHub / origin</div>
+            <div class="cap-title"><span class="cap-chip cap-git">GitHub</span> GitHub / origin</div>
             <div class="cap-sub">Standard git remote — pushes via <code>git push</code> or <code>nostr-station publish</code>.</div>
           </div>
         </label>
@@ -5463,12 +5484,12 @@ const ProjectDrawer = (() => {
         <label class="cap-toggle">
           <input type="checkbox" class="cap-ngit" ${draft.capabilities.ngit ? 'checked' : ''} ${ngitDisabled}>
           <div class="cap-body">
-            <div class="cap-title"><span class="cap-chip cap-ngit">ngit</span> Nostr-native repo</div>
+            <div class="cap-title"><span class="cap-chip cap-ngit">Nostr</span> Nostr-native repo</div>
             <div class="cap-sub">Pushes git events through a nostr relay. Amber signs on your phone.</div>
           </div>
         </label>
         <div class="cap-detail ngit-detail" style="${draft.capabilities.ngit ? '' : 'display:none'}">
-          <label class="field-label">ngit remote URL</label>
+          <label class="field-label">Nostr remote URL</label>
           <input type="text" class="ngit-remote" placeholder="nostr://…" value="${escapeHtml(draft.remotes.ngit)}">
           <div class="muted">Signing uses this project's identity (configured in step 3).</div>
         </div>
@@ -5594,7 +5615,7 @@ const ProjectDrawer = (() => {
       <input type="text" class="name-input" maxlength="64" value="${escapeHtml(draft.name)}" placeholder="my-project">
 
       <div class="summary-card">
-        <div class="summary-row"><span class="k">Capabilities</span><span class="v summary-caps">${projectCapBadges(draft.capabilities) || '<em class="muted">none</em>'}</span></div>
+        <div class="summary-row"><span class="k">Capabilities</span><span class="v summary-caps">${projectCapBadges(draft.capabilities, draft.remotes) || '<em class="muted">none</em>'}</span></div>
         <div class="summary-row"><span class="k">Identity</span><span class="v">${draft.identity.useDefault ? 'Station identity' : `Project: ${escapeHtml(truncNpub(draft.identity.npub))}`}</span></div>
         <div class="summary-row"><span class="k">Path</span><span class="v">${draft.noPath ? '<em>nsite-only (no path)</em>' : `<code>${escapeHtml(draft.path || '—')}</code>`}</span></div>
       </div>
@@ -5853,7 +5874,7 @@ const ProjectsPanel = (() => {
         <div class="projects-empty">
           <img class="empty-art" src="/nori.svg" alt="">
           <div class="big">No projects yet</div>
-          <div class="hint">Add your first project to manage git, ngit, and nsite from one place.</div>
+          <div class="hint">Add your first project to manage Git, Nostr, and nsite from one place.</div>
           <button class="primary empty-add">Add project</button>
         </div>
       `;
@@ -5907,7 +5928,7 @@ const ProjectsPanel = (() => {
         <div class="pc-actions"></div>
       </div>
       <div class="pc-path">${p.path ? `<code>${escapeHtml(p.path)}</code>` : '<em class="muted">no local path</em>'}</div>
-      <div class="pc-badges">${projectCapBadges(p.capabilities)}${projectEnvBadge(p)}<span class="pc-state-host"><span class="pc-state" hidden></span></span><a class="pc-prop-badge" hidden></a></div>
+      <div class="pc-badges">${projectCapBadges(p.capabilities, p.remotes)}${projectEnvBadge(p)}<span class="pc-state-host"><span class="pc-state" hidden></span></span><a class="pc-prop-badge" hidden></a></div>
       <div class="pc-meta">
         <div class="pc-meta-row"><span class="k">identity</span><span class="v">${escapeHtml(projectIdentityLabel(p))}</span></div>
         <div class="pc-meta-row"><span class="k">last activity</span><span class="v pc-last-activity">${lastAct}</span></div>
@@ -6109,7 +6130,7 @@ const ProjectsPanel = (() => {
       <button class="primary sync-pop-primary" disabled>Sync</button>
       <div class="sync-pop-half">
         <button class="sync-pop-pull">Pull</button>
-        <button class="sync-pop-push">Push</button>
+        <button class="sync-pop-push">Push ${amberSignMarker()}</button>
       </div>
       <label class="sync-pop-autosync" title="Pull only. Fetches every 5 min. Never pushes or signs without you.">
         <input type="checkbox" class="sync-pop-autosync-input" ${p.autoSync ? 'checked' : ''}>
@@ -6119,8 +6140,9 @@ const ProjectsPanel = (() => {
         </span>
       </label>
       <div class="sync-pop-footer">
-        <button class="link sync-pop-proposals">Proposals →</button>
+        <button class="link sync-pop-proposals">Nostr proposals →</button>
         <button class="link sync-pop-signing">Signing &amp; remote →</button>
+        ${p.remotes.github ? `<button class="link sync-pop-github">GitHub remote →</button>` : ''}
       </div>
     `;
 
@@ -6197,6 +6219,11 @@ const ProjectsPanel = (() => {
     wrap.querySelector('.sync-pop-signing').addEventListener('click', () => {
       openProjectTab(p.id, 'settings');
     });
+    // GitHub plane lives in Settings too — this link just signals it
+    // exists; the popover itself stays Nostr-only (no push from here).
+    wrap.querySelector('.sync-pop-github')?.addEventListener('click', () => {
+      openProjectTab(p.id, 'settings');
+    });
 
     // Status line + adaptive primary button. Paints from `gs` if given,
     // otherwise probes /git-state and repaints once it lands.
@@ -6218,16 +6245,18 @@ const ProjectsPanel = (() => {
       // Adaptive primary button.
       primaryEl.classList.remove('sync-pop-hint');
       primaryEl.disabled = false;
+      // Sync + Push are Nostr-signed (Amber) — tag them with the marker.
+      // Pull (fetch) is unsigned, so it stays bare.
       if (dirty) {
         primaryEl.textContent = 'Save changes first';
         primaryEl.classList.add('sync-pop-hint');
         primaryEl.disabled = true;
         primaryEl.onclick = null;
       } else if (ahead && behind) {
-        primaryEl.textContent = `Sync (${ahead}↑${behind}↓)`;
+        primaryEl.innerHTML = `Sync (${ahead}↑${behind}↓) ${amberSignMarker()}`;
         primaryEl.onclick = runSync;
       } else if (ahead) {
-        primaryEl.textContent = `Push ${ahead} commit${ahead === 1 ? '' : 's'}`;
+        primaryEl.innerHTML = `Push ${ahead} commit${ahead === 1 ? '' : 's'} ${amberSignMarker()}`;
         primaryEl.onclick = runPush;
       } else if (behind) {
         primaryEl.textContent = `Pull ${behind}`;
@@ -6238,7 +6267,7 @@ const ProjectsPanel = (() => {
         primaryEl.onclick = null;
       } else {
         // Unknown / probe failed — fall back to the generic Sync verb.
-        primaryEl.textContent = 'Sync';
+        primaryEl.innerHTML = `Sync ${amberSignMarker()}`;
         primaryEl.onclick = runSync;
       }
     };
@@ -6799,7 +6828,7 @@ const ProjectsPanel = (() => {
           const ghRemote = st.remotes?.find(r => r.type === 'github')?.url || p.remotes.github || '';
           gitBlock = `
             <div class="tab-section">
-              <h3>Git</h3>
+              <h3>${escapeHtml(remoteHostLabel(p.remotes))}</h3>
               <div class="overview-grid">
                 <div class="overview-kv"><div class="k">last commit</div><div class="v">${escapeHtml(st.hash)} · ${escapeHtml(st.message || '')}</div></div>
                 <div class="overview-kv"><div class="k">author</div><div class="v">${escapeHtml(st.author || '—')} · ${escapeHtml(fmtAgoMs(st.timestamp))}</div></div>
@@ -6816,7 +6845,7 @@ const ProjectsPanel = (() => {
       const url = p.remotes.ngit || '(not configured)';
       ngitBlock = `
         <div class="tab-section">
-          <h3>ngit</h3>
+          <h3>Nostr</h3>
           <div class="overview-grid">
             <div class="overview-kv has-copy"><div class="k">nostr remote</div><div class="v"><code>${escapeHtml(url)}</code></div>${p.remotes.ngit ? `<div class="copy-slot" data-copy="${escapeHtml(url)}"></div>` : ''}</div>
             <div class="overview-kv"><div class="k">bunker</div><div class="v">${escapeHtml(bunker)}</div></div>
@@ -7853,7 +7882,7 @@ const ProjectsPanel = (() => {
       // Mark for the one-time success banner; cleared on the next
       // renderCodeTab pass so it doesn't reappear on tab switches.
       state.justPublishedProjectId = p.id;
-      toast('Published to ngit',
+      toast('Published to Nostr',
             enableAutoSync ? 'auto-sync enabled' : 'manual sync', 'ok');
     } catch (e) {
       toast('Post-publish sync failed', e?.message || '', 'warn');
@@ -7970,7 +7999,7 @@ const ProjectsPanel = (() => {
     wrap.innerHTML = `
       <div class="cpb-icon">✓</div>
       <div class="cpb-body">
-        <div class="cpb-title">Published to ngit</div>
+        <div class="cpb-title">Published to Nostr</div>
         <div class="cpb-sub muted">
           Anyone can now clone with this URL:
           ${shareUrl ? `<code class="cpb-url">${escapeHtml(shareUrl)}</code>` : '<em>(detecting clone URL…)</em>'}
@@ -9271,7 +9300,7 @@ const ProjectsPanel = (() => {
       ? 'station identity'
       : `${truncNpub(p.identity.npub || '')}${p.identity.bunkerUrl ? ' · bunker configured' : ''}`;
     const alsoGit = p.capabilities.git
-      ? `<div class="muted" style="margin-top:8px"><code>nostr-station publish</code> handles both the GitHub and ngit remotes simultaneously.</div>`
+      ? `<div class="muted" style="margin-top:8px"><code>nostr-station publish</code> handles both the GitHub and Nostr remotes simultaneously.</div>`
       : '';
     // Phase 2: the Sync/Pull/Push triad + auto-sync now live in the
     // status-badge popover on the project card (buildSyncPopoverContents).
@@ -9283,7 +9312,7 @@ const ProjectsPanel = (() => {
       <div class="tab-section">
         <h3>Nostr remote</h3>
         <div class="remote-row">
-          <span class="k">ngit</span><span class="v"><code>${escapeHtml(remote)}</code></span>
+          <span class="k">Nostr</span><span class="v"><code>${escapeHtml(remote)}</code></span>
           ${p.remotes.ngit ? `<span class="copy-slot" data-copy="${escapeHtml(remote)}"></span>` : ''}
         </div>
         <div class="muted" style="margin-top:8px;font-size:11px">
@@ -9305,7 +9334,7 @@ const ProjectsPanel = (() => {
       <div class="tab-section">
         <h3>Signing</h3>
         <div class="overview-kv"><div class="k">identity</div><div class="v">${escapeHtml(signing)}</div></div>
-        <div class="muted">Pushes to the ngit remote trigger Amber signing on your phone.</div>
+        <div class="muted">Pushes to the Nostr remote trigger Amber signing on your phone.</div>
         ${alsoGit}
       </div>
     `;
@@ -9327,7 +9356,7 @@ const ProjectsPanel = (() => {
       const ahead = Number(st?.ahead || 0);
       if (ahead > 0) {
         sendBtn.style.display  = '';
-        sendBtn.textContent    = `Send as proposal (${ahead} commit${ahead === 1 ? '' : 's'})`;
+        sendBtn.innerHTML      = `Send as proposal (${ahead} commit${ahead === 1 ? '' : 's'}) ${amberSignMarker()}`;
         sendBtn.addEventListener('click', () => {
           openExecModal({
             title:    `Send proposal · ${p.name}`,
@@ -9723,7 +9752,10 @@ const ProjectsPanel = (() => {
     container.innerHTML = `
       <div class="tab-section">
         <div class="proposals-head">
-          <h3 style="margin:0">Pull requests</h3>
+          <div>
+            <h3 style="margin:0">Pull requests</h3>
+            <div class="muted" style="font-size:11px;margin-top:2px">Patch series over Nostr (NIP-34)</div>
+          </div>
           <div class="proposals-head-actions">
             <button class="proposals-view-patch">View latest patch</button>
             <button class="proposals-refresh">Refresh</button>
@@ -10114,7 +10146,7 @@ const ProjectsPanel = (() => {
         <div class="pdetail-patches">${patchRows}</div>
         <div class="pdetail-foot">
           <button class="primary pdetail-download">Download</button>
-          <button class="pdetail-merge" title="Merge this proposal locally via ngit pr_merge">Merge</button>
+          <button class="pdetail-merge" title="Merge this proposal locally via ngit pr_merge">Merge ${amberSignMarker()}</button>
           <span class="pdetail-status-slot"></span>
           <span class="pdetail-copy"></span>
         </div>
@@ -10859,9 +10891,9 @@ const ProjectsPanel = (() => {
     const noPath  = !p.path;
     container.innerHTML = `
       <div class="tab-section">
-        <h3>Initialize ngit for this project</h3>
+        <h3>Set up Nostr remote</h3>
         <div class="muted" style="margin-bottom:10px">
-          ngit is enabled for this project but no nostr remote is configured yet.
+          Nostr is enabled for this project but no nostr remote is configured yet.
           Publishes a kind-30617 repo announcement so collaborators can clone via
           <code>git clone nostr://…</code>.
         </div>
@@ -11032,7 +11064,7 @@ const ProjectsPanel = (() => {
     const sections = [];
     if (p.capabilities.git) {
       sections.push({
-        label:  'Git remote',
+        label:  `${remoteHostLabel(p.remotes)} remote`,
         render: (el) => renderGitTab(el, p),
         open:   false,
       });
@@ -11040,8 +11072,8 @@ const ProjectsPanel = (() => {
     if (p.capabilities.ngit) {
       sections.push({
         label:  p.remotes.ngit
-                  ? 'ngit signer + sync'
-                  : 'Initialize ngit for this project',
+                  ? 'Nostr remote & signing'
+                  : 'Set up Nostr remote',
         render: (el) => renderNgitTab(el, p),
         // Auto-open the ngit section when the project hasn't been
         // initialised yet — that's the case where the user needs it.
@@ -12219,13 +12251,13 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
     body.innerHTML = `
       <div class="discover-status">
         <div class="spinner" style="margin:auto"></div>
-        <div class="discover-msg" style="text-align:center;margin-top:12px">Querying relays for your ngit repositories…</div>
+        <div class="discover-msg" style="text-align:center;margin-top:12px">Querying relays for your Nostr repositories…</div>
         <div class="discover-queried muted" style="text-align:center;margin-top:6px;font-size:11px"></div>
       </div>
       <div class="discover-results" style="display:none"></div>
     `;
     const modal = openModal({
-      title: 'Discover ngit repositories',
+      title: 'Discover Nostr repositories',
       subtitle: 'kind 30617 · published under your npub',
       body,
     });
@@ -12263,7 +12295,7 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
           : '';
         resultsEl.innerHTML = `
           <div class="discover-empty">
-            <div class="big">No ngit repositories found under your npub.</div>
+            <div class="big">No Nostr repositories found under your npub.</div>
             <div class="muted" style="margin-top:8px;font-size:11px">Queried: ${escapeHtml(queried || '(no relays)')}</div>
             <a href="#config" class="config-link" style="display:inline-block;margin-top:10px">Check your GRASP servers in Config →</a>
             ${diagHtml}
@@ -12768,7 +12800,7 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
   // project modal. Import is purely for bringing in a repo that already
   // exists at a URL.
   //
-  // "Scan my ngit repos" closes this modal and opens the Discover flow
+  // "Scan my Nostr repos" closes this modal and opens the Discover flow
   // — slightly faster than pasting an naddr for users who just want to
   // pick from their own published repos.
 
@@ -12853,7 +12885,7 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
         <input id="ir-url" type="text" autocomplete="off"
                placeholder="https://github.com/you/repo.git  ·  nostr://…  ·  naddr1…" />
         <div class="ir-url-actions">
-          <button type="button" class="ir-quick-scan">Scan my ngit repos…</button>
+          <button type="button" class="ir-quick-scan">Scan my Nostr repos…</button>
         </div>
       </label>
       <div class="np-hint">
@@ -16196,7 +16228,7 @@ const ConfigPanel = (() => {
                 ` : `
                   <div class="key-status-line err">✗ not logged in</div>
                   <div class="muted" style="font-size:11px;margin-top:6px">
-                    A signer is required before you can clone ngit repos. Login connects Amber (or another NIP-46 signer) to ngit.
+                    A signer is required before you can clone Nostr repos. Login connects Amber (or another NIP-46 signer) for signing.
                   </div>
                   <div class="keyrow" style="margin-top:10px">
                     <button class="primary" id="cfg-ngit-relogin">Login</button>
