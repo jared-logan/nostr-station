@@ -139,6 +139,24 @@ export function nsiteUrl(pubkeyHex: string, slug: string, gateway = DEFAULT_NSIT
   return `https://${pubkeyToBase36(pubkeyHex)}${slug}.${gateway}/`;
 }
 
+/**
+ * Extract the repo `d`-tag (identifier) from an ngit `nostr://` remote.
+ * ngit emits two shapes:
+ *   nostr://<npub>/<d-tag>                 (2-part)
+ *   nostr://<npub>/<relay-host>/<d-tag>    (3-part — e.g. .../relay.ngit.dev/repo)
+ * The d-tag is ALWAYS the last path segment. A naive greedy capture folds
+ * the relay host into the identifier and then fails to match the published
+ * 30617 (whose d-tag is just the repo name) — the bug that made the deploy
+ * web-tag refresh silently no-op. Returns null for non-nostr:// or malformed
+ * remotes. Pure; exported for direct testing.
+ */
+export function ngitRemoteDTag(remote: string): string | null {
+  const m = String(remote || '').match(/^nostr:\/\/(npub1[0-9a-z]+)\/(.+)$/);
+  if (!m) return null;
+  const segs = m[2].split('/').filter(Boolean);
+  return segs.length ? segs[segs.length - 1] : null;
+}
+
 // ── Build output discovery + walk ────────────────────────────────────────────
 
 const BUILD_DIR_CANDIDATES = ['dist', 'build', 'out', 'public'];
@@ -317,6 +335,16 @@ export function refreshAnnounceWebTag(
     .filter(t => Array.isArray(t) && t[0] !== 'web')
     .map(t => t.slice());
   tags.push(['web', url]);
+  // Stamp ['client','nostr-station'] if it isn't already present. We're the
+  // one republishing this 30617, so the deploy should be attributable to
+  // nostr-station — mirroring shakespeare.diy's client tag. We DON'T strip
+  // an existing client tag (e.g. a repo originally announced by another
+  // client): both can coexist, and a repo's provenance is preserved.
+  // Note: ngit-CLI-generated 30617s carry no client tag at all, which is
+  // why a freshly `ngit push`ed repo shows none until its first deploy.
+  if (!tags.some(t => t[0] === 'client' && t[1] === 'nostr-station')) {
+    tags.push(['client', 'nostr-station']);
+  }
   return { tags, content: prior.content };
 }
 

@@ -13,6 +13,7 @@ const {
   pubkeyToBase36,
   slugifyTitle,
   nsiteUrl,
+  ngitRemoteDTag,
   resolveBuildDir,
   walkBuildDir,
   withSpaFallbacks,
@@ -77,6 +78,28 @@ test('nsiteUrl: composes base36+slug.gateway with trailing slash', () => {
 test('nsiteUrl: honors a custom gateway', () => {
   const pk = '00'.repeat(31) + '01';
   assert.match(nsiteUrl(pk, 'x', 'example.com'), /\.example\.com\/$/);
+});
+
+// ── ngitRemoteDTag (regression: 3-part remote broke web-tag refresh) ─────────
+
+test('ngitRemoteDTag: 2-part remote → d-tag', () => {
+  assert.equal(ngitRemoteDTag('nostr://npub1abc/hello-world'), 'hello-world');
+});
+
+test('ngitRemoteDTag: 3-part (relay-host) remote → LAST segment, not the relay', () => {
+  // The exact shape that silently skipped the refresh in the first live test.
+  assert.equal(ngitRemoteDTag('nostr://npub1abc/relay.ngit.dev/hello-world'), 'hello-world');
+  assert.equal(ngitRemoteDTag('nostr://npub1xyz/git.shakespeare.diy/nostr-vm'), 'nostr-vm');
+});
+
+test('ngitRemoteDTag: tolerates a trailing slash', () => {
+  assert.equal(ngitRemoteDTag('nostr://npub1abc/relay.ngit.dev/repo/'), 'repo');
+});
+
+test('ngitRemoteDTag: null for non-nostr / malformed', () => {
+  assert.equal(ngitRemoteDTag('https://example.com/x'), null);
+  assert.equal(ngitRemoteDTag('nostr://npub1abc'), null);
+  assert.equal(ngitRemoteDTag(''), null);
 });
 
 // ── mime ────────────────────────────────────────────────────────────────────
@@ -217,7 +240,26 @@ test('refreshAnnounceWebTag: replaces web tag, preserves the rest', () => {
   assert.equal(webs[0][1], 'https://new.nsite.lol/');
   // other tags preserved
   assert.ok(out.tags.some((t: string[]) => t[0] === 'name' && t[1] === 'NostrVM'));
+  // pre-existing client tag is preserved (provenance kept)…
   assert.ok(out.tags.some((t: string[]) => t[0] === 'client' && t[1] === 'shakespeare.diy'));
+  // …and our own client stamp is added alongside it.
+  assert.ok(out.tags.some((t: string[]) => t[0] === 'client' && t[1] === 'nostr-station'));
+});
+
+test('refreshAnnounceWebTag: stamps client:nostr-station on a tagless prior (ngit-CLI 30617)', () => {
+  // ngit push generates a 30617 with no client tag — the hello-world case.
+  const prior = { tags: [['d', 'hello-world'], ['name', 'hello-world'], ['web', 'https://gitworkshop.dev/x']], content: '' };
+  const out = refreshAnnounceWebTag(prior, 'https://abc.nsite.lol/');
+  const clients = out.tags.filter((t: string[]) => t[0] === 'client');
+  assert.equal(clients.length, 1);
+  assert.equal(clients[0][1], 'nostr-station');
+  assert.equal(out.tags.filter((t: string[]) => t[0] === 'web')[0][1], 'https://abc.nsite.lol/');
+});
+
+test('refreshAnnounceWebTag: idempotent — does not double-stamp on re-deploy', () => {
+  const prior = { tags: [['d', 'x'], ['client', 'nostr-station'], ['web', 'https://old']], content: '' };
+  const out = refreshAnnounceWebTag(prior, 'https://new/');
+  assert.equal(out.tags.filter((t: string[]) => t[0] === 'client' && t[1] === 'nostr-station').length, 1);
 });
 
 // ── deployFiles end-to-end (stubbed sign + publish + real upload mock) ───────
