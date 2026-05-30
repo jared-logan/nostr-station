@@ -9480,7 +9480,10 @@ const ProjectsPanel = (() => {
 
       const wireReannounce = (label) => {
         btn.style.display = '';
-        btn.textContent = label;
+        // innerHTML (not textContent): label embeds amberSignMarker()'s
+        // <span>. Both halves are hardcoded literals — no user input — so
+        // this matches the Send-as-proposal button's idiom above.
+        btn.innerHTML = label;
         btn.addEventListener('click', () => {
           // Reuse the Edit Repository modal. When repo is null (deleted /
           // missing), synthesize a prefill from the project + maintainerSet
