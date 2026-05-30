@@ -77,16 +77,26 @@ function buildTemplate() {
     tags: [
       ['d', D_TAG],
       // Kinds this client handles (drives "open in nostr-station"
-      // affordances in NIP-89-aware UIs). Matches what the Client
-      // panel + native /api/client surface support:
-      //   1     — short text notes
-      //   6     — reposts
-      //   7     — reactions
-      //   1111  — NIP-22 comments
+      // affordances in NIP-89-aware UIs). Matches the Client panel +
+      // native /api/client surface AND the repo/nsite features that
+      // stamp the same client tag (kept in sync with the nostrhub.io
+      // app listing's "Supported Event Types"):
+      //   1      — short text notes
+      //   6      — reposts
+      //   7      — reactions
+      //   1111   — NIP-22 comments
+      //   1617   — NIP-34 patches (PRs)
+      //   1621   — NIP-34 issues
+      //   30617  — NIP-34 repo announcements
+      //   35128  — NIP-5A v2 nsite manifests
       ['k', '1'],
       ['k', '6'],
       ['k', '7'],
       ['k', '1111'],
+      ['k', '1617'],
+      ['k', '1621'],
+      ['k', '30617'],
+      ['k', '35128'],
       // Where to open content. {bech32} is NIP-89's URI template
       // placeholder for the resolved nevent/naddr/etc. The landing
       // page is nsite-hosted; its router accepts /<bech32> paths.
