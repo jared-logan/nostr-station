@@ -5300,6 +5300,23 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 .cap-chip.cap-ngit  { background: var(--accent-soft); color: var(--accent-bright); border: 1px solid var(--accent-dim); }
 .cap-chip.cap-nsite { background: rgba(30, 200, 190, 0.10); color: #47d6c8; border: 1px solid rgba(30, 200, 190, 0.3); }
 
+/* "Signs with Amber on your phone" marker — sits inline inside the
+   Nostr-signed action buttons (Sync / Push / Send-as-proposal / Merge).
+   Deliberately subtle: a small accent glyph + label that reads as a
+   hint, not a second button. Never appears on GitHub/git actions or on
+   unsigned fetches (Pull). */
+.amber-sign {
+  display: inline-flex; align-items: center; gap: 2px;
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  /* Inherit the host button's text colour so it stays legible through
+     hover/active state changes; opacity keeps it a hint, not a label. */
+  color: currentColor;
+  opacity: 0.75;
+}
+
 /* ── Environment / surface chips ─────────────────────────────────────────
    THEME-LOCKED palette. These three chips communicate which relay
    "world" a surface is bound to:
