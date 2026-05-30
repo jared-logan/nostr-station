@@ -28,7 +28,7 @@ import { publishEventToRelays } from './repo.js';
 import { queryRelays } from '../nostr-query.js';
 import { detectBuildCommand } from '../ai-tools/build.js';
 import {
-  deployFiles, resolveBuildDir, walkBuildDir, withSpaFallbacks,
+  deployFiles, resolveBuildDir, walkBuildDir, withSpaFallbacks, ngitRemoteDTag,
   DEFAULT_NSITE_GATEWAY, type DeployDeps, type SignedEvent,
 } from '../nsite-deploy.js';
 import { readBody } from './_shared.js';
@@ -226,8 +226,11 @@ async function resolvePriorAnnounce(project: Project, ownerHex: string): Promise
       if (d.type === 'naddr' && d.data.kind === REPO_ANNOUNCE_KIND) identifier = d.data.identifier;
     } catch {}
   } else if (remote.startsWith('nostr://')) {
-    const m = remote.match(/^nostr:\/\/(npub1[0-9a-z]+)\/(.+)$/);
-    if (m) { identifier = m[2]; source = remote; }
+    // The d-tag is the LAST path segment for both the 2-part and 3-part
+    // (relay-host) ngit remote shapes — see ngitRemoteDTag. The full
+    // nostr:// path is kept as `source` (matches Shakespeare's coordinate).
+    const dtag = ngitRemoteDTag(remote);
+    if (dtag) { identifier = dtag; source = remote; }
   }
   if (!identifier) return { priorAnnounce: null, source };
   if (!source && ident_npubOf(ownerHex)) source = `nostr://${ident_npubOf(ownerHex)}/${identifier}`;

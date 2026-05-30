@@ -368,7 +368,13 @@ test('buildRepoAnnounceTemplate: auto-injects client=nostr-station when absent',
     ANCHOR_HEX,
   );
   const client = tpl.tags.find(t => t[0] === 'client');
-  assert.deepEqual(client, ['client', 'nostr-station']);
+  // 4-element NIP-89 form (links to the kind-31990 handler), not the bare
+  // 2-element marker — so the announcement links to nostr-station in
+  // NIP-89-aware clients exactly like the Client panel's kind-1s do.
+  assert.equal(client?.[0], 'client');
+  assert.equal(client?.[1], 'nostr-station');
+  assert.equal(client?.length, 4);
+  assert.match(client?.[2] || '', /^31990:[0-9a-f]{64}:nostr-station$/);
 });
 
 test('buildRepoAnnounceTemplate: does NOT overwrite an explicit client tag from the form', () => {

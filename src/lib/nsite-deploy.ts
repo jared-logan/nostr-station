@@ -27,6 +27,7 @@
 import fs from 'fs';
 import path from 'path';
 import { sha256Hex, buildUploadAuthTemplate, uploadBlobs, type BlobToUpload, type BlobUploadResult } from './blossom-upload.js';
+import { CLIENT_TAG, stampClientTag } from './client-tag.js';
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 
@@ -137,6 +138,24 @@ export function slugifyTitle(title: string): string {
 /** Compose the gateway URL for a named site: base36(pubkey)+slug.gateway. */
 export function nsiteUrl(pubkeyHex: string, slug: string, gateway = DEFAULT_NSITE_GATEWAY): string {
   return `https://${pubkeyToBase36(pubkeyHex)}${slug}.${gateway}/`;
+}
+
+/**
+ * Extract the repo `d`-tag (identifier) from an ngit `nostr://` remote.
+ * ngit emits two shapes:
+ *   nostr://<npub>/<d-tag>                 (2-part)
+ *   nostr://<npub>/<relay-host>/<d-tag>    (3-part — e.g. .../relay.ngit.dev/repo)
+ * The d-tag is ALWAYS the last path segment. A naive greedy capture folds
+ * the relay host into the identifier and then fails to match the published
+ * 30617 (whose d-tag is just the repo name) — the bug that made the deploy
+ * web-tag refresh silently no-op. Returns null for non-nostr:// or malformed
+ * remotes. Pure; exported for direct testing.
+ */
+export function ngitRemoteDTag(remote: string): string | null {
+  const m = String(remote || '').match(/^nostr:\/\/(npub1[0-9a-z]+)\/(.+)$/);
+  if (!m) return null;
+  const segs = m[2].split('/').filter(Boolean);
+  return segs.length ? segs[segs.length - 1] : null;
 }
 
 // ── Build output discovery + walk ────────────────────────────────────────────
@@ -292,9 +311,10 @@ export function buildManifestTemplate(input: ManifestInput): { kind: number; cre
   tags.push(['title', input.title]);
   if (input.description) tags.push(['description', input.description]);
   if (input.source)      tags.push(['source', input.source]);
-  // Mirror shakespeare.diy's ["client", ...] stamp so the manifest is
-  // attributable to nostr-station.
-  tags.push(['client', 'nostr-station']);
+  // NIP-89 client tag (4-element form) — links the manifest to
+  // nostr-station's kind-31990 handler, same as the Client panel's
+  // kind-1s. Mirrors shakespeare.diy stamping its own client handler.
+  tags.push([...CLIENT_TAG]);
   return {
     kind:       NSITE_MANIFEST_KIND_NAMED,
     created_at: Math.floor(Date.now() / 1000),
@@ -317,6 +337,14 @@ export function refreshAnnounceWebTag(
     .filter(t => Array.isArray(t) && t[0] !== 'web')
     .map(t => t.slice());
   tags.push(['web', url]);
+  // Stamp the NIP-89 client tag (4-element form → links to the kind-31990
+  // handler) if a nostr-station client tag isn't already present. We're the
+  // one republishing this 30617, so the deploy is attributable to
+  // nostr-station — mirroring shakespeare.diy. We DON'T strip an existing
+  // client tag from another client: both can coexist, preserving provenance.
+  // Note: ngit-CLI-generated 30617s carry no client tag at all, which is
+  // why a freshly `ngit push`ed repo shows none until its first deploy.
+  stampClientTag(tags);
   return { tags, content: prior.content };
 }
 
