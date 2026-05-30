@@ -45,6 +45,7 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import { nip19 } from 'nostr-tools';
+import { CLIENT_TAG } from '../client-tag.js';
 import { WebSocket } from 'ws';
 import { getProject, type Project } from '../projects.js';
 import { MAX_WS_PAYLOAD } from '../ws-limits.js';
@@ -782,9 +783,11 @@ export function buildRepoAnnounceTemplate(
       customs.push(t.map(v => typeof v === 'string' ? v : ''));
     }
   }
-  // (3) auto-inject the client marker if nothing else set it.
+  // (3) auto-inject the NIP-89 client marker if nothing else set it. The
+  // 4-element form links the announcement to nostr-station's kind-31990
+  // handler (same tag the Client panel's kind-1s carry).
   if (!customs.some((c) => c[0] === 'client')) {
-    customs.push(['client', 'nostr-station']);
+    customs.push([...CLIENT_TAG]);
   }
   for (const c of customs) tags.push(c);
 

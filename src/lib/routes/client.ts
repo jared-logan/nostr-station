@@ -47,6 +47,7 @@ import { queryRelaysDirect as queryRelays, type NostrEvent } from '../nostr-quer
 import { getLocalStore } from '../inproc-store-ref.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { publishEventToRelays } from './repo.js';
+import { CLIENT_TAG as SHARED_CLIENT_TAG } from '../client-tag.js';
 import { safeHttpUrl } from '../url-safety.js';
 import { signProxyUrl } from '../img-proxy-sign.js';
 import { readBody } from './_shared.js';
@@ -60,20 +61,11 @@ const FEED_MAX_LIMIT         = 200;
 const CONTACTS_CACHE_TTL_MS  = 60_000;
 const PROFILE_CACHE_TTL_MS   = 5 * 60_000;
 // Client identity stamped on every event published through this surface.
-// 4-element NIP-89 form: ["client", <name>, <kind>:<pubkey>:<d-tag>, <relay-hint>].
-// Coordinate points at the kind-31990 client handler event for
-// nostr-station (NIP-89 "handler information"), signed by the project
-// pubkey (291c75d… — same identity that anchors the landing-page nsite
-// and signs ngit merge events). Publish/refresh the handler event with
-// `npm run publish-client-handler`; this constant must stay in sync with
-// the `client` naddr1 baked into scripts/fetch-ditto.mjs so the iframe
-// (Ditto) and native (/api/client) publish paths emit the same tag.
-const CLIENT_TAG: string[] = [
-  'client',
-  'nostr-station',
-  '31990:291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe:nostr-station',
-  'wss://relay.nsite.lol',
-];
+// Now sourced from the shared src/lib/client-tag.ts so the native
+// /api/client path, repo announcements, and nsite deploys all emit an
+// identical NIP-89 client tag (and thus link to the same kind-31990
+// handler event). Local alias kept mutable for the existing spread sites.
+const CLIENT_TAG: string[] = [...SHARED_CLIENT_TAG];
 
 // Notification kinds we surface in the UI. Matches what Damus/Primal show:
 //   1     — kind-1 with a p tag (mentions + replies)

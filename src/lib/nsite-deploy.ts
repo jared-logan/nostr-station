@@ -27,6 +27,7 @@
 import fs from 'fs';
 import path from 'path';
 import { sha256Hex, buildUploadAuthTemplate, uploadBlobs, type BlobToUpload, type BlobUploadResult } from './blossom-upload.js';
+import { CLIENT_TAG, stampClientTag } from './client-tag.js';
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 
@@ -310,9 +311,10 @@ export function buildManifestTemplate(input: ManifestInput): { kind: number; cre
   tags.push(['title', input.title]);
   if (input.description) tags.push(['description', input.description]);
   if (input.source)      tags.push(['source', input.source]);
-  // Mirror shakespeare.diy's ["client", ...] stamp so the manifest is
-  // attributable to nostr-station.
-  tags.push(['client', 'nostr-station']);
+  // NIP-89 client tag (4-element form) — links the manifest to
+  // nostr-station's kind-31990 handler, same as the Client panel's
+  // kind-1s. Mirrors shakespeare.diy stamping its own client handler.
+  tags.push([...CLIENT_TAG]);
   return {
     kind:       NSITE_MANIFEST_KIND_NAMED,
     created_at: Math.floor(Date.now() / 1000),
@@ -335,16 +337,14 @@ export function refreshAnnounceWebTag(
     .filter(t => Array.isArray(t) && t[0] !== 'web')
     .map(t => t.slice());
   tags.push(['web', url]);
-  // Stamp ['client','nostr-station'] if it isn't already present. We're the
-  // one republishing this 30617, so the deploy should be attributable to
-  // nostr-station — mirroring shakespeare.diy's client tag. We DON'T strip
-  // an existing client tag (e.g. a repo originally announced by another
-  // client): both can coexist, and a repo's provenance is preserved.
+  // Stamp the NIP-89 client tag (4-element form → links to the kind-31990
+  // handler) if a nostr-station client tag isn't already present. We're the
+  // one republishing this 30617, so the deploy is attributable to
+  // nostr-station — mirroring shakespeare.diy. We DON'T strip an existing
+  // client tag from another client: both can coexist, preserving provenance.
   // Note: ngit-CLI-generated 30617s carry no client tag at all, which is
   // why a freshly `ngit push`ed repo shows none until its first deploy.
-  if (!tags.some(t => t[0] === 'client' && t[1] === 'nostr-station')) {
-    tags.push(['client', 'nostr-station']);
-  }
+  stampClientTag(tags);
   return { tags, content: prior.content };
 }
 
