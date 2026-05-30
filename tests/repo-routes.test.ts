@@ -8,7 +8,34 @@ const {
   parseRepoAnnouncement,
   clampInt,
   buildRepoAnnounceTemplate,
+  decodeNgitRemote,
 } = await import('../src/lib/routes/repo.ts');
+
+// ── decodeNgitRemote (regression: 3-part remote forked the d-tag) ─────────
+// A `nostr://<npub>/<relay-host>/<repo>` remote must decode to d=<repo>,
+// NOT d=<relay-host>/<repo>. The latter forks every lookup + re-announce
+// onto a phantom coordinate and produced a duplicate repo on gitworkshop.
+const NPUB = 'npub19yw8tkfh530kdgfqn782vcga7azgckdn2fjjp3nv5txu6dl3h7lqhv322j';
+const HEX  = '291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe';
+
+test('decodeNgitRemote: 2-part nostr remote → d-tag is the repo, no relay hints', () => {
+  const c = decodeNgitRemote({ remotes: { ngit: `nostr://${NPUB}/hello-world` } });
+  assert.equal(c?.pubkey, HEX);
+  assert.equal(c?.identifier, 'hello-world');
+  assert.deepEqual(c?.relayHints, []);
+});
+
+test('decodeNgitRemote: 3-part remote → LAST segment is d-tag, middle is a relay hint', () => {
+  const c = decodeNgitRemote({ remotes: { ngit: `nostr://${NPUB}/relay.ngit.dev/hello-world` } });
+  assert.equal(c?.pubkey, HEX);
+  assert.equal(c?.identifier, 'hello-world');                 // NOT 'relay.ngit.dev/hello-world'
+  assert.deepEqual(c?.relayHints, ['wss://relay.ngit.dev']);
+});
+
+test('decodeNgitRemote: no ngit remote → null', () => {
+  assert.equal(decodeNgitRemote({ remotes: {} }), null);
+  assert.equal(decodeNgitRemote({}), null);
+});
 
 // ── isSafeRef ────────────────────────────────────────────────────────────
 
