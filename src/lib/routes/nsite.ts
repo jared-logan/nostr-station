@@ -31,12 +31,13 @@
 import http from 'http';
 import { randomBytes } from 'crypto';
 import { readBody } from './_shared.js';
-import { getEffectiveReadRelays } from '../identity.js';
+import { getEffectiveReadRelays, readIdentity, npubToHex } from '../identity.js';
 import {
   resolveAddress, fetchSiteIndex, fetchBlossomServers, fetchBlob,
   fetchAuthorOutboxRelays, unionRelays,
   normalizePath, mimeForPath,
   DEFAULT_NSITE_RELAYS, DEFAULT_BLOSSOM_SERVERS,
+  DEFAULT_DEPLOY_BLOSSOM_SERVERS, DEFAULT_DEPLOY_RELAYS,
   DEFAULT_NSIT_INDEXER_PUBKEY, DEFAULT_NSIT_INDEXER_RELAYS,
   DEFAULT_CONTENT_RELAYS, PROFILE_DISCOVERY_RELAYS,
   NsiteError, type SiteIndex, type NsitResolveConfig,
@@ -367,11 +368,39 @@ export async function handleNsite(
       config:   readNsiteConfig(),
       defaults: defaultNsiteConfig(),
       configPath: nsiteConfigPath(),
+      // App-default deploy lists (fixed in code) the "nsite deploy" Config
+      // section renders as its toggleable "App" rows.
+      deployAppDefaults: {
+        blossomServers: DEFAULT_DEPLOY_BLOSSOM_SERVERS.slice(),
+        relays:         DEFAULT_DEPLOY_RELAYS.slice(),
+      },
       envOverrides: {
         nsitIndexerPubkey: !!(process.env.NSITE_NSIT_INDEXER_PUBKEY || '').trim(),
         nsitIndexerRelays: !!(process.env.NSITE_NSIT_RELAYS || '').trim(),
       },
     });
+    return true;
+  }
+  // Sync the user's OWN kind:10063 (BUD-03) Blossom server list from Nostr,
+  // for the "nsite deploy → Your Blossom Servers → Sync from Nostr" action.
+  // Read-only: returns the author-listed servers (no public-pool fallback,
+  // no merge — the UI merges into the textarea). We never publish a 10063.
+  if (path === '/api/nsite/blossom-list/sync' && method === 'POST') {
+    const ident = readIdentity();
+    let ownerHex = '';
+    try { ownerHex = ident.npub ? npubToHex(ident.npub).toLowerCase() : ''; } catch { ownerHex = ''; }
+    if (!/^[0-9a-f]{64}$/.test(ownerHex)) {
+      json(res, 400, { error: 'no_identity', message: 'configure your Nostr identity first' });
+      return true;
+    }
+    const relays = unionRelays(getEffectiveReadRelays?.() ?? [], readNsiteConfig().contentRelays);
+    try {
+      // Empty fallback → author-listed servers only (the ones THEY published).
+      const servers = await fetchBlossomServers(ownerHex, relays, []);
+      json(res, 200, { servers });
+    } catch (e: any) {
+      json(res, 502, { error: 'sync_failed', message: String(e?.message || e) });
+    }
     return true;
   }
   if (path === '/api/nsite/config' && method === 'PUT') {

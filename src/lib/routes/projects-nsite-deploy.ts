@@ -66,7 +66,14 @@ export async function handleProjectsNsiteDeploy(
   const emit  = (payload: object) => { try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {} };
   const log   = (line: string, stream: 'stdout' | 'stderr' = 'stdout') => emit({ line, stream });
   const fail  = (msg: string, code = 1) => { log(msg, 'stderr'); emit({ done: true, code }); try { res.end(); } catch {} };
-  const finish = (url: string) => { emit({ done: true, code: 0, url }); try { res.end(); } catch {} };
+  const finish = (url: string) => {
+    // Side-channel the URL via an info frame (the exec-modal stashes
+    // `info[name]=value` and surfaces it on the resolved promise), then
+    // the terminal done frame.
+    emit({ info: 'url', value: url });
+    emit({ done: true, code: 0, url });
+    try { res.end(); } catch {}
+  };
 
   let aborted = false;
   req.on('close', () => { aborted = true; });
