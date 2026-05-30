@@ -1038,6 +1038,13 @@ export async function handleRepo(
       return json(res, 200, {
         status: result.repo ? 'published' : 'local-only',
         repo:   result.repo,
+        // True when the project has an ngit remote (decodable coordinate)
+        // even if no 30617 resolved on relays. Lets the UI distinguish
+        // "never announced" (no remote) from "announcement missing/deleted
+        // or not yet propagated" (remote present, repo null) — the latter
+        // gets a 'Re-announce' affordance instead of a misleading
+        // 'run ngit init' hint.
+        hasRemote: !!coords,
         maintainerSet,
         cached: result.cached,
         // Diagnostics on fresh queries only — cached returns are quiet.
