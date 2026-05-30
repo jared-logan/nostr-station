@@ -935,6 +935,39 @@ async function handleAnnounce(
     } catch { /* prior fetch failed — proceed without carry-through */ }
   }
 
+  // Recover the EUC (earliest-unique-commit) when the form didn't supply
+  // one. The EUC anchors a repo's identity across re-announcements:
+  // gitworkshop and other NIP-34 clients GROUP announcements by it, so an
+  // announcement missing the `["r", <root-commit>, "euc"]` tag shows up as
+  // a SEPARATE repo instead of replacing/merging with the prior one. The
+  // resurrection path (deleted announcement → synthRepoPrefill) can't know
+  // the EUC client-side and sends none, which is what surfaced as two
+  // duplicate repos on gitworkshop. Recover it here:
+  //   (1) carry the prior announcement's euc when we found a prior event;
+  //   (2) else derive it from the local repo's root commit — the same
+  //       value `ngit init` stamps (`git rev-list --max-parents=0`).
+  if (!input.euc) {
+    if (priorEvent && Array.isArray(priorEvent.tags)) {
+      for (const t of priorEvent.tags) {
+        if (Array.isArray(t) && t[0] === 'r' && t[2] === 'euc' && typeof t[1] === 'string'
+            && /^[0-9a-f]{40}$/.test(t[1].toLowerCase())) {
+          input.euc = t[1].toLowerCase();
+          break;
+        }
+      }
+    }
+    if (!input.euc && project.path) {
+      try {
+        // A repo can have multiple root commits (merged unrelated
+        // histories); rev-list emits newest-first, so the EARLIEST root —
+        // the EUC by convention — is last.
+        const roots = (await gitRun(project.path, ['rev-list', '--max-parents=0', 'HEAD']))
+          .split(/\s+/).map(s => s.trim().toLowerCase()).filter(s => /^[0-9a-f]{40}$/.test(s));
+        if (roots.length > 0) input.euc = roots[roots.length - 1];
+      } catch { /* no git / detached HEAD — emit without euc */ }
+    }
+  }
+
   const template = buildRepoAnnounceTemplate(input, priorEvent, ownerHex);
 
   // Sign via the persisted Amber pairing.
