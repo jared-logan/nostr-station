@@ -5,6 +5,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn panel: copyable node npub, honest 4.x controls
+
+UX pass on the nostr-vpn panel, driven by three reported pain points: the
+node's own npub couldn't be copied, joining a network you already run
+elsewhere was unclear, and several buttons threw API errors.
+
+- **Your node npub is now copyable.** nvpn 4.x dropped `npub` from
+  `status --json`, so the panel's only copy of it was a truncated,
+  copy-less badge in the status strip. The full value now carries a copy
+  button in the **status strip**, a dedicated **"this node (npub)"** row in
+  the **Network** tab (the place you reach for when adding this station to a
+  mesh), and the **Status** tab's npub row now falls back to the
+  config-derived identity instead of vanishing on modern daemons.
+- **Clearer join path.** The Import-invite modal now spells out that the
+  code must be an `nvpn://invite/…` minted by an admin of the target
+  network, and documents the two ways to bring this station into a network
+  you already operate: mint an invite there, or copy this node's npub and
+  add it as a participant on that side.
+- **No more buttons that always 501.** nvpn 4.x removed the bulk
+  `set --relay`, `netcheck`, and `stats` CLI verbs; the matching routes
+  return `501`, but the UI still rendered live-looking buttons that
+  double-toasted errors. The **Relays** tab is now read-only with an honest
+  "edit `relays = […]` in config.toml / native app" callout (config path is
+  copyable) plus the recommended set as a copy-pasteable TOML line; relay
+  rows still surface publish-health from the in-process aggregator (which
+  works on 4.x). The **Diagnostics** tab drops the dead **Run netcheck** and
+  **Show stats** buttons (doctor covers netcheck's old ground), and the
+  Logs panel's 504-loop hint now routes to the Relays tab instead of
+  calling the removed bulk-set endpoint.
+
 ### nvpn pin bump 4.0.37 → 4.0.48
 
 Tracks the upstream 4.0.x line forward. Existing users see the upgrade as
