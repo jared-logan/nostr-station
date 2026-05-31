@@ -5,6 +5,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: adopt identity — make the daemon run the managed identity
+
+The load-bearing fix for the dashboard/daemon split. Until the daemon runs
+the identity the dashboard manages, every control (join, repair, relay
+edits) writes a config the daemon never reads — the dashboard is cosmetic.
+"Adopt" makes the running daemon use the dashboard-managed identity + config.
+
+Surfaced as **"Make the daemon use this identity"** on the diagnosis when an
+identity split is detected. It:
+
+- **Previews first** — shows the daemon's current npub → your managed npub
+  and the 3 steps (back up daemon config, copy managed config onto the
+  daemon's resolved `--config` path, restart). No write until you confirm.
+- **Backs up** the daemon's current config (`sudo cp -p` to `<path>.bak-<ts>`)
+  before overwriting, so the prior identity is recoverable.
+- **Writes atomically with the correct ownership for a secret-bearing file**
+  — `sudo -n install -o root -g root -m 600` from the managed config's body
+  via stdin. The managed config contains the private key, so it's never
+  returned through the API or logged; only the two (public) npubs and paths
+  are surfaced. Empty sudo cred cache → clear "run `sudo -v` then retry"
+  hint, and nothing is changed (or only the backup, never a half-write).
+- **Restarts** nvpn so the daemon comes up on the adopted identity.
+
+New: pure decision core `decideAdoptIdentity` (unit-tested), `planAdoptIdentity`
+/ `adoptIdentity` (`nvpn.ts`), route `POST /api/nvpn/identity/adopt`
+(`{ apply }`), and the preview→confirm→restart UI. Verified end-to-end by
+hand on a live VM (managed identity adopted → tunnel landed on the correct
+deterministic IP, mesh converged). Nothing hardcoded — paths/identities are
+all resolved live.
+
 ### nostr-vpn: identity-aware diagnosis (dashboard vs daemon split)
 
 The deepest cause of "nothing connects" on a service install: the dashboard
