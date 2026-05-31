@@ -257,3 +257,65 @@ nvpn from shell scripts:
 | `nvpn stats` | The `relay-for-others` mode this counted was dropped from the FIPS mesh redesign. |
 | `nvpn set --relay <url>` (bulk) | No CLI replacement upstream — edit `[[networks]] relays = […]` in `config.toml` directly, or use the native app. The dashboard's GET `/api/nvpn/relays` still reads correctly; mutations return `501 Not Implemented`. |
 | `nvpn init --yes` | Renamed to `nvpn init --force`. The installer was updated in lockstep. |
+
+## Why a containerized node shows "0 online"
+
+A station node behind NAT (OrbStack VM, Docker, home box with no
+port-forward) frequently sits at "0 peers online." nvpn fails quietly, so
+the dashboard's **nostr-vpn → Diagnostics → Connectivity diagnosis** panel
+(auto-run, read-only) names the actual cause. The three common ones:
+
+### Wrong network (the usual culprit)
+
+nvpn assigns each node a **deterministic** mesh IP — there is no
+admin-assigned IPAM. From the protocol spec:
+
+```
+ip = 10.44.(SHA256(network_id + "\n" + pubkey_hex)[0] % 254 + 1)
+          .(SHA256(network_id + "\n" + pubkey_hex)[1] % 254 + 1)
+```
+
+Because the IP is a pure function of `(network_id, pubkey)`, the same npub
+showing **three different IPs** across config.toml, the live `utun`
+interface, and the admin's roster means three different `network_id`s are in
+play — i.e. the node activated a *separate* network instead of joining the
+intended one. Fix: **Join by ID** with the mesh's exact `network_id`
+(Network tab), then restart nvpn so the interface re-derives its IP. The
+diagnosis computes the expected IP for every configured network and tells
+you which one your live IP actually belongs to.
+
+**Watch for a non-canonical id.** The daemon hashes the stored `network_id`
+*literally*, so an id that picked up a separator — e.g. `abcd-1234` instead
+of the canonical `abcd1234` — derives a different (wrong) IP and never
+converges. Two `[[networks]]` records that canonicalize to the same id
+(`abcd1234` + `abcd-1234`) are a **forked duplicate** of one mesh. The
+diagnosis flags both: strip the separator / remove the duplicate block, keep
+the canonical id, and restart.
+
+### Behind NAT with no relay neighbour
+
+nvpn routes directly when possible and **relays through a reachable FIPS
+neighbour when direct UDP is blocked** — but only if such a neighbour
+exists. A node advertising a private endpoint (`endpoint =
+"192.168.x.y:51820"`) that STUN can't lift to a public mapping, with an
+empty `[fips_peer_endpoints]`, has no bootstrap path and stays unreachable.
+
+There are no public default bootstrap relays, so "any device, anywhere"
+needs *one* mesh node with a reachable endpoint (a public-IP / port-forwarded
+box, or a LAN peer the NATed node can reach) to relay through. Once one
+exists, point at it:
+
+```
+nvpn set --fips-peer-endpoint npub1theirnode…=<reachable-host>:51820
+```
+
+nostr-station surfaces the missing-relay state and the private-endpoint
+warning; it can't itself *be* the public relay — that's an upstream / infra
+concern, the same way Tailscale's DERP relays are infrastructure someone
+runs.
+
+### Lonely roster
+
+A roster with only your own node usually means a join didn't adopt the
+admin's network. Re-join with the exact `network_id`, or if you're the
+admin, add peers / share an invite.

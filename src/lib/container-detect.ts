@@ -105,6 +105,16 @@ export interface NatWarning {
 
 const PRIVATE_RE = /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[0-1])\.|169\.254\.|127\.)/;
 
+// Is this address (or `ip:port` endpoint) an RFC1918 / link-local /
+// loopback address — i.e. not reachable from the public internet?
+// Exported so the diagnostics layer can flag a node that's advertising a
+// private WireGuard endpoint. Accepts bare IPs or `host:port`.
+export function isPrivateEndpoint(endpoint: string | null | undefined): boolean {
+  if (!endpoint) return false;
+  const ip = String(endpoint).split(':')[0];
+  return PRIVATE_RE.test(ip);
+}
+
 export function natWarningFor(in_: NatWarningInput): NatWarning | null {
   const ipOnly = in_.publicEndpoint ? in_.publicEndpoint.split(':')[0] : null;
 

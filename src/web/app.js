@@ -15020,7 +15020,20 @@ const VpnPanel = (() => {
   function renderDiagnosticsBody() {
     return `
       <div class="vpn-section">
-        <p class="vpn-section-help">
+        <!-- Connectivity diagnosis — auto-run, read-only. Explains *why*
+             a node is offline (wrong network / behind NAT with no relay /
+             lonely roster) instead of leaving "0 online" unexplained. -->
+        <div class="vpn-diag-net" id="vpn-diag-net">
+          <div class="vpn-diag-net-head">
+            <span class="vpn-meta-label">connectivity diagnosis</span>
+            <button id="vpn-diag-net-refresh" class="vpn-diag-net-refresh"
+                    title="Re-check network connectivity (reads daemon status + config, no external calls)">recheck</button>
+          </div>
+          <div class="vpn-diag-net-body" id="vpn-diag-net-body">
+            <span class="muted">checking…</span>
+          </div>
+        </div>
+        <p class="vpn-section-help" style="margin-top:16px">
           Run-on-click diagnostics — each makes a live call to the daemon
           (sometimes via public STUN servers / Nostr relays), so we never
           auto-poll. Start with <strong>Test reachability</strong> when
@@ -15053,7 +15066,60 @@ const VpnPanel = (() => {
         <div id="vpn-diag-out" class="vpn-meta-diag-out muted">click an action to run it</div>
       </div>`;
   }
+  // Render the auto-run connectivity diagnosis into #vpn-diag-net-body.
+  // Read-only (GET /api/nvpn/network-diagnosis) so it's safe to fire on
+  // every Diagnostics-tab paint. Findings carry a level → coloured dot;
+  // the context block shows the underlying values (active vs daemon
+  // network, expected vs live IP) so a power user can see the evidence.
+  async function renderNetworkDiagnosis() {
+    const host = bodyEl.querySelector('#vpn-diag-net-body');
+    if (!host) return;
+    let d;
+    try { d = await api('/api/nvpn/network-diagnosis', undefined, { silent: true }); }
+    catch { host.innerHTML = '<span class="muted">diagnosis unavailable (daemon unreachable)</span>'; return; }
+    if (!d || !Array.isArray(d.findings)) { host.innerHTML = '<span class="muted">no diagnosis</span>'; return; }
+    const dotFor = (lvl) => lvl === 'error' ? 'err' : lvl === 'warn' ? 'warn' : lvl === 'ok' ? 'ok' : 'idle';
+    const findingsHtml = d.findings.map(f => `
+      <div class="vpn-diag-finding vpn-diag-finding-${escapeHtml(f.level)}">
+        <span class="dot ${dotFor(f.level)}"></span>
+        <div class="vpn-diag-finding-text">
+          <div class="vpn-diag-finding-summary">${escapeHtml(f.summary)}</div>
+          <div class="vpn-diag-finding-detail muted">${escapeHtml(f.detail)}</div>
+        </div>
+      </div>`).join('');
+    // Evidence rows — only the ones we actually have values for.
+    const ctx = d.context || {};
+    const ev = [];
+    if (ctx.activeNetworkId) ev.push(['active network', ctx.activeNetworkId]);
+    // Canonical id only when it differs from the stored one (i.e. the
+    // stored id carried a separator) — that's the actionable case.
+    if (d.canonicalActiveNetworkId && ctx.activeNetworkId && d.canonicalActiveNetworkId !== ctx.activeNetworkId) {
+      ev.push(['canonical network', d.canonicalActiveNetworkId]);
+    }
+    if (ctx.daemonNetworkId && ctx.daemonNetworkId !== ctx.activeNetworkId) ev.push(['daemon network', ctx.daemonNetworkId]);
+    if (d.expectedTunnelIp) ev.push(['expected tunnel IP', d.expectedTunnelIp]);
+    if (ctx.liveTunnelIp) ev.push(['live tunnel IP', ctx.liveTunnelIp]);
+    if (ctx.endpoint) ev.push(['advertised endpoint', ctx.endpoint + (ctx.endpointIsPrivate ? ' (private — unreachable)' : '')]);
+    ev.push(['roster / online', `${ctx.rosterParticipantCount ?? '?'} participant${ctx.rosterParticipantCount === 1 ? '' : 's'} · ${ctx.rosterAdminCount ?? '?'} admin${ctx.rosterAdminCount === 1 ? '' : 's'} · ${ctx.onlineCount ?? 0} online`]);
+    ev.push(['relay peers configured', String(ctx.fipsPeerEndpointCount ?? 0)]);
+    const evHtml = ev.map(([k, v]) => `
+      <div class="vpn-diag-ev-row"><span class="vpn-diag-ev-k">${escapeHtml(k)}</span><code class="vpn-diag-ev-v">${escapeHtml(String(v))}</code></div>`).join('');
+    host.innerHTML = `
+      <div class="vpn-diag-findings">${findingsHtml}</div>
+      <details class="vpn-diag-evidence"><summary class="muted">evidence</summary><div class="vpn-diag-ev">${evHtml}</div></details>
+    `;
+  }
+
   renderDiagnosticsBody.wire = () => {
+    const netRefresh = bodyEl.querySelector('#vpn-diag-net-refresh');
+    if (netRefresh) netRefresh.addEventListener('click', async (e) => {
+      e.preventDefault(); netRefresh.disabled = true;
+      const host = bodyEl.querySelector('#vpn-diag-net-body');
+      if (host) host.innerHTML = '<span class="muted">checking…</span>';
+      try { await renderNetworkDiagnosis(); } finally { netRefresh.disabled = false; }
+    });
+    void renderNetworkDiagnosis();
+
     const diagOut = bodyEl.querySelector('#vpn-diag-out');
     const setDiagOut = (text, level = 'info') => {
       if (!diagOut) return;
