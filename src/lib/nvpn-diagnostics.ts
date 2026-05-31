@@ -88,6 +88,10 @@ export interface NvpnDiagnosisInput {
   pendingJoinAgeSecs:     number | null;
   /** Container/VM runtime, when detected (Docker / OrbStack / LXC / …). */
   containerKind:          string | null;
+  /** npub of the identity the dashboard manages (user-side config). */
+  managedNpub:            string | null;
+  /** npub of the identity the running daemon actually uses (its real config). */
+  daemonNpub:             string | null;
 }
 
 export interface NvpnDiagnosis {
@@ -100,6 +104,8 @@ export interface NvpnDiagnosis {
   liveMatchesNetworkId:   string | null;
   /** Forked duplicates: same canonical id stored under >1 raw id. */
   forked:                 Array<{ canonical: string; ids: string[] }>;
+  /** True when the daemon's identity differs from the managed one. */
+  identitySplit:          boolean;
   /** Highest finding level — drives the summary pill. */
   overall:                NvpnDiagLevel;
 }
@@ -125,6 +131,10 @@ export function diagnoseNvpnNetwork(in_: NvpnDiagnosisInput): NvpnDiagnosis {
   const canonActive = in_.activeNetworkId ? canonicalNetworkId(in_.activeNetworkId) : null;
   const expectedTunnelIp =
     canonActive && in_.pubkeyHex ? computeNvpnTunnelIp(canonActive, in_.pubkeyHex) : null;
+
+  // Identity split: the daemon is a *different* nvpn node than the one the
+  // dashboard manages. This outranks every network finding below.
+  const identitySplit = !!(in_.managedNpub && in_.daemonNpub && in_.managedNpub !== in_.daemonNpub);
 
   // Which configured network does the live IP belong to? Match against each
   // network's *raw* id — that's the string the daemon hashed to produce the
@@ -159,7 +169,32 @@ export function diagnoseNvpnNetwork(in_: NvpnDiagnosisInput): NvpnDiagnosis {
       summary: 'nvpn daemon is not running',
       detail:  'Start the daemon from the status strip above; diagnostics need it live to read the mesh state.',
     });
-    return { findings, canonicalActiveNetworkId: canonActive, expectedTunnelIp, liveMatchesNetworkId, forked, overall: 'info' };
+    return { findings, canonicalActiveNetworkId: canonActive, expectedTunnelIp, liveMatchesNetworkId, forked, identitySplit, overall: 'info' };
+  }
+
+  // ── Identity split (the deepest split, takes precedence) ──────────
+  // The daemon runs a different nvpn identity than the dashboard manages,
+  // so nothing changed here (join / repair / relays) reaches the daemon —
+  // those edits land in the managed identity's config, which the daemon
+  // never reads. This is meaningless to compare network-by-network (it's
+  // not even the same node), so we surface it alone (plus any managed-side
+  // forks, which matter once the daemon adopts this identity) and stop.
+  if (identitySplit) {
+    findings.push({
+      id:      'identity-split',
+      level:   'error',
+      summary: 'The daemon is running a different identity than this dashboard manages',
+      detail:  `The running daemon's identity (${shortId(in_.daemonNpub)}) isn't the one this dashboard manages (${shortId(in_.managedNpub)}) — they're separate nvpn nodes. Joins, repairs, and relay edits here change the managed identity's config, which the daemon never reads, so they don't take effect. The daemon has to run the managed identity before anything here converges.`,
+    });
+    for (const g of forked) {
+      findings.push({
+        id:      'forked-network',
+        level:   'error',
+        summary: `Duplicate copies of one network configured: ${g.ids.map(shortId).join(' + ')}`,
+        detail:  `Same mesh (canonical "${g.canonical}") stored under different ids — collapse them when the daemon adopts this identity.`,
+      });
+    }
+    return { findings, canonicalActiveNetworkId: canonActive, expectedTunnelIp, liveMatchesNetworkId, forked, identitySplit, overall: 'error' };
   }
 
   // ── Forked / duplicate network (independent finding) ──────────────
@@ -252,5 +287,5 @@ export function diagnoseNvpnNetwork(in_: NvpnDiagnosisInput): NvpnDiagnosis {
     (acc, f) => (LEVEL_RANK[f.level] > LEVEL_RANK[acc] ? f.level : acc),
     'ok',
   );
-  return { findings, canonicalActiveNetworkId: canonActive, expectedTunnelIp, liveMatchesNetworkId, forked, overall };
+  return { findings, canonicalActiveNetworkId: canonActive, expectedTunnelIp, liveMatchesNetworkId, forked, identitySplit, overall };
 }

@@ -92,6 +92,8 @@ function baseInput(over = {}) {
     fipsPeerEndpointCount:  0,
     pendingJoinAgeSecs:     null,
     containerKind:          null,
+    managedNpub:            'npub1managed',
+    daemonNpub:             'npub1managed',
     ...over,
   };
 }
@@ -106,6 +108,32 @@ test('diagnose: healthy mesh → ok', () => {
   const d = diagnoseNvpnNetwork(baseInput());
   assert.equal(d.overall, 'ok');
   assert.equal(d.findings[0].id, 'healthy');
+});
+
+test('diagnose: daemon identity ≠ managed identity → identity-split, outranks network findings', () => {
+  const d = diagnoseNvpnNetwork(baseInput({
+    managedNpub:     'npub1managed',
+    daemonNpub:      'npub1daemonothernode',
+    // even with a network mismatch present, identity-split takes over
+    daemonNetworkId: 'someothernet',
+  }));
+  assert.equal(d.identitySplit, true);
+  assert.equal(d.overall, 'error');
+  assert.equal(d.findings[0].id, 'identity-split');
+  // The cross-identity network findings are suppressed (different node).
+  assert.equal(d.findings.some(f => f.id === 'wrong-network'), false);
+});
+
+test('diagnose: same identity → no identity-split', () => {
+  const d = diagnoseNvpnNetwork(baseInput({ managedNpub: 'npub1x', daemonNpub: 'npub1x' }));
+  assert.equal(d.identitySplit, false);
+});
+
+test('diagnose: daemon identity unknown (null) → no false split', () => {
+  // Can't read the daemon's identity (e.g. empty sudo cred cache) → never
+  // claim a split we can't prove.
+  const d = diagnoseNvpnNetwork(baseInput({ managedNpub: 'npub1x', daemonNpub: null }));
+  assert.equal(d.identitySplit, false);
 });
 
 test('diagnose: daemon on a different network id → error wrong-network', () => {

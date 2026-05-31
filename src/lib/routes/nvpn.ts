@@ -44,6 +44,7 @@ import {
   setNvpnAlias, removeNvpnAlias,
   readNvpnRelays, addNvpnRelay, removeNvpnRelay, setNvpnRelays,
   readNvpnFipsPeerEndpoints,
+  resolveDaemonConfigPath, readNodeNpubFromPath,
   RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
 import { diagnoseNvpnNetwork } from '../nvpn-diagnostics.js';
@@ -212,6 +213,24 @@ export async function handleNvpn(
       }
     }
 
+    // Identity split: the dashboard manages `identity.npub` (user-side
+    // config), but the daemon may run a different identity entirely (a
+    // root --service that minted its own keypair). Resolve the daemon's
+    // real config path from its live cmdline and read its identity — all
+    // from live evidence, nothing hardcoded. Best-effort: null when we
+    // can't read it (e.g. empty sudo cred cache) → no split finding.
+    const managedNpub = identity.npub;
+    const daemonPid = (raw && raw.daemon && typeof raw.daemon.pid === 'number') ? raw.daemon.pid : null;
+    const daemonCfg = await resolveDaemonConfigPath(daemonPid);
+    let daemonNpub: string | null = null;
+    if (daemonCfg.path) {
+      // Only treat it as the "daemon identity" when it's a *different*
+      // file than the managed config — otherwise it's the same node.
+      if (daemonCfg.path !== identity.configPath) {
+        daemonNpub = await readNodeNpubFromPath(daemonCfg.path);
+      }
+    }
+
     const diagnosis = diagnoseNvpnNetwork({
       running:                status.running,
       activeNetworkId:        roster.networkId,
@@ -227,6 +246,8 @@ export async function handleNvpn(
       fipsPeerEndpointCount:  Object.keys(fips.endpoints).length,
       pendingJoinAgeSecs,
       containerKind:          container ? container.kind : null,
+      managedNpub,
+      daemonNpub,
     });
     await writeJson(res, 200, {
       ...diagnosis,
@@ -244,6 +265,10 @@ export async function handleNvpn(
         onlineCount,
         fipsPeerEndpointCount: Object.keys(fips.endpoints).length,
         running: status.running,
+        managedNpub,
+        daemonNpub,
+        daemonConfigPath: daemonCfg.path,
+        managedConfigPath: identity.configPath,
       },
     });
     return true;

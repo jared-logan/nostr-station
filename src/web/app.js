@@ -15090,6 +15090,14 @@ const VpnPanel = (() => {
     // Evidence rows — only the ones we actually have values for.
     const ctx = d.context || {};
     const ev = [];
+    // Identity split is the headline — show both identities + the daemon's
+    // real config path so it's obvious they're different nodes/files.
+    if (d.identitySplit) {
+      if (ctx.daemonNpub) ev.push(['daemon identity', ctx.daemonNpub]);
+      if (ctx.managedNpub) ev.push(['this dashboard identity', ctx.managedNpub]);
+      if (ctx.daemonConfigPath) ev.push(['daemon config', ctx.daemonConfigPath]);
+      if (ctx.managedConfigPath) ev.push(['dashboard config', ctx.managedConfigPath]);
+    }
     if (ctx.activeNetworkId) ev.push(['active network', ctx.activeNetworkId]);
     // Canonical id only when it differs from the stored one (i.e. the
     // stored id carried a separator) — that's the actionable case.
@@ -15104,10 +15112,12 @@ const VpnPanel = (() => {
     ev.push(['relay peers configured', String(ctx.fipsPeerEndpointCount ?? 0)]);
     const evHtml = ev.map(([k, v]) => `
       <div class="vpn-diag-ev-row"><span class="vpn-diag-ev-k">${escapeHtml(k)}</span><code class="vpn-diag-ev-v">${escapeHtml(String(v))}</code></div>`).join('');
-    // Offer "Repair config" when the diagnosis found a forked or
-    // non-canonical network — the cases repair definitively fixes
-    // (collapse duplicates, canonicalize the active id, re-pin a stale IP).
-    const repairable = d.findings.some(f => f.id === 'forked-network' || f.id === 'non-canonical-network');
+    // "Repair config" only helps when the daemon actually reads the config
+    // we'd edit. On an identity split it doesn't (the daemon runs a
+    // different identity off a different file), so we suppress the button
+    // and show a note instead — identity adoption is the real fix (next).
+    const repairable = !d.identitySplit &&
+      d.findings.some(f => f.id === 'forked-network' || f.id === 'non-canonical-network');
     const repairHtml = repairable
       ? `<div class="vpn-diag-repair-row">
            <button id="vpn-diag-repair-btn" class="primary"
@@ -15116,7 +15126,11 @@ const VpnPanel = (() => {
            </button>
            <span class="muted vpn-diag-repair-hint">previews first · backs up config · needs a Restart</span>
          </div>`
-      : '';
+      : (d.identitySplit
+          ? `<div class="vpn-diag-repair-row">
+               <span class="muted vpn-diag-repair-hint">The daemon runs a different identity than this dashboard manages, so config fixes here won't reach it. Making the daemon run the managed identity is the fix (coming next).</span>
+             </div>`
+          : '');
     host.innerHTML = `
       <div class="vpn-diag-findings">${findingsHtml}</div>
       ${repairHtml}

@@ -5,6 +5,37 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: identity-aware diagnosis (dashboard vs daemon split)
+
+The deepest cause of "nothing connects" on a service install: the dashboard
+runs as the user and edits `~/.config/nvpn/config.toml`, but the daemon runs
+as a root `--service` off `/root/.config/nvpn/config.toml` — and that root
+config can be a **completely different nvpn identity** (its own keypair),
+auto-minted when the service was installed. So every join / repair / relay
+edit lands in a config the daemon never reads, against an identity that
+isn't even the same node. The diagnosis was splicing the managed identity
+onto the daemon's state.
+
+The Connectivity diagnosis now tells the truth:
+
+- Resolves the daemon's **real** config path from live evidence only — its
+  own `--config` argument (read from `/proc/<pid>/cmdline`, world-readable
+  even for a root process), falling back to the systemd unit's `ExecStart`.
+  Nothing hardcoded.
+- Reads the daemon's identity from that path (leak-safe: only the `[nostr]
+  public_key` is ever extracted; falls back to `sudo -n cat` when the file
+  is root-owned, degrades quietly on an empty sudo cred cache).
+- New **identity-split** finding (top priority) when the daemon's npub
+  differs from the managed one — it explains *why* dashboard changes don't
+  reach the daemon, and suppresses the now-meaningless cross-identity
+  network findings. Evidence shows both identities + both config paths. The
+  config-repair button is hidden in this state (it wouldn't reach the
+  daemon); identity adoption is the fix (next).
+
+New pure helper `parseConfigPathFromCmdline` + `resolveDaemonConfigPath` /
+`readNodeNpubFromPath` (`nvpn.ts`), `identitySplit` in the diagnosis, and
+`managedNpub`/`daemonNpub` plumbed through the route. All read-only.
+
 ### nostr-vpn: prevent + repair forked / non-canonical networks
 
 Follow-up to the connectivity diagnosis: stop the forked-network bug from

@@ -6,7 +6,31 @@ import {
   insertNetworkBlockFirst,
   extractAllNetworksSections,
   extractTomlString,
+  parseConfigPathFromCmdline,
 } from '../src/lib/nvpn.ts';
+
+// ── parseConfigPathFromCmdline ─────────────────────────────────────────
+
+test('parseConfigPathFromCmdline: NUL-joined /proc cmdline', () => {
+  const cmd = ['/usr/local/bin/nvpn', 'daemon', '--service', '--config', '/root/.config/nvpn/config.toml', '--iface', 'utun100'].join('\0');
+  assert.equal(parseConfigPathFromCmdline(cmd), '/root/.config/nvpn/config.toml');
+});
+
+test('parseConfigPathFromCmdline: space-joined ps args', () => {
+  assert.equal(
+    parseConfigPathFromCmdline('/usr/local/bin/nvpn daemon --config /home/u/.config/nvpn/config.toml'),
+    '/home/u/.config/nvpn/config.toml',
+  );
+});
+
+test('parseConfigPathFromCmdline: --config=PATH form', () => {
+  assert.equal(parseConfigPathFromCmdline('nvpn daemon --config=/etc/nvpn/c.toml'), '/etc/nvpn/c.toml');
+});
+
+test('parseConfigPathFromCmdline: absent / empty → null', () => {
+  assert.equal(parseConfigPathFromCmdline('nvpn daemon --service'), null);
+  assert.equal(parseConfigPathFromCmdline(''), null);
+});
 
 // ── isValidNetworkId ───────────────────────────────────────────────────
 
