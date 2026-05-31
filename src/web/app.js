@@ -15104,10 +15104,94 @@ const VpnPanel = (() => {
     ev.push(['relay peers configured', String(ctx.fipsPeerEndpointCount ?? 0)]);
     const evHtml = ev.map(([k, v]) => `
       <div class="vpn-diag-ev-row"><span class="vpn-diag-ev-k">${escapeHtml(k)}</span><code class="vpn-diag-ev-v">${escapeHtml(String(v))}</code></div>`).join('');
+    // Offer "Repair config" when the diagnosis found a forked or
+    // non-canonical network — the cases repair definitively fixes
+    // (collapse duplicates, canonicalize the active id, re-pin a stale IP).
+    const repairable = d.findings.some(f => f.id === 'forked-network' || f.id === 'non-canonical-network');
+    const repairHtml = repairable
+      ? `<div class="vpn-diag-repair-row">
+           <button id="vpn-diag-repair-btn" class="primary"
+                   title="Preview a fix that collapses duplicate networks, canonicalizes the active id, and re-pins the IP">
+             Repair network config…
+           </button>
+           <span class="muted vpn-diag-repair-hint">previews first · backs up config · needs a Restart</span>
+         </div>`
+      : '';
     host.innerHTML = `
       <div class="vpn-diag-findings">${findingsHtml}</div>
+      ${repairHtml}
       <details class="vpn-diag-evidence"><summary class="muted">evidence</summary><div class="vpn-diag-ev">${evHtml}</div></details>
     `;
+    const repairBtn = host.querySelector('#vpn-diag-repair-btn');
+    if (repairBtn) repairBtn.addEventListener('click', (e) => { e.preventDefault(); openRepairModal(); });
+  }
+
+  // Preview → confirm → apply → restart. Repair rewrites live network
+  // identity, so it's confirm-first: we fetch the dry-run plan, show
+  // exactly what changes + the Restart/interface-drop warning, and only
+  // write on explicit confirm. After applying we surface the backup path
+  // and offer the Restart inline (a network-identity change needs a full
+  // restart, not a reload).
+  async function openRepairModal() {
+    const body = document.createElement('div');
+    body.innerHTML = `<div class="muted vpn-invite-loading">computing repair plan…</div>`;
+    const modal = openModal({ title: 'Repair network config', subtitle: 'Collapse forks · canonicalize · re-pin IP', body });
+    modal.root.classList.add('vpn-invite-modal');
+    let r;
+    try {
+      r = await api('/api/nvpn/networks/repair', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apply: false }),
+      });
+    } catch { body.innerHTML = `<div class="vpn-invite-err">couldn't compute a repair plan</div>`; return; }
+    const plan = r?.plan || {};
+    if (!plan.needed) {
+      body.innerHTML = `<p>Nothing to repair — no forked or non-canonical networks found.</p>`;
+      return;
+    }
+    const steps = (plan.summary || []).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+    body.innerHTML = `
+      <p class="muted">This rewrites your active network identity in <code class="cmd-inline">config.toml</code>. Here's exactly what it will change:</p>
+      <ul class="vpn-repair-steps">${steps}</ul>
+      <div class="community-card-error" style="margin:10px 0">
+        <strong>Requires a Restart</strong> of nvpn (not just a reload) — the tunnel interface drops for a moment while it re-derives. A timestamped backup of <code>config.toml</code> is written first.
+      </div>
+      <div class="vpn-invite-modal-actions">
+        <button id="vpn-repair-cancel">Cancel</button>
+        <button id="vpn-repair-apply" class="primary">Apply repair</button>
+      </div>
+    `;
+    body.querySelector('#vpn-repair-cancel').addEventListener('click', (e) => { e.preventDefault(); modal.close(); });
+    body.querySelector('#vpn-repair-apply').addEventListener('click', async (e) => {
+      e.preventDefault();
+      const applyBtn = e.currentTarget;
+      applyBtn.disabled = true;
+      let ar;
+      try {
+        ar = await api('/api/nvpn/networks/repair', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ apply: true }),
+        });
+      } catch { applyBtn.disabled = false; return; /* api() toasted */ }
+      if (ar?.ok === false) { toast('repair failed', ar?.detail || '', 'err'); applyBtn.disabled = false; return; }
+      toast('config repaired', ar?.backedUpTo ? `backup: ${ar.backedUpTo}` : '', 'ok');
+      body.innerHTML = `
+        <p>✅ Config repaired.${ar?.backedUpTo ? ` Backup saved to <code class="cmd-inline">${escapeHtml(ar.backedUpTo)}</code>.` : ''}</p>
+        <p class="muted">Restart nvpn now so the tunnel re-derives onto the corrected network. This drops the interface briefly.</p>
+        <div class="vpn-invite-modal-actions">
+          <button id="vpn-repair-later">Later</button>
+          <button id="vpn-repair-restart" class="primary">Restart nvpn now</button>
+        </div>
+      `;
+      body.querySelector('#vpn-repair-later').addEventListener('click', (ev) => { ev.preventDefault(); modal.close(); void refresh(); });
+      body.querySelector('#vpn-repair-restart').addEventListener('click', async (ev) => {
+        ev.preventDefault();
+        const rb = ev.currentTarget; rb.disabled = true;
+        await callNvpnAction('restart', 'restarting');
+        modal.close();
+        await refresh();
+      });
+    });
   }
 
   renderDiagnosticsBody.wire = () => {
