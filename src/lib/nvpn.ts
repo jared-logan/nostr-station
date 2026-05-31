@@ -957,6 +957,87 @@ export function readNvpnNodeIdentity(): NvpnNodeIdentity {
   return { npub: extractNostrPublicKey(toml), configPath };
 }
 
+// ── Daemon config-path + identity resolution ─────────────────────────────
+//
+// The dashboard runs as the user; the system service runs the daemon as
+// root off /root/.config/nvpn/config.toml. So the daemon can be a
+// *different node* (different [nostr] identity) than the one the dashboard
+// manages — the root cause behind "dashboard changes never reach the
+// daemon." To tell the truth, we resolve the daemon's REAL config path and
+// read its identity. Nothing is hardcoded: the path comes from the live
+// daemon's own `--config` argument (or the service unit).
+
+// Pure: pull the value of `--config <path>` (or `--config=<path>`) out of a
+// process command line. Accepts NUL-joined (/proc/<pid>/cmdline) or
+// space-joined (`ps -o args=`) input. Exported for tests.
+export function parseConfigPathFromCmdline(cmdline: string): string | null {
+  if (!cmdline) return null;
+  // Normalize NUL separators to spaces, then tokenize on whitespace.
+  const tokens = cmdline.replace(/\0/g, ' ').trim().split(/\s+/);
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '--config' && i + 1 < tokens.length) return tokens[i + 1];
+    if (t.startsWith('--config=')) return t.slice('--config='.length);
+  }
+  return null;
+}
+
+export interface DaemonConfigPath {
+  /** Resolved path the running daemon actually reads, or null. */
+  path:   string | null;
+  /** How we found it — for "where is this coming from?" display. */
+  source: 'cmdline' | 'unit' | null;
+}
+
+// Resolve the config path the running daemon reads, from live evidence
+// only. Tries the daemon process's own cmdline first (authoritative), then
+// the systemd unit's ExecStart. Best-effort + quiet — returns null when it
+// can't tell, and the caller falls back to the user-side config.
+export async function resolveDaemonConfigPath(pid?: number | null): Promise<DaemonConfigPath> {
+  // 1) The daemon process's own command line.
+  if (typeof pid === 'number' && pid > 0) {
+    // Linux: /proc/<pid>/cmdline is world-readable even for root procs.
+    try {
+      const raw = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      const p = parseConfigPathFromCmdline(raw);
+      if (p) return { path: p, source: 'cmdline' };
+    } catch { /* not Linux / no procfs — fall through to ps */ }
+    // Cross-platform: ps args for the pid.
+    try {
+      const { stdout } = await execa('ps', ['-o', 'args=', '-p', String(pid)], { timeout: 4000, stdio: 'pipe' });
+      const p = parseConfigPathFromCmdline(stdout);
+      if (p) return { path: p, source: 'cmdline' };
+    } catch { /* ps unavailable / pid gone */ }
+  }
+  // 2) The systemd unit's ExecStart (Linux service installs).
+  try {
+    const { stdout } = await execa('systemctl', ['cat', 'nvpn.service'], { timeout: 4000, stdio: 'pipe' });
+    const execLine = stdout.split(/\r?\n/).find(l => /^\s*ExecStart=/.test(l)) || '';
+    const p = parseConfigPathFromCmdline(execLine.replace(/^\s*ExecStart=/, ''));
+    if (p) return { path: p, source: 'unit' };
+  } catch { /* no systemd / no unit */ }
+  return { path: null, source: null };
+}
+
+// Read ONLY the [nostr] public_key (npub) from a config path that may be
+// root-owned. Tries a direct read first; on permission failure falls back
+// to `sudo -n cat`. LEAK-SAFE by construction: the file body (which holds
+// secret_key / private_key) is fed only to extractNostrPublicKey and never
+// returned or logged. Returns null when unreadable (e.g. empty sudo cred
+// cache) — callers degrade rather than error.
+export async function readNodeNpubFromPath(configPath: string): Promise<string | null> {
+  if (!configPath) return null;
+  let toml: string | null = null;
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch {
+    try {
+      const { stdout } = await execa('sudo', ['-n', 'cat', configPath], { timeout: 5000, stdio: 'pipe' });
+      toml = stdout;
+    } catch { return null; }
+  }
+  return toml ? extractNostrPublicKey(toml) : null;
+}
+
 export function extractTomlString(section: string, key: string): string | null {
   const re = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, 'm');
   const m = section.match(re);
