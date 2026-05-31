@@ -289,8 +289,16 @@ you which one your live IP actually belongs to.
 of the canonical `abcd1234` — derives a different (wrong) IP and never
 converges. Two `[[networks]]` records that canonicalize to the same id
 (`abcd1234` + `abcd-1234`) are a **forked duplicate** of one mesh. The
-diagnosis flags both: strip the separator / remove the duplicate block, keep
-the canonical id, and restart.
+diagnosis flags both.
+
+To fix it without hand-editing TOML, use **Repair network config** (the
+button appears on the diagnosis when a fork / non-canonical id is found). It
+**previews first** — showing exactly which blocks it drops, the id it
+canonicalizes, and the old→new IP — then, on confirm, **backs up**
+`config.toml` and rewrites it to a single canonical network. A network-
+identity change needs a full **Restart** (brief interface drop), which the
+repair prompts for. Joining a network by id already stores the canonical
+form, so new forks can't be created.
 
 ### Behind NAT with no relay neighbour
 

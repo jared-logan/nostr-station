@@ -29,6 +29,7 @@ import path from 'path';
 import os from 'os';
 import readline from 'readline';
 import { findBin } from './detect.js';
+import { canonicalNetworkId, computeNvpnTunnelIp } from './nvpn-diagnostics.js';
 import type { LogBuffer } from './log-buffer.js';
 
 // ── Lifecycle pub/sub ────────────────────────────────────────────────────
@@ -1102,10 +1103,16 @@ export interface NvpnJoinResult extends ControlResult {
 // can activate it from the native app), since reordering arbitrary TOML
 // is riskier than the additive insert.
 export function joinNvpnNetwork(networkId: string): NvpnJoinResult {
-  const id = String(networkId || '').trim();
-  if (!isValidNetworkId(id)) {
+  const raw = String(networkId || '').trim();
+  if (!isValidNetworkId(raw)) {
     return { ok: false, detail: 'invalid network id' };
   }
+  // Prevention: always store the CANONICAL (separator-free) id. The daemon
+  // hashes the id literally, so writing a hyphenated id would derive the
+  // wrong mesh IP and create the exact forked-network bug the diagnosis
+  // exists to catch. Canonicalizing on write makes new forks impossible.
+  const id = canonicalNetworkId(raw);
+  if (!id) return { ok: false, detail: 'invalid network id' };
   const configPath = findNvpnConfigPath();
   if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first' };
   let toml = '';
@@ -1114,13 +1121,16 @@ export function joinNvpnNetwork(networkId: string): NvpnJoinResult {
 
   const sections = extractAllNetworksSections(toml);
   const ids = sections.map(s => extractTomlString(s, 'network_id'));
-  if (ids[0] === id) {
+  // Compare on the canonical form so we never create a duplicate of a
+  // network that's already configured under a non-canonical id.
+  const canonIds = ids.map(x => (x ? canonicalNetworkId(x) : null));
+  if (canonIds[0] === id) {
     return { ok: true, detail: 'already the active network', networkId: id };
   }
-  if (ids.includes(id)) {
+  if (canonIds.includes(id)) {
     return {
       ok: false,
-      detail: 'network already configured but not active — activate it from the native nvpn app, or reorder the [[networks]] blocks in config.toml',
+      detail: 'this network is already configured (possibly under a non-canonical id) — use Repair on the Diagnostics tab to consolidate the duplicate and make it active',
     };
   }
 
@@ -1141,6 +1151,256 @@ export function joinNvpnNetwork(networkId: string): NvpnJoinResult {
     return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}` };
   }
   return { ok: true, detail: 'joined network', networkId: id, relays };
+}
+
+// ── De-fork + re-pin repair (config.toml surgery) ─────────────────────
+//
+// The forked-network bug, made fixable. When config.toml has two
+// [[networks]] records that canonicalize to the same id (e.g. "abcd-1234"
+// shadowing "abcd1234"), the daemon hashes each literally → different mesh
+// IPs → the node never converges. Repair collapses each forked group to a
+// single canonical survivor, makes the active network's survivor first,
+// and re-pins a stale explicit tunnel_ip override to the deterministic
+// value. It is preview-first (dry-run returns the plan without writing),
+// backs up config.toml before any write, and writes atomically. It never
+// reloads/restarts — a network-identity change needs a full restart with a
+// brief interface drop, which the caller prompts for explicitly.
+
+interface NetBlockSpan {
+  start: number; end: number; text: string;
+  id: string | null; participants: number;
+}
+
+// Split config.toml into its [[networks]] blocks (full text incl. header),
+// each bounded at the next top-level table heading. Pure.
+function findNetworkBlocks(toml: string): NetBlockSpan[] {
+  const out: NetBlockSpan[] = [];
+  const re = /^[^\S\r\n]*\[\[networks\]\][^\S\r\n]*\r?\n?/gm;
+  const heads: Array<{ start: number; bodyStart: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(toml)) !== null) heads.push({ start: m.index, bodyStart: m.index + m[0].length });
+  for (const h of heads) {
+    const after = toml.slice(h.bodyStart);
+    const nextRel = after.search(/^[^\S\r\n]*\[(?:\[)?/m);
+    const end = nextRel >= 0 ? h.bodyStart + nextRel : toml.length;
+    const body = toml.slice(h.bodyStart, end);
+    out.push({
+      start: h.start, end,
+      text: toml.slice(h.start, end),
+      id: extractTomlString(body, 'network_id'),
+      participants: extractTomlList(body, 'participants').length,
+    });
+  }
+  return out;
+}
+
+function rewriteBlockNetworkId(text: string, newId: string): string {
+  return text.replace(/^([^\S\r\n]*network_id[^\S\r\n]*=[^\S\r\n]*")[^"]*(")/m, `$1${newId}$2`);
+}
+function blockTunnelIp(text: string): string | null {
+  const m = text.match(/^[^\S\r\n]*tunnel_ip[^\S\r\n]*=[^\S\r\n]*"([^"]*)"/m);
+  return m ? m[1] : null;
+}
+function rewriteBlockTunnelIp(text: string, ip: string): string {
+  return text.replace(/^([^\S\r\n]*tunnel_ip[^\S\r\n]*=[^\S\r\n]*")[^"]*(")/m, `$1${ip}$2`);
+}
+
+// Re-pin a stale `tunnel_ip` inside the `[node]` table — verified on real
+// hardware to be where nvpn persists the node's mesh IP (the [[networks]]
+// blocks carry only network_id). This is config HYGIENE: the daemon
+// re-derives the live interface IP from the canonical network_id on
+// restart and ignores this stored value, so fixing it doesn't move the
+// interface — it just stops config.toml from showing a wrong IP. Scoped to
+// the [node] section and rewrites ONLY the tunnel_ip line; the section's
+// private_key and every other field are left byte-identical. Returns the
+// rewritten toml + the stale value found (null when absent / already
+// correct). Pure.
+function repinNodeTunnelIp(toml: string, correctIp: string): { toml: string; from: string | null } {
+  const header = toml.match(/^[^\S\r\n]*\[node\][^\S\r\n]*\r?\n/m);
+  if (!header || header.index === undefined) return { toml, from: null };
+  const bodyStart = header.index + header[0].length;
+  const after = toml.slice(bodyStart);
+  const nextRel = after.search(/^[^\S\r\n]*\[(?:\[)?/m);
+  const sectionEnd = nextRel >= 0 ? bodyStart + nextRel : toml.length;
+  const section = toml.slice(bodyStart, sectionEnd);
+  const m = section.match(/^[^\S\r\n]*tunnel_ip[^\S\r\n]*=[^\S\r\n]*"([^"]*)"/m);
+  if (!m) return { toml, from: null };
+  if (m[1] === correctIp) return { toml, from: null };
+  const newSection = section.replace(/^([^\S\r\n]*tunnel_ip[^\S\r\n]*=[^\S\r\n]*")[^"]*(")/m, `$1${correctIp}$2`);
+  return { toml: toml.slice(0, bodyStart) + newSection + toml.slice(sectionEnd), from: m[1] };
+}
+
+export interface NvpnRepairPlan {
+  needed:            boolean;
+  activeNetworkId:   string | null;
+  canonicalActiveId: string | null;
+  /** Forked/duplicate network ids that will be dropped. */
+  removedNetworkIds: string[];
+  /** Active network id rewrite (non-canonical → canonical), if any. */
+  renamedActiveId:   { from: string; to: string } | null;
+  /** Stale explicit tunnel_ip override fix, if any. */
+  ipRepin:           { from: string; to: string } | null;
+  /** Human-readable preview lines. */
+  summary:           string[];
+  /** Rewritten config (null when nothing to do). */
+  newToml:           string | null;
+}
+
+// Pure planner — computes the repair without touching disk. Exported for
+// unit tests (fed synthetic forked configs).
+export function planNvpnRepair(toml: string, pubkeyHex: string | null): NvpnRepairPlan {
+  const empty: NvpnRepairPlan = {
+    needed: false, activeNetworkId: null, canonicalActiveId: null,
+    removedNetworkIds: [], renamedActiveId: null, ipRepin: null, summary: [], newToml: null,
+  };
+  const blocks = findNetworkBlocks(toml);
+  if (blocks.length === 0) return empty;
+  const active = blocks[0];
+  if (!active.id) return empty; // can't reason without an active id
+  const canonActive = canonicalNetworkId(active.id);
+
+  const groups = new Map<string, NetBlockSpan[]>();
+  for (const b of blocks) {
+    if (!b.id) continue;
+    const c = canonicalNetworkId(b.id);
+    const arr = groups.get(c);
+    if (arr) arr.push(b); else groups.set(c, [b]);
+  }
+  // Survivor: prefer an already-canonical block, else the most-populated.
+  const survivorOf = (group: NetBlockSpan[]): NetBlockSpan =>
+    group.find(b => b.id === canonicalNetworkId(b.id!)) ||
+    [...group].sort((a, b) => b.participants - a.participants)[0];
+
+  const removedIds: string[] = [];
+  const orderedSurvivors: string[] = [];
+  const seenCanon = new Set<string>();
+
+  // Active group's survivor goes first.
+  const activeGroup = groups.get(canonActive)!;
+  const activeSurvivor = survivorOf(activeGroup);
+  for (const b of activeGroup) if (b !== activeSurvivor && b.id) removedIds.push(b.id);
+  seenCanon.add(canonActive);
+
+  let activeText = activeSurvivor.text;
+  let renamedActiveId: { from: string; to: string } | null = null;
+  if (activeSurvivor.id !== canonActive) {
+    renamedActiveId = { from: activeSurvivor.id!, to: canonActive };
+    activeText = rewriteBlockNetworkId(activeText, canonActive);
+  }
+  // The correct deterministic IP for this node on the (canonical) active
+  // network — used to re-pin any stale stored value.
+  const correctIp = pubkeyHex ? computeNvpnTunnelIp(canonActive, pubkeyHex) : null;
+  // Rare: a stale tunnel_ip override *inside* the active [[networks]] block.
+  let ipRepin: { from: string; to: string; where: string } | null = null;
+  if (correctIp) {
+    const inBlock = blockTunnelIp(activeText);
+    if (inBlock && inBlock !== correctIp) {
+      ipRepin = { from: inBlock, to: correctIp, where: 'active network block' };
+      activeText = rewriteBlockTunnelIp(activeText, correctIp);
+    }
+  }
+  orderedSurvivors.push(activeText);
+
+  // Remaining groups in original order; id-less blocks kept verbatim.
+  for (const b of blocks) {
+    if (!b.id) { orderedSurvivors.push(b.text); continue; }
+    const c = canonicalNetworkId(b.id);
+    if (seenCanon.has(c)) continue;
+    seenCanon.add(c);
+    const grp = groups.get(c)!;
+    const surv = survivorOf(grp);
+    for (const x of grp) if (x !== surv && x.id) removedIds.push(x.id);
+    orderedSurvivors.push(surv.id !== c ? rewriteBlockNetworkId(surv.text, c) : surv.text);
+  }
+
+  const needsReorder = activeSurvivor !== active;
+  // De-fork changes that require rebuilding the networks section.
+  const rebuildNeeded = removedIds.length > 0 || renamedActiveId !== null || needsReorder || ipRepin !== null;
+
+  // Assemble the de-forked config (or start from the original when the only
+  // change is the [node] IP hygiene fix below).
+  let result = toml;
+  if (rebuildNeeded) {
+    const firstStart = blocks[0].start;
+    let stripped = '';
+    let cursor = 0;
+    for (const b of blocks) { stripped += toml.slice(cursor, b.start); cursor = b.end; }
+    stripped += toml.slice(cursor);
+    result = stripped.slice(0, firstStart) + orderedSurvivors.join('') + stripped.slice(firstStart);
+  }
+
+  // Hygiene: re-pin the stale `[node].tunnel_ip` (where nvpn actually
+  // stores it). Cosmetic — the Restart re-derive is what moves the
+  // interface — but it stops config.toml from showing a wrong IP.
+  if (correctIp) {
+    const node = repinNodeTunnelIp(result, correctIp);
+    if (node.from !== null) {
+      result = node.toml;
+      // Prefer reporting the [node] location since that's the real one.
+      ipRepin = { from: node.from, to: correctIp, where: '[node].tunnel_ip' };
+    }
+  }
+
+  const needed = rebuildNeeded || ipRepin !== null;
+  if (!needed) return { ...empty, activeNetworkId: active.id, canonicalActiveId: canonActive };
+
+  const summary: string[] = [];
+  if (removedIds.length) summary.push(`Remove ${removedIds.length} forked/duplicate network block${removedIds.length === 1 ? '' : 's'} (${removedIds.join(', ')})`);
+  if (renamedActiveId) summary.push(`Rewrite active network id "${renamedActiveId.from}" → canonical "${renamedActiveId.to}"`);
+  if (needsReorder) summary.push(`Make "${canonActive}" the active network`);
+  if (ipRepin) summary.push(`Re-pin stale ${ipRepin.where} ${ipRepin.from} → ${ipRepin.to} (config hygiene; the Restart re-derives the live interface)`);
+
+  return {
+    needed: true, activeNetworkId: active.id, canonicalActiveId: canonActive,
+    removedNetworkIds: removedIds,
+    renamedActiveId,
+    ipRepin: ipRepin ? { from: ipRepin.from, to: ipRepin.to } : null,
+    summary,
+    newToml: result,
+  };
+}
+
+export interface NvpnRepairResult extends ControlResult {
+  plan:             NvpnRepairPlan;
+  applied:          boolean;
+  backedUpTo?:      string;
+  restartRequired?: boolean;
+}
+
+// Read config, compute the plan, and (only when apply=true) back up +
+// write it atomically. Preview-first: apply=false returns the plan with
+// no write. Never reloads/restarts — the caller prompts for the restart.
+export function repairNvpnNetworkConfig(opts: { apply: boolean; pubkeyHex: string | null }): NvpnRepairResult {
+  const emptyPlan: NvpnRepairPlan = {
+    needed: false, activeNetworkId: null, canonicalActiveId: null,
+    removedNetworkIds: [], renamedActiveId: null, ipRepin: null, summary: [], newToml: null,
+  };
+  const configPath = findNvpnConfigPath();
+  if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first', plan: emptyPlan, applied: false };
+  let toml = '';
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch (e: any) { return { ok: false, detail: `read failed: ${(e?.message || '').slice(0, 160)}`, plan: emptyPlan, applied: false }; }
+
+  const plan = planNvpnRepair(toml, opts.pubkeyHex);
+  if (!plan.needed) {
+    return { ok: true, detail: 'nothing to repair — no forked or non-canonical networks found', plan, applied: false };
+  }
+  if (!opts.apply || !plan.newToml) {
+    return { ok: true, detail: 'repair plan ready (preview)', plan, applied: false, restartRequired: true };
+  }
+  // Back up before writing; refuse the write if the backup fails.
+  const backupPath = `${configPath}.bak-${Date.now()}`;
+  try { fs.copyFileSync(configPath, backupPath); }
+  catch (e: any) { return { ok: false, detail: `backup failed (refusing to write): ${(e?.message || '').slice(0, 160)}`, plan, applied: false }; }
+  const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    fs.writeFileSync(tmp, plan.newToml, { mode: 0o600 });
+    fs.renameSync(tmp, configPath);
+  } catch (e: any) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}`, plan, applied: false, backedUpTo: backupPath };
+  }
+  return { ok: true, detail: 'config repaired', plan, applied: true, backedUpTo: backupPath, restartRequired: true };
 }
 
 // ── Discovery relays (Nostr presence/signaling) ──────────────────────

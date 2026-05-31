@@ -36,7 +36,7 @@ import {
   nvpnRowStateFor, nvpnHealthSummary,
   addParticipants, removeParticipants, addAdmins, removeAdmins,
   publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster, readNvpnNetworks,
-  joinNvpnNetwork,
+  joinNvpnNetwork, repairNvpnNetworkConfig,
   readNvpnNodeIdentity,
   pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork,
   pingNvpnPeer, netcheckNvpn, doctorNvpn, natDiscoverNvpn,
@@ -398,6 +398,29 @@ export async function handleNvpn(
       await reloadNvpn().catch(() => null);
     }
     await writeJson(res, r.ok ? 200 : 400, r);
+    return true;
+  }
+
+  // Repair a forked / non-canonical network config. Preview-first:
+  // body `{ apply: false }` (default) returns the plan without writing;
+  // `{ apply: true }` backs up config.toml, writes the de-forked +
+  // re-pinned config atomically, and reports the backup path. We never
+  // reload/restart here — a network-identity change needs a full restart
+  // (brief interface drop), which the UI prompts for explicitly.
+  if (url === '/api/nvpn/networks/repair' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const apply = body.apply === true;
+    // Decode our npub → hex so the planner can compute the correct
+    // deterministic IP for the re-pin. Tolerate hex-shaped / missing.
+    const identity = readNvpnNodeIdentity();
+    let pubkeyHex: string | null = null;
+    if (identity.npub) {
+      if (/^[0-9a-f]{64}$/i.test(identity.npub)) pubkeyHex = identity.npub.toLowerCase();
+      else { try { pubkeyHex = npubToHex(identity.npub).toLowerCase(); } catch { pubkeyHex = null; } }
+    }
+    const r = repairNvpnNetworkConfig({ apply, pubkeyHex });
+    await writeJson(res, r.ok ? 200 : 500, r);
     return true;
   }
 

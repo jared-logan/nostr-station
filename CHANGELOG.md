@@ -5,6 +5,41 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: prevent + repair forked / non-canonical networks
+
+Follow-up to the connectivity diagnosis: stop the forked-network bug from
+happening, and fix configs that already have it.
+
+- **Prevent (Join by ID).** Joins now store the **canonical** (separator-
+  free) network id, and dedupe against existing networks by canonical form.
+  A hyphenated id like `abcd-1234` can no longer be written as a second copy
+  of `abcd1234` — new forks are impossible.
+- **Repair (Diagnostics → "Repair network config").** When the diagnosis
+  finds a forked duplicate or a non-canonical active id, a repair action
+  collapses each forked group to a single canonical survivor (keeping the
+  most-populated roster + unioned relays), makes the active network's
+  survivor first, and re-pins a stale `tunnel_ip` to the deterministic
+  value. The re-pin targets `[node].tunnel_ip` (verified on hardware to be
+  where nvpn persists the node IP — the `[[networks]]` blocks carry only
+  `network_id`), rewriting only that line and never the `[node]`
+  private-key fields. It's config hygiene: the daemon re-derives the live
+  interface IP from the canonical id on Restart, so the de-fork + Restart
+  is the load-bearing fix; the re-pin just stops config.toml showing a
+  wrong IP.
+
+  It is **preview-first**: the dry-run returns the exact plan (blocks to
+  remove, id rewrite, old→new IP) with no write; only an explicit confirm
+  applies it. Before any write it **backs up** `config.toml` to
+  `config.toml.bak-<ts>` and writes atomically (temp + rename); it **bails**
+  if the backup fails. It never reloads/restarts — a network-identity change
+  needs a full **Restart** (brief interface drop), which the UI states up
+  front and offers inline after applying.
+
+  New pure planner `planNvpnRepair` + `repairNvpnNetworkConfig`
+  (unit-tested against synthetic forked configs), route
+  `POST /api/nvpn/networks/repair` (`{ apply }`), and the preview→confirm→
+  restart UI. `joinNvpnNetwork` now canonicalizes on write.
+
 ### nostr-vpn: connectivity diagnosis — turn "0 online" into a reason
 
 A NATed/containerized station node (OrbStack VM, Docker, …) often sits at

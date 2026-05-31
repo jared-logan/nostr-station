@@ -2487,6 +2487,14 @@ details.dashboard-health .dashboard-health-sub {
 .vpn-diag-ev-row { display: flex; gap: 8px; align-items: baseline; font-size: 11px; }
 .vpn-diag-ev-k { color: var(--muted); min-width: 150px; }
 .vpn-diag-ev-v { font-size: 10px; word-break: break-all; }
+.vpn-diag-repair-row {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.vpn-diag-repair-hint { font-size: 11px; }
+.vpn-repair-steps { margin: 8px 0; padding-left: 18px; font-size: 12px; line-height: 1.5; }
+.vpn-repair-steps li { margin: 2px 0; }
 
 /* Settings block — grid of label / input pairs. */
 .vpn-meta-set-body {
