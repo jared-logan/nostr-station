@@ -25,7 +25,7 @@ import fs from 'fs';
 import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
 import { getCargoBin, getNvpnTarget } from './detect.js';
-import { applyLinuxCapsDropIn, seedFreeMagicDnsPort } from './nvpn.js';
+import { applyLinuxCapsDropIn, seedFreeMagicDnsPort, reconcileDaemonIdentityAfterInstall } from './nvpn.js';
 import {
   type InstallResult, type ProgressCallback,
   createInstallLogger, downloadAndVerify,
@@ -195,6 +195,15 @@ export async function installNostrVpn(
         { stdio: 'pipe', timeout: 30_000 },
       );
       log.append(`service install --force ok; stdout=${stdout.slice(0, 240)}`);
+      // Keep a 1.6-adopted box from regressing: if `service install
+      // --force` re-minted a root identity, reconcile back to the managed
+      // one. No-op when they already agree. Best-effort + quiet.
+      try {
+        const rec = await reconcileDaemonIdentityAfterInstall(null);
+        log.append(`reconcile (force): ${rec.adopted ? 'adopted managed identity' : 'no-op'} — ${rec.detail}`);
+      } catch (e: any) {
+        log.append(`reconcile (force) skipped: ${(e?.message || '').slice(0, 160)}`);
+      }
     } catch (e: any) {
       const stderr = (e?.stderr?.toString?.() || '').trim();
       serviceInstallErr = stderr.slice(0, 160) || (e?.message || '').slice(0, 120);
@@ -268,6 +277,12 @@ export async function installNostrVpn(
   // daemon (which uses the root-side config). The user-mode init is
   // now a fallback path further down — it only runs when service
   // install fails and we need user-mode `nvpn start --daemon` to work.
+  //
+  // `service install` itself runs `nvpn init` as root, so it still mints
+  // a root identity. When the dashboard user already has a managed
+  // identity (paired / joined), we reconcile right after — see the
+  // reconcileDaemonIdentityAfterInstall call below — so the daemon ends
+  // up running the single managed identity instead of the throwaway one.
   log.step('sudo nvpn service install');
   try {
     const { stdout, stderr } = await execa(
@@ -275,6 +290,23 @@ export async function installNostrVpn(
       { stdio: 'pipe', timeout: 30_000 },
     );
     log.append(`service install ok; stdout=${stdout.slice(0, 120)} stderr=${stderr.slice(0, 120)}`);
+
+    // Prevent the identity split at the source. `service install` just ran
+    // `nvpn init` as root, minting a separate root identity at
+    // /root/.config/nvpn/. If the dashboard user already has a managed
+    // identity (they've paired / joined), reconcile so the daemon runs
+    // THAT single identity — otherwise every later dashboard op edits a
+    // config the daemon ignores. Best-effort + quiet: the install already
+    // succeeded; sudo is warm from the call above. No managed identity yet
+    // (user hasn't paired) → it safely no-ops, and the eventual adopt flow
+    // covers any later drift.
+    log.step('reconcile daemon identity (single-identity)');
+    try {
+      const rec = await reconcileDaemonIdentityAfterInstall(null);
+      log.append(`reconcile: ${rec.adopted ? 'adopted managed identity' : 'no-op'} — ${rec.detail}`);
+    } catch (e: any) {
+      log.append(`reconcile skipped: ${(e?.message || '').slice(0, 160)}`);
+    }
     return { ok: true, detail: `installed ${nvpnBin}` };
   } catch (e: any) {
     const stderr = (e?.stderr?.toString?.() || '').trim();
