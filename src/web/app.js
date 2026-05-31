@@ -16241,9 +16241,13 @@ const ConfigPanel = (() => {
         </summary>
         <div class="cfg-section-body">
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
-            These relays power the <a href="#client" style="color:var(--accent-bright)">/client panel</a>
-            (feed, notifications, profile lookups, publishing) and the dashboard's behind-the-scenes
-            profile / maintainer lookups. Reads + writes go here — <b>not</b> to the private local relay.
+            The relays <b>nostr-station itself</b> uses for its behind-the-scenes Nostr
+            reads — resolving profile names + avatars and repo maintainers across the
+            dashboard, and as an extra source when resolving nsites. These are
+            <b>not</b> the private local relay (configured above), and they do
+            <b>not</b> control the embedded
+            <a href="#client" style="color:var(--accent-bright)">Ditto client</a> —
+            Ditto connects to its own relays, managed inside Ditto's own settings.
           </div>
 
           <div class="cfg-subsection" id="cfg-app-relays">
@@ -16271,13 +16275,14 @@ const ConfigPanel = (() => {
           <div class="cfg-subsection" id="cfg-your-relays" style="margin-top:18px">
             <div class="cfg-subsection-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
               <h4 style="margin:0">Your Relays</h4>
-              <button id="cfg-sync-relays" type="button" title="Fetch your NIP-65 outbox list (kind 10002) and merge into this list">
+              <button id="cfg-sync-relays" type="button" title="Fetch your NIP-65 outbox list (kind 10002) and mirror this list to match it exactly">
                 ↻ sync from Nostr
               </button>
             </div>
             <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
               Your personal relays. Merged with App Relays (above) when the toggle is on, otherwise used alone.
-              Use <b>sync from Nostr</b> to import your existing NIP-65 outbox list.
+              Use <b>sync from Nostr</b> to mirror your published NIP-65 list (kind 10002) — this list is
+              rewritten to match it exactly (adds what's missing, drops what isn't there).
             </div>
             <div class="relay-list" id="read-relays">
               ${relayItems || '<div style="color:var(--muted);font-size:11px">no personal relays — App Relays will be used alone</div>'}
