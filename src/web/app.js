@@ -14194,6 +14194,10 @@ const VpnPanel = (() => {
                   title="Paste an invite code to join the network it represents">
             Import invite
           </button>
+          <button id="vpn-join-by-id"
+                  title="Join a network you already run elsewhere by entering its network id — no invite needed">
+            Join by ID
+          </button>
           <button id="vpn-publish-roster"
                   title="Re-broadcast the current roster to Nostr relays — useful when a recent add/remove reported 0 recipients">
             Publish roster
@@ -14261,6 +14265,8 @@ const VpnPanel = (() => {
     if (shareBtn) shareBtn.addEventListener('click', (e) => { e.preventDefault(); openShareInviteModal(); });
     const importBtn = bodyEl.querySelector('#vpn-import-invite');
     if (importBtn) importBtn.addEventListener('click', (e) => { e.preventDefault(); openImportInviteModal(); });
+    const joinByIdBtn = bodyEl.querySelector('#vpn-join-by-id');
+    if (joinByIdBtn) joinByIdBtn.addEventListener('click', (e) => { e.preventDefault(); openJoinByIdModal(); });
     const pubBtn = bodyEl.querySelector('#vpn-publish-roster');
     if (pubBtn) {
       pubBtn.addEventListener('click', async (e) => {
@@ -14479,17 +14485,17 @@ const VpnPanel = (() => {
     });
   }
 
-  // Relays sub-tab — discovery relays (where nvpn publishes presence
-  // and discovers peers). Read goes straight from config.toml so the
-  // list renders even when the daemon is down.
+  // Relays sub-tab — discovery relays (where nvpn publishes presence and
+  // discovers peers). Read goes straight from config.toml so the list
+  // renders even when the daemon is down.
   //
-  // READ-ONLY on nvpn 4.x: the bulk `nvpn set --relay` verb was removed
-  // upstream and never replaced by a CLI, so every relay mutation route
-  // (add / remove / set) now returns 501. Rather than render buttons
-  // that always error, we show the list + an honest "how to edit"
-  // callout pointing at config.toml / the native app. Rows are still
-  // decorated with publish-health (from the in-process aggregator, which
-  // works fine) so users can see which relays are rejecting publishes.
+  // Editable again on nvpn 4.x: upstream removed the bulk `set --relay`
+  // CLI, so add / remove / set mutate config.toml's active `[[networks]]
+  // relays = […]` directly (server-side, atomic) and then `nvpn reload`
+  // so the running daemon re-reads them — same thing the native app does.
+  // Rows are decorated with publish-health from the in-process aggregator
+  // so a relay that's rejecting publishes (rate-limit / WoT / timeout) is
+  // flagged inline.
   function renderRelaysBody() {
     const r = lastRelays;
     if (!r) return '<div class="vpn-empty muted">loading…</div>';
@@ -14497,65 +14503,70 @@ const VpnPanel = (() => {
       <div class="item" data-url="${escapeHtml(url)}">
         <span class="url">${escapeHtml(url)}</span>
         <span class="relay-health" data-slot="health"></span>
+        <button class="danger rm-vpn-relay" title="Remove ${escapeHtml(url)} from the relay list">×</button>
       </div>`).join('');
     const errorLine = r.found === false
       ? `<div class="key-status-line">${r.configPath
           ? '✗ config.toml unreadable'
           : 'no nvpn config — run <code>nvpn init</code> first'}</div>`
       : '';
-    // Honest edit path. nvpn 4.x has no CLI to mutate the relay list, so
-    // we surface the config.toml location (when known) and the exact
-    // TOML key to edit, plus the recommended set the dashboard used to
-    // apply in one click — now copy-pasteable instead.
-    const configPath = r.configPath || '~/.config/nvpn/config.toml';
     return `
       <div class="vpn-section">
         <p class="vpn-section-help">
           Nostr relays nostr-vpn uses to publish presence and discover
           peers. Distinct from your identity / ngit relay sets — these
-          are mesh-only. Rows are flagged below if recent publishes were
-          rejected (rate-limit, WoT, timeout) — a flagged relay is a good
-          candidate to swap out.
+          are mesh-only. Edits here write to config.toml and reload the
+          daemon. Rows are flagged if recent publishes were rejected
+          (rate-limit, WoT, timeout) — a flagged relay is a good candidate
+          to swap out.
         </p>
         ${errorLine}
         <div class="relay-list" id="vpn-relays">
-          ${items || '<div class="muted" style="padding:6px 0">no relays configured</div>'}
+          ${items}
+          <div class="add">
+            <input id="vpn-relay-input" placeholder="wss://your-relay.example" autocomplete="off" spellcheck="false"
+                   title="WebSocket URL (ws:// or wss://) of a Nostr relay">
+            <button id="vpn-relay-paste" title="Paste from clipboard">paste</button>
+            <button class="primary" id="vpn-relay-add" title="Append this relay to nvpn's discovery set">add</button>
+          </div>
+        </div>
+        <div class="keyrow" style="margin-top:6px;justify-content:flex-end;gap:6px">
+          <button id="vpn-relay-recommended"
+                  title="Replace the current relay list with the dashboard-curated set — useful when configured relays are timing out / WoT-rejecting">
+            Use recommended
+          </button>
         </div>
         <div class="key-status-line ${r.relays && r.relays.length ? 'ok' : ''}">
           ${r.relays && r.relays.length
             ? `✓ ${r.relays.length} relay${r.relays.length === 1 ? '' : 's'} configured`
             : 'no relays configured'}
         </div>
-        <div class="vpn-relay-edit-note" style="margin-top:14px">
-          <p class="muted" style="margin:0 0 6px">
-            <strong>Editing relays</strong> moved out of the nvpn CLI in
-            4.x. Change the discovery set in
-            <code class="cmd-inline">${escapeHtml(configPath)}</code>
-            <span class="vpn-relay-config-copy"></span>
-            (the <code>relays = […]</code> key under your active
-            <code>[[networks]]</code> block) or from the native nvpn app,
-            then hit <strong>Refresh</strong> above to re-read it.
-          </p>
-          <details>
-            <summary class="muted">Recommended relay set (copy-paste)</summary>
-            <div class="vpn-relay-recommended-body" style="margin-top:8px">
-              <span class="muted">loading…</span>
-            </div>
-          </details>
-        </div>
       </div>`;
   }
   renderRelaysBody.wire = () => {
-    // Copy button for the config path so users can paste it into an
-    // editor / terminal without retyping.
-    const cfgPath = (lastRelays && lastRelays.configPath) || '~/.config/nvpn/config.toml';
-    const cfgCopy = bodyEl.querySelector('.vpn-relay-config-copy');
-    if (cfgCopy) cfgCopy.appendChild(copyBtn(cfgPath, 'Copy config.toml path'));
-
-    // Populate the recommended-set <details> with a copy-pasteable TOML
-    // line. Pulled from the server (single source of truth) on expand;
-    // silent so a fetch hiccup doesn't toast.
-    void populateRecommendedRelays();
+    $$('#vpn-relays .rm-vpn-relay').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const url = e.target.closest('.item').dataset.url;
+        void removeRelay(url);
+      });
+    });
+    const addBtn = $('vpn-relay-add');
+    if (addBtn) {
+      addBtn.addEventListener('click', addRelayFromInput);
+      $('vpn-relay-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') addRelayFromInput();
+      });
+      $('vpn-relay-paste').addEventListener('click', async () => {
+        try { $('vpn-relay-input').value = (await navigator.clipboard.readText()).trim(); }
+        catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+      });
+    }
+    const recommendedBtn = $('vpn-relay-recommended');
+    if (recommendedBtn) recommendedBtn.addEventListener('click', async (e) => {
+      e.preventDefault(); recommendedBtn.disabled = true;
+      try { await useRecommendedRelays(); }
+      finally { recommendedBtn.disabled = false; }
+    });
 
     // Decorate rows with publish-health (works on 4.x; no netcheck).
     if (lastRelays && Array.isArray(lastRelays.relays) && lastRelays.relays.length > 0) {
@@ -14570,28 +14581,67 @@ const VpnPanel = (() => {
     return String(s || '').replace(/\/+$/, '').toLowerCase();
   }
 
-  // Fill the "Recommended relay set" disclosure with a TOML-ready line
-  // the user can paste into their [[networks]] block. Replaces the old
-  // one-click "Use recommended" button (its endpoint is 501 on 4.x).
-  async function populateRecommendedRelays() {
-    const host = bodyEl.querySelector('.vpn-relay-recommended-body');
-    if (!host) return;
-    let recommended = [];
-    try {
-      const r = await api('/api/nvpn/relays/recommended', undefined, { silent: true });
-      recommended = Array.isArray(r?.relays) ? r.relays : [];
-    } catch { /* silent — disclosure just shows the fallback message */ }
-    if (recommended.length === 0) {
-      host.innerHTML = '<span class="muted">no recommended set available</span>';
+  async function addRelayFromInput() {
+    const input = $('vpn-relay-input');
+    const url = input.value.trim();
+    if (!url) return;
+    if (!/^wss?:\/\//i.test(url)) {
+      toast('Invalid relay URL', 'must start with wss:// or ws://', 'err');
       return;
     }
-    const tomlLine = `relays = [${recommended.map(u => `"${u}"`).join(', ')}]`;
-    host.innerHTML = `
-      <pre class="community-mono" style="background:var(--bg);padding:8px 10px;border-radius:4px;font-size:11px;overflow-x:auto;margin:0"><code>${escapeHtml(tomlLine)}</code></pre>
-      <div class="vpn-relay-recommended-copy" style="margin-top:6px"></div>
-    `;
-    const slot = host.querySelector('.vpn-relay-recommended-copy');
-    if (slot) slot.appendChild(copyBtn(tomlLine, 'Copy recommended relays = […] line'));
+    try {
+      // api() throws (and toasts) on non-2xx, so a single catch is enough
+      // — no double error toast.
+      await api('/api/nvpn/relays/add', {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ url }),
+      });
+      toast('Relay added', url, 'ok');
+      input.value = '';
+      await refresh();
+    } catch { /* api() already toasted */ }
+  }
+
+  async function removeRelay(url) {
+    try {
+      await api('/api/nvpn/relays/remove', {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ url }),
+      });
+      toast('Relay removed', url, 'ok');
+      await refresh();
+    } catch { /* api() already toasted */ }
+  }
+
+  // One-click recovery: replace with the dashboard-curated set
+  // (RECOMMENDED_NVPN_RELAYS in nvpn.ts; server is the single source).
+  // Confirms first because this is destructive.
+  async function useRecommendedRelays() {
+    let recommended = [];
+    try {
+      const r = await api('/api/nvpn/relays/recommended');
+      recommended = Array.isArray(r?.relays) ? r.relays : [];
+    } catch { return; /* api() already toasted */ }
+    if (recommended.length === 0) {
+      toast('No recommended set defined', '', 'err'); return;
+    }
+    const ok = confirm(
+      `Replace your nostr-vpn relay list with the recommended set?\n\n` +
+      recommended.map(u => `  • ${u}`).join('\n') +
+      `\n\nAny existing relays will be removed.`
+    );
+    if (!ok) return;
+    try {
+      await api('/api/nvpn/relays/set', {
+        method:  'POST',
+        headers: { 'content-type': 'application/json' },
+        body:    JSON.stringify({ relays: recommended }),
+      });
+      toast('Relays updated', `${recommended.length} recommended relay${recommended.length === 1 ? '' : 's'}`, 'ok');
+      await refresh();
+    } catch { /* api() already toasted */ }
   }
 
   // Decorate each row in #vpn-relays with publish-health from the
@@ -15534,10 +15584,11 @@ const VpnPanel = (() => {
         <button id="vpn-import-invite-submit" class="primary">Import</button>
       </div>
       <p class="muted" style="margin-top:12px;font-size:12px">
-        Already run a network outside nostr-station? Two ways in:
-        <strong>(a)</strong> mint an invite on that network and paste it
-        here, or <strong>(b)</strong> copy this node's npub (Network tab →
-        <em>this node</em>) and add it as a participant there.
+        Already run a network outside nostr-station? Easiest is
+        <strong>Join by ID</strong> (no invite — just enter its network
+        id). Otherwise: mint an invite on that network and paste it here,
+        or copy this node's npub (Network tab → <em>this node</em>) and add
+        it as a participant there.
       </p>
     `;
     const modal = openModal({ title: 'Import invite', subtitle: 'Joins the network in your local config', body });
@@ -15562,6 +15613,51 @@ const VpnPanel = (() => {
       } catch { /* api() already toasted */ }
       submit.disabled = false;
     });
+  }
+
+  // Join a network by id — the no-invite path for "I already run a mesh
+  // elsewhere." Adds a [[networks]] block for the id, makes it active,
+  // and reloads the daemon. The daemon then converges on the admin-signed
+  // roster on its own; we nudge a restart since switching the active
+  // network can need a fuller bounce than a hot reload.
+  async function openJoinByIdModal() {
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <p class="muted">Enter the <strong>network id</strong> of a mesh you already run (find it in that network's nvpn app, or the dashboard's <em>network id</em> row on its host). This adds the network and makes it active — no invite needed. The daemon then syncs the admin-signed roster on its own.</p>
+      <input type="text" id="vpn-join-id-input" placeholder="network id" spellcheck="false" autocomplete="off">
+      <p class="muted" style="font-size:12px;margin-top:8px">Note: this switches your active network. Any network you have configured now stays saved but goes inactive (only one mesh is live at a time).</p>
+      <div class="vpn-invite-modal-actions">
+        <button id="vpn-join-id-cancel">Cancel</button>
+        <button id="vpn-join-id-submit" class="primary">Join network</button>
+      </div>
+    `;
+    const modal = openModal({ title: 'Join by network ID', subtitle: 'Joins + activates the network in your local config', body });
+    modal.root.classList.add('vpn-invite-modal');
+    const input = body.querySelector('#vpn-join-id-input');
+    input?.focus();
+    body.querySelector('#vpn-join-id-cancel').addEventListener('click', (e) => { e.preventDefault(); modal.close(); });
+    const submit = body.querySelector('#vpn-join-id-submit');
+    const doSubmit = async () => {
+      const v = String(input.value || '').trim();
+      if (!v) { input.focus(); return; }
+      submit.disabled = true;
+      try {
+        const r = await api('/api/nvpn/networks/join', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ networkId: v }),
+        });
+        toast('network joined', r?.detail || '', 'ok');
+        modal.close();
+        // Switching the active network often needs more than a hot reload
+        // — surface a restart nudge so the user isn't left wondering why
+        // peers haven't appeared yet.
+        toast('Restart nvpn to connect', 'Use Restart in the status strip above if the joined mesh doesn\'t come up shortly.', 'warn');
+        await refresh();
+      } catch { /* api() already toasted */ }
+      submit.disabled = false;
+    };
+    submit.addEventListener('click', (e) => { e.preventDefault(); void doSubmit(); });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void doSubmit(); } });
   }
 
   return {
