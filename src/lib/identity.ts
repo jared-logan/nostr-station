@@ -43,7 +43,7 @@ export interface Identity {
   // — relay.damus.io / relay.nostr.band / nos.lol) in /client read paths
   // alongside the user's "Your Relays" list. Default true so a brand-new
   // user gets a working feed without configuring anything. Toggled from
-  // Config → Client Relays. Mirrors Ditto's "App Relays" enable switch.
+  // Config → Station Relays. Mirrors Ditto's "App Relays" enable switch.
   appRelaysEnabled?: boolean;
   // Persisted on/off state for the in-process Blossom server. The user
   // toggles this via Config → Blossom or the Dashboard card; on next
@@ -296,6 +296,27 @@ export function removeReadRelay(url: string): { ok: boolean; relays: string[] } 
   ident.readRelays = ident.readRelays.filter(r => r !== url);
   writeIdentity(ident);
   return { ok: true, relays: ident.readRelays };
+}
+
+// Replace the entire readRelays list in one write. Used by "sync from Nostr"
+// to mirror the owner's NIP-65 (kind 10002) list exactly. Validates and
+// dedupes (case-insensitive, first-seen casing wins) so the persisted list
+// stays clean regardless of what the caller passes.
+export function setReadRelays(urls: string[]): { ok: true; relays: string[] } {
+  const ident = readIdentity();
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const raw of urls) {
+    const url = String(raw || '').trim();
+    if (!isValidRelayUrl(url)) continue;
+    const key = url.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(url);
+  }
+  ident.readRelays = next;
+  writeIdentity(ident);
+  return { ok: true, relays: next };
 }
 
 // ── Grasp server list helpers ─────────────────────────────────────────────

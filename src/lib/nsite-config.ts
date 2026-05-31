@@ -47,7 +47,7 @@ export interface NsiteConfig {
   // station publishes its OWN nsites: the Blossom servers it uploads
   // file blobs to and the relays it publishes the kind:35128 manifest to.
   // Each pairs an app-default list (toggleable) with the user's own list,
-  // mirroring the Client Relays "App Relays / Your Relays" model. The
+  // mirroring the Station Relays "App Relays / Your Relays" model. The
   // effective target set is computed by effectiveDeployBlossomServers() /
   // effectiveDeployRelays() below.
 

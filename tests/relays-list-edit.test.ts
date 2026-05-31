@@ -278,6 +278,41 @@ test('relays: publishNip65 reports ok=false when no relay accepts', async () => 
   });
 });
 
+test('identity: setReadRelays replaces the list wholesale (mirror semantics)', async () => {
+  await withTmpHome(async () => {
+    const { ident } = await load();
+    ident.writeIdentity({
+      npub: 'a'.repeat(64),
+      readRelays:  ['wss://keep.example', 'wss://drop.example'],
+      writeRelays: [],
+    });
+    // Mirror to a list that keeps one, drops one, adds one. The dropped
+    // relay must disappear — this is the behaviour "sync from Nostr" relies
+    // on to make Your Relays match the published NIP-65 list exactly.
+    const r = ident.setReadRelays(['wss://keep.example', 'wss://new.example']);
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.relays, ['wss://keep.example', 'wss://new.example']);
+    assert.deepEqual(ident.readIdentity().readRelays,
+      ['wss://keep.example', 'wss://new.example']);
+  });
+});
+
+test('identity: setReadRelays dedupes case-insensitively and drops invalid urls', async () => {
+  await withTmpHome(async () => {
+    const { ident } = await load();
+    ident.writeIdentity({ npub: 'a'.repeat(64), readRelays: [], writeRelays: [] });
+    const r = ident.setReadRelays([
+      'wss://A.example',
+      'wss://a.example',            // dupe of the first (case-insensitive)
+      'http://not-a-relay.example', // invalid scheme → dropped
+      '   ',                        // blank → dropped
+      'wss://b.example',
+    ]);
+    assert.deepEqual(r.relays, ['wss://A.example', 'wss://b.example'],
+      'first-seen casing wins; dupes and invalid entries are dropped');
+  });
+});
+
 test('relays: applyNip65Pull rewrites readRelays + writeRelays from a parsed event', async () => {
   await withTmpHome(async () => {
     const { ident, relays } = await load();

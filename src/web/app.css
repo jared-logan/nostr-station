@@ -9106,7 +9106,7 @@ a.client-mention {
 .client-relay-config-link:hover { color: var(--accent-bright); }
 
 /* Read-only variant of the existing .relay-list editor — used for the
-   App Relays display in Config → Client Relays. No remove button, no
+   App Relays display in Config → Station Relays. No remove button, no
    add row, slightly dimmed defaults marker on each entry. */
 .relay-list-readonly .item {
   cursor: default;

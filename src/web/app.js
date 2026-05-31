@@ -5026,7 +5026,7 @@ function projectCapBadges(caps, remotes) {
 const ENV_CHIP_TOOLTIPS = {
   dev:    'dev — spawned dev servers, deploy, and exec see NOSTR_STATION_RELAY pointing at the local in-process relay. Safe to publish test events. Client panel is independent of this.',
   prod:   'prod — spawned dev servers see public relays via NOSTR_STATION_RELAY. Promote publishes to real Nostr. Client panel is independent of this.',
-  public: 'Public Nostr — this panel always reads + posts via your App Relays ∪ Your Relays (Config → Client Relays). Never bound to any project\'s dev/prod active-env.',
+  public: 'Public Nostr — this panel always reads + posts via your App Relays ∪ Your Relays (Config → Station Relays). Never bound to any project\'s dev/prod active-env.',
 };
 function projectEnvBadge(project) {
   const active = project.environment?.active;
@@ -16227,23 +16227,27 @@ const ConfigPanel = (() => {
           ${row('Config file', rc.configPath || '—')}
           <div class="callout" style="margin-top:10px">
             This section configures the <b>private, local Nostr relay</b> running inside nostr-station.
-            For the public relays the /client panel reads from, see <b>Client Relays</b> below.
+            For the public relays nostr-station uses for its own Nostr lookups, see <b>Station Relays</b> below.
           </div>
         </div>
       </details>
 
       <details class="config-section cfg-collapsible" id="cfg-client-relays-section">
         <summary>
-          <h3>Client Relays</h3>
+          <h3>Station Relays</h3>
           <span class="cfg-summary-meta">
             ${(ident.appRelaysEnabled !== false ? (ident.appRelays?.length || 3) : 0) + (ident.readRelays?.length || 0)} effective
           </span>
         </summary>
         <div class="cfg-section-body">
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px">
-            These relays power the <a href="#client" style="color:var(--accent-bright)">/client panel</a>
-            (feed, notifications, profile lookups, publishing) and the dashboard's behind-the-scenes
-            profile / maintainer lookups. Reads + writes go here — <b>not</b> to the private local relay.
+            The relays <b>nostr-station itself</b> uses for its behind-the-scenes Nostr
+            reads — resolving profile names + avatars and repo maintainers across the
+            dashboard, and as an extra source when resolving nsites. These are
+            <b>not</b> the private local relay (configured above), and they do
+            <b>not</b> control the embedded
+            <a href="#client" style="color:var(--accent-bright)">Ditto client</a> —
+            Ditto connects to its own relays, managed inside Ditto's own settings.
           </div>
 
           <div class="cfg-subsection" id="cfg-app-relays">
@@ -16271,13 +16275,14 @@ const ConfigPanel = (() => {
           <div class="cfg-subsection" id="cfg-your-relays" style="margin-top:18px">
             <div class="cfg-subsection-head" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
               <h4 style="margin:0">Your Relays</h4>
-              <button id="cfg-sync-relays" type="button" title="Fetch your NIP-65 outbox list (kind 10002) and merge into this list">
+              <button id="cfg-sync-relays" type="button" title="Fetch your NIP-65 outbox list (kind 10002) and mirror this list to match it exactly">
                 ↻ sync from Nostr
               </button>
             </div>
             <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
               Your personal relays. Merged with App Relays (above) when the toggle is on, otherwise used alone.
-              Use <b>sync from Nostr</b> to import your existing NIP-65 outbox list.
+              Use <b>sync from Nostr</b> to mirror your published NIP-65 list (kind 10002) — this list is
+              rewritten to match it exactly (adds what's missing, drops what isn't there).
             </div>
             <div class="relay-list" id="read-relays">
               ${relayItems || '<div style="color:var(--muted);font-size:11px">no personal relays — App Relays will be used alone</div>'}
@@ -16331,7 +16336,7 @@ const ConfigPanel = (() => {
            above: this governs where THIS station publishes its OWN
            nsites — the Blossom servers it uploads file blobs to and the
            relays it publishes the kind:35128 manifest to. App/Your model
-           mirrors Client Relays. Body filled lazily by JS. -->
+           mirrors Station Relays. Body filled lazily by JS. -->
       <details class="config-section cfg-collapsible" id="cfg-deploy-section">
         <summary>
           <h3>nsite deploy</h3>
@@ -16690,7 +16695,7 @@ const ConfigPanel = (() => {
       }
     }
 
-    // Read-relays list ("Your Relays" — under the Client Relays section)
+    // Read-relays list ("Your Relays" — under the Station Relays section)
     $$('#read-relays .rm').forEach(btn => {
       btn.addEventListener('click', (e) => {
         const url = e.target.closest('.item').dataset.url;
@@ -16750,8 +16755,20 @@ const ConfigPanel = (() => {
             toast('Nothing to sync', r.empty, 'warn');
             return;
           }
-          const n = Array.isArray(r.added) ? r.added.length : 0;
-          toast('Synced from Nostr', n === 0 ? 'No new relays — your list is up to date' : `Added ${n} relay${n === 1 ? '' : 's'}`, 'ok');
+          // Sync mirrors Your Relays to your NIP-65 list — report both
+          // additions and removals so the toast matches what changed.
+          const nAdd = Array.isArray(r.added) ? r.added.length : 0;
+          const nRem = Array.isArray(r.removed) ? r.removed.length : 0;
+          let msg;
+          if (nAdd === 0 && nRem === 0) {
+            msg = 'Already in sync with your Nostr relay list';
+          } else {
+            const parts = [];
+            if (nAdd) parts.push(`+${nAdd} added`);
+            if (nRem) parts.push(`−${nRem} removed`);
+            msg = `Mirrored your Nostr list (${parts.join(', ')})`;
+          }
+          toast('Synced from Nostr', msg, 'ok');
           apiInvalidate('/api/identity/config');
           document.dispatchEvent(new CustomEvent('api-config-changed'));
           load();
@@ -17500,7 +17517,7 @@ const ConfigPanel = (() => {
 
   // ── nsite deploy section ───────────────────────────────────────────────
   // Publish-side targets, separate from "nsite browsing" above. Mirrors the
-  // Client Relays "App Relays / Your Relays" model: an app-default list with
+  // Station Relays "App Relays / Your Relays" model: an app-default list with
   // an on/off toggle, plus the user's own editable list. Two pairs: Blossom
   // upload servers and manifest-publish relays. The "Sync from Nostr" action
   // on Blossom pulls the user's own kind:10063 (BUD-03) list and merges it.
@@ -19300,6 +19317,11 @@ const ConfigPanel = (() => {
       });
       if (!r.ok) throw new Error(r.error || 'add failed');
       toast('Relay added', url, 'ok');
+      // Bust the cached /api/identity/config (30s TTL) before reloading —
+      // otherwise load() re-renders from stale data and the new relay
+      // never shows. Match the App Relays toggle / sync handlers.
+      apiInvalidate('/api/identity/config');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
       load();
     } catch (e) { toast('Add failed', e.message, 'err'); }
   }
@@ -19312,6 +19334,8 @@ const ConfigPanel = (() => {
         body: JSON.stringify({ url }),
       });
       toast('Relay removed', url, 'ok');
+      apiInvalidate('/api/identity/config');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
   }
@@ -19330,6 +19354,9 @@ const ConfigPanel = (() => {
       });
       if (!r.ok) throw new Error(r.error || 'add failed');
       toast('Grasp server added', url, 'ok');
+      // Same stale-cache pitfall as read-relays: invalidate before reload.
+      apiInvalidate('/api/identity/config');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
       load();
     } catch (e) { toast('Add failed', e.message, 'err'); }
   }
@@ -19342,6 +19369,8 @@ const ConfigPanel = (() => {
         body: JSON.stringify({ url }),
       });
       toast('Grasp server removed', url, 'ok');
+      apiInvalidate('/api/identity/config');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
   }

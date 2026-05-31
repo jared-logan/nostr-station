@@ -36,7 +36,7 @@
 import http from 'http';
 import {
   readIdentity, npubToHex, hexToNpub,
-  DEFAULT_READ_RELAYS, getEffectiveReadRelays, addReadRelay, isValidRelayUrl,
+  DEFAULT_READ_RELAYS, getEffectiveReadRelays, setReadRelays, isValidRelayUrl,
 } from '../identity.js';
 // Use the direct-WebSocket variant of queryRelays for the Client panel:
 // nak-based queries kept missing kind-0 / kind-3 / kind-1 events that the
@@ -85,8 +85,8 @@ const REACTION_LIKE_CONTENT = '+';
 
 // NIP-65 outbox-discovery bootstrap set — relays that aggregate kind-10002
 // events across the network. The sync-relays endpoint queries these IN
-// ADDITION to the user's configured Client Relays so a fresh user whose
-// only Client Relays are different from where their kind-10002 actually
+// ADDITION to the user's configured Station Relays so a fresh user whose
+// only Station Relays are different from where their kind-10002 actually
 // lives can still bootstrap. purplepag.es is the canonical profile +
 // relay-list indexer; the rest are wide general-purpose indexers + Ditto's
 // own relay (where many @user@happytavern.co / Ditto-instance users
@@ -430,9 +430,9 @@ export async function handleClient(
 
   // ── GET /api/client/relay-config ─────────────────────────────────────────
   //
-  // Composite view of the relays the /client panel uses. Single endpoint
-  // for the dashboard's status indicator + the Config → Client Relays
-  // section. Includes:
+  // Composite view of the relays nostr-station uses for its own Nostr
+  // lookups. Single endpoint for the dashboard's status indicator + the
+  // Config → Station Relays section. Includes:
   //   appRelays         — DEFAULT_READ_RELAYS (fixed, ships with nostr-station)
   //   appRelaysEnabled  — toggle state (true = App Relays merged into effective)
   //   yourRelays        — identity.readRelays (user's editable list)
@@ -455,20 +455,26 @@ export async function handleClient(
   // ── POST /api/client/sync-relays ─────────────────────────────────────────
   //
   // NIP-65 outbox sync: fetches the owner's kind 10002 relay list event
-  // from the currently-effective relays, parses every `r` tag, and merges
-  // the URLs into identity.readRelays (deduped). Returns the additions so
-  // the UI can render a "added N relays" toast.
+  // from the currently-effective relays, parses every `r` tag, and mirrors
+  // identity.readRelays to match it exactly — adding URLs that are new and
+  // removing local URLs that aren't in the published list. Returns both the
+  // additions and removals so the UI can render an accurate toast.
   //
-  // This is a one-shot import, not a continuous binding — once relays
-  // land in identity.readRelays they're user-managed from there. Per-
-  // author outbox routing (read THEIR posts from THEIR write relays)
-  // is the bigger architectural follow-up and intentionally deferred.
+  // "Mirror" means Your Relays ends up equal to your kind-10002 list, so
+  // manually-added relays not present in NIP-65 are dropped. We guard the
+  // empty / not-found cases below so a missing or unparseable event never
+  // wipes the list.
+  //
+  // This is a one-shot sync, not a continuous binding — after it runs the
+  // list is user-managed again until the next sync. Per-author outbox
+  // routing (read THEIR posts from THEIR write relays) is the bigger
+  // architectural follow-up and intentionally deferred.
   if (path === '/api/client/sync-relays' && method === 'POST') {
     const me = ownerHex();
     if (!me) return json(res, 400, { error: 'no station owner configured' });
     // Union of the user's configured relays + the NIP-65 bootstrap set.
     // The bootstrap relays widen the search so a fresh user whose
-    // configured Client Relays don't happen to mirror their kind-10002
+    // configured Station Relays don't happen to mirror their kind-10002
     // can still discover their published relay list. Capped at 12 to
     // bound fan-out (queryRelays opens one WebSocket per entry).
     const configured = readRelays();
@@ -501,30 +507,44 @@ export async function handleClient(
           queriedRelays: relays,
         });
       }
-      const ident = readIdentity();
-      const existing = new Set((ident.readRelays || []).map(s => s.toLowerCase()));
-      const added: string[] = [];
+      const before = (readIdentity().readRelays || []).slice();
+      const beforeKeys = new Set(before.map(s => s.toLowerCase()));
       // NIP-65 r-tag shapes:
       //   ["r", "wss://relay.example.com"]            — read+write
       //   ["r", "wss://relay.example.com", "read"]    — read only
       //   ["r", "wss://relay.example.com", "write"]   — write only
       // We import all of them — the read/write distinction is a per-author
       // routing hint, not a "should this be in my own list" filter.
+      const desired: string[] = [];
+      const desiredKeys = new Set<string>();
       for (const t of newest.tags) {
         if (!Array.isArray(t) || t[0] !== 'r') continue;
         const url = typeof t[1] === 'string' ? t[1].trim() : '';
         if (!url || !isValidRelayUrl(url)) continue;
-        if (existing.has(url.toLowerCase())) continue;
-        const r2 = addReadRelay(url);
-        if (r2.ok) {
-          existing.add(url.toLowerCase());
-          added.push(url);
-        }
+        const key = url.toLowerCase();
+        if (desiredKeys.has(key)) continue;
+        desiredKeys.add(key);
+        desired.push(url);
       }
+      // Guard: a kind-10002 with no usable `r` tags must not wipe the list.
+      // Treat it as "nothing to mirror" and leave readRelays untouched.
+      if (desired.length === 0) {
+        return json(res, 200, {
+          added: [],
+          removed: [],
+          empty: 'Your NIP-65 list (kind 10002) had no usable relay entries — nothing to mirror.',
+          sourceCreatedAt: newest.created_at,
+          yourRelays:      before,
+        });
+      }
+      const added   = desired.filter(u => !beforeKeys.has(u.toLowerCase()));
+      const removed = before.filter(u => !desiredKeys.has(u.toLowerCase()));
+      const set = setReadRelays(desired);
       return json(res, 200, {
         added,
+        removed,
         sourceCreatedAt: newest.created_at,
-        yourRelays:      (readIdentity().readRelays || []).slice(),
+        yourRelays:      set.relays.slice(),
       });
     } catch (e: any) {
       return json(res, 500, { error: String(e?.message || e) });
