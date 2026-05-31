@@ -1038,6 +1038,153 @@ export async function readNodeNpubFromPath(configPath: string): Promise<string |
   return toml ? extractNostrPublicKey(toml) : null;
 }
 
+// ── Adopt identity (make the daemon run the managed identity+config) ──────
+//
+// The load-bearing fix for the dashboard/daemon identity split. The daemon
+// runs a root --service off its own config (often a different auto-minted
+// identity); the dashboard manages the user-side config. "Adopt" makes the
+// daemon run the MANAGED identity by copying the user-side config onto the
+// daemon's resolved --config path, then restarting the service.
+//
+// Security posture (this copies a file containing the [nostr] secret_key
+// and [node] private_key into a root-owned location):
+//   * Preview-first. plan() reads both identities + paths and returns what
+//     would change, with NO write.
+//   * The managed config's body is never returned through the API or logged
+//     — we only ever surface the two npubs (public) and the paths.
+//   * Backs up the daemon's current config (sudo cp) before overwriting, so
+//     the prior identity is recoverable.
+//   * Writes via `sudo -n install -o root -g root -m 600` (atomic, correct
+//     owner+mode for a secret-bearing file). Empty cred cache → clear hint.
+//   * Restart goes through the existing sudo systemctl path.
+
+export interface AdoptIdentityPlan {
+  /** True when an adopt would change the daemon's identity/config. */
+  needed:           boolean;
+  managedNpub:      string | null;
+  daemonNpub:       string | null;
+  managedConfigPath: string | null;
+  daemonConfigPath: string | null;
+  /** Why an adopt isn't possible/needed, when applicable. */
+  blocker:          string | null;
+  summary:          string[];
+}
+
+// Pure decision core for the adopt plan — given the two resolved
+// (path, npub) pairs, decide whether an adopt is needed / blocked and build
+// the preview summary. Separated from the fs/proc I/O so the branching is
+// unit-testable. Exported for tests.
+export function decideAdoptIdentity(in_: {
+  managedConfigPath: string | null;
+  managedNpub:       string | null;
+  daemonConfigPath:  string | null;
+  daemonNpub:        string | null;
+}): AdoptIdentityPlan {
+  const base: AdoptIdentityPlan = {
+    needed: false,
+    managedNpub: in_.managedNpub,
+    daemonNpub: in_.daemonNpub,
+    managedConfigPath: in_.managedConfigPath,
+    daemonConfigPath: in_.daemonConfigPath,
+    blocker: null,
+    summary: [],
+  };
+  if (!in_.managedConfigPath) {
+    return { ...base, blocker: 'no user-side nvpn config found — run `nvpn init` first' };
+  }
+  if (!in_.daemonConfigPath) {
+    return { ...base, blocker: 'could not resolve the daemon\'s config path (daemon not running, or not a managed service)' };
+  }
+  if (in_.daemonConfigPath === in_.managedConfigPath) {
+    return { ...base, blocker: 'the daemon already reads the managed config — nothing to adopt' };
+  }
+  if (in_.daemonNpub && in_.managedNpub && in_.daemonNpub === in_.managedNpub) {
+    return { ...base, blocker: 'the daemon already runs the managed identity — nothing to adopt' };
+  }
+  base.needed = true;
+  base.summary = [
+    `Back up the daemon config ${in_.daemonConfigPath}`,
+    `Copy your managed identity${in_.managedNpub ? ` (${in_.managedNpub.slice(0, 12)}…${in_.managedNpub.slice(-4)})` : ''} + config onto ${in_.daemonConfigPath}`,
+    `Restart nvpn so the daemon runs your identity`,
+  ];
+  return base;
+}
+
+// Resolve the inputs an adopt needs: the managed (user-side) config path +
+// identity, and the daemon's real config path + identity. Pure-ish (reads
+// files / proc), no writes. `daemonPid` comes from the status probe.
+export async function planAdoptIdentity(daemonPid?: number | null): Promise<AdoptIdentityPlan> {
+  const managed = readNvpnNodeIdentity(); // { npub, configPath } — user side
+  const daemonCfg = await resolveDaemonConfigPath(daemonPid);
+  // Only read the daemon's identity when it's a distinct file worth
+  // comparing — avoids a redundant (possibly sudo) read otherwise.
+  const daemonNpub = (daemonCfg.path && daemonCfg.path !== managed.configPath)
+    ? await readNodeNpubFromPath(daemonCfg.path)
+    : null;
+  return decideAdoptIdentity({
+    managedConfigPath: managed.configPath,
+    managedNpub:       managed.npub,
+    daemonConfigPath:  daemonCfg.path,
+    daemonNpub,
+  });
+}
+
+export interface AdoptIdentityResult extends ControlResult {
+  plan:        AdoptIdentityPlan;
+  applied:     boolean;
+  backedUpTo?: string;
+}
+
+// Apply the adoption: backup → sudo-copy managed config onto the daemon's
+// path → restart. apply=false returns the plan only.
+export async function adoptIdentity(opts: { apply: boolean; daemonPid?: number | null }): Promise<AdoptIdentityResult> {
+  const plan = await planAdoptIdentity(opts.daemonPid);
+  if (!plan.needed) {
+    return { ok: !plan.blocker || plan.blocker.includes('already'), detail: plan.blocker || 'nothing to adopt', plan, applied: false };
+  }
+  if (!opts.apply) {
+    return { ok: true, detail: 'adopt plan ready (preview)', plan, applied: false };
+  }
+  const src = plan.managedConfigPath!;
+  const dst = plan.daemonConfigPath!;
+  const backupPath = `${dst}.bak-${Date.now()}`;
+  try {
+    // Back up the daemon's current config (root-owned) before overwriting.
+    await execa('sudo', ['-n', 'cp', '-p', dst, backupPath], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) {
+      return { ok: false, detail: 'sudo cred cache empty — run `sudo -v` in your terminal, then retry. (Nothing was changed.)', plan, applied: false };
+    }
+    return { ok: false, detail: `backup failed (refusing to write): ${summarizeError(e)}`, plan, applied: false };
+  }
+  // Read the managed config locally (we own it) and pipe it to a
+  // root-owned install via stdin — never round-trips through a shell
+  // string, and lands with the correct secret-file owner+mode in one
+  // atomic op. The body is used ONLY as install's stdin; never returned.
+  let body: string;
+  try { body = fs.readFileSync(src, 'utf8'); }
+  catch (e: any) { return { ok: false, detail: `could not read managed config: ${summarizeError(e)}`, plan, applied: false, backedUpTo: backupPath }; }
+  try {
+    await execa('sudo', ['-n', 'install', '-o', 'root', '-g', 'root', '-m', '600', '/dev/stdin', dst], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe', input: body,
+    });
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) {
+      return { ok: false, detail: 'sudo cred cache empty — run `sudo -v` then retry. The backup was written; no overwrite happened.', plan, applied: false, backedUpTo: backupPath };
+    }
+    return { ok: false, detail: `write failed: ${summarizeError(e)} (daemon config unchanged; backup at ${backupPath})`, plan, applied: false, backedUpTo: backupPath };
+  }
+  // Restart so the daemon picks up the adopted identity. Best-effort —
+  // the copy already succeeded; surface a restart hint if it fails.
+  const restart = await restartNvpn();
+  const detail = restart.ok
+    ? 'identity adopted — daemon restarted with your identity'
+    : `identity adopted; restart nvpn manually (${restart.detail})`;
+  return { ok: true, detail, plan, applied: true, backedUpTo: backupPath };
+}
+
 export function extractTomlString(section: string, key: string): string | null {
   const re = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, 'm');
   const m = section.match(re);

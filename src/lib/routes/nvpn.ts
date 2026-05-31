@@ -44,7 +44,7 @@ import {
   setNvpnAlias, removeNvpnAlias,
   readNvpnRelays, addNvpnRelay, removeNvpnRelay, setNvpnRelays,
   readNvpnFipsPeerEndpoints,
-  resolveDaemonConfigPath, readNodeNpubFromPath,
+  resolveDaemonConfigPath, readNodeNpubFromPath, adoptIdentity,
   RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
 import { diagnoseNvpnNetwork } from '../nvpn-diagnostics.js';
@@ -445,6 +445,25 @@ export async function handleNvpn(
       else { try { pubkeyHex = npubToHex(identity.npub).toLowerCase(); } catch { pubkeyHex = null; } }
     }
     const r = repairNvpnNetworkConfig({ apply, pubkeyHex });
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // Adopt identity: make the running daemon use the dashboard-managed
+  // identity + config instead of a separate (auto-minted) one. Preview-
+  // first: `{ apply: false }` (default) returns the plan with no write;
+  // `{ apply: true }` backs up the daemon's config, sudo-copies the managed
+  // config onto the daemon's resolved --config path, and restarts. The
+  // daemon pid comes from the live status probe (config-path resolution
+  // keys off it). 200 on ok/preview, 500 on a write/sudo failure.
+  if (url === '/api/nvpn/identity/adopt' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const apply = body.apply === true;
+    const status = await probeNvpnStatus();
+    const raw = status.raw as Record<string, any> | null;
+    const daemonPid = (raw && raw.daemon && typeof raw.daemon.pid === 'number') ? raw.daemon.pid : null;
+    const r = await adoptIdentity({ apply, daemonPid });
     await writeJson(res, r.ok ? 200 : 500, r);
     return true;
   }

@@ -15128,7 +15128,11 @@ const VpnPanel = (() => {
          </div>`
       : (d.identitySplit
           ? `<div class="vpn-diag-repair-row">
-               <span class="muted vpn-diag-repair-hint">The daemon runs a different identity than this dashboard manages, so config fixes here won't reach it. Making the daemon run the managed identity is the fix (coming next).</span>
+               <button id="vpn-diag-adopt-btn" class="primary"
+                       title="Make the running daemon use this dashboard's identity + config, so changes here take effect">
+                 Make the daemon use this identity…
+               </button>
+               <span class="muted vpn-diag-repair-hint">previews first · backs up the daemon config · needs a Restart</span>
              </div>`
           : '');
     host.innerHTML = `
@@ -15138,6 +15142,72 @@ const VpnPanel = (() => {
     `;
     const repairBtn = host.querySelector('#vpn-diag-repair-btn');
     if (repairBtn) repairBtn.addEventListener('click', (e) => { e.preventDefault(); openRepairModal(); });
+    const adoptBtn = host.querySelector('#vpn-diag-adopt-btn');
+    if (adoptBtn) adoptBtn.addEventListener('click', (e) => { e.preventDefault(); openAdoptIdentityModal(); });
+  }
+
+  // Preview → confirm → apply → restart for "make the daemon use this
+  // identity." This copies the managed config (which contains your private
+  // key) onto the daemon's root-owned config path via sudo, so it's
+  // confirm-first and spells out exactly what moves + that a backup is made.
+  async function openAdoptIdentityModal() {
+    const body = document.createElement('div');
+    body.innerHTML = `<div class="muted vpn-invite-loading">computing plan…</div>`;
+    const modal = openModal({ title: 'Make the daemon use this identity', subtitle: 'Run the dashboard-managed identity on the daemon', body });
+    modal.root.classList.add('vpn-invite-modal');
+    let r;
+    try {
+      r = await api('/api/nvpn/identity/adopt', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apply: false }),
+      });
+    } catch { body.innerHTML = `<div class="vpn-invite-err">couldn't compute a plan</div>`; return; }
+    const plan = r?.plan || {};
+    if (!plan.needed) {
+      body.innerHTML = `<p>${escapeHtml(r?.detail || 'Nothing to adopt.')}</p>`;
+      return;
+    }
+    const steps = (plan.summary || []).map(s => `<li>${escapeHtml(s)}</li>`).join('');
+    const idRow = (label, npub) => npub
+      ? `<div class="vpn-diag-ev-row"><span class="vpn-diag-ev-k">${escapeHtml(label)}</span><code class="vpn-diag-ev-v">${escapeHtml(npub)}</code></div>` : '';
+    body.innerHTML = `
+      <p class="muted">The daemon is running a different identity than this dashboard manages. This makes it run <strong>your</strong> identity so joins, repairs, and relay changes here actually take effect.</p>
+      <div class="vpn-diag-ev" style="margin:8px 0">
+        ${idRow('daemon now', plan.daemonNpub)}
+        ${idRow('will become', plan.managedNpub)}
+      </div>
+      <ul class="vpn-repair-steps">${steps}</ul>
+      <div class="community-card-error" style="margin:10px 0">
+        Copies your managed config (which contains your private key) onto the daemon's config and <strong>Restarts</strong> nvpn — the tunnel drops for a moment. The daemon's current config is backed up first and is fully recoverable.
+      </div>
+      <div class="vpn-invite-modal-actions">
+        <button id="vpn-adopt-cancel">Cancel</button>
+        <button id="vpn-adopt-apply" class="primary">Make the daemon use this identity</button>
+      </div>
+    `;
+    body.querySelector('#vpn-adopt-cancel').addEventListener('click', (e) => { e.preventDefault(); modal.close(); });
+    body.querySelector('#vpn-adopt-apply').addEventListener('click', async (e) => {
+      e.preventDefault();
+      const applyBtn = e.currentTarget; applyBtn.disabled = true;
+      let ar;
+      try {
+        ar = await api('/api/nvpn/identity/adopt', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ apply: true }),
+        });
+      } catch { applyBtn.disabled = false; return; /* api() toasted */ }
+      if (ar?.ok === false) { toast('adopt failed', ar?.detail || '', 'err'); applyBtn.disabled = false; return; }
+      toast('identity adopted', ar?.backedUpTo ? `backup: ${ar.backedUpTo}` : '', 'ok');
+      body.innerHTML = `
+        <p>✅ ${escapeHtml(ar?.detail || 'Done.')}</p>
+        ${ar?.backedUpTo ? `<p class="muted">Daemon config backed up to <code class="cmd-inline">${escapeHtml(ar.backedUpTo)}</code>.</p>` : ''}
+        <p class="muted">Give the mesh ~20–30s to converge, then recheck the diagnosis.</p>
+        <div class="vpn-invite-modal-actions">
+          <button id="vpn-adopt-done" class="primary">Done</button>
+        </div>
+      `;
+      body.querySelector('#vpn-adopt-done').addEventListener('click', (ev) => { ev.preventDefault(); modal.close(); void refresh(); });
+    });
   }
 
   // Preview → confirm → apply → restart. Repair rewrites live network
