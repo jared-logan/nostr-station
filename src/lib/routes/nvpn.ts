@@ -36,6 +36,7 @@ import {
   nvpnRowStateFor, nvpnHealthSummary,
   addParticipants, removeParticipants, addAdmins, removeAdmins,
   publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster, readNvpnNetworks,
+  joinNvpnNetwork,
   readNvpnNodeIdentity,
   pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork,
   pingNvpnPeer, netcheckNvpn, doctorNvpn, natDiscoverNvpn,
@@ -277,10 +278,30 @@ export async function handleNvpn(
   // Returns every `[[networks]]` block in config.toml so the dashboard
   // can show "X also configured" alongside the active network. The
   // active one is always index 0; inactive networks stay saved until
-  // re-activated via `nvpn set --network-id <id>`.
+  // re-activated (POST /networks/join re-adds + activates by id, or the
+  // native app reorders the blocks).
   if (url === '/api/nvpn/networks' && method === 'GET') {
     const networks = readNvpnNetworks();
     await writeJson(res, 200, { networks });
+    return true;
+  }
+
+  // Join a network by id, no invite required — mirrors the native nvpn
+  // app's "manual join." Adds a `[[networks]]` block for the id and makes
+  // it active (config.toml edit), then reloads the daemon best-effort so
+  // it starts converging on the admin-signed roster. 400 on bad/duplicate
+  // input so the UI can distinguish it from a write failure (500-ish).
+  if (url === '/api/nvpn/networks/join' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const networkId = typeof body.networkId === 'string' ? body.networkId : '';
+    const r = joinNvpnNetwork(networkId);
+    if (r.ok && r.detail !== 'already the active network') {
+      // A new active network needs the daemon to re-read config. reload
+      // is best-effort; the UI nudges the user to restart if needed.
+      await reloadNvpn().catch(() => null);
+    }
+    await writeJson(res, r.ok ? 200 : 400, r);
     return true;
   }
 
@@ -374,24 +395,37 @@ export async function handleNvpn(
     await writeJson(res, 200, { health: snapshot, windowMs: 5 * 60 * 1000 });
     return true;
   }
-  // Relay mutations removed in nvpn 4.x — bulk `nvpn set --relay` is
-  // gone and the per-relay CLI never landed; the native app is the
-  // only writer upstream supports. Read-only GET /api/nvpn/relays
-  // above still works against config.toml. 501 makes the failure
-  // distinct from "bad input" (400) or "broken daemon" (500).
+  // Relay mutations. nvpn 4.x removed the bulk `nvpn set --relay` CLI, so
+  // these edit config.toml's active `[[networks]] relays = […]` directly
+  // (same approach the native app takes) and then reload the daemon
+  // best-effort so the running process re-reads the set. 400 on bad input
+  // (invalid URL, no networks block, refusing to empty the list) keeps it
+  // distinct from a write failure.
   if (url === '/api/nvpn/relays/add' && method === 'POST') {
-    const r = await addNvpnRelay('');
-    await writeJson(res, 501, r);
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const u = typeof body.url === 'string' ? body.url : '';
+    const r = await addNvpnRelay(u);
+    if (r.ok) await reloadNvpn().catch(() => null);
+    await writeJson(res, r.ok ? 200 : 400, r);
     return true;
   }
   if (url === '/api/nvpn/relays/remove' && method === 'POST') {
-    const r = await removeNvpnRelay('');
-    await writeJson(res, 501, r);
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const u = typeof body.url === 'string' ? body.url : '';
+    const r = await removeNvpnRelay(u);
+    if (r.ok) await reloadNvpn().catch(() => null);
+    await writeJson(res, r.ok ? 200 : 400, r);
     return true;
   }
   if (url === '/api/nvpn/relays/set' && method === 'POST') {
-    const r = await setNvpnRelays([]);
-    await writeJson(res, 501, r);
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const relays = Array.isArray(body.relays) ? body.relays : [];
+    const r = await setNvpnRelays(relays);
+    if (r.ok) await reloadNvpn().catch(() => null);
+    await writeJson(res, r.ok ? 200 : 400, r);
     return true;
   }
 

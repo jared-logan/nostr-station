@@ -4,6 +4,7 @@ import {
   extractNvpnRelays,
   isValidRelayUrl,
   buildSetRelaysArgs,
+  rebuildTomlWithRelays,
   RECOMMENDED_NVPN_RELAYS,
 } from '../src/lib/nvpn.ts';
 
@@ -121,4 +122,58 @@ test('RECOMMENDED_NVPN_RELAYS: deduplicated', () => {
     assert.equal(seen.has(url), false, `duplicate in recommended set: ${url}`);
     seen.add(url);
   }
+});
+
+// ── rebuildTomlWithRelays ──────────────────────────────────────────────
+
+test('rebuildTomlWithRelays: replaces an existing multi-line relays array', () => {
+  const toml = `[[networks]]
+network_id = "abc"
+relays = [
+  "wss://old-a/",
+  "wss://old-b/",
+]
+participants = ["a"]
+
+[nat]
+enabled = true
+`;
+  const out = rebuildTomlWithRelays(toml, ['wss://new-a/', 'wss://new-b/']);
+  assert.deepEqual(extractNvpnRelays(out), ['wss://new-a/', 'wss://new-b/']);
+  // Old entries gone, sibling keys + other sections intact.
+  assert.equal(out.includes('old-a'), false);
+  assert.match(out, /participants = \["a"\]/);
+  assert.match(out, /\[nat\][\s\S]*enabled = true/);
+});
+
+test('rebuildTomlWithRelays: inserts relays when the block has none', () => {
+  const toml = `[[networks]]
+network_id = "abc"
+participants = []
+`;
+  const out = rebuildTomlWithRelays(toml, ['wss://a/']);
+  assert.deepEqual(extractNvpnRelays(out), ['wss://a/']);
+  assert.match(out, /network_id = "abc"/);
+});
+
+test('rebuildTomlWithRelays: only touches the first [[networks]] block', () => {
+  const toml = `[[networks]]
+network_id = "active"
+relays = ["wss://active/"]
+
+[[networks]]
+network_id = "inactive"
+relays = ["wss://inactive/"]
+`;
+  const out = rebuildTomlWithRelays(toml, ['wss://changed/']);
+  // First block updated…
+  assert.match(out, /network_id = "active"[\s\S]*wss:\/\/changed\//);
+  // …second block left exactly as-is.
+  assert.match(out, /network_id = "inactive"[\s\S]*wss:\/\/inactive\//);
+  assert.equal(out.includes('wss://active/'), false);
+});
+
+test('rebuildTomlWithRelays: returns input unchanged with no [[networks]] block', () => {
+  const toml = `[nostr]\npublic_key = "npub1x"\n`;
+  assert.equal(rebuildTomlWithRelays(toml, ['wss://a/']), toml);
 });

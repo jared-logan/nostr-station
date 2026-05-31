@@ -5,6 +5,45 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn panel: copyable npub, join-by-ID, in-dashboard relay editing
+
+UX pass on the nostr-vpn panel, driven by three reported pain points: the
+node's own npub couldn't be copied, joining a network you already run
+elsewhere didn't work, and several buttons threw API errors.
+
+- **Your node npub is now copyable.** nvpn 4.x dropped `npub` from
+  `status --json`, so the panel's only copy of it was a truncated,
+  copy-less badge in the status strip. The full value now carries a copy
+  button in the **status strip**, a dedicated **"this node (npub)"** row in
+  the **Network** tab (the place you reach for when adding this station to a
+  mesh), and the **Status** tab's npub row now falls back to the
+  config-derived identity instead of vanishing on modern daemons.
+- **Join a network by ID — no invite.** New **Join by ID** action on the
+  Network tab mirrors the native nvpn app's manual join: enter the
+  network id of a mesh you already run and it's added + activated by
+  writing a `[[networks]]` block to config.toml (seeded with the active
+  network's discovery relays, or the recommended set) and reloading the
+  daemon, which then converges on the admin-signed roster on its own. The
+  Import-invite modal now also explains the invite must be an
+  `nvpn://invite/…` minted by an admin of the target network, and points
+  at Join-by-ID / copy-this-npub as alternatives.
+- **Relay editing works again, and no more buttons that always 501.**
+  nvpn 4.x removed the bulk `set --relay` CLI; rather than 501, the
+  add / remove / Use-recommended actions now edit config.toml's active
+  `[[networks]] relays = […]` directly (server-side, atomic temp-file +
+  rename) and reload the daemon — the same path the native app takes.
+  Relay rows still surface publish-health from the in-process aggregator.
+  The **Diagnostics** tab drops the dead **Run netcheck** and **Show
+  stats** buttons (both removed in 4.x; `doctor` covers netcheck's old
+  ground), and the Logs panel's 504-loop hint now routes to the Relays tab.
+
+  New lib surface (all unit-tested): `joinNvpnNetwork` +
+  `isValidNetworkId` / `buildNvpnNetworkBlock` / `insertNetworkBlockFirst`,
+  and real `addNvpnRelay` / `removeNvpnRelay` / `setNvpnRelays` backed by
+  `rebuildTomlWithRelays`. New routes: `POST /api/nvpn/networks/join`, and
+  `POST /api/nvpn/relays/{add,remove,set}` now mutate config + reload
+  (200 on success, 400 on bad/duplicate input) instead of returning 501.
+
 ### nvpn pin bump 4.0.37 → 4.0.48
 
 Tracks the upstream 4.0.x line forward. Existing users see the upgrade as

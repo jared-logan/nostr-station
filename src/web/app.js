@@ -13411,33 +13411,20 @@ const LogsPanel = (() => {
         <span class="logs-relay-hint-icon">⚠</span>
         <span class="logs-relay-hint-text">
           Repeated relay <code>504</code> errors — your nostr-vpn discovery
-          relays may be down.
+          relays may be down. Swap them in the nostr-vpn → Relays tab.
         </span>
-        <button class="primary" id="logs-relay-hint-fix">Use recommended</button>
+        <button class="primary" id="logs-relay-hint-fix">Open Relays tab</button>
         <button id="logs-relay-hint-dismiss">Dismiss</button>`;
       // Insert above the log scroll view so it floats with the meta strip
       // rather than scrolling away with old entries.
       view.parentNode.insertBefore(relayHintEl, view);
-      relayHintEl.querySelector('#logs-relay-hint-fix').addEventListener('click', async () => {
-        const btn = relayHintEl.querySelector('#logs-relay-hint-fix');
-        btn.disabled = true;
-        try {
-          const r = await api('/api/nvpn/relays/recommended');
-          const list = Array.isArray(r?.relays) ? r.relays : [];
-          if (list.length === 0) throw new Error('no recommended set defined');
-          const setRes = await api('/api/nvpn/relays/set', {
-            method:  'POST',
-            headers: { 'content-type': 'application/json' },
-            body:    JSON.stringify({ relays: list }),
-          });
-          if (!setRes.ok) throw new Error(setRes.detail || 'set failed');
-          toast('Relays updated', `${list.length} recommended relay${list.length === 1 ? '' : 's'}`, 'ok');
-          relayErrTimestamps = [];
-          hideRelayHint();
-        } catch (e) {
-          toast('Update failed', e.message, 'err');
-          btn.disabled = false;
-        }
+      // nvpn 4.x removed the bulk relay-set CLI (route is 501), so we can
+      // no longer one-click "Use recommended" here. Send the user to the
+      // Relays tab instead, which explains the config.toml edit path and
+      // offers the recommended set as a copy-pasteable TOML line.
+      relayHintEl.querySelector('#logs-relay-hint-fix').addEventListener('click', () => {
+        location.hash = '#vpn';
+        hideRelayHint();
       });
       relayHintEl.querySelector('#logs-relay-hint-dismiss').addEventListener('click', () => {
         hideRelayHint();
@@ -13690,9 +13677,6 @@ const VpnPanel = (() => {
   let lastDeployment   = null;  // GET /api/nvpn/deployment-context
   let lastSplitBrain   = null;  // GET /api/nvpn/split-brain
   let lastJoinRequests = null;  // GET /api/nvpn/join-requests
-  // 60s TTL for the auto-fired netcheck — same idea as ConfigPanel's
-  // cache. Manual "Check reachability" passes { force:true } to bypass.
-  let relayHealthCache = null; // { fetchedAt: ms, raw: object|null }
 
   // Sub-tab switching is purely visual + lazy. Each sub-tab has a
   // render function that draws into bodyEl from the cached payloads.
@@ -13838,8 +13822,13 @@ const VpnPanel = (() => {
     // 63 chars and would dominate the strip; full value in the title
     // attribute and copyable from the Network tab.
     const npub = status.identity && status.identity.npub;
+    // Truncated display + a copy slot. nvpn 4.x dropped npub from
+    // `status --json`, so this strip (fed from config.toml via
+    // status.identity) is the most prominent place the full value
+    // survives — give it a one-click copy so users can paste their node
+    // identity into a network they run elsewhere without hunting for it.
     const npubBadge = npub
-      ? `<code class="cmd-inline vpn-strip-npub" title="Your nvpn node identity (Nostr npub): ${escapeHtml(npub)}">${escapeHtml(npub.slice(0, 14) + '…' + npub.slice(-4))}</code>`
+      ? `<code class="cmd-inline vpn-strip-npub" title="Your nvpn node identity (Nostr npub): ${escapeHtml(npub)}">${escapeHtml(npub.slice(0, 14) + '…' + npub.slice(-4))}</code><span class="vpn-strip-npub-copy"></span>`
       : '';
     // Reality check (issue #56). status.health is the rolled-up surface
     // from nvpnHealthSummary — when it disagrees with the daemon-claimed
@@ -13868,6 +13857,12 @@ const VpnPanel = (() => {
         : ''}
       <div class="vpn-strip-actions" id="vpn-strip-actions"></div>
     `;
+    // Wire the copy button onto the npub badge (innerHTML can't carry the
+    // copyBtn element). copyBtn takes the raw, un-truncated value.
+    if (npub) {
+      const npubCopySlot = stripEl.querySelector('.vpn-strip-npub-copy');
+      if (npubCopySlot) npubCopySlot.appendChild(copyBtn(npub, 'Copy your full nvpn npub'));
+    }
     const actions = $('vpn-strip-actions');
     if (!status.installed) {
       // Only meaningful when the binary is missing — directs the user
@@ -13985,8 +13980,14 @@ const VpnPanel = (() => {
     if (r.daemon && r.daemon.pid != null) rows.push({ k: 'daemon pid', v: String(r.daemon.pid) });
     if (r.daemon && r.daemon.started_at) rows.push({ k: 'started',    v: String(r.daemon.started_at) });
     if (lastStatus.tunnelIp)              rows.push({ k: 'tunnel ip',  v: lastStatus.tunnelIp });
-    if (typeof r.npub === 'string')       rows.push({ k: 'npub',      v: r.npub,    copy: true });
-    if (typeof r.pubkey === 'string' && !r.npub) rows.push({ k: 'pubkey', v: r.pubkey, copy: true });
+    // npub: 4.x drops it from status JSON, so fall back to the
+    // config.toml-derived identity (status.identity.npub) — otherwise
+    // the row vanishes on every modern daemon and the user can't copy
+    // their own node identity from here.
+    const identityNpub = (lastStatus.identity && lastStatus.identity.npub) || null;
+    const nodeNpub = (typeof r.npub === 'string' && r.npub) ? r.npub : identityNpub;
+    if (nodeNpub)                         rows.push({ k: 'npub',      v: nodeNpub,  copy: true });
+    else if (typeof r.pubkey === 'string') rows.push({ k: 'pubkey', v: r.pubkey, copy: true });
     if (typeof r.endpoint === 'string')   rows.push({ k: 'endpoint',   v: r.endpoint });
     if (typeof r.session_status === 'string') rows.push({ k: 'session', v: r.session_status });
     // Log path — surfaces where the daemon is writing. Lets a power user
@@ -14017,15 +14018,18 @@ const VpnPanel = (() => {
   renderStatusBody.wire = () => {
     // Attach copy buttons after innerHTML — the rendered value text is
     // already escaped, but copyBtn takes the raw string for clipboard.
-    const r = lastStatus && lastStatus.raw ? lastStatus.raw : null;
-    if (!r) return;
+    // Tolerate a null raw (daemon down): the identity npub row still
+    // renders from config.toml, so we still want its copy button.
+    const r = (lastStatus && lastStatus.raw) ? lastStatus.raw : {};
     const wireCopy = (key, value) => {
       if (!value) return;
       const row = bodyEl.querySelector(`.vpn-kv-row[data-row-key="${CSS.escape(key)}"]`);
       const slot = row && row.querySelector('.vpn-kv-copy-slot');
       if (slot) slot.appendChild(copyBtn(value));
     };
-    if (typeof r.npub === 'string')   wireCopy('npub', r.npub);
+    const identityNpub = (lastStatus && lastStatus.identity && lastStatus.identity.npub) || null;
+    const nodeNpub = (typeof r.npub === 'string' && r.npub) ? r.npub : identityNpub;
+    if (nodeNpub)   wireCopy('npub', nodeNpub);
     else if (typeof r.pubkey === 'string') wireCopy('pubkey', r.pubkey);
     if (r.daemon && typeof r.daemon.log_file === 'string') wireCopy('log', r.daemon.log_file);
   };
@@ -14075,6 +14079,13 @@ const VpnPanel = (() => {
     const r = lastStatus && lastStatus.raw ? lastStatus.raw : null;
     const roster = lastRoster;
     if (!r && !roster) return '<div class="vpn-empty muted">loading…</div>';
+    // This node's own identity. nvpn 4.x dropped npub from status JSON,
+    // so we read it from config.toml via status.identity (leak-safe —
+    // public_key only). Surfaced + copyable here because the Network tab
+    // is where the "add this node to a mesh" mental model lives: to join
+    // a network you already run elsewhere, copy this npub and add it as a
+    // participant on that side.
+    const nodeNpub = (lastStatus && lastStatus.identity && lastStatus.identity.npub) || null;
     const networkId = (roster && roster.networkId)
       || (r && typeof r.network_id === 'string' ? r.network_id : null);
     const rosterParts  = (roster && Array.isArray(roster.participants)) ? roster.participants : [];
@@ -14145,9 +14156,19 @@ const VpnPanel = (() => {
           participants, and any peers nvpn has currently discovered. Use
           <strong>Share invite</strong> to onboard a new device,
           <strong>Import invite</strong> to join someone else's mesh, or
-          add an npub directly below.
+          add an npub directly below. Already run a network elsewhere?
+          Copy <strong>this node</strong>'s npub below and add it as a
+          participant there — that's how you bring this station into a
+          mesh you already operate.
         </p>
         <div class="vpn-kv">
+          ${nodeNpub
+            ? `<div class="vpn-kv-row" data-row-key="node-npub">
+                <span class="vpn-kv-key">this node (npub)</span>
+                <code class="vpn-kv-val vpn-node-npub">${escapeHtml(nodeNpub)}</code>
+                <span class="vpn-node-npub-copy"></span>
+              </div>`
+            : ''}
           ${activeRowHtml}
           <div class="vpn-kv-row">
             <span class="vpn-kv-key">network id</span>
@@ -14172,6 +14193,10 @@ const VpnPanel = (() => {
           <button id="vpn-import-invite"
                   title="Paste an invite code to join the network it represents">
             Import invite
+          </button>
+          <button id="vpn-join-by-id"
+                  title="Join a network you already run elsewhere by entering its network id — no invite needed">
+            Join by ID
           </button>
           <button id="vpn-publish-roster"
                   title="Re-broadcast the current roster to Nostr relays — useful when a recent add/remove reported 0 recipients">
@@ -14231,10 +14256,17 @@ const VpnPanel = (() => {
     const netCopy = bodyEl.querySelector('.vpn-net-id-copy');
     if (netCopy && networkId) netCopy.appendChild(copyBtn(networkId));
 
+    // Copy button for this node's own npub — the full, un-truncated value.
+    const nodeNpub = (lastStatus && lastStatus.identity && lastStatus.identity.npub) || null;
+    const nodeNpubCopy = bodyEl.querySelector('.vpn-node-npub-copy');
+    if (nodeNpubCopy && nodeNpub) nodeNpubCopy.appendChild(copyBtn(nodeNpub, 'Copy your full nvpn npub'));
+
     const shareBtn = bodyEl.querySelector('#vpn-share-invite');
     if (shareBtn) shareBtn.addEventListener('click', (e) => { e.preventDefault(); openShareInviteModal(); });
     const importBtn = bodyEl.querySelector('#vpn-import-invite');
     if (importBtn) importBtn.addEventListener('click', (e) => { e.preventDefault(); openImportInviteModal(); });
+    const joinByIdBtn = bodyEl.querySelector('#vpn-join-by-id');
+    if (joinByIdBtn) joinByIdBtn.addEventListener('click', (e) => { e.preventDefault(); openJoinByIdModal(); });
     const pubBtn = bodyEl.querySelector('#vpn-publish-roster');
     if (pubBtn) {
       pubBtn.addEventListener('click', async (e) => {
@@ -14453,12 +14485,17 @@ const VpnPanel = (() => {
     });
   }
 
-  // Relays sub-tab — discovery relays (where nvpn publishes presence
-  // and discovers peers). Read goes straight from config.toml so the
-  // list renders even when the daemon is down; mutations go through
-  // `nvpn set --relay` followed by an automatic `nvpn reload`.
-  // Auto-fired netcheck decorates each row with latency + a coloured
-  // dot (60s panel-scope cache; "Check reachability" forces refetch).
+  // Relays sub-tab — discovery relays (where nvpn publishes presence and
+  // discovers peers). Read goes straight from config.toml so the list
+  // renders even when the daemon is down.
+  //
+  // Editable again on nvpn 4.x: upstream removed the bulk `set --relay`
+  // CLI, so add / remove / set mutate config.toml's active `[[networks]]
+  // relays = […]` directly (server-side, atomic) and then `nvpn reload`
+  // so the running daemon re-reads them — same thing the native app does.
+  // Rows are decorated with publish-health from the in-process aggregator
+  // so a relay that's rejecting publishes (rate-limit / WoT / timeout) is
+  // flagged inline.
   function renderRelaysBody() {
     const r = lastRelays;
     if (!r) return '<div class="vpn-empty muted">loading…</div>';
@@ -14478,9 +14515,10 @@ const VpnPanel = (() => {
         <p class="vpn-section-help">
           Nostr relays nostr-vpn uses to publish presence and discover
           peers. Distinct from your identity / ngit relay sets — these
-          are mesh-only. If the log shows <code>504 Gateway Timeout</code>
-          loops, the configured relay is likely flaky; add a healthier
-          one and the daemon will pick it up on the next reload.
+          are mesh-only. Edits here write to config.toml and reload the
+          daemon. Rows are flagged if recent publishes were rejected
+          (rate-limit, WoT, timeout) — a flagged relay is a good candidate
+          to swap out.
         </p>
         ${errorLine}
         <div class="relay-list" id="vpn-relays">
@@ -14496,10 +14534,6 @@ const VpnPanel = (() => {
           <button id="vpn-relay-recommended"
                   title="Replace the current relay list with the dashboard-curated set — useful when configured relays are timing out / WoT-rejecting">
             Use recommended
-          </button>
-          <button id="vpn-relay-recheck"
-                  title="Re-run an 8s netcheck pass against all configured relays. Result decorates each row.">
-            Check reachability
           </button>
         </div>
         <div class="key-status-line ${r.relays && r.relays.length ? 'ok' : ''}">
@@ -14517,38 +14551,32 @@ const VpnPanel = (() => {
       });
     });
     const addBtn = $('vpn-relay-add');
-    if (!addBtn) return;
-    addBtn.addEventListener('click', addRelayFromInput);
-    $('vpn-relay-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') addRelayFromInput();
-    });
-    $('vpn-relay-paste').addEventListener('click', async () => {
-      try { $('vpn-relay-input').value = (await navigator.clipboard.readText()).trim(); }
-      catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
-    });
-    const recheckBtn = $('vpn-relay-recheck');
-    if (recheckBtn) recheckBtn.addEventListener('click', async (e) => {
-      e.preventDefault(); recheckBtn.disabled = true;
-      try { await loadRelayHealth({ force: true }); }
-      finally { recheckBtn.disabled = false; }
-    });
+    if (addBtn) {
+      addBtn.addEventListener('click', addRelayFromInput);
+      $('vpn-relay-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') addRelayFromInput();
+      });
+      $('vpn-relay-paste').addEventListener('click', async () => {
+        try { $('vpn-relay-input').value = (await navigator.clipboard.readText()).trim(); }
+        catch { toast('Clipboard blocked', 'paste manually', 'warn'); }
+      });
+    }
     const recommendedBtn = $('vpn-relay-recommended');
     if (recommendedBtn) recommendedBtn.addEventListener('click', async (e) => {
       e.preventDefault(); recommendedBtn.disabled = true;
       try { await useRecommendedRelays(); }
       finally { recommendedBtn.disabled = false; }
     });
-    // Auto-fire reachability after this sub-tab paints, only if relays
-    // are configured. 60s cache avoids re-spawning an 8s netcheck on
-    // every tab switch; manual recheck bypasses with { force:true }.
+
+    // Decorate rows with publish-health (works on 4.x; no netcheck).
     if (lastRelays && Array.isArray(lastRelays.relays) && lastRelays.relays.length > 0) {
       void loadRelayHealth();
     }
   };
 
   // Trailing-slash normalization — config.toml may store "wss://x/"
-  // while netcheck reports "wss://x" (and vice versa). Match on the
-  // canonical form so reachability decorates the right row.
+  // while the aggregator reports "wss://x" (and vice versa). Match on
+  // the canonical form so health decorates the right row.
   function normalizeRelayUrl(s) {
     return String(s || '').replace(/\/+$/, '').toLowerCase();
   }
@@ -14562,33 +14590,29 @@ const VpnPanel = (() => {
       return;
     }
     try {
-      const r = await api('/api/nvpn/relays/add', {
+      // api() throws (and toasts) on non-2xx, so a single catch is enough
+      // — no double error toast.
+      await api('/api/nvpn/relays/add', {
         method:  'POST',
         headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ url }),
       });
-      if (!r.ok) throw new Error(r.detail || 'add failed');
       toast('Relay added', url, 'ok');
       input.value = '';
-      // Invalidate health cache — the new relay isn't in the cached
-      // netcheck pass and the user is mid-troubleshoot.
-      relayHealthCache = null;
       await refresh();
-    } catch (e) { toast('Add failed', e.message, 'err'); }
+    } catch { /* api() already toasted */ }
   }
 
   async function removeRelay(url) {
     try {
-      const r = await api('/api/nvpn/relays/remove', {
+      await api('/api/nvpn/relays/remove', {
         method:  'POST',
         headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ url }),
       });
-      if (!r.ok) throw new Error(r.detail || 'remove failed');
       toast('Relay removed', url, 'ok');
-      relayHealthCache = null;
       await refresh();
-    } catch (e) { toast('Remove failed', e.message, 'err'); }
+    } catch { /* api() already toasted */ }
   }
 
   // One-click recovery: replace with the dashboard-curated set
@@ -14599,7 +14623,7 @@ const VpnPanel = (() => {
     try {
       const r = await api('/api/nvpn/relays/recommended');
       recommended = Array.isArray(r?.relays) ? r.relays : [];
-    } catch (e) { toast('Failed to load recommended', e.message, 'err'); return; }
+    } catch { return; /* api() already toasted */ }
     if (recommended.length === 0) {
       toast('No recommended set defined', '', 'err'); return;
     }
@@ -14610,65 +14634,29 @@ const VpnPanel = (() => {
     );
     if (!ok) return;
     try {
-      const r = await api('/api/nvpn/relays/set', {
+      await api('/api/nvpn/relays/set', {
         method:  'POST',
         headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ relays: recommended }),
       });
-      if (!r.ok) throw new Error(r.detail || 'set failed');
       toast('Relays updated', `${recommended.length} recommended relay${recommended.length === 1 ? '' : 's'}`, 'ok');
-      relayHealthCache = null;
       await refresh();
-    } catch (e) { toast('Update failed', e.message, 'err'); }
+    } catch { /* api() already toasted */ }
   }
 
-  // Pull `nvpn netcheck --json` and decorate each row in #vpn-relays
-  // with a coloured dot + latency. Auto-fire path (no opts) shares a
-  // 60s cache; manual "Check reachability" passes { force:true } to
-  // bypass. Quiet on failure — if netcheck times out (relays really
-  // are unreachable, daemon down, etc.) we leave rows un-annotated
-  // rather than red-flagging everything.
-  async function loadRelayHealth(opts) {
+  // Decorate each row in #vpn-relays with publish-health from the
+  // in-process aggregator (the vpn LogBuffer over a ~5min window). This
+  // is the surface that survived the 4.x CLI cull — `nvpn netcheck` is
+  // gone (folded into `doctor`), so we no longer probe connect-latency
+  // here; we report whether the daemon's recent publishes landed, which
+  // is the signal that actually predicts "peers can't find me." Quiet on
+  // failure — no data just leaves rows un-annotated.
+  async function loadRelayHealth() {
     const list = document.getElementById('vpn-relays');
     if (!list) return;
     const slots = list.querySelectorAll('.relay-health[data-slot="health"]');
     if (slots.length === 0) return;
-    const force = !!(opts && opts.force);
-    const cached = relayHealthCache;
-    const fresh = cached && (Date.now() - cached.fetchedAt < 60_000);
-    let raw = null;
-    if (!force && fresh) {
-      raw = cached.raw;
-    } else {
-      for (const slot of slots) {
-        slot.className = 'relay-health checking';
-        slot.textContent = 'checking…';
-      }
-      try {
-        // silent:true so a flaky relay set (the very thing this UI
-        // exists to fix) doesn't pop a red toast for every render.
-        const r = await api('/api/nvpn/netcheck', undefined, { silent: true });
-        if (r && r.ok) raw = r.raw || null;
-      } catch { /* daemon down or relays unreachable — silent */ }
-      relayHealthCache = { fetchedAt: Date.now(), raw };
-    }
-    if (!raw) {
-      for (const slot of slots) { slot.className = 'relay-health'; slot.textContent = ''; }
-      return;
-    }
-    const checks = Array.isArray(raw.relayChecks) ? raw.relayChecks : [];
-    const preferred = typeof raw.preferredRelay === 'string'
-      ? normalizeRelayUrl(raw.preferredRelay) : null;
-    const byUrl = new Map();
-    for (const c of checks) {
-      if (c && typeof c.relay === 'string') byUrl.set(normalizeRelayUrl(c.relay), c);
-    }
 
-    // Publish-health from the in-process aggregator. Independent of
-    // netcheck — netcheck measures connect latency; the aggregator
-    // measures whether the daemon's recent publishes were accepted.
-    // Both surfaces useful, and the aggregator's `lastError.text`
-    // makes the "why is this relay broken" cause one hover away.
     const publishHealthByUrl = new Map();
     try {
       const ph = await api('/api/nvpn/relays/health', undefined, { silent: true });
@@ -14683,31 +14671,18 @@ const VpnPanel = (() => {
       const slot = item.querySelector('.relay-health[data-slot="health"]');
       if (!slot) continue;
       const url = normalizeRelayUrl(item.dataset.url);
-      const check = byUrl.get(url);
       slot.className = 'relay-health';
       const pub = publishHealthByUrl.get(url);
-      let parts;
-      if (!check) {
-        parts = ['<span class="dot warn"></span><span>untested</span>'];
-      } else {
-        const latency = typeof check.latencyMs === 'number' ? check.latencyMs : null;
-        const cls = latency === null ? 'warn'
-                  : latency < 200    ? 'ok'
-                  :                    'warn';
-        const star = (preferred && url === preferred)
-          ? '<span class="preferred-star" title="nvpn-preferred relay">★</span>' : '';
-        const text = latency === null ? 'no latency' : `${latency}ms`;
-        parts = [`<span class="dot ${cls}"></span><span>${escapeHtml(text)}</span>${star}`];
-      }
-      // Append publish-health badge when the aggregator has data. We
-      // only show errors — a healthy relay just stays quiet here, since
-      // the latency dot already conveys the positive signal.
+      // Only surface errors — a relay with no recent publish errors stays
+      // quiet rather than implying a positive health probe we no longer
+      // run. lastError.text makes the "why" one hover away.
       if (pub && pub.errCount > 0) {
         const kind = pub.lastError ? pub.lastError.kind : 'other';
         const tip = pub.lastError ? pub.lastError.text : 'recent publish errors';
-        parts.push(`<span class="dot err" title="${escapeHtml(tip)}"></span><span title="${escapeHtml(tip)}">${pub.errCount} publish ${pub.errCount === 1 ? 'err' : 'errs'} (${escapeHtml(kind)})</span>`);
+        slot.innerHTML = `<span class="dot err" title="${escapeHtml(tip)}"></span><span title="${escapeHtml(tip)}">${pub.errCount} publish ${pub.errCount === 1 ? 'err' : 'errs'} (${escapeHtml(kind)})</span>`;
+      } else {
+        slot.textContent = '';
       }
-      slot.innerHTML = parts.join(' ');
     }
   }
 
@@ -15054,21 +15029,13 @@ const VpnPanel = (() => {
           orphaned from a crashed session.
         </p>
         <div class="vpn-meta-diag-actions">
-          <button id="vpn-diag-netcheck"
-                  title="Probe configured Nostr relays + STUN servers. Shows which ones nvpn can reach.">
-            Run netcheck
-          </button>
           <button id="vpn-diag-doctor"
-                  title="Full health probe — relays, NAT, port mapping, peer state. JSON output below.">
+                  title="Full health probe — relays, NAT, port mapping, peer state. JSON output below. (In 4.x this also covers what the old netcheck reported.)">
             Run doctor
           </button>
           <button id="vpn-diag-doctor-bundle"
                   title="Save a doctor report tarball to ~/logs/ for sharing with support / filing an issue">
             Save support bundle
-          </button>
-          <button id="vpn-diag-stats"
-                  title="Local relay-operator counters (only meaningful when relay-for-others is on)">
-            Show stats
           </button>
           <button id="vpn-diag-reload"
                   title="Ask the daemon to re-read config.toml without restarting. Picks up out-of-band edits.">
@@ -15109,8 +15076,6 @@ const VpnPanel = (() => {
         }
       } catch { setDiagOut(`${label} failed (network error)`, 'err'); }
     };
-    const ncBtn = bodyEl.querySelector('#vpn-diag-netcheck');
-    if (ncBtn) ncBtn.addEventListener('click', (e) => { e.preventDefault(); runDiag('netcheck', () => api('/api/nvpn/netcheck')); });
     const docBtn = bodyEl.querySelector('#vpn-diag-doctor');
     if (docBtn) docBtn.addEventListener('click', (e) => {
       e.preventDefault();
@@ -15134,8 +15099,6 @@ const VpnPanel = (() => {
       } catch { setDiagOut('bundle failed (network error)', 'err'); }
       bundleBtn.disabled = false;
     });
-    const statsBtn = bodyEl.querySelector('#vpn-diag-stats');
-    if (statsBtn) statsBtn.addEventListener('click', (e) => { e.preventDefault(); runDiag('stats', () => api('/api/nvpn/stats')); });
     const reloadBtn = bodyEl.querySelector('#vpn-diag-reload');
     if (reloadBtn) reloadBtn.addEventListener('click', async (e) => {
       e.preventDefault(); reloadBtn.disabled = true;
@@ -15614,12 +15577,19 @@ const VpnPanel = (() => {
   async function openImportInviteModal() {
     const body = document.createElement('div');
     body.innerHTML = `
-      <p class="muted">Paste an <code>nvpn://invite/…</code> code from another node to join their network.</p>
+      <p class="muted">Paste an <code>nvpn://invite/…</code> code to join the network it represents. The code must be one an <strong>admin of that network</strong> minted with <strong>Share invite</strong> (or <code class="cmd-inline">nvpn create-invite</code>) — a bare network id or npub won't import here.</p>
       <textarea id="vpn-import-invite-input" placeholder="nvpn://invite/…" spellcheck="false" rows="3"></textarea>
       <div class="vpn-invite-modal-actions">
         <button id="vpn-import-invite-cancel">Cancel</button>
         <button id="vpn-import-invite-submit" class="primary">Import</button>
       </div>
+      <p class="muted" style="margin-top:12px;font-size:12px">
+        Already run a network outside nostr-station? Easiest is
+        <strong>Join by ID</strong> (no invite — just enter its network
+        id). Otherwise: mint an invite on that network and paste it here,
+        or copy this node's npub (Network tab → <em>this node</em>) and add
+        it as a participant there.
+      </p>
     `;
     const modal = openModal({ title: 'Import invite', subtitle: 'Joins the network in your local config', body });
     modal.root.classList.add('vpn-invite-modal');
@@ -15643,6 +15613,51 @@ const VpnPanel = (() => {
       } catch { /* api() already toasted */ }
       submit.disabled = false;
     });
+  }
+
+  // Join a network by id — the no-invite path for "I already run a mesh
+  // elsewhere." Adds a [[networks]] block for the id, makes it active,
+  // and reloads the daemon. The daemon then converges on the admin-signed
+  // roster on its own; we nudge a restart since switching the active
+  // network can need a fuller bounce than a hot reload.
+  async function openJoinByIdModal() {
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <p class="muted">Enter the <strong>network id</strong> of a mesh you already run (find it in that network's nvpn app, or the dashboard's <em>network id</em> row on its host). This adds the network and makes it active — no invite needed. The daemon then syncs the admin-signed roster on its own.</p>
+      <input type="text" id="vpn-join-id-input" placeholder="network id" spellcheck="false" autocomplete="off">
+      <p class="muted" style="font-size:12px;margin-top:8px">Note: this switches your active network. Any network you have configured now stays saved but goes inactive (only one mesh is live at a time).</p>
+      <div class="vpn-invite-modal-actions">
+        <button id="vpn-join-id-cancel">Cancel</button>
+        <button id="vpn-join-id-submit" class="primary">Join network</button>
+      </div>
+    `;
+    const modal = openModal({ title: 'Join by network ID', subtitle: 'Joins + activates the network in your local config', body });
+    modal.root.classList.add('vpn-invite-modal');
+    const input = body.querySelector('#vpn-join-id-input');
+    input?.focus();
+    body.querySelector('#vpn-join-id-cancel').addEventListener('click', (e) => { e.preventDefault(); modal.close(); });
+    const submit = body.querySelector('#vpn-join-id-submit');
+    const doSubmit = async () => {
+      const v = String(input.value || '').trim();
+      if (!v) { input.focus(); return; }
+      submit.disabled = true;
+      try {
+        const r = await api('/api/nvpn/networks/join', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ networkId: v }),
+        });
+        toast('network joined', r?.detail || '', 'ok');
+        modal.close();
+        // Switching the active network often needs more than a hot reload
+        // — surface a restart nudge so the user isn't left wondering why
+        // peers haven't appeared yet.
+        toast('Restart nvpn to connect', 'Use Restart in the status strip above if the joined mesh doesn\'t come up shortly.', 'warn');
+        await refresh();
+      } catch { /* api() already toasted */ }
+      submit.disabled = false;
+    };
+    submit.addEventListener('click', (e) => { e.preventDefault(); void doSubmit(); });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void doSubmit(); } });
   }
 
   return {

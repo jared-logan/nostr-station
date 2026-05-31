@@ -1009,6 +1009,106 @@ export function readNvpnNetworks(): NvpnNetworkSummary[] {
   }));
 }
 
+// ── Join a network by id (no invite) ──────────────────────────────────
+//
+// The native nvpn app lets you join a network you already run elsewhere
+// by entering its network_id directly — no invite round-trip. It does
+// this by adding a `[[networks]]` block for that id and making it the
+// active network; the daemon then converges on the admin-signed roster
+// over FIPS control events. We reproduce that by editing config.toml:
+// prepend a new `[[networks]]` block (active = first block) seeded with
+// the current active network's discovery relays (or the recommended set),
+// then the route layer kicks `nvpn reload`.
+//
+// network_id format is opaque to us (nvpn has used a few shapes across
+// releases), so validation is conservative-but-permissive: printable,
+// no quote / backslash / control chars (which would break the quoted
+// TOML string), bounded length.
+const NETWORK_ID_MAX = 200;
+export function isValidNetworkId(s: unknown): s is string {
+  if (typeof s !== 'string') return false;
+  const v = s.trim();
+  return v.length > 0
+    && v.length <= NETWORK_ID_MAX
+    && !/["\\]/.test(v)
+    // eslint-disable-next-line no-control-regex
+    && !/[\x00-\x1f\x7f]/.test(v);
+}
+
+// Pure: render a minimal `[[networks]]` block for a joined network.
+// participants/admins start empty — the daemon fills the roster from the
+// admin's signed control events once it connects. Exported for tests.
+export function buildNvpnNetworkBlock(networkId: string, relays: string[]): string {
+  const relayLiteral = relays.length
+    ? `[${relays.map(r => `"${r}"`).join(', ')}]`
+    : '[]';
+  return `[[networks]]\nnetwork_id = "${networkId}"\nparticipants = []\nadmins = []\nrelays = ${relayLiteral}\n`;
+}
+
+// Pure: insert `block` as the FIRST [[networks]] block so it becomes the
+// active network. When the config has no networks block yet, append at
+// EOF. Exported for tests.
+export function insertNetworkBlockFirst(toml: string, block: string): string {
+  const m = toml.match(/^[^\S\r\n]*\[\[networks\]\]/m);
+  if (m && m.index !== undefined) {
+    return toml.slice(0, m.index) + block + '\n' + toml.slice(m.index);
+  }
+  const sep = toml.length === 0 ? '' : (toml.endsWith('\n') ? '\n' : '\n\n');
+  return toml + sep + block;
+}
+
+export interface NvpnJoinResult extends ControlResult {
+  networkId?: string;
+  relays?:    string[];
+}
+
+// Join (or activate) a network by id. Idempotent-ish: if the id is
+// already the active network we report no-op; if it's configured but
+// inactive we decline rather than silently reordering blocks (the user
+// can activate it from the native app), since reordering arbitrary TOML
+// is riskier than the additive insert.
+export function joinNvpnNetwork(networkId: string): NvpnJoinResult {
+  const id = String(networkId || '').trim();
+  if (!isValidNetworkId(id)) {
+    return { ok: false, detail: 'invalid network id' };
+  }
+  const configPath = findNvpnConfigPath();
+  if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first' };
+  let toml = '';
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch (e: any) { return { ok: false, detail: `read failed: ${(e?.message || '').slice(0, 160)}` }; }
+
+  const sections = extractAllNetworksSections(toml);
+  const ids = sections.map(s => extractTomlString(s, 'network_id'));
+  if (ids[0] === id) {
+    return { ok: true, detail: 'already the active network', networkId: id };
+  }
+  if (ids.includes(id)) {
+    return {
+      ok: false,
+      detail: 'network already configured but not active — activate it from the native nvpn app, or reorder the [[networks]] blocks in config.toml',
+    };
+  }
+
+  // Seed the joined network's discovery relays from the current active
+  // network so it can actually reach the relays the admin publishes on;
+  // fall back to the curated set when there's no active network yet.
+  const seed = sections[0] ? extractTomlList(sections[0], 'relays') : [];
+  const relays = seed.length > 0 ? seed : [...RECOMMENDED_NVPN_RELAYS];
+  const block = buildNvpnNetworkBlock(id, relays);
+  const updated = insertNetworkBlockFirst(toml, block);
+
+  const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    fs.writeFileSync(tmp, updated, { mode: 0o600 });
+    fs.renameSync(tmp, configPath);
+  } catch (e: any) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}` };
+  }
+  return { ok: true, detail: 'joined network', networkId: id, relays };
+}
+
 // ── Discovery relays (Nostr presence/signaling) ──────────────────────
 //
 // nvpn discovers peers by publishing/subscribing to presence events on a
@@ -1111,28 +1211,117 @@ export interface NvpnRelaysResult extends ControlResult {
   raw?:    Record<string, unknown> | null;
 }
 
-// Replace the entire relay list. Single `nvpn set` invocation; the
-// daemon picks up the new set on the next reload (we follow with
-// `nvpn reload` best-effort, mirroring the alias mutation path).
+// ── Relay mutation (config.toml [[networks]] relays = […]) ─────────────
 //
-// Refuses empty input — clearing the relay set would strand the
-// node (presence won't publish, peers won't be discovered). The
-// caller wanting to reset should remove relays one at a time and
-// stop before the last.
-const RELAY_MUTATION_REMOVED_DETAIL =
-  'relay management was removed from `nvpn set` in 4.x — the native app is the supported surface; '
-  + 'read-only `/api/nvpn/relays` still works against config.toml';
+// nvpn 4.x removed the bulk `nvpn set --relay` CLI verb and never shipped
+// a replacement — upstream's own answer is "edit config.toml or use the
+// native app." The native app edits the file directly, so we do the same:
+// rewrite the `relays = […]` array inside the active (first) `[[networks]]`
+// block, atomically, then the route layer kicks `nvpn reload` so the
+// running daemon re-reads it. Same write discipline as the alias path
+// (temp file + rename, 0o600). Pure rebuild is factored out + exported so
+// the regex surgery is unit-tested without touching disk.
 
-export async function setNvpnRelays(_relays: string[]): Promise<NvpnRelaysResult> {
-  return { ok: false, detail: RELAY_MUTATION_REMOVED_DETAIL };
+// Canonicalize for comparison — config.toml may store "wss://x/" while a
+// removal request arrives as "wss://x" (or vice versa). Used only for
+// equality in remove/dedupe; the stored string is left untouched.
+function normalizeRelayForCompare(s: string): string {
+  return s.replace(/\/+$/, '').toLowerCase();
 }
 
-export async function addNvpnRelay(_url: string): Promise<NvpnRelaysResult> {
-  return { ok: false, detail: RELAY_MUTATION_REMOVED_DETAIL };
+// Rebuild a TOML doc with the active [[networks]] block's relay list
+// replaced by `relays`. Pure for testability. When the first networks
+// block already has a `relays = […]` entry it's replaced in place;
+// otherwise the entry is inserted at the top of that block. Returns the
+// input unchanged when there is no [[networks]] block at all (caller
+// guards that case with a clear error).
+export function rebuildTomlWithRelays(toml: string, relays: string[]): string {
+  const literal = `relays = [${relays.map(r => `"${r}"`).join(', ')}]`;
+  const header = toml.match(/^[^\S\r\n]*\[\[networks\]\][^\S\r\n]*\r?\n?/m);
+  if (!header || header.index === undefined) return toml;
+  const bodyStart = header.index + header[0].length;
+  const after = toml.slice(bodyStart);
+  // Bound the block at the next top-level table heading (or EOF).
+  const nextRel = after.search(/^[^\S\r\n]*\[(?:\[)?/m);
+  const sectionEnd = nextRel >= 0 ? bodyStart + nextRel : toml.length;
+  const before  = toml.slice(0, bodyStart);
+  let   section = toml.slice(bodyStart, sectionEnd);
+  const tail    = toml.slice(sectionEnd);
+  // Match an existing (possibly multi-line) relays array within the block.
+  const relaysRe = /^[^\S\r\n]*relays[^\S\r\n]*=[^\S\r\n]*\[[\s\S]*?\][^\S\r\n]*$/m;
+  if (relaysRe.test(section)) {
+    section = section.replace(relaysRe, literal);
+  } else {
+    section = `${literal}\n${section}`;
+  }
+  return before + section + tail;
 }
 
-export async function removeNvpnRelay(_url: string): Promise<NvpnRelaysResult> {
-  return { ok: false, detail: RELAY_MUTATION_REMOVED_DETAIL };
+// Apply a mutation to the active network's relay list and write it back.
+// Validates the resulting set (every entry must be a well-formed relay
+// URL) and refuses to leave the node with zero relays — an empty set
+// strands presence/discovery. Atomic write mirrors mutateAliases.
+function mutateRelays(
+  mutator: (current: string[]) => string[],
+): NvpnRelaysResult {
+  const configPath = findNvpnConfigPath();
+  if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first' };
+  let toml = '';
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch (e: any) { return { ok: false, detail: `read failed: ${(e?.message || '').slice(0, 160)}` }; }
+  if (!/^[^\S\r\n]*\[\[networks\]\]/m.test(toml)) {
+    return { ok: false, detail: 'no [[networks]] block in config.toml — join or create a network first' };
+  }
+  const current = extractNvpnRelays(toml);
+  // Dedupe the mutator output on the canonical form while keeping the
+  // first-seen original string (preserves the user's preferred casing /
+  // trailing slash).
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const r of mutator([...current])) {
+    if (typeof r !== 'string') continue;
+    const key = normalizeRelayForCompare(r);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(r);
+  }
+  for (const r of next) {
+    if (!isValidRelayUrl(r)) return { ok: false, detail: `invalid relay url: ${String(r).slice(0, 120)}` };
+  }
+  if (next.length === 0) {
+    return { ok: false, detail: 'refusing to clear the relay list — the node needs at least one discovery relay' };
+  }
+  if (JSON.stringify(next) === JSON.stringify(current)) {
+    return { ok: true, detail: 'no change', relays: current };
+  }
+  const updated = rebuildTomlWithRelays(toml, next);
+  const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    fs.writeFileSync(tmp, updated, { mode: 0o600 });
+    fs.renameSync(tmp, configPath);
+  } catch (e: any) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}` };
+  }
+  return { ok: true, detail: 'relays updated', relays: next };
+}
+
+// Replace the entire relay list. Refuses empty input (see mutateRelays).
+export async function setNvpnRelays(relays: string[]): Promise<NvpnRelaysResult> {
+  if (!Array.isArray(relays)) return { ok: false, detail: 'relays must be an array' };
+  return mutateRelays(() => relays.map(r => String(r).trim()).filter(Boolean));
+}
+
+export async function addNvpnRelay(url: string): Promise<NvpnRelaysResult> {
+  const u = String(url || '').trim();
+  if (!isValidRelayUrl(u)) return { ok: false, detail: 'invalid relay url — must be ws:// or wss://' };
+  return mutateRelays(cur => [...cur, u]);
+}
+
+export async function removeNvpnRelay(url: string): Promise<NvpnRelaysResult> {
+  const target = normalizeRelayForCompare(String(url || '').trim());
+  if (!target) return { ok: false, detail: 'no relay url provided' };
+  return mutateRelays(cur => cur.filter(r => normalizeRelayForCompare(r) !== target));
 }
 
 // ── Alias mutation (config.toml [peer_aliases] table) ──────────────
