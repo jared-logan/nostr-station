@@ -1185,6 +1185,42 @@ export async function adoptIdentity(opts: { apply: boolean; daemonPid?: number |
   return { ok: true, detail, plan, applied: true, backedUpTo: backupPath };
 }
 
+// Post-install reconcile: right after `service install` runs `nvpn init` as
+// root (minting a separate root identity at /root/.config/nvpn/), make the
+// freshly-installed daemon run the SINGLE managed identity instead — so the
+// dashboard's config and the daemon's config never diverge in the first
+// place. This is the prevention half of the identity-split fix (the adopt
+// flow is the cure for already-split boxes). Best-effort and quiet: the
+// install succeeded regardless; if there's no managed identity yet, or no
+// split, or sudo isn't warm, we just skip. Runs inside the install flow
+// where the sudo cred cache is already warm from `service install`.
+//
+// `daemonPid` is optional — when null we still resolve via the service
+// unit's ExecStart (the daemon may not be probed yet mid-install).
+// Pure gate: should the post-install reconcile even attempt an adopt?
+// We only reconcile when the dashboard user has a managed identity to
+// reconcile *to* — on a fresh install where the user hasn't paired yet,
+// the root identity is the only one and there's nothing to adopt. Exported
+// for tests.
+export function shouldReconcileAfterInstall(managed: { configPath: string | null; npub: string | null }): boolean {
+  return !!(managed.configPath && managed.npub);
+}
+
+export async function reconcileDaemonIdentityAfterInstall(
+  daemonPid?: number | null,
+): Promise<{ ok: boolean; detail: string; adopted: boolean }> {
+  const managed = readNvpnNodeIdentity();
+  if (!shouldReconcileAfterInstall(managed)) {
+    return { ok: true, detail: 'no managed identity to reconcile (skipped)', adopted: false };
+  }
+  const plan = await planAdoptIdentity(daemonPid);
+  if (!plan.needed) {
+    return { ok: true, detail: plan.blocker || 'identities already aligned', adopted: false };
+  }
+  const r = await adoptIdentity({ apply: true, daemonPid });
+  return { ok: r.ok, detail: r.detail, adopted: r.applied };
+}
+
 export function extractTomlString(section: string, key: string): string | null {
   const re = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, 'm');
   const m = section.match(re);

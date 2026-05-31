@@ -5,6 +5,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: installer reconciles to a single identity (prevention)
+
+The prevention half of the identity-split fix (the adopt flow is the cure
+for already-split boxes; this stops new ones). `nvpn service install` runs
+`nvpn init` as root, minting a separate root identity at
+`/root/.config/nvpn/` — distinct from the dashboard user's managed identity.
+That's the split at the source, and it would also regress a 1.6-adopted box
+on the next install/upgrade.
+
+Now, right after a successful `service install` (and `service install
+--force` on upgrades), the installer runs a best-effort reconcile: when the
+dashboard user already has a managed identity (paired / joined), it makes
+the freshly-installed daemon run **that** identity (via the same backup →
+sudo-write → restart the adopt flow uses), so the daemon's config and the
+dashboard's config never diverge. It's quiet and safe — no managed identity
+yet (fresh install, not paired) → it no-ops; identities already aligned →
+no-op; sudo is warm from the install step. The whole thing only logs to the
+install log; the install result is unchanged.
+
+New: `reconcileDaemonIdentityAfterInstall` + pure gate
+`shouldReconcileAfterInstall` (unit-tested), wired into both install paths
+in `nvpn-installer.ts`. Nothing hardcoded.
+
 ### nostr-vpn: adopt identity — make the daemon run the managed identity
 
 The load-bearing fix for the dashboard/daemon split. Until the daemon runs
