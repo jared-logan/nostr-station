@@ -2451,6 +2451,43 @@ details.dashboard-health .dashboard-health-sub {
 .vpn-meta-diag-out-ok  { color: var(--text); }
 .vpn-meta-diag-out-err { color: color-mix(in srgb, var(--error) 80%, var(--text-dim)); }
 
+/* Connectivity diagnosis (auto-run, top of Diagnostics tab). */
+.vpn-diag-net {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: rgba(0,0,0,0.12);
+}
+.vpn-diag-net-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.vpn-diag-net-refresh {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.vpn-diag-net-refresh:hover:not(:disabled) { color: var(--text); border-color: var(--accent-dim); }
+.vpn-diag-net-refresh:disabled { opacity: 0.5; cursor: progress; }
+.vpn-diag-findings { display: flex; flex-direction: column; gap: 8px; }
+.vpn-diag-finding { display: flex; gap: 8px; align-items: flex-start; }
+.vpn-diag-finding .dot { margin-top: 4px; flex: 0 0 auto; }
+.vpn-diag-finding-summary { font-size: 12px; color: var(--text); }
+.vpn-diag-finding-detail { font-size: 11px; line-height: 1.45; margin-top: 2px; }
+.vpn-diag-finding-error .vpn-diag-finding-summary { color: color-mix(in srgb, var(--error) 85%, var(--text)); }
+.vpn-diag-evidence { margin-top: 10px; }
+.vpn-diag-evidence summary { font-size: 11px; cursor: pointer; }
+.vpn-diag-ev { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.vpn-diag-ev-row { display: flex; gap: 8px; align-items: baseline; font-size: 11px; }
+.vpn-diag-ev-k { color: var(--muted); min-width: 150px; }
+.vpn-diag-ev-v { font-size: 10px; word-break: break-all; }
+
 /* Settings block — grid of label / input pairs. */
 .vpn-meta-set-body {
   padding-top: 6px;

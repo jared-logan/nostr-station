@@ -858,6 +858,40 @@ export function extractAliasMap(sectionBody: string): Record<string, string> {
   return out;
 }
 
+// Generic `[table]` section-body extractor (mirrors
+// extractPeerAliasesSection but parameterized by table name). Returns the
+// body between the header and the next top-level table heading, or '' when
+// the table is absent. Used by the FIPS-endpoint reader below.
+export function extractNamedTableSection(toml: string, table: string): string {
+  const esc = table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const header = toml.match(new RegExp(`^\\s*\\[${esc}\\][^\\S\\r\\n]*\\r?\\n?`, 'm'));
+  if (!header || header.index === undefined) return '';
+  const rest = toml.slice(header.index + header[0].length);
+  const next = rest.search(/^\s*\[(?:\[)?/m);
+  return next >= 0 ? rest.slice(0, next) : rest;
+}
+
+// Statically-configured FIPS relay peers — `[fips_peer_endpoints]` maps an
+// npub to a reachable `host:port`. nvpn relays packets through a reachable
+// FIPS neighbour when direct UDP is blocked, so for a NATed node "are any
+// of these configured?" is the difference between "can bootstrap" and
+// "unreachable." Stored like [peer_aliases] (npub = "host:port"), so we
+// reuse extractAliasMap. Read-only; the dashboard surfaces the count in
+// the connectivity diagnosis.
+export interface NvpnFipsPeerEndpoints {
+  found:      boolean;
+  configPath: string | null;
+  endpoints:  Record<string, string>;
+}
+export function readNvpnFipsPeerEndpoints(): NvpnFipsPeerEndpoints {
+  const configPath = findNvpnConfigPath();
+  if (!configPath) return { found: false, configPath: null, endpoints: {} };
+  let toml = '';
+  try { toml = fs.readFileSync(configPath, 'utf8'); }
+  catch { return { found: false, configPath, endpoints: {} }; }
+  return { found: true, configPath, endpoints: extractAliasMap(extractNamedTableSection(toml, 'fips_peer_endpoints')) };
+}
+
 export function extractTomlList(section: string, key: string): string[] {
   const re = new RegExp(`^\\s*${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'm');
   const m = section.match(re);
