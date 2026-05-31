@@ -5,6 +5,53 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: connectivity diagnosis — turn "0 online" into a reason
+
+A NATed/containerized station node (OrbStack VM, Docker, …) often sits at
+"0 peers online" with no surfaced cause. nvpn fails quietly: a node on the
+wrong network, a node behind NAT with no relay neighbour, and a healthy-but-
+lonely node all read identically. New **Connectivity diagnosis** panel at
+the top of the nostr-vpn → Diagnostics tab names the actual reason. It's
+read-only (one status probe + config.toml reads, no external calls), so it
+auto-runs on every visit.
+
+Signals, all computed from data we already have:
+
+- **Wrong-network detection (the headline).** Per nvpn's protocol doc — and
+  verified against four live nodes — a node's mesh IP is deterministic:
+  `10.44.(SHA256(network_id + "\n" + pubkey_hex)[0]%254+1).(…[1]%254+1)`, no
+  admin IPAM. So if the live tunnel IP doesn't match the IP computed for the
+  *active* network, the node is almost always running a different network
+  than its config claims (the "separate network instead of joining" failure,
+  which shows up as one npub holding three different IPs across config /
+  interface / roster). We compare the daemon-reported network id against the
+  active one, and compute the expected IP for every configured network to
+  report which one the live IP actually belongs to.
+- **Forked / non-canonical network id.** The daemon hashes the stored id
+  *literally*, so an id that picked up a separator (`abcd-1234` vs the
+  canonical `abcd1234`) derives the wrong IP and never converges — and two
+  records that canonicalize equal are a forked duplicate of one mesh. The
+  diagnosis canonicalizes before computing the expected IP, flags the
+  non-canonical id (showing the correct one + IP), and flags forked
+  duplicates — the actual root cause behind the "three different IPs" symptom.
+- **Behind-NAT-with-no-relay.** nvpn relays through a reachable FIPS
+  neighbour when direct UDP is blocked — but only if one exists. A node
+  advertising a private endpoint (`192.168.x`) with no `[fips_peer_endpoints]`
+  configured and 0 peers online is flagged with the remediation: point at a
+  reachable mesh node as a relay, or run one with a public/forwarded
+  endpoint. (nostr-station can surface this and make adding a relay peer
+  easy; it can't *be* the public relay — that stays an upstream/infra
+  concern.)
+- **Solo roster.** A roster with only your node usually means a join didn't
+  adopt the admin's network — points at Join-by-ID with the exact id.
+
+Each finding carries a level + a "what to do" line; an **evidence**
+disclosure shows the underlying values (active vs daemon network, expected
+vs live IP, advertised endpoint, roster/online counts, configured relay
+peers). New pure helpers `computeNvpnTunnelIp` / `diagnoseNvpnNetwork`
+(unit-tested), config reader `readNvpnFipsPeerEndpoints`, and route
+`GET /api/nvpn/network-diagnosis`.
+
 ### nostr-vpn panel: copyable npub, join-by-ID, in-dashboard relay editing
 
 UX pass on the nostr-vpn panel, driven by three reported pain points: the

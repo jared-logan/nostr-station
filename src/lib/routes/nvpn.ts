@@ -43,10 +43,13 @@ import {
   setNvpnSettings, statsNvpn,
   setNvpnAlias, removeNvpnAlias,
   readNvpnRelays, addNvpnRelay, removeNvpnRelay, setNvpnRelays,
+  readNvpnFipsPeerEndpoints,
   RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
+import { diagnoseNvpnNetwork } from '../nvpn-diagnostics.js';
+import { npubToHex } from '../identity.js';
 import { nvpnRelayHealth } from '../nvpn-relay-health.js';
-import { detectContainer, natWarningFor } from '../container-detect.js';
+import { detectContainer, natWarningFor, isPrivateEndpoint } from '../container-detect.js';
 import { detectSplitBrain, stopUserModeDaemon } from '../nvpn-split-brain.js';
 import { listJoinRequests, approveJoinRequest, denyJoinRequest } from '../nvpn-join-requests.js';
 import { readBody } from './_shared.js';
@@ -150,6 +153,99 @@ export async function handleNvpn(
     const container = detectContainer();
     const warning = natWarningFor({ container, publicEndpoint });
     await writeJson(res, 200, { container, publicEndpoint, warning });
+    return true;
+  }
+
+  // Connectivity diagnosis — explains *why* a node is offline. Pure read
+  // (one status probe + config.toml reads), so it's cheap to call on every
+  // panel refresh. Assembles the signals the analyzer needs: active vs
+  // daemon-reported network id, our pubkey (for the deterministic mesh-IP
+  // check), configured networks, live tunnel IP, roster / online counts,
+  // advertised endpoint reachability, and configured FIPS relay peers.
+  if (url === '/api/nvpn/network-diagnosis' && method === 'GET') {
+    const status = await probeNvpnStatus();
+    const raw = status.raw as Record<string, any> | null;
+
+    const roster   = readNvpnRoster();
+    const networks = readNvpnNetworks();
+    const fips     = readNvpnFipsPeerEndpoints();
+    const identity = readNvpnNodeIdentity();
+    const container = detectContainer();
+
+    // Decode our npub → hex for the IPAM hash. Tolerate a hex-shaped or
+    // missing value rather than throwing.
+    let pubkeyHex: string | null = null;
+    if (identity.npub) {
+      if (/^[0-9a-f]{64}$/i.test(identity.npub)) pubkeyHex = identity.npub.toLowerCase();
+      else { try { pubkeyHex = npubToHex(identity.npub).toLowerCase(); } catch { pubkeyHex = null; } }
+    }
+
+    // Advertised endpoint — raw.endpoint first (what this node tells peers
+    // to dial), then the STUN-discovered variants.
+    const endpoint =
+      (raw && typeof raw.endpoint === 'string' && raw.endpoint) ||
+      (raw && typeof raw.public_endpoint === 'string' && raw.public_endpoint) ||
+      (raw && typeof raw.external_endpoint === 'string' && raw.external_endpoint) ||
+      (raw && raw.nat && typeof raw.nat.public_endpoint === 'string' && raw.nat.public_endpoint) ||
+      null;
+
+    // Online peer count from live status. peers may be an array or a
+    // pubkey-keyed object; count entries flagged connected/online/up.
+    let onlineCount = 0;
+    const peers = raw?.peers;
+    const peerList = Array.isArray(peers) ? peers : (peers && typeof peers === 'object' ? Object.values(peers) : []);
+    for (const p of peerList as any[]) {
+      if (p && typeof p === 'object' && (p.connected ?? p.online ?? p.up)) onlineCount++;
+    }
+
+    // Outbound join request age, when the daemon surfaces one. Field name
+    // varies / may be absent — extract defensively and only when we can
+    // derive an age, so a missing field just means "no pending-join finding."
+    let pendingJoinAgeSecs: number | null = null;
+    const jr = (raw && (raw.outbound_join_request || raw.join_request || raw.pending_join)) as any;
+    if (jr && typeof jr === 'object') {
+      if (typeof jr.age_secs === 'number') pendingJoinAgeSecs = jr.age_secs;
+      else {
+        const tsStr = jr.created_at || jr.ts || jr.requested_at;
+        const tsMs = typeof tsStr === 'string' ? Date.parse(tsStr) : (typeof tsStr === 'number' ? tsStr * 1000 : NaN);
+        if (Number.isFinite(tsMs)) pendingJoinAgeSecs = Math.max(0, Math.round((Date.now() - tsMs) / 1000));
+      }
+    }
+
+    const diagnosis = diagnoseNvpnNetwork({
+      running:                status.running,
+      activeNetworkId:        roster.networkId,
+      daemonNetworkId:        raw && typeof raw.network_id === 'string' ? raw.network_id : null,
+      pubkeyHex,
+      configuredNetworks:     networks.map(n => ({ networkId: n.networkId, active: n.active })),
+      liveTunnelIp:           status.tunnelIp,
+      rosterParticipantCount: roster.participants.length,
+      rosterAdminCount:       roster.admins.length,
+      onlineCount,
+      endpoint,
+      endpointIsPrivate:      isPrivateEndpoint(endpoint),
+      fipsPeerEndpointCount:  Object.keys(fips.endpoints).length,
+      pendingJoinAgeSecs,
+      containerKind:          container ? container.kind : null,
+    });
+    await writeJson(res, 200, {
+      ...diagnosis,
+      // Echo the raw signals so the UI can show the underlying values
+      // alongside the findings (active vs daemon network, expected vs live
+      // IP) without a second round-trip.
+      context: {
+        activeNetworkId: roster.networkId,
+        daemonNetworkId: raw && typeof raw.network_id === 'string' ? raw.network_id : null,
+        liveTunnelIp:    status.tunnelIp,
+        endpoint,
+        endpointIsPrivate: isPrivateEndpoint(endpoint),
+        rosterParticipantCount: roster.participants.length,
+        rosterAdminCount: roster.admins.length,
+        onlineCount,
+        fipsPeerEndpointCount: Object.keys(fips.endpoints).length,
+        running: status.running,
+      },
+    });
     return true;
   }
 
