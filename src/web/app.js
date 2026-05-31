@@ -5026,7 +5026,7 @@ function projectCapBadges(caps, remotes) {
 const ENV_CHIP_TOOLTIPS = {
   dev:    'dev — spawned dev servers, deploy, and exec see NOSTR_STATION_RELAY pointing at the local in-process relay. Safe to publish test events. Client panel is independent of this.',
   prod:   'prod — spawned dev servers see public relays via NOSTR_STATION_RELAY. Promote publishes to real Nostr. Client panel is independent of this.',
-  public: 'Public Nostr — this panel always reads + posts via your App Relays ∪ Your Relays (Config → Client Relays). Never bound to any project\'s dev/prod active-env.',
+  public: 'Public Nostr — this panel always reads + posts via your App Relays ∪ Your Relays (Config → Station Relays). Never bound to any project\'s dev/prod active-env.',
 };
 function projectEnvBadge(project) {
   const active = project.environment?.active;
@@ -16227,14 +16227,14 @@ const ConfigPanel = (() => {
           ${row('Config file', rc.configPath || '—')}
           <div class="callout" style="margin-top:10px">
             This section configures the <b>private, local Nostr relay</b> running inside nostr-station.
-            For the public relays the /client panel reads from, see <b>Client Relays</b> below.
+            For the public relays nostr-station uses for its own Nostr lookups, see <b>Station Relays</b> below.
           </div>
         </div>
       </details>
 
       <details class="config-section cfg-collapsible" id="cfg-client-relays-section">
         <summary>
-          <h3>Client Relays</h3>
+          <h3>Station Relays</h3>
           <span class="cfg-summary-meta">
             ${(ident.appRelaysEnabled !== false ? (ident.appRelays?.length || 3) : 0) + (ident.readRelays?.length || 0)} effective
           </span>
@@ -16336,7 +16336,7 @@ const ConfigPanel = (() => {
            above: this governs where THIS station publishes its OWN
            nsites — the Blossom servers it uploads file blobs to and the
            relays it publishes the kind:35128 manifest to. App/Your model
-           mirrors Client Relays. Body filled lazily by JS. -->
+           mirrors Station Relays. Body filled lazily by JS. -->
       <details class="config-section cfg-collapsible" id="cfg-deploy-section">
         <summary>
           <h3>nsite deploy</h3>
@@ -16695,7 +16695,7 @@ const ConfigPanel = (() => {
       }
     }
 
-    // Read-relays list ("Your Relays" — under the Client Relays section)
+    // Read-relays list ("Your Relays" — under the Station Relays section)
     $$('#read-relays .rm').forEach(btn => {
       btn.addEventListener('click', (e) => {
         const url = e.target.closest('.item').dataset.url;
@@ -17517,7 +17517,7 @@ const ConfigPanel = (() => {
 
   // ── nsite deploy section ───────────────────────────────────────────────
   // Publish-side targets, separate from "nsite browsing" above. Mirrors the
-  // Client Relays "App Relays / Your Relays" model: an app-default list with
+  // Station Relays "App Relays / Your Relays" model: an app-default list with
   // an on/off toggle, plus the user's own editable list. Two pairs: Blossom
   // upload servers and manifest-publish relays. The "Sync from Nostr" action
   // on Blossom pulls the user's own kind:10063 (BUD-03) list and merges it.

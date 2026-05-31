@@ -85,8 +85,8 @@ const REACTION_LIKE_CONTENT = '+';
 
 // NIP-65 outbox-discovery bootstrap set — relays that aggregate kind-10002
 // events across the network. The sync-relays endpoint queries these IN
-// ADDITION to the user's configured Client Relays so a fresh user whose
-// only Client Relays are different from where their kind-10002 actually
+// ADDITION to the user's configured Station Relays so a fresh user whose
+// only Station Relays are different from where their kind-10002 actually
 // lives can still bootstrap. purplepag.es is the canonical profile +
 // relay-list indexer; the rest are wide general-purpose indexers + Ditto's
 // own relay (where many @user@happytavern.co / Ditto-instance users
@@ -430,9 +430,9 @@ export async function handleClient(
 
   // ── GET /api/client/relay-config ─────────────────────────────────────────
   //
-  // Composite view of the relays the /client panel uses. Single endpoint
-  // for the dashboard's status indicator + the Config → Client Relays
-  // section. Includes:
+  // Composite view of the relays nostr-station uses for its own Nostr
+  // lookups. Single endpoint for the dashboard's status indicator + the
+  // Config → Station Relays section. Includes:
   //   appRelays         — DEFAULT_READ_RELAYS (fixed, ships with nostr-station)
   //   appRelaysEnabled  — toggle state (true = App Relays merged into effective)
   //   yourRelays        — identity.readRelays (user's editable list)
@@ -474,7 +474,7 @@ export async function handleClient(
     if (!me) return json(res, 400, { error: 'no station owner configured' });
     // Union of the user's configured relays + the NIP-65 bootstrap set.
     // The bootstrap relays widen the search so a fresh user whose
-    // configured Client Relays don't happen to mirror their kind-10002
+    // configured Station Relays don't happen to mirror their kind-10002
     // can still discover their published relay list. Capped at 12 to
     // bound fan-out (queryRelays opens one WebSocket per entry).
     const configured = readRelays();

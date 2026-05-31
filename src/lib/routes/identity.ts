@@ -463,7 +463,7 @@ export async function handleIdentity(
 
   // ── App Relays toggle ─────────────────────────────────────────────────
   //
-  // Flips identity.appRelaysEnabled. Used by the Config → Client Relays
+  // Flips identity.appRelaysEnabled. Used by the Config → Station Relays
   // toggle. Returns the new state so the client doesn't have to round-trip
   // through /api/identity/config to re-render. No need to bust the profile
   // cache — App Relays affect /client reads but not the profile-lookup

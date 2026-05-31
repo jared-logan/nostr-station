@@ -43,7 +43,7 @@ export interface Identity {
   // — relay.damus.io / relay.nostr.band / nos.lol) in /client read paths
   // alongside the user's "Your Relays" list. Default true so a brand-new
   // user gets a working feed without configuring anything. Toggled from
-  // Config → Client Relays. Mirrors Ditto's "App Relays" enable switch.
+  // Config → Station Relays. Mirrors Ditto's "App Relays" enable switch.
   appRelaysEnabled?: boolean;
   // Persisted on/off state for the in-process Blossom server. The user
   // toggles this via Config → Blossom or the Dashboard card; on next
