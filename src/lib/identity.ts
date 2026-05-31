@@ -298,6 +298,27 @@ export function removeReadRelay(url: string): { ok: boolean; relays: string[] } 
   return { ok: true, relays: ident.readRelays };
 }
 
+// Replace the entire readRelays list in one write. Used by "sync from Nostr"
+// to mirror the owner's NIP-65 (kind 10002) list exactly. Validates and
+// dedupes (case-insensitive, first-seen casing wins) so the persisted list
+// stays clean regardless of what the caller passes.
+export function setReadRelays(urls: string[]): { ok: true; relays: string[] } {
+  const ident = readIdentity();
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const raw of urls) {
+    const url = String(raw || '').trim();
+    if (!isValidRelayUrl(url)) continue;
+    const key = url.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(url);
+  }
+  ident.readRelays = next;
+  writeIdentity(ident);
+  return { ok: true, relays: next };
+}
+
 // ── Grasp server list helpers ─────────────────────────────────────────────
 
 // Returns the user's configured grasp servers, falling back to

@@ -16750,8 +16750,20 @@ const ConfigPanel = (() => {
             toast('Nothing to sync', r.empty, 'warn');
             return;
           }
-          const n = Array.isArray(r.added) ? r.added.length : 0;
-          toast('Synced from Nostr', n === 0 ? 'No new relays — your list is up to date' : `Added ${n} relay${n === 1 ? '' : 's'}`, 'ok');
+          // Sync mirrors Your Relays to your NIP-65 list — report both
+          // additions and removals so the toast matches what changed.
+          const nAdd = Array.isArray(r.added) ? r.added.length : 0;
+          const nRem = Array.isArray(r.removed) ? r.removed.length : 0;
+          let msg;
+          if (nAdd === 0 && nRem === 0) {
+            msg = 'Already in sync with your Nostr relay list';
+          } else {
+            const parts = [];
+            if (nAdd) parts.push(`+${nAdd} added`);
+            if (nRem) parts.push(`−${nRem} removed`);
+            msg = `Mirrored your Nostr list (${parts.join(', ')})`;
+          }
+          toast('Synced from Nostr', msg, 'ok');
           apiInvalidate('/api/identity/config');
           document.dispatchEvent(new CustomEvent('api-config-changed'));
           load();
@@ -19300,6 +19312,11 @@ const ConfigPanel = (() => {
       });
       if (!r.ok) throw new Error(r.error || 'add failed');
       toast('Relay added', url, 'ok');
+      // Bust the cached /api/identity/config (30s TTL) before reloading —
+      // otherwise load() re-renders from stale data and the new relay
+      // never shows. Match the App Relays toggle / sync handlers.
+      apiInvalidate('/api/identity/config');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
       load();
     } catch (e) { toast('Add failed', e.message, 'err'); }
   }
@@ -19312,6 +19329,8 @@ const ConfigPanel = (() => {
         body: JSON.stringify({ url }),
       });
       toast('Relay removed', url, 'ok');
+      apiInvalidate('/api/identity/config');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
   }
@@ -19330,6 +19349,9 @@ const ConfigPanel = (() => {
       });
       if (!r.ok) throw new Error(r.error || 'add failed');
       toast('Grasp server added', url, 'ok');
+      // Same stale-cache pitfall as read-relays: invalidate before reload.
+      apiInvalidate('/api/identity/config');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
       load();
     } catch (e) { toast('Add failed', e.message, 'err'); }
   }
@@ -19342,6 +19364,8 @@ const ConfigPanel = (() => {
         body: JSON.stringify({ url }),
       });
       toast('Grasp server removed', url, 'ok');
+      apiInvalidate('/api/identity/config');
+      document.dispatchEvent(new CustomEvent('api-config-changed'));
       load();
     } catch (e) { toast('Remove failed', e.message, 'err'); }
   }
