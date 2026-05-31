@@ -18,8 +18,14 @@ happening, and fix configs that already have it.
   finds a forked duplicate or a non-canonical active id, a repair action
   collapses each forked group to a single canonical survivor (keeping the
   most-populated roster + unioned relays), makes the active network's
-  survivor first, and re-pins a stale explicit `tunnel_ip` override to the
-  deterministic value.
+  survivor first, and re-pins a stale `tunnel_ip` to the deterministic
+  value. The re-pin targets `[node].tunnel_ip` (verified on hardware to be
+  where nvpn persists the node IP — the `[[networks]]` blocks carry only
+  `network_id`), rewriting only that line and never the `[node]`
+  private-key fields. It's config hygiene: the daemon re-derives the live
+  interface IP from the canonical id on Restart, so the de-fork + Restart
+  is the load-bearing fix; the re-pin just stops config.toml showing a
+  wrong IP.
 
   It is **preview-first**: the dry-run returns the exact plan (blocks to
   remove, id rewrite, old→new IP) with no write; only an explicit confirm

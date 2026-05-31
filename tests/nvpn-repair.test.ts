@@ -125,6 +125,61 @@ relays = []
   assert.equal(p.ipRepin, null);
 });
 
+test('planNvpnRepair: re-pins stale [node].tunnel_ip and never touches private_key', () => {
+  // Real configs store the node IP in [node], not the [[networks]] block.
+  const toml = `[[networks]]
+network_id = "aabbccdd"
+participants = ["x"]
+relays = []
+
+[node]
+private_key = "SECRET_DO_NOT_TOUCH"
+tunnel_ip = "10.44.9.9"
+listen_port = 51820
+`;
+  const p = planNvpnRepair(toml, HEX);
+  assert.equal(p.needed, true);
+  assert.deepEqual(p.ipRepin, { from: '10.44.9.9', to: CORRECT_IP });
+  assert.match(p.newToml!, new RegExp(`tunnel_ip = "${CORRECT_IP.replace(/\./g, '\\.')}"`));
+  assert.equal(p.newToml!.includes('10.44.9.9'), false);
+  // The private key and other [node] fields must be byte-identical.
+  assert.match(p.newToml!, /private_key = "SECRET_DO_NOT_TOUCH"/);
+  assert.match(p.newToml!, /listen_port = 51820/);
+});
+
+test('planNvpnRepair: correct [node].tunnel_ip is left alone', () => {
+  const toml = `[[networks]]
+network_id = "aabbccdd"
+participants = ["x"]
+relays = []
+
+[node]
+tunnel_ip = "${CORRECT_IP}"
+`;
+  assert.equal(planNvpnRepair(toml, HEX).needed, false);
+});
+
+test('planNvpnRepair: de-fork + stale [node] IP repinned together', () => {
+  // The real-world shape: forked network + the stale IP in [node].
+  const toml = `[[networks]]
+network_id = "aabbccdd"
+participants = ["x", "y"]
+
+[[networks]]
+network_id = "aabb-ccdd"
+participants = []
+
+[node]
+tunnel_ip = "10.44.35.5"
+`;
+  const p = planNvpnRepair(toml, HEX);
+  assert.equal(p.needed, true);
+  assert.deepEqual(p.removedNetworkIds, ['aabb-ccdd']);
+  assert.deepEqual(p.ipRepin, { from: '10.44.35.5', to: CORRECT_IP });
+  assert.deepEqual(networkIds(p.newToml!), ['aabbccdd']);
+  assert.match(p.newToml!, new RegExp(`tunnel_ip = "${CORRECT_IP.replace(/\./g, '\\.')}"`));
+});
+
 test('planNvpnRepair: combined fork + non-canonical + re-pin in one plan', () => {
   const toml = `[[networks]]
 network_id = "aabb-ccdd"

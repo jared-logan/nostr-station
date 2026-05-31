@@ -1205,6 +1205,31 @@ function rewriteBlockTunnelIp(text: string, ip: string): string {
   return text.replace(/^([^\S\r\n]*tunnel_ip[^\S\r\n]*=[^\S\r\n]*")[^"]*(")/m, `$1${ip}$2`);
 }
 
+// Re-pin a stale `tunnel_ip` inside the `[node]` table — verified on real
+// hardware to be where nvpn persists the node's mesh IP (the [[networks]]
+// blocks carry only network_id). This is config HYGIENE: the daemon
+// re-derives the live interface IP from the canonical network_id on
+// restart and ignores this stored value, so fixing it doesn't move the
+// interface — it just stops config.toml from showing a wrong IP. Scoped to
+// the [node] section and rewrites ONLY the tunnel_ip line; the section's
+// private_key and every other field are left byte-identical. Returns the
+// rewritten toml + the stale value found (null when absent / already
+// correct). Pure.
+function repinNodeTunnelIp(toml: string, correctIp: string): { toml: string; from: string | null } {
+  const header = toml.match(/^[^\S\r\n]*\[node\][^\S\r\n]*\r?\n/m);
+  if (!header || header.index === undefined) return { toml, from: null };
+  const bodyStart = header.index + header[0].length;
+  const after = toml.slice(bodyStart);
+  const nextRel = after.search(/^[^\S\r\n]*\[(?:\[)?/m);
+  const sectionEnd = nextRel >= 0 ? bodyStart + nextRel : toml.length;
+  const section = toml.slice(bodyStart, sectionEnd);
+  const m = section.match(/^[^\S\r\n]*tunnel_ip[^\S\r\n]*=[^\S\r\n]*"([^"]*)"/m);
+  if (!m) return { toml, from: null };
+  if (m[1] === correctIp) return { toml, from: null };
+  const newSection = section.replace(/^([^\S\r\n]*tunnel_ip[^\S\r\n]*=[^\S\r\n]*")[^"]*(")/m, `$1${correctIp}$2`);
+  return { toml: toml.slice(0, bodyStart) + newSection + toml.slice(sectionEnd), from: m[1] };
+}
+
 export interface NvpnRepairPlan {
   needed:            boolean;
   activeNetworkId:   string | null;
@@ -1262,15 +1287,16 @@ export function planNvpnRepair(toml: string, pubkeyHex: string | null): NvpnRepa
     renamedActiveId = { from: activeSurvivor.id!, to: canonActive };
     activeText = rewriteBlockNetworkId(activeText, canonActive);
   }
-  // Re-pin only a stale *explicit* tunnel_ip override (don't invent one —
-  // the daemon re-derives the IP from the canonical id on restart).
-  let ipRepin: { from: string; to: string } | null = null;
-  if (pubkeyHex) {
-    const correct = computeNvpnTunnelIp(canonActive, pubkeyHex);
-    const existing = blockTunnelIp(activeText);
-    if (correct && existing && existing !== correct) {
-      ipRepin = { from: existing, to: correct };
-      activeText = rewriteBlockTunnelIp(activeText, correct);
+  // The correct deterministic IP for this node on the (canonical) active
+  // network — used to re-pin any stale stored value.
+  const correctIp = pubkeyHex ? computeNvpnTunnelIp(canonActive, pubkeyHex) : null;
+  // Rare: a stale tunnel_ip override *inside* the active [[networks]] block.
+  let ipRepin: { from: string; to: string; where: string } | null = null;
+  if (correctIp) {
+    const inBlock = blockTunnelIp(activeText);
+    if (inBlock && inBlock !== correctIp) {
+      ipRepin = { from: inBlock, to: correctIp, where: 'active network block' };
+      activeText = rewriteBlockTunnelIp(activeText, correctIp);
     }
   }
   orderedSurvivors.push(activeText);
@@ -1288,27 +1314,49 @@ export function planNvpnRepair(toml: string, pubkeyHex: string | null): NvpnRepa
   }
 
   const needsReorder = activeSurvivor !== active;
-  const needed = removedIds.length > 0 || renamedActiveId !== null || ipRepin !== null || needsReorder;
-  if (!needed) return { ...empty, activeNetworkId: active.id, canonicalActiveId: canonActive };
+  // De-fork changes that require rebuilding the networks section.
+  const rebuildNeeded = removedIds.length > 0 || renamedActiveId !== null || needsReorder || ipRepin !== null;
 
-  // Strip all network blocks, reinsert the ordered survivors where the
-  // first one began (keeps non-network tables intact).
-  const firstStart = blocks[0].start;
-  let stripped = '';
-  let cursor = 0;
-  for (const b of blocks) { stripped += toml.slice(cursor, b.start); cursor = b.end; }
-  stripped += toml.slice(cursor);
-  const newToml = stripped.slice(0, firstStart) + orderedSurvivors.join('') + stripped.slice(firstStart);
+  // Assemble the de-forked config (or start from the original when the only
+  // change is the [node] IP hygiene fix below).
+  let result = toml;
+  if (rebuildNeeded) {
+    const firstStart = blocks[0].start;
+    let stripped = '';
+    let cursor = 0;
+    for (const b of blocks) { stripped += toml.slice(cursor, b.start); cursor = b.end; }
+    stripped += toml.slice(cursor);
+    result = stripped.slice(0, firstStart) + orderedSurvivors.join('') + stripped.slice(firstStart);
+  }
+
+  // Hygiene: re-pin the stale `[node].tunnel_ip` (where nvpn actually
+  // stores it). Cosmetic — the Restart re-derive is what moves the
+  // interface — but it stops config.toml from showing a wrong IP.
+  if (correctIp) {
+    const node = repinNodeTunnelIp(result, correctIp);
+    if (node.from !== null) {
+      result = node.toml;
+      // Prefer reporting the [node] location since that's the real one.
+      ipRepin = { from: node.from, to: correctIp, where: '[node].tunnel_ip' };
+    }
+  }
+
+  const needed = rebuildNeeded || ipRepin !== null;
+  if (!needed) return { ...empty, activeNetworkId: active.id, canonicalActiveId: canonActive };
 
   const summary: string[] = [];
   if (removedIds.length) summary.push(`Remove ${removedIds.length} forked/duplicate network block${removedIds.length === 1 ? '' : 's'} (${removedIds.join(', ')})`);
   if (renamedActiveId) summary.push(`Rewrite active network id "${renamedActiveId.from}" → canonical "${renamedActiveId.to}"`);
   if (needsReorder) summary.push(`Make "${canonActive}" the active network`);
-  if (ipRepin) summary.push(`Re-pin stale tunnel IP ${ipRepin.from} → ${ipRepin.to}`);
+  if (ipRepin) summary.push(`Re-pin stale ${ipRepin.where} ${ipRepin.from} → ${ipRepin.to} (config hygiene; the Restart re-derives the live interface)`);
 
   return {
     needed: true, activeNetworkId: active.id, canonicalActiveId: canonActive,
-    removedNetworkIds: removedIds, renamedActiveId, ipRepin, summary, newToml,
+    removedNetworkIds: removedIds,
+    renamedActiveId,
+    ipRepin: ipRepin ? { from: ipRepin.from, to: ipRepin.to } : null,
+    summary,
+    newToml: result,
   };
 }
 
