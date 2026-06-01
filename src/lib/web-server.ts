@@ -106,7 +106,10 @@ import { handleTerminal, mountTerminalWebSocket } from './routes/terminal.js';
 import { mountRelayProxyWebSocket } from './routes/relay-proxy.js';
 import { handleNvpn } from './routes/nvpn.js';
 import { handleCommunities } from './routes/communities.js';
-import { attachDashboardBindingFilter } from './dashboard-binding.js';
+import {
+  attachDashboardBindingFilter, isLoopbackAddress, allowDashboardConnection,
+  trustedDevicePubkeys, meshHostMatches, meshUrlMatches,
+} from './dashboard-binding.js';
 import { readMobileAccessConfig, writeMobileAccessConfig, dashboardBindHost } from './mobile-access.js';
 import {
   readCommunitiesFeatureConfig, writeCommunitiesFeatureConfig, isCommunitiesUsable,
@@ -599,6 +602,29 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // of them.
       const hostHeader = String(req.headers['host'] || '').toLowerCase();
 
+      // ── Mesh-trust: is this request from a trusted mesh peer? ──────────
+      // The dashboard binds to 0.0.0.0 in Mobile Access mode; the
+      // connection-time pubkey filter (dashboard-binding.ts) destroys
+      // untrusted non-loopback sockets. But the async filter can race the
+      // HTTP parse, so we make the HTTP layer AUTHORITATIVE here: re-verify
+      // the remote IP maps to a trusted device pubkey (same verdict logic),
+      // and only then relax the loopback Host/Origin gates — pinned to the
+      // ACTUAL local interface address so a trusted peer still can't inject
+      // a foreign Host (rebinding) or cross-origin Origin (CSRF). Fail
+      // closed: any error → not trusted → loopback-only (view-only).
+      const remoteAddr = req.socket.remoteAddress;
+      const localAddr  = req.socket.localAddress;
+      let meshTrusted = false;
+      if (remoteAddr && !isLoopbackAddress(remoteAddr)) {
+        try {
+          const peers = ((await probeNvpnStatus()).raw as Record<string, unknown> | null)?.peers ?? null;
+          meshTrusted = allowDashboardConnection({
+            remoteAddress: remoteAddr, nvpnPeers: peers, trusted: trustedDevicePubkeys(),
+          }).ok;
+        } catch { meshTrusted = false; }
+      }
+      const meshHostOk = meshTrusted && meshHostMatches(hostHeader, localAddr, port);
+
       // ── H1a: Nsite per-origin subdomain dispatch ──────────────────────
       // *.nsite.localhost subdomains resolve to 127.0.0.1 client-side
       // (RFC 6761) and reach our loopback socket the same as `localhost`,
@@ -631,7 +657,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
         return;
       }
 
-      if (!allowedHosts.has(hostHeader)) {
+      if (!allowedHosts.has(hostHeader) && !meshHostOk) {
         res.writeHead(400, { 'Content-Type': 'text/plain' });
         res.end('bad host');
         return;
@@ -651,7 +677,12 @@ export async function startWebServer(port: number): Promise<http.Server> {
       if (isMutation) {
         const origin  = typeof req.headers.origin  === 'string' ? req.headers.origin  : '';
         const referer = typeof req.headers.referer === 'string' ? req.headers.referer : '';
-        const ok = isLoopbackUrl(origin) || isLoopbackUrl(referer);
+        // Loopback OR a trusted-mesh same-origin (Origin/Referer pinned to
+        // the local interface). A cross-origin page (e.g. DNS-rebinding from
+        // evil.com) fails this even on a trusted connection — its Origin
+        // won't equal the tunnel-IP interface.
+        const ok = isLoopbackUrl(origin) || isLoopbackUrl(referer)
+                || (meshTrusted && (meshUrlMatches(origin, localAddr, port) || meshUrlMatches(referer, localAddr, port)));
         if (!ok) {
           res.writeHead(403, { 'Content-Type': 'text/plain' });
           res.end('bad origin');
@@ -668,7 +699,8 @@ export async function startWebServer(port: number): Promise<http.Server> {
       if (method === 'GET' && /[?&]token=[a-f0-9]{64}(?:&|$)/.test(req.url || '')) {
         const origin  = typeof req.headers.origin  === 'string' ? req.headers.origin  : '';
         const referer = typeof req.headers.referer === 'string' ? req.headers.referer : '';
-        const ok = isLoopbackUrl(origin) || isLoopbackUrl(referer);
+        const ok = isLoopbackUrl(origin) || isLoopbackUrl(referer)
+                || (meshTrusted && (meshUrlMatches(origin, localAddr, port) || meshUrlMatches(referer, localAddr, port)));
         if (!ok) {
           res.writeHead(403, { 'Content-Type': 'text/plain' });
           res.end('bad origin');
