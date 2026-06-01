@@ -22,6 +22,7 @@
 // dashboard event loop.
 
 import { execa } from 'execa';
+import { spawnSync } from 'node:child_process';
 import dgram from 'dgram';
 import { EventEmitter } from 'events';
 import fs from 'fs';
@@ -893,6 +894,25 @@ export async function readConfigText(configPath: string): Promise<string | null>
   }
 }
 
+// Synchronous sibling of readConfigText, for the many sync read helpers
+// (readNvpnRoster/Networks/Relays/Identity/Fips/repair) that aren't worth
+// turning async. Same discipline: direct fs first, `sudo -n cat` fallback
+// (via spawnSync) when root-owned/unreadable; null when we still can't read
+// (e.g. empty sudo cred cache) so callers degrade rather than throw. The
+// returned body may carry secret key material — callers must extract only
+// public fields, exactly as with the async variant.
+export function readConfigTextSync(configPath: string): string | null {
+  if (!configPath) return null;
+  try { return fs.readFileSync(configPath, 'utf8'); }
+  catch {
+    try {
+      const r = spawnSync('sudo', ['-n', 'cat', configPath], { timeout: 5000, encoding: 'utf8' });
+      if (r.status === 0 && typeof r.stdout === 'string') return r.stdout;
+      return null;
+    } catch { return null; }
+  }
+}
+
 export interface ConfigWriteResult {
   ok:         boolean;
   detail:     string;
@@ -1022,11 +1042,10 @@ export interface NvpnFipsPeerEndpoints {
   endpoints:  Record<string, string>;
 }
 export function readNvpnFipsPeerEndpoints(): NvpnFipsPeerEndpoints {
-  const configPath = findNvpnConfigPath();
+  const configPath = resolveCanonicalConfig().path;
   if (!configPath) return { found: false, configPath: null, endpoints: {} };
-  let toml = '';
-  try { toml = fs.readFileSync(configPath, 'utf8'); }
-  catch { return { found: false, configPath, endpoints: {} }; }
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) return { found: false, configPath, endpoints: {} };
   return { found: true, configPath, endpoints: extractAliasMap(extractNamedTableSection(toml, 'fips_peer_endpoints')) };
 }
 
@@ -1082,11 +1101,10 @@ function extractNostrPublicKey(toml: string): string | null {
 }
 
 export function readNvpnNodeIdentity(): NvpnNodeIdentity {
-  const configPath = findNvpnConfigPath();
+  const configPath = resolveCanonicalConfig().path;
   if (!configPath) return { npub: null, configPath: null };
-  let toml = '';
-  try { toml = fs.readFileSync(configPath, 'utf8'); }
-  catch { return { npub: null, configPath }; }
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) return { npub: null, configPath };
   // CRITICAL: only call extractNostrPublicKey on the file contents.
   // Never destructure or pass the whole file body to the caller — the
   // file also contains [nostr] secret_key and [node] private_key, both
@@ -1365,13 +1383,12 @@ export function extractTomlString(section: string, key: string): string | null {
 }
 
 export function readNvpnRoster(): NvpnRoster {
-  const configPath = findNvpnConfigPath();
+  const configPath = resolveCanonicalConfig().path;
   if (!configPath) {
     return { found: false, configPath: null, networkId: null, participants: [], admins: [], aliases: {} };
   }
-  let toml = '';
-  try { toml = fs.readFileSync(configPath, 'utf8'); }
-  catch {
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) {
     return { found: false, configPath, networkId: null, participants: [], admins: [], aliases: {} };
   }
   const section = extractFirstNetworksSection(toml);
@@ -1428,11 +1445,10 @@ export function extractAllNetworksSections(toml: string): string[] {
 // empty list when the config file is missing or unreadable — callers
 // render an empty-state in that case rather than blocking.
 export function readNvpnNetworks(): NvpnNetworkSummary[] {
-  const configPath = findNvpnConfigPath();
+  const configPath = resolveCanonicalConfig().path;
   if (!configPath) return [];
-  let toml = '';
-  try { toml = fs.readFileSync(configPath, 'utf8'); }
-  catch { return []; }
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) return [];
   const sections = extractAllNetworksSections(toml);
   return sections.map((section, idx) => ({
     networkId:        extractTomlString(section, 'network_id'),
@@ -1866,11 +1882,10 @@ export function extractNvpnRelays(toml: string): string[] {
 }
 
 export function readNvpnRelays(): NvpnRelays {
-  const configPath = findNvpnConfigPath();
+  const configPath = resolveCanonicalConfig().path;
   if (!configPath) return { found: false, configPath: null, relays: [] };
-  let toml = '';
-  try { toml = fs.readFileSync(configPath, 'utf8'); }
-  catch { return { found: false, configPath, relays: [] }; }
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) return { found: false, configPath, relays: [] };
   return { found: true, configPath, relays: extractNvpnRelays(toml) };
 }
 
