@@ -3,6 +3,7 @@
 // utilities (toast, modal, copy-button) at the bottom.
 
 import { previewRetryDecision } from './preview-retry.js';
+import { mergePeers, npubToHex } from './nvpn-peers.js';
 import { renderMarkdown, renderCodeBlock, proxyImageUrl, startMarkdownImageObserver } from './markdown.js';
 
 // Async-sign external markdown image URLs after every renderMarkdown
@@ -15701,85 +15702,9 @@ const VpnPanel = (() => {
     }
   }
 
-  // Roster + live peers rarely match exactly (live peers may show
-  // before the roster updates locally; offline roster entries never
-  // appear in live). Merge keys on hex pubkey or npub equivalence so
-  // the row count matches the user's mental model: "the people in my
-  // network."
-  function mergePeers(rosterParts, rosterAdmins, livePeers, aliases = {}) {
-    const adminSet = new Set(rosterAdmins.map(s => String(s).toLowerCase()));
-    const aliasLookup = new Map();
-    for (const [k, v] of Object.entries(aliases)) {
-      if (typeof k === 'string' && typeof v === 'string') {
-        aliasLookup.set(k.toLowerCase(), { aliasKey: k, alias: v });
-      }
-    }
-    // Live peers indexed three ways so we can match rostered entries by
-    // any identity field they happen to share. In 4.x the same physical
-    // node can appear under one identity in a live FIPS entry and a
-    // different identity in a config-roster entry; we use tunnel-IP as
-    // the tiebreaker. Without this, a rostered peer that's also been
-    // FIPS-discovered renders as TWO rows in the Network tab.
-    const liveByIdentity = new Map();
-    const liveByIp = new Map();
-    for (const lp of livePeers) {
-      const idKey = (lp.npub || lp.pubkey || '').toLowerCase();
-      if (idKey) liveByIdentity.set(idKey, lp);
-      const ipKey = (lp.ip || '').toLowerCase();
-      if (ipKey) liveByIp.set(ipKey, lp);
-    }
-    const out = [];
-    const seenIds = new Set();
-    const consumedLive = new Set();   // identity-keys of live peers already folded into a rostered row
-    const consumedLiveIps = new Set();
-    for (const p of rosterParts) {
-      const k = String(p).toLowerCase();
-      seenIds.add(k);
-      // Try identity first — that's the canonical join. Falls through
-      // to "any live entry whose tunnel_ip matches a rostered peer's
-      // tunnel_ip" via the second map. Roster entries don't carry a
-      // tunnel_ip themselves so the tunnel-IP join only fires when
-      // some other live peer (under a different identity) is already
-      // associated with this roster member's hex pubkey via a prior
-      // discovery — which is exactly the 4.x dup case.
-      let live = liveByIdentity.get(k);
-      if (live) { consumedLive.add(k); if (live.ip) consumedLiveIps.add(live.ip.toLowerCase()); }
-      const aliasEntry = aliasLookup.get(k);
-      out.push({
-        id:        p,
-        rosterKey: p,
-        live,
-        alias:     aliasEntry?.alias || null,
-        connected: !!live?.connected,
-        admin:     adminSet.has(k),
-        roster:    true,
-      });
-    }
-    // Second pass: live entries not yet folded into a rostered row.
-    // Dedup by tunnel_ip — if two live entries share the same IP
-    // (FIPS-overlay entry + raw discovered entry, common in 4.x),
-    // keep only the first. Anything truly novel goes through as
-    // "discovered (not in roster)."
-    for (const live of livePeers) {
-      const idKey = (live.npub || live.pubkey || '').toLowerCase();
-      if (idKey && consumedLive.has(idKey)) continue;
-      const ipKey = (live.ip || '').toLowerCase();
-      if (ipKey && consumedLiveIps.has(ipKey)) continue;
-      if (ipKey) consumedLiveIps.add(ipKey);
-      if (idKey) consumedLive.add(idKey);
-      const aliasEntry = aliasLookup.get(idKey);
-      out.push({
-        id:        live.npub || live.pubkey || live.ip || idKey || `peer-${out.length}`,
-        rosterKey: null,
-        live,
-        alias:     aliasEntry?.alias || null,
-        connected: !!live.connected,
-        admin:     false,
-        roster:    false,
-      });
-    }
-    return out;
-  }
+  // mergePeers + npubToHex now live in ./nvpn-peers.js (shared with
+  // unit tests) — they normalize npub↔hex so a rostered peer that is
+  // also FIPS-discovered renders as ONE row, not two.
 
   function renderPeerRow(p) {
     const id  = p.id;
