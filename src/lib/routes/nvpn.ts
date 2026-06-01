@@ -53,6 +53,7 @@ import { nvpnRelayHealth } from '../nvpn-relay-health.js';
 import { detectContainer, natWarningFor, isPrivateEndpoint } from '../container-detect.js';
 import { detectSplitBrain, stopUserModeDaemon } from '../nvpn-split-brain.js';
 import { listJoinRequests, approveJoinRequest, denyJoinRequest } from '../nvpn-join-requests.js';
+import { sudoState, warmSudoCache, buildSudoersInstallCommand } from '../nvpn-sudo.js';
 import { readBody } from './_shared.js';
 
 async function writeJson(
@@ -360,6 +361,32 @@ export async function handleNvpn(
   // sudo -n and surface a clear hint when the cred cache is empty.
   if (url === '/api/nvpn/service/status' && method === 'GET') {
     const r = await probeNvpnServiceStatus();
+    await writeJson(res, 200, r);
+    return true;
+  }
+  // ── Admin unlock (sudo cred-cache warming) ────────────────────────
+  // Privileged ops below all run `sudo -n`, which needs a warm cred
+  // cache. The dashboard has no TTY to answer a sudo prompt, so we let
+  // the user "unlock" once: their password is piped straight to
+  // `sudo -S -v` and never stored/logged. status reports whether the
+  // cache is currently usable.
+  if (url === '/api/nvpn/sudo/status' && method === 'GET') {
+    await writeJson(res, 200, {
+      ...(await sudoState()),
+      permanentCmd: buildSudoersInstallCommand(),
+    });
+    return true;
+  }
+  if (url === '/api/nvpn/sudo/unlock' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body || typeof body.password !== 'string') {
+      await writeJson(res, 400, { ok: false, detail: 'password required' });
+      return true;
+    }
+    const r = await warmSudoCache(body.password);
+    // body.password drops out of scope here; never echoed back. Always
+    // 200 — the {ok} flag carries success/failure so the client can show
+    // an inline "incorrect password" without a generic red error toast.
     await writeJson(res, 200, r);
     return true;
   }

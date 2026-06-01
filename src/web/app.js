@@ -660,6 +660,94 @@ function confirmDestructive({ title, description, typeToConfirm, confirmLabel = 
   });
 }
 
+// Admin unlock — warm the sudo cred cache so the dashboard's `sudo -n`
+// privileged ops (install / service control) succeed. The password is
+// posted once and is never stored client-side. Resolves true on success.
+function openSudoUnlockModal(onUnlocked) {
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p class="muted" style="margin-top:0">
+      Installing, updating, or managing the service needs root. Enter your
+      password for <code>sudo</code> — it's sent once to warm sudo for the
+      next few minutes and is <strong>never stored or logged</strong>.
+    </p>
+    <input id="sudo-pw" type="password" autocomplete="off" placeholder="sudo password" style="width:100%;box-sizing:border-box">
+    <div id="sudo-pw-err" class="err" style="margin-top:8px;display:none"></div>
+  `;
+  const foot = document.createElement('div');
+  foot.style.display = 'flex'; foot.style.gap = '8px';
+  const cancel = document.createElement('button'); cancel.textContent = 'Cancel';
+  const go = document.createElement('button'); go.textContent = 'Unlock'; go.className = 'primary';
+  foot.appendChild(cancel); foot.appendChild(go);
+  const modal = openModal({ title: 'Unlock admin actions', subtitle: 'Warm sudo for installs & service control', body, footer: foot });
+  const input = body.querySelector('#sudo-pw');
+  const err = body.querySelector('#sudo-pw-err');
+  cancel.addEventListener('click', modal.close);
+  input.focus();
+  const submit = async () => {
+    const pw = input.value;
+    if (!pw) { input.focus(); return; }
+    go.disabled = true; go.innerHTML = '<span class="spinner"></span> Unlocking…';
+    err.style.display = 'none';
+    let r = null;
+    try { r = await api('/api/nvpn/sudo/unlock', { method: 'POST', body: JSON.stringify({ password: pw }) }); }
+    catch { /* network — handled below */ }
+    input.value = '';
+    if (r?.ok) {
+      toast('Admin actions unlocked', 'sudo is warm for the next few minutes', 'ok');
+      modal.close();
+      onUnlocked?.();
+    } else {
+      err.textContent = r?.detail || 'unlock failed';
+      err.style.display = 'block';
+      go.disabled = false; go.textContent = 'Unlock';
+      input.focus();
+    }
+  };
+  go.addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+}
+
+// Populate an admin-unlock slot (#vpn-admin-unlock) inside `container`:
+// shows lock state + an unlock button, and the optional permanent-grant
+// command. Re-renders itself after a successful unlock.
+async function wireAdminUnlock(container) {
+  const slot = container.querySelector('#vpn-admin-unlock');
+  if (!slot) return;
+  let st = null;
+  try { st = await api('/api/nvpn/sudo/status', undefined, { silent: true }); } catch { slot.remove(); return; }
+  const ready = !!st?.ready;
+  slot.innerHTML = `
+    <div class="vpn-meta-row vpn-meta-subrow">
+      <div>
+        <div class="vpn-empty-title">${ready ? '🔓 Admin actions unlocked' : '🔒 Admin actions locked'}</div>
+        <div class="vpn-empty-detail muted">
+          ${ready
+            ? 'Install, update, and service buttons can use sudo for the next few minutes.'
+            : 'Installing, updating, or managing the service needs sudo. Unlock once and these actions work for about 15 minutes.'}
+        </div>
+      </div>
+      <span class="vpn-meta-svc-actions">
+        <button id="vpn-admin-unlock-btn" class="${ready ? '' : 'primary'}">${ready ? 'Re-unlock' : 'Unlock admin actions'}</button>
+      </span>
+    </div>
+    ${st?.permanentCmd ? `
+      <details class="vpn-admin-perm" style="margin-top:10px">
+        <summary class="muted" style="cursor:pointer">Make it permanent (optional, advanced)</summary>
+        <p class="vpn-empty-detail muted" style="margin-top:8px">
+          Run this once in a terminal to grant passwordless sudo for exactly
+          the nvpn service commands — then you'll never need to unlock again.
+          It's validated with <code>visudo</code> before it's installed:
+        </p>
+        <pre class="vpn-cmd" style="white-space:pre-wrap;word-break:break-all"><code>${escapeHtml(st.permanentCmd)}</code></pre>
+      </details>` : ''}
+  `;
+  slot.querySelector('#vpn-admin-unlock-btn')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    openSudoUnlockModal(() => { wireAdminUnlock(container); });
+  });
+}
+
 // Reusable terminal-output modal for streaming SSE from any POST endpoint
 // (/api/exec/:cmd, /api/projects/:id/git/push, …). Resolves when the stream
 // emits `done`. The footer button is enabled on done; the header × prompts
@@ -14873,8 +14961,12 @@ const VpnPanel = (() => {
     if (svc.binaryVersion) meta.push(`v${escapeHtml(svc.binaryVersion)}`);
     if (svc.label)         meta.push(`unit: <code>${escapeHtml(svc.label)}</code>`);
     if (svc.error)         meta.push(`<span class="muted">${escapeHtml(svc.error)}</span>`);
+    // Admin-unlock slot (populated async in .wire). Privileged buttons
+    // below all run `sudo -n`; this lets the user warm the cred cache once.
+    const unlockSlot = '<div id="vpn-admin-unlock" class="vpn-section"></div>';
     if (!svc.installed) {
       return `
+        ${unlockSlot}
         <div class="vpn-section">
           <div class="vpn-meta-row vpn-meta-subrow vpn-meta-svc-head">
             <div>
@@ -14922,6 +15014,7 @@ const VpnPanel = (() => {
     actions.push('<button id="vpn-svc-reinstall" title="Rewrite the systemd unit / launchd plist. Useful after a binary upgrade so the ExecStart path matches the new install location.">Reinstall</button>');
     actions.push('<button id="vpn-svc-uninstall" class="danger" title="Remove the system service unit. Binary stays on PATH; config + keypair stay in ~/.config/nvpn/.">Remove service</button>');
     return `
+      ${unlockSlot}
       <div class="vpn-section">
         <p class="vpn-section-help">
           System service registration — whether nvpn runs as a managed
@@ -14963,6 +15056,10 @@ const VpnPanel = (() => {
     wireSvcBtn('vpn-svc-disable',   '/api/nvpn/service/disable',   'auto-start disabled');
     wireSvcBtn('vpn-svc-reinstall', '/api/nvpn/service/install',   'service reinstalled');
     wireSvcBtn('vpn-svc-uninstall', '/api/nvpn/service/uninstall', 'service unit removed');
+
+    // Admin unlock — warm the sudo cred cache so the privileged buttons
+    // (install / reinstall / enable / disable / remove) actually succeed.
+    wireAdminUnlock(bodyEl);
 
     // Danger zone — Uninstall nvpn entirely. Type-to-confirm so a
     // stray click can't wipe a working install. Sequence: stop daemon
