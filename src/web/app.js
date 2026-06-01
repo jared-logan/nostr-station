@@ -14237,7 +14237,43 @@ const VpnPanel = (() => {
         </div>`
       : '';
 
+    // Guided entry — only while the mesh is empty (fresh node: no roster,
+    // no discovered peers). Signposts the two end-user paths so a new user
+    // isn't dropped into a wall of tabs. Disappears once anything's set up.
+    const meshEmpty = rosterParts.length === 0 && rosterAdmins.length === 0 && merged.length === 0;
+    const onboardingHtml = meshEmpty ? `
+      <div class="vpn-section vpn-onboard">
+        <div class="vpn-empty-title">Set up your mesh</div>
+        <p class="vpn-section-help" style="margin-top:4px">
+          Choose how this station fits into your Nostr VPN — you can do both later.
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">
+          <div style="border:1px solid var(--border);border-radius:8px;padding:14px">
+            <div class="vpn-empty-title">🏠 Host a mesh</div>
+            <p class="vpn-empty-detail muted" style="margin:6px 0 12px">
+              This station runs the network and your other devices join it.
+              Best when this is your always-on box. Share an invite, then
+              import it on each device you want on the mesh.
+            </p>
+            <button id="vpn-onboard-host" class="primary">Share an invite →</button>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:8px;padding:14px">
+            <div class="vpn-empty-title">🔗 Join a mesh</div>
+            <p class="vpn-empty-detail muted" style="margin:6px 0 12px">
+              Your other devices already run a nostr-vpn network; this station
+              joins it. Paste an invite from that network, or enter its
+              network id directly.
+            </p>
+            <div class="vpn-net-actions">
+              <button id="vpn-onboard-join-invite" class="primary">Import invite</button>
+              <button id="vpn-onboard-join-id">Join by ID</button>
+            </div>
+          </div>
+        </div>
+      </div>` : '';
+
     return `
+      ${onboardingHtml}
       <div class="vpn-section">
         <p class="vpn-section-help">
           Your mesh: the active network, its admin-signed roster of
@@ -14355,6 +14391,10 @@ const VpnPanel = (() => {
     if (importBtn) importBtn.addEventListener('click', (e) => { e.preventDefault(); openImportInviteModal(); });
     const joinByIdBtn = bodyEl.querySelector('#vpn-join-by-id');
     if (joinByIdBtn) joinByIdBtn.addEventListener('click', (e) => { e.preventDefault(); openJoinByIdModal(); });
+    // Guided-onboarding buttons reuse the same modal openers as the toolbar.
+    bodyEl.querySelector('#vpn-onboard-host')?.addEventListener('click', (e) => { e.preventDefault(); openShareInviteModal(); });
+    bodyEl.querySelector('#vpn-onboard-join-invite')?.addEventListener('click', (e) => { e.preventDefault(); openImportInviteModal(); });
+    bodyEl.querySelector('#vpn-onboard-join-id')?.addEventListener('click', (e) => { e.preventDefault(); openJoinByIdModal(); });
     const pubBtn = bodyEl.querySelector('#vpn-publish-roster');
     if (pubBtn) {
       pubBtn.addEventListener('click', async (e) => {
