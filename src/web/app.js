@@ -13957,7 +13957,18 @@ const VpnPanel = (() => {
         b.textContent = label;
         b.title = tip;
         b.addEventListener('click', async (e) => {
-          e.preventDefault(); b.disabled = true;
+          e.preventDefault();
+          // Stop is destructive (tunnel drops) — confirm, matching the
+          // status-strip Stop button.
+          if (action === 'stop') {
+            const ok = await confirmDestructive({
+              title: 'Stop the VPN daemon?',
+              description: 'The mesh tunnel goes down immediately and stays down until you Start it again — any device relying on this station loses connectivity.',
+              confirmLabel: 'Stop',
+            });
+            if (!ok) return;
+          }
+          b.disabled = true;
           await callNvpnAction(action, label.toLowerCase());
           await refresh();
           b.disabled = false;

@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import {
-  ADMIN_VERBS, ADMIN_HELPER, ADMIN_NVPN_BIN, ADMIN_LIB_DIR,
+  ADMIN_VERBS, ADMIN_HELPER, ADMIN_NVPN_BIN, ADMIN_LIB_DIR, ADMIN_MANIFEST, ADMIN_SUDOERS,
   renderAdminSudoers, renderAdminManifest, renderAdminHelperScript,
   buildAdminProvisionCommand,
 } from '../src/lib/nvpn-sudo.ts';
@@ -98,14 +102,63 @@ test('manifest: emits shell-sourceable tag + per-target sha vars', () => {
   assert.match(m, /NVPN_SHA_x86_64_unknown_linux_musl='abc123'/);
 });
 
-test('provision command: validates with visudo before installing the rule, 0440', () => {
-  const cmd = buildAdminProvisionCommand({ user: 'alice', tag: 'v4.0.48', shas: { 'x86_64-unknown-linux-musl': 'abc' } });
+const PROV_OPTS = { user: 'alice', tag: 'v4.0.48', shas: { 'x86_64-unknown-linux-musl': 'abcdef' } };
+
+test('provision command: structure — no heredocs, visudo before install, 0755/0440, base64 bodies round-trip', () => {
+  const cmd = buildAdminProvisionCommand(PROV_OPTS);
+  // The bug that bricked provisioning: heredocs whose terminator collided
+  // with the ` && \` join. There must be NO heredoc at all now.
+  assert.ok(!cmd.includes('<<'), 'no heredocs');
+  // visudo validates the rule before it is installed.
   const visudoAt = cmd.indexOf('visudo -cf');
-  const installAt = cmd.indexOf(`install -m 0440 -o root -g root /tmp/nostr-station-nvpn.sudoers ${'/etc/sudoers.d/nostr-station-nvpn'}`);
+  const installAt = cmd.indexOf(`install -m 0440 -o root -g root /tmp/nostr-station-nvpn.sudoers ${ADMIN_SUDOERS}`);
   assert.ok(visudoAt > 0 && installAt > 0 && visudoAt < installAt, 'visudo -cf precedes sudoers install');
-  // Helper installed root:root 0755 in a root-owned dir.
-  assert.ok(cmd.includes('install -d -m 0755 -o root -g root /usr/local/lib/nostr-station'));
-  assert.ok(cmd.includes('chmod 0755 /usr/local/lib/nostr-station/nvpn-admin'));
-  // The full helper body is embedded so the user can review what runs as root.
-  assert.ok(cmd.includes('#!/usr/bin/env bash'));
+  assert.ok(cmd.includes(`install -d -m 0755 -o root -g root ${ADMIN_LIB_DIR}`));
+  assert.ok(cmd.includes(`chmod 0755 ${ADMIN_HELPER}`));
+  // Each body is a base64 token that decodes to EXACTLY the rendered file.
+  const b64s = [...cmd.matchAll(/printf %s '([A-Za-z0-9+/=]+)' \| base64 -d/g)].map(m => Buffer.from(m[1], 'base64').toString('utf8'));
+  assert.equal(b64s.length, 3, 'helper + manifest + sudoers bodies');
+  assert.ok(b64s.includes(renderAdminHelperScript()), 'helper body intact');
+  assert.ok(b64s.includes(renderAdminManifest(PROV_OPTS.tag, PROV_OPTS.shas)), 'manifest body intact');
+  assert.ok(b64s.includes(renderAdminSudoers(PROV_OPTS.user)), 'sudoers body intact');
+});
+
+// The acceptance test the VM run asked for, adapted to CI (no root): run the
+// generated command with privilege dropped + system paths remapped into a
+// tmp dir, and assert ALL THREE files actually land intact — catching the
+// heredoc-swallow class of bug where the manifest/sudoers never got created.
+test('provision command: executes end-to-end (sandboxed) — helper 0755 + valid bash, all 3 files intact', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvpn-prov-'));
+  const libDir     = path.join(dir, 'lib');
+  const sudoersDst = path.join(dir, 'sudoers.d', 'nostr-station-nvpn');
+  const tmpSudoers = path.join(dir, 'nvpn.sudoers.tmp');
+  fs.mkdirSync(path.dirname(sudoersDst), { recursive: true });
+  try {
+    let cmd = buildAdminProvisionCommand(PROV_OPTS)
+      // Remap system paths into the sandbox (helper + manifest inherit the lib prefix).
+      .split(ADMIN_SUDOERS).join(sudoersDst)
+      .split('/tmp/nostr-station-nvpn.sudoers').join(tmpSudoers)
+      .split(ADMIN_LIB_DIR).join(libDir)
+      // Drop privilege + the root-only bits we can't do unprivileged in CI.
+      // NB: \bsudo so we don't clobber the "sudo" inside "visudo".
+      .replace(/visudo -cf \S+/g, 'true')
+      .replace(/\bsudo /g, '')
+      .replace(/ -o root -g root/g, '')
+      .replace(/chown root:root \S+/g, 'true');
+    execFileSync('bash', ['-c', cmd], { stdio: 'pipe' });
+
+    const helperPath   = path.join(libDir, 'nvpn-admin');
+    const manifestPath = path.join(libDir, 'nvpn.manifest');
+    // All three files exist and are byte-identical to the rendered sources.
+    assert.equal(fs.readFileSync(helperPath, 'utf8'), renderAdminHelperScript(), 'helper intact');
+    assert.equal(fs.readFileSync(manifestPath, 'utf8'), renderAdminManifest(PROV_OPTS.tag, PROV_OPTS.shas), 'manifest intact');
+    assert.equal(fs.readFileSync(sudoersDst, 'utf8'), renderAdminSudoers(PROV_OPTS.user), 'sudoers installed');
+    // Helper ends up 0755 and is syntactically valid bash (would run).
+    assert.equal(fs.statSync(helperPath).mode & 0o777, 0o755, 'helper is 0755');
+    execFileSync('bash', ['-n', helperPath], { stdio: 'pipe' });
+    // The temp sudoers file was cleaned up by the final `rm`.
+    assert.ok(!fs.existsSync(tmpSudoers), 'temp sudoers removed');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -280,28 +280,39 @@ esac
 // The one-time provisioning command the user reviews and runs themselves.
 // Installs the helper (root:root 0755 in a root-owned dir), the manifest,
 // and the sudoers rule (visudo-validated, 0440). The dashboard NEVER runs
-// this — it only displays it, including the full helper body so the user
-// sees exactly what will run as root.
+// this — it only displays it.
+//
+// Bodies are base64-encoded and piped through `base64 -d`, NOT heredocs.
+// Heredocs are fatal here: joining the steps with `&& \` appends ` && \`
+// right after the heredoc terminator line, so the terminator never matches
+// and the body swallows the rest of the command (helper lands corrupt +
+// 0644, manifest/sudoers never created). base64 is a single token with no
+// shell metacharacters or delimiter to collide with, so the `&&`-chain is
+// safe. (The user can still review each body by decoding the base64.)
 export function buildAdminProvisionCommand(opts?: {
   user?: string; tag?: string; shas?: Record<string, string>;
 }): string {
   const user = opts?.user || os.userInfo().username;
   const tag  = opts?.tag  || (`v${COMPONENT_VERSIONS['nvpn'] || ''}`);
   const shas = opts?.shas || (BINARY_SHA256['nvpn'] || {});
-  const helper   = renderAdminHelperScript();
-  const manifest = renderAdminManifest(tag, shas);
-  const sudoers  = renderAdminSudoers(user);
-  // Heredocs quote their delimiters so nothing in the bodies is expanded.
+  const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
+  const helper64   = b64(renderAdminHelperScript());
+  const manifest64 = b64(renderAdminManifest(tag, shas));
+  const sudoers64  = b64(renderAdminSudoers(user));
+  const tmpSudoers = '/tmp/nostr-station-nvpn.sudoers';
+  // Each step is a single line (base64 is one token) joined by `&& \`.
   return [
     `sudo install -d -m 0755 -o root -g root ${ADMIN_LIB_DIR}`,
-    `sudo tee ${ADMIN_HELPER} >/dev/null <<'NVPN_ADMIN_HELPER_EOF'\n${helper}\nNVPN_ADMIN_HELPER_EOF`,
-    `sudo chown root:root ${ADMIN_HELPER} && sudo chmod 0755 ${ADMIN_HELPER}`,
-    `sudo tee ${ADMIN_MANIFEST} >/dev/null <<'NVPN_ADMIN_MANIFEST_EOF'\n${manifest}NVPN_ADMIN_MANIFEST_EOF`,
-    `sudo chown root:root ${ADMIN_MANIFEST} && sudo chmod 0644 ${ADMIN_MANIFEST}`,
-    `sudo tee /tmp/nostr-station-nvpn.sudoers >/dev/null <<'NVPN_ADMIN_SUDOERS_EOF'\n${sudoers}NVPN_ADMIN_SUDOERS_EOF`,
-    `sudo visudo -cf /tmp/nostr-station-nvpn.sudoers`,
-    `sudo install -m 0440 -o root -g root /tmp/nostr-station-nvpn.sudoers ${ADMIN_SUDOERS}`,
-    `sudo rm -f /tmp/nostr-station-nvpn.sudoers`,
+    `printf %s '${helper64}' | base64 -d | sudo tee ${ADMIN_HELPER} >/dev/null`,
+    `sudo chown root:root ${ADMIN_HELPER}`,
+    `sudo chmod 0755 ${ADMIN_HELPER}`,
+    `printf %s '${manifest64}' | base64 -d | sudo tee ${ADMIN_MANIFEST} >/dev/null`,
+    `sudo chown root:root ${ADMIN_MANIFEST}`,
+    `sudo chmod 0644 ${ADMIN_MANIFEST}`,
+    `printf %s '${sudoers64}' | base64 -d | sudo tee ${tmpSudoers} >/dev/null`,
+    `sudo visudo -cf ${tmpSudoers}`,
+    `sudo install -m 0440 -o root -g root ${tmpSudoers} ${ADMIN_SUDOERS}`,
+    `sudo rm -f ${tmpSudoers}`,
   ].join(' && \\\n');
 }
 
