@@ -39,6 +39,8 @@ export const ADMIN_HELPER     = `${ADMIN_LIB_DIR}/nvpn-admin`;
 export const ADMIN_MANIFEST   = `${ADMIN_LIB_DIR}/nvpn.manifest`;
 export const ADMIN_NVPN_BIN   = '/usr/local/bin/nvpn';
 export const ADMIN_SUDOERS    = '/etc/sudoers.d/nostr-station-nvpn';
+// Where the helper writes its persistent step log (for diagnostics).
+export const ADMIN_LOG        = '/var/log/nostr-station-nvpn-admin.log';
 // Where the dashboard stages the verified tarball for the helper to pick up
 // (relative to the invoking user's home; the helper derives it from
 // SUDO_USER, never from an argument).
@@ -105,8 +107,13 @@ readonly UNIT=nvpn.service
 readonly DROPIN_DIR="/etc/systemd/system/\${UNIT}.d"
 readonly CAPS_DROPIN="\$DROPIN_DIR/10-nostr-station-caps.conf"
 readonly CONFIG_DROPIN="\$DROPIN_DIR/20-nostr-station-config.conf"
+readonly ADMIN_LOG=/var/log/nostr-station-nvpn-admin.log
 
-die() { echo "nvpn-admin: \$*" >&2; exit 1; }
+# Observability: every step is echoed (captured by the dashboard) AND
+# appended to a persistent root-owned log, so a failure is diagnosable
+# immediately instead of a silent brick.
+log()  { echo "nvpn-admin: \$*"; { echo "\$(date -Is 2>/dev/null) [\${verb:-?}] \$*" >>"\$ADMIN_LOG"; } 2>/dev/null || true; }
+die()  { echo "nvpn-admin: \$*" >&2; { echo "\$(date -Is 2>/dev/null) [\${verb:-?}] FATAL: \$*" >>"\$ADMIN_LOG"; } 2>/dev/null || true; exit 1; }
 
 [ "\$(id -u)" -eq 0 ] || die "must run as root (via sudo)"
 [ "\$#" -eq 1 ]       || die "exactly one verb, no arguments"
@@ -146,8 +153,9 @@ write_config_dropin() {
   # daemon doesn't come back up.
   local base
   base=\$(systemctl cat "\$UNIT" 2>/dev/null | awk '/^# /{f=(\$2 ~ /\\/'"\$UNIT"'\$/)} f && /^ExecStart=/{sub(/^ExecStart=/,"");print;exit}')
-  [ -n "\$base" ] || return 0
+  if [ -z "\$base" ]; then log "config drop-in skipped: could not read base ExecStart from systemctl cat"; return 0; fi
   base=\$(echo "\$base" | sed -E 's/[[:space:]]--config([= ])[^ ]+//g')
+  log "config drop-in: ExecStart -> \$base --config \$CANON_CONFIG"
   install -d -m 0755 -o root -g root "\$DROPIN_DIR"
   cat > "\$CONFIG_DROPIN" <<CFG
 # Managed by nostr-station — daemon reads the canonical user config.
@@ -158,6 +166,7 @@ CFG
 }
 
 do_install() {
+  log "install: start (staged=\$STAGED)"
   [ -f "\$STAGED" ] || die "no staged tarball at \$STAGED (dashboard must download+verify first)"
   # shellcheck disable=SC1090
   . "\$MANIFEST"
@@ -169,6 +178,7 @@ do_install() {
   # Re-verify the staged tarball against the ROOT-owned pinned sha. A
   # swapped/forged binary fails here — this is what defeats binary-swap.
   echo "\$sha  \$STAGED" | sha256sum -c - >/dev/null 2>&1 || die "sha256 mismatch on staged tarball — refusing to install"
+  log "install: sha verified for \$target"
   local tmp; tmp=\$(mktemp -d /root/.nvpn-admin.XXXXXX)
   # shellcheck disable=SC2064
   trap "rm -rf '\$tmp'" RETURN
@@ -179,34 +189,44 @@ do_install() {
   # so a failed (re)install can be rolled back instead of bricking the box.
   install -d -m 0755 -o root -g root "\$LIB_DIR"
   local had_prev=0
-  if [ -x "\$NVPN_BIN" ]; then cp -p "\$NVPN_BIN" "\$PREV_BIN"; had_prev=1; fi
+  if [ -x "\$NVPN_BIN" ]; then cp -p "\$NVPN_BIN" "\$PREV_BIN"; had_prev=1; log "install: snapshotted current binary -> \$PREV_BIN"; fi
   install -m 0755 -o root -g root "\$src" "\$NVPN_BIN"
+  log "install: placed binary at \$NVPN_BIN"
   write_caps_dropin
   if ! "\$NVPN_BIN" service install; then
     # Roll back to the previous working binary if we had one.
     if [ "\$had_prev" -eq 1 ]; then install -m 0755 -o root -g root "\$PREV_BIN" "\$NVPN_BIN"; "\$NVPN_BIN" service install || true; fi
     die "service install failed — rolled back"
   fi
+  log "install: service install ok"
   systemctl daemon-reload || true
   # Seed the canonical user config if absent, AS THE INVOKING USER (so it's
   # user-owned, not root) — the config the b2 ExecStart drop-in points at
   # must exist or the daemon can't start. Without this a fresh install lands
   # identity-split (daemon on its root config, dashboard on the user one).
   if [ ! -f "\$CANON_CONFIG" ]; then
+    log "install: seeding canonical config as \$real_user (\$CANON_CONFIG)"
     install -d -m 0700 -o "\$real_user" -g "\$(id -gn "\$real_user")" "\$(dirname "\$CANON_CONFIG")" 2>/dev/null || true
     runuser -u "\$real_user" -- "\$NVPN_BIN" init >/dev/null 2>&1 \
       || su -s /bin/sh "\$real_user" -c "'\$NVPN_BIN' init" >/dev/null 2>&1 \
-      || true
+      || log "install: WARNING seed init failed — daemon may fall back to its own config"
+    [ -f "\$CANON_CONFIG" ] && log "install: seeded \$CANON_CONFIG" || log "install: canonical config still absent after seed"
   fi
   write_config_dropin
   systemctl daemon-reload || true
   systemctl try-restart "\$UNIT" || true
-  # Verify the daemon came up; if not and we have a snapshot, revert the
-  # config drop-in (the most likely culprit) and reload.
-  if ! systemctl is-active --quiet "\$UNIT"; then
+  # Verify the daemon came up; if not, revert the config drop-in (the most
+  # likely culprit) and reload — leaving a running daemon over a "clean" but
+  # dead one.
+  if systemctl is-active --quiet "\$UNIT"; then
+    log "install: daemon active with --config \$CANON_CONFIG"
+  else
+    log "install: daemon NOT active after repoint — reverting config drop-in"
     rm -f "\$CONFIG_DROPIN"; systemctl daemon-reload || true; systemctl try-restart "\$UNIT" || true
+    systemctl is-active --quiet "\$UNIT" && log "install: daemon recovered on its own config (identity-split — investigate)" || log "install: daemon STILL not active after revert"
   fi
   rm -f "\$PREV_BIN"
+  log "install: done"
 }
 
 clear_recent_peers() {
@@ -343,13 +363,19 @@ export async function runAdminVerb(verb: AdminVerb, password?: string): Promise<
     });
     return { ok: true, detail: `${verb} ok` };
   } catch (e: any) {
-    const stderr = (e?.stderr?.toString?.() || '').toLowerCase();
+    const stderrRaw = e?.stderr?.toString?.() || '';
+    const stderr = stderrRaw.toLowerCase();
     if (/incorrect password|sorry, try again/.test(stderr)) return { ok: false, detail: 'incorrect password' };
     if (/a password is required|may not run sudo|not in the sudoers/.test(stderr)) {
-      return { ok: false, detail: 'admin helper not authorized — run the one-time setup, or unlock with your password' };
+      return { ok: false, detail: 'admin helper not authorized — run the one-time setup command from the Service tab' };
     }
-    // Surface the helper's own die() message when present (it's our text).
-    const msg = (e?.stderr?.toString?.() || e?.message || '').split('\n').find((l: string) => l.includes('nvpn-admin:'));
-    return { ok: false, detail: msg ? msg.trim() : `${verb} failed` };
+    // Surface the helper's own messages (its `nvpn-admin:` step + die lines
+    // are our text) so a failure shows the exact step, plus the log path for
+    // the full trail.
+    const ours = `${stderrRaw}\n${e?.stdout?.toString?.() || ''}`
+      .split('\n').map((l: string) => l.trim()).filter((l: string) => l.startsWith('nvpn-admin:'));
+    const lastDie = [...ours].reverse().find((l: string) => /fatal|failed|refus|mismatch|not |cannot/i.test(l));
+    const detail = lastDie || ours[ours.length - 1] || `${verb} failed`;
+    return { ok: false, detail: `${detail} (full log: ${ADMIN_LOG})` };
   }
 }
