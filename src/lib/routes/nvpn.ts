@@ -38,7 +38,7 @@ import {
   publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster, readNvpnNetworks,
   joinNvpnNetwork, repairNvpnNetworkConfig,
   readNvpnNodeIdentity,
-  pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork,
+  pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork, resetNvpnPeerState,
   pingNvpnPeer, netcheckNvpn, doctorNvpn, natDiscoverNvpn,
   setNvpnSettings, statsNvpn,
   setNvpnAlias, removeNvpnAlias,
@@ -540,6 +540,15 @@ export async function handleNvpn(
     const participants = Array.isArray(body.participants) ? body.participants : [];
     const publish = body.publish !== false; // default-on
     const r = await rosterRoute[url](participants, publish) as { ok: boolean };
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // Recover from runaway discovery: stop → clear the daemon's
+  // recent-peers cache → start. Restarts the daemon (brief tunnel blip),
+  // so the UI gates it behind a confirm.
+  if (url === '/api/nvpn/peers/reset' && method === 'POST') {
+    const r = await resetNvpnPeerState();
     await writeJson(res, r.ok ? 200 : 500, r);
     return true;
   }

@@ -15155,6 +15155,10 @@ const VpnPanel = (() => {
                   title="Clear stale routes / tun interface state left by a crashed session. Brief connectivity blip.">
             Repair network
           </button>
+          <button id="vpn-diag-reset-peers" class="danger"
+                  title="Stop the daemon, clear its discovered-peer cache (daemon.recent-peers.json), and restart. Recovers from runaway discovery / 'max links exceeded'. Brief tunnel blip.">
+            Reset peer state
+          </button>
           <button id="vpn-diag-reachability" class="primary"
                   title="Walks you through a manual external probe — confirms peers can actually reach your public endpoint">
             Test reachability
@@ -15454,6 +15458,24 @@ const VpnPanel = (() => {
         toast('repair network', r?.detail || '', r?.ok === false ? 'err' : 'ok');
       } catch { /* api() already toasted */ }
       repairBtn.disabled = false;
+    });
+    const resetPeersBtn = bodyEl.querySelector('#vpn-diag-reset-peers');
+    if (resetPeersBtn) resetPeersBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const ok = await confirmDestructive({
+        title: 'Reset peer state?',
+        description: 'Stops the daemon, clears its discovered-peer cache (daemon.recent-peers.json), and restarts it. Use this to recover from runaway discovery or "max links exceeded". The roster and your config are untouched; brief tunnel blip while it restarts.',
+        confirmLabel: 'Reset & restart',
+      });
+      if (!ok) return;
+      resetPeersBtn.disabled = true;
+      try {
+        const r = await api('/api/nvpn/peers/reset', { method: 'POST' });
+        toast('reset peer state', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+        await refresh();
+        refreshHealth();
+      } catch { /* api() already toasted */ }
+      resetPeersBtn.disabled = false;
     });
     const reachBtn = bodyEl.querySelector('#vpn-diag-reachability');
     if (reachBtn) reachBtn.addEventListener('click', async (e) => {

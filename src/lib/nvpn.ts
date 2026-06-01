@@ -475,6 +475,78 @@ export async function restartNvpn(): Promise<ControlResult> {
   return { ok: true, detail: stop.ok ? 'restarted' : `started (stop hint: ${stop.detail})` };
 }
 
+// ── Discovered-peer state reset (recover from runaway discovery) ──────────
+//
+// The daemon caches discovered peers in `daemon.recent-peers.json` next to
+// its config. A rogue/looping daemon can fill it with stale peers and hit
+// the daemon's hard link ceiling ("max links exceeded: 256"), which blocks
+// the mesh until the file is cleared — until now only doable from a shell.
+// resetNvpnPeerState() stops the daemon, clears the cache (sudo when
+// root-owned), and starts it fresh.
+
+// The daemon's hard peer-link ceiling. Used to warn before the mesh wedges.
+export const NVPN_LINK_CEILING = 256;
+
+// Candidate paths for the daemon's recent-peers cache, most-likely first:
+// next to the config the daemon actually reads (canonical), then the common
+// user + root config dirs. Pure-ish (one resolve), exported for tests.
+export function recentPeersCandidatePaths(): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (dir: string | null | undefined) => {
+    if (!dir) return;
+    const p = path.join(dir, 'daemon.recent-peers.json');
+    if (!seen.has(p)) { seen.add(p); out.push(p); }
+  };
+  const canon = resolveCanonicalConfig().path;
+  if (canon) add(path.dirname(canon));
+  add(path.join(os.homedir(), '.config', 'nvpn'));
+  add('/root/.config/nvpn');
+  return out;
+}
+
+// Remove one peer-state file: direct unlink when we own it; `sudo -n` (test
+// then rm) when it's root-owned. Returns true only when a file was actually
+// removed, so the caller can report an honest count.
+async function removePeerStateFile(p: string): Promise<boolean> {
+  try {
+    if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); return true; }
+  } catch { /* permission — fall through to sudo */ }
+  try {
+    await execa('sudo', ['-n', 'test', '-f', p], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+  } catch {
+    return false; // doesn't exist, or no sudo — nothing cleared here
+  }
+  try {
+    await execa('sudo', ['-n', 'rm', '-f', p], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+    return true;
+  } catch { return false; }
+}
+
+export async function resetNvpnPeerState(): Promise<ControlResult> {
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  // Stop first so the daemon isn't mid-write when we clear the cache.
+  const stop = await stopNvpn();
+  const cleared: string[] = [];
+  for (const p of recentPeersCandidatePaths()) {
+    if (await removePeerStateFile(p)) cleared.push(p);
+  }
+  const start = await startNvpn();
+  if (!start.ok) {
+    return {
+      ok: false,
+      detail: `cleared ${cleared.length} peer-state file(s) but the daemon failed to restart: ${start.detail}`,
+    };
+  }
+  return {
+    ok: true,
+    detail: cleared.length
+      ? `cleared discovered-peer cache (${cleared.length} file${cleared.length > 1 ? 's' : ''}) and restarted the daemon`
+      : `no peer-state cache found${stop.ok ? '' : ` (stop hint: ${stop.detail})`} — restarted the daemon`,
+  };
+}
+
 // ── System service lifecycle ─────────────────────────────────────────────
 //
 // `nvpn service install` writes a systemd unit (linux) or launchd plist
