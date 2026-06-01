@@ -83,6 +83,14 @@ test('helper: snapshots the working binary and rolls back a failed install (#7)'
   assert.match(h, /rolled back/, 'rolls back on service-install failure');
 });
 
+test('helper: seeds the canonical config AS THE USER (not root) so b2 repoint has a target', () => {
+  const h = renderAdminHelperScript();
+  // Only seed when absent, and run init dropped to the invoking user so the
+  // config is user-owned (a root-owned config would defeat b2).
+  assert.match(h, /\[ ! -f "\$CANON_CONFIG" \]/, 'guards on absence');
+  assert.match(h, /runuser -u "\$real_user".*init|su -s \/bin\/sh "\$real_user"/s, 'inits as the user, not root');
+});
+
 // ── manifest + provisioning ─────────────────────────────────────────────
 test('manifest: emits shell-sourceable tag + per-target sha vars', () => {
   const m = renderAdminManifest('v4.0.48', { 'x86_64-unknown-linux-musl': 'abc123' });

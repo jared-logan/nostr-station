@@ -188,6 +188,16 @@ do_install() {
     die "service install failed — rolled back"
   fi
   systemctl daemon-reload || true
+  # Seed the canonical user config if absent, AS THE INVOKING USER (so it's
+  # user-owned, not root) — the config the b2 ExecStart drop-in points at
+  # must exist or the daemon can't start. Without this a fresh install lands
+  # identity-split (daemon on its root config, dashboard on the user one).
+  if [ ! -f "\$CANON_CONFIG" ]; then
+    install -d -m 0700 -o "\$real_user" -g "\$(id -gn "\$real_user")" "\$(dirname "\$CANON_CONFIG")" 2>/dev/null || true
+    runuser -u "\$real_user" -- "\$NVPN_BIN" init >/dev/null 2>&1 \
+      || su -s /bin/sh "\$real_user" -c "'\$NVPN_BIN' init" >/dev/null 2>&1 \
+      || true
+  fi
   write_config_dropin
   systemctl daemon-reload || true
   systemctl try-restart "\$UNIT" || true
@@ -277,6 +287,14 @@ function isRootOwned(p: string): boolean {
 }
 
 export async function adminState(): Promise<AdminState> {
+  // The helper is systemd-based (Linux). macOS/launchd is not yet covered —
+  // report clearly rather than letting verbs fail cryptically.
+  if (process.platform !== 'linux') {
+    return {
+      helperInstalled: false, rootOwned: false, ready: false, manifestCurrent: false,
+      detail: 'admin helper is Linux-only for now — macOS service management via the dashboard is not yet supported',
+    };
+  }
   const helperInstalled = (() => { try { return fs.statSync(ADMIN_HELPER).isFile(); } catch { return false; } })();
   const rootOwned = helperInstalled && isRootOwned(ADMIN_HELPER) && isRootOwned(ADMIN_LIB_DIR);
   let ready = false;
@@ -312,6 +330,9 @@ export interface AdminRunResult { ok: boolean; detail: string }
 // stdin-only, never logged/stored/returned.
 export async function runAdminVerb(verb: AdminVerb, password?: string): Promise<AdminRunResult> {
   if (!ADMIN_VERBS.includes(verb)) return { ok: false, detail: `unknown verb: ${verb}` };
+  if (process.platform !== 'linux') {
+    return { ok: false, detail: 'admin helper is Linux-only for now — macOS service management via the dashboard is not yet supported' };
+  }
   const args = password
     ? ['-S', '-p', '', ADMIN_HELPER, verb]
     : ['-n', ADMIN_HELPER, verb];
