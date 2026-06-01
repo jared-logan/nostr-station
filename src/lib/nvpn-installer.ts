@@ -25,13 +25,56 @@ import fs from 'fs';
 import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
 import { getCargoBin, getNvpnTarget } from './detect.js';
-import { applyLinuxCapsDropIn, seedFreeMagicDnsPort, reconcileDaemonIdentityAfterInstall } from './nvpn.js';
+import {
+  applyLinuxCapsDropIn, seedFreeMagicDnsPort, reconcileDaemonIdentityAfterInstall,
+  applyNvpnConfigDropIn, canonicalConfigInstallPath,
+} from './nvpn.js';
 import {
   type InstallResult, type ProgressCallback,
   createInstallLogger, downloadAndVerify,
 } from './installer-runtime.js';
 
 export type { InstallResult, ProgressCallback };
+
+// b2 stage 4: make the root daemon read the canonical user-side config the
+// dashboard reads/writes, so the daemon and dashboard share a single
+// identity and the create-then-heal copy is unnecessary. Seeds the
+// canonical config if absent (the daemon can't --config a missing file),
+// then lays down the ExecStart drop-in (which self-reverts if the daemon
+// doesn't come back up). Fully best-effort + linux-only: every failure
+// degrades to the prior behavior (root config + reconcile), never breaks
+// the install.
+async function pointDaemonAtCanonicalConfig(
+  nvpnBin: string, log: ReturnType<typeof createInstallLogger>,
+): Promise<void> {
+  if (process.platform !== 'linux') return;
+  const canonical = canonicalConfigInstallPath();
+  // 1) Seed the canonical config if it doesn't exist yet. Guard on
+  //    existence so we don't spawn `nvpn init` on the common already-paired
+  //    path; `nvpn init` won't clobber an existing config either way.
+  if (!fs.existsSync(canonical)) {
+    log.step('seed canonical nvpn config');
+    try {
+      await execa(nvpnBin, ['init', '--force'], { stdio: 'pipe', timeout: 10_000 });
+      log.append(`seeded ${canonical}`);
+    } catch {
+      try {
+        await execa(nvpnBin, ['init'], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000, input: '\n' });
+        log.append(`seeded ${canonical} (stdin-newline)`);
+      } catch (e: any) {
+        log.append(`seed skipped: ${(e?.message || '').slice(0, 160)}`);
+      }
+    }
+  }
+  // 2) Repoint the daemon's ExecStart at the canonical config.
+  log.step('point daemon at canonical config');
+  try {
+    const r = await applyNvpnConfigDropIn(canonical);
+    log.append(`config drop-in: ${r.ok ? 'ok' : 'skipped'} — ${r.detail}`);
+  } catch (e: any) {
+    log.append(`config drop-in skipped: ${(e?.message || '').slice(0, 160)}`);
+  }
+}
 
 export async function installNostrVpn(
   onProgress: ProgressCallback = () => {},
@@ -195,9 +238,12 @@ export async function installNostrVpn(
         { stdio: 'pipe', timeout: 30_000 },
       );
       log.append(`service install --force ok; stdout=${stdout.slice(0, 240)}`);
-      // Keep a 1.6-adopted box from regressing: if `service install
-      // --force` re-minted a root identity, reconcile back to the managed
-      // one. No-op when they already agree. Best-effort + quiet.
+      // b2: repoint the daemon at the canonical config (re-applies the
+      // ExecStart drop-in in case --force rewrote the unit). With the daemon
+      // reading the managed config directly, the reconcile below no-ops.
+      await pointDaemonAtCanonicalConfig(nvpnBin, log);
+      // Safety net (now usually a no-op): if anything left the daemon on a
+      // re-minted root identity, reconcile back to the managed one.
       try {
         const rec = await reconcileDaemonIdentityAfterInstall(null);
         log.append(`reconcile (force): ${rec.adopted ? 'adopted managed identity' : 'no-op'} — ${rec.detail}`);
@@ -291,16 +337,18 @@ export async function installNostrVpn(
     );
     log.append(`service install ok; stdout=${stdout.slice(0, 120)} stderr=${stderr.slice(0, 120)}`);
 
-    // Prevent the identity split at the source. `service install` just ran
-    // `nvpn init` as root, minting a separate root identity at
-    // /root/.config/nvpn/. If the dashboard user already has a managed
-    // identity (they've paired / joined), reconcile so the daemon runs
-    // THAT single identity — otherwise every later dashboard op edits a
-    // config the daemon ignores. Best-effort + quiet: the install already
-    // succeeded; sudo is warm from the call above. No managed identity yet
-    // (user hasn't paired) → it safely no-ops, and the eventual adopt flow
-    // covers any later drift.
-    log.step('reconcile daemon identity (single-identity)');
+    // b2: `service install` just ran `nvpn init` as root, minting a root
+    // identity at /root/.config/nvpn/. Instead of later copying the managed
+    // config over it (create-then-heal), point the daemon's ExecStart at
+    // the canonical user-side config directly — one identity, no copy. The
+    // drop-in self-reverts if the daemon doesn't come back up.
+    await pointDaemonAtCanonicalConfig(nvpnBin, log);
+
+    // Safety net (now a no-op when the repoint succeeded): if the daemon is
+    // still on a separate root identity and the user already has a managed
+    // one, reconcile so later dashboard ops don't edit a config the daemon
+    // ignores. Kept dormant pending VM acceptance of the repoint path.
+    log.step('reconcile daemon identity (safety net)');
     try {
       const rec = await reconcileDaemonIdentityAfterInstall(null);
       log.append(`reconcile: ${rec.adopted ? 'adopted managed identity' : 'no-op'} — ${rec.detail}`);

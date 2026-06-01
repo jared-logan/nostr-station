@@ -674,6 +674,129 @@ async function applyLinuxCapsDropIn(): Promise<ControlResult> {
 
 export { applyLinuxCapsDropIn };
 
+// ── Canonical-config ExecStart drop-in (b2 stage 4) ─────────────────────
+//
+// The load-bearing step of b2: make the root daemon read the SAME config
+// the dashboard reads/writes — the canonical user-side config — instead of
+// its own auto-minted root config. We do it the systemd-idiomatic way: a
+// drop-in that overrides ExecStart to add `--config <canonical path>`,
+// layered over upstream's unit exactly like the caps drop-in. With the
+// daemon pointed at the canonical config there is one identity and the
+// create-then-heal reconcile/adopt copy becomes a no-op (kept as a dormant
+// safety net for now).
+//
+// Safety: applyNvpnConfigDropIn() has a rollback guard — if the daemon was
+// running and does NOT come back up after the repoint+restart, we remove
+// the drop-in and reload so it returns to its working config. Worst case is
+// the prior behavior, never a dead daemon.
+
+const CONFIG_DROP_IN_PATH = `${CAPS_DROP_IN_DIR}/20-nostr-station-config.conf`;
+
+// The deterministic canonical config path for installs — the dashboard
+// user's `~/.config/nvpn/config.toml`. Unlike resolveCanonicalConfig(),
+// this does NOT gate on existence (the installer seeds it), so the drop-in
+// can name a stable target. Mirrors nvpnConfigCandidates()[0].
+export function canonicalConfigInstallPath(): string {
+  return path.join(os.homedir(), '.config', 'nvpn', 'config.toml');
+}
+
+// Pull the BASE unit's ExecStart out of `systemctl cat nvpn.service`
+// output. cat prints each fragment under a `# <path>` header; the base unit
+// is the fragment whose path ends in `/nvpn.service` (drop-ins live under
+// `/nvpn.service.d/`). Returns the last ExecStart= in that fragment, or
+// null. Pure — exported for unit tests.
+export function extractBaseExecStart(catOutput: string): string | null {
+  let inBase = false;
+  let exec: string | null = null;
+  for (const line of catOutput.split(/\r?\n/)) {
+    const h = line.match(/^#\s+(\/\S+)\s*$/);
+    if (h) { inBase = /\/nvpn\.service$/.test(h[1]); continue; }
+    if (inBase) {
+      const m = line.match(/^\s*ExecStart=(.*)$/);
+      if (m && m[1].trim()) exec = m[1].trim();
+    }
+  }
+  return exec;
+}
+
+// Rewrite an ExecStart command to read `configPath`: strip any existing
+// `--config <x>` / `--config=<x>` first (so re-applying is idempotent and
+// we never end up with two --config flags), then append the canonical one.
+// Pure — exported for unit tests.
+export function rewriteExecStartWithConfig(execStart: string, configPath: string): string {
+  const stripped = execStart.replace(/\s*--config(?:=|\s+)\S+/g, '').trim();
+  return `${stripped} --config ${configPath}`;
+}
+
+// Render the override drop-in. The empty `ExecStart=` resets the inherited
+// value before we set ours — required by systemd for single-value
+// directives. Pure — exported for unit tests.
+export function renderNvpnConfigDropIn(rewrittenExecStart: string): string {
+  return [
+    '# Managed by nostr-station — points the nvpn daemon at the canonical',
+    '# config the dashboard reads/writes, so the daemon and dashboard share',
+    '# a single identity (no create-then-heal copy). Safe to remove to',
+    '# revert the daemon to its own config path.',
+    '[Service]',
+    'ExecStart=',
+    `ExecStart=${rewrittenExecStart}`,
+    '',
+  ].join('\n');
+}
+
+// Is nvpn.service currently active? Best-effort; false on any error.
+async function nvpnServiceActive(): Promise<boolean> {
+  try {
+    const r = await execa('systemctl', ['is-active', 'nvpn.service'], { timeout: 5000, stdio: 'pipe', reject: false });
+    return (r.stdout || '').trim() === 'active';
+  } catch { return false; }
+}
+
+// Apply (or refresh) the canonical-config ExecStart drop-in. Reads the base
+// ExecStart, rewrites it to add `--config <configPath>`, writes the drop-in,
+// reloads + restarts, then verifies the daemon came back up — rolling the
+// drop-in back if it didn't. Linux-only; best-effort (the caller logs and
+// continues, with reconcile as the fallback).
+export async function applyNvpnConfigDropIn(configPath: string): Promise<ControlResult> {
+  if (process.platform !== 'linux') return { ok: true, detail: 'non-linux — skipped' };
+  if (!configPath) return { ok: false, detail: 'no canonical config path' };
+
+  let baseExec: string | null = null;
+  try {
+    const { stdout } = await execa('systemctl', ['cat', 'nvpn.service'], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+    baseExec = extractBaseExecStart(stdout);
+  } catch (e: any) {
+    return { ok: false, detail: `systemctl cat failed: ${summarizeError(e)}` };
+  }
+  if (!baseExec) return { ok: false, detail: 'could not find base ExecStart in nvpn.service' };
+
+  const content = renderNvpnConfigDropIn(rewriteExecStartWithConfig(baseExec, configPath));
+  const wasActive = await nvpnServiceActive();
+  try {
+    await execa('sudo', ['-n', 'install', '-d', '-m', '0755', CAPS_DROP_IN_DIR], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+    await execa('sudo', ['-n', 'tee', CONFIG_DROP_IN_PATH], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe', input: content });
+    await execa('sudo', ['-n', 'systemctl', 'daemon-reload'], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+    await execa('sudo', ['-n', 'systemctl', 'try-restart', 'nvpn.service'], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) return { ok: false, detail: 'sudo cred cache empty' };
+    return { ok: false, detail: summarizeError(e) };
+  }
+
+  // Rollback guard: only meaningful if the daemon was up before we touched
+  // it. If it was running and isn't now, the --config repoint broke its
+  // start — revert so the box is left in a working state.
+  if (wasActive && !(await nvpnServiceActive())) {
+    try {
+      await execa('sudo', ['-n', 'rm', '-f', CONFIG_DROP_IN_PATH], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+      await execa('sudo', ['-n', 'systemctl', 'daemon-reload'], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+      await execa('sudo', ['-n', 'systemctl', 'try-restart', 'nvpn.service'], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+    } catch { /* best-effort revert */ }
+    return { ok: false, detail: 'daemon did not come up with --config repoint — reverted drop-in' };
+  }
+  return { ok: true, detail: 'config drop-in applied' };
+}
+
 // ── Magic-DNS port seed ────────────────────────────────────────────────
 //
 // nvpn's default magic-dns port is 1053. On Ubuntu desktop and anywhere
