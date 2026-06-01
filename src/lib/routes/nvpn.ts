@@ -390,6 +390,16 @@ export async function handleNvpn(
     await writeJson(res, 200, r);
     return true;
   }
+  // Service-tab Install / Reinstall buttons (vpn-svc-install,
+  // vpn-svc-reinstall) POST here. This route was MISSING — the buttons
+  // 404'd, so registering/reinstalling the unit from the Service tab did
+  // nothing. (Distinct from /api/nvpn/install-service, the Status-strip
+  // first-run install.) Registers/rewrites the systemd unit via sudo -n.
+  if (url === '/api/nvpn/service/install' && method === 'POST') {
+    const r = await installNvpnService();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
   if (url === '/api/nvpn/service/enable' && method === 'POST') {
     const r = await enableNvpnService();
     await writeJson(res, r.ok ? 200 : 500, r);
