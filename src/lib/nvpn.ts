@@ -30,6 +30,7 @@ import path from 'path';
 import os from 'os';
 import readline from 'readline';
 import { findBin } from './detect.js';
+import { runAdminVerb } from './nvpn-sudo.js';
 import { canonicalNetworkId, computeNvpnTunnelIp } from './nvpn-diagnostics.js';
 import type { LogBuffer } from './log-buffer.js';
 
@@ -385,21 +386,10 @@ function summarizeError(e: any): string {
 async function systemctlControl(
   op: 'start' | 'stop' | 'restart',
 ): Promise<ControlResult> {
-  try {
-    await execa('sudo', ['-n', 'systemctl', op, 'nvpn.service'], {
-      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
-    });
-    return { ok: true, detail: `systemctl ${op} nvpn.service` };
-  } catch (e: any) {
-    const stderr = (e?.stderr?.toString?.() || '').trim();
-    if (/password is required|sudo:.*required/i.test(stderr)) {
-      return {
-        ok: false,
-        detail: `sudo cred cache empty — run \`sudo systemctl ${op} nvpn.service\` in your terminal, then refresh the dashboard.`,
-      };
-    }
-    return { ok: false, detail: summarizeError(e) };
-  }
+  // Routed through the root-owned helper (sudo -n nvpn-admin <op>) — no
+  // broad `sudo systemctl` grant. When the helper isn't set up yet,
+  // runAdminVerb returns a clear "run the one-time setup" detail.
+  return runAdminVerb(op);
 }
 
 export async function startNvpn(): Promise<ControlResult> {
@@ -505,46 +495,16 @@ export function recentPeersCandidatePaths(): string[] {
   return out;
 }
 
-// Remove one peer-state file: direct unlink when we own it; `sudo -n` (test
-// then rm) when it's root-owned. Returns true only when a file was actually
-// removed, so the caller can report an honest count.
-async function removePeerStateFile(p: string): Promise<boolean> {
-  try {
-    if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); return true; }
-  } catch { /* permission — fall through to sudo */ }
-  try {
-    await execa('sudo', ['-n', 'test', '-f', p], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
-  } catch {
-    return false; // doesn't exist, or no sudo — nothing cleared here
-  }
-  try {
-    await execa('sudo', ['-n', 'rm', '-f', p], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
-    return true;
-  } catch { return false; }
-}
 
 export async function resetNvpnPeerState(): Promise<ControlResult> {
-  const binPath = findBin('nvpn');
-  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
-  // Stop first so the daemon isn't mid-write when we clear the cache.
-  const stop = await stopNvpn();
-  const cleared: string[] = [];
-  for (const p of recentPeersCandidatePaths()) {
-    if (await removePeerStateFile(p)) cleared.push(p);
-  }
-  const start = await startNvpn();
-  if (!start.ok) {
-    return {
-      ok: false,
-      detail: `cleared ${cleared.length} peer-state file(s) but the daemon failed to restart: ${start.detail}`,
-    };
-  }
-  return {
-    ok: true,
-    detail: cleared.length
-      ? `cleared discovered-peer cache (${cleared.length} file${cleared.length > 1 ? 's' : ''}) and restarted the daemon`
-      : `no peer-state cache found${stop.ok ? '' : ` (stop hint: ${stop.detail})`} — restarted the daemon`,
-  };
+  // Routed through the root-owned helper: it stops the daemon, clears the
+  // recent-peers cache next to the canonical (and root) config, and starts
+  // again — all as root, with the path derived from SUDO_USER inside the
+  // helper (no user-supplied path). recentPeersCandidatePaths()/removePeer-
+  // StateFile() remain for reference + tests but the privileged clear is
+  // the helper's job now.
+  const r = await runAdminVerb('reset-peers');
+  return r.ok ? { ok: true, detail: 'cleared discovered-peer cache and restarted the daemon' } : r;
 }
 
 // ── System service lifecycle ─────────────────────────────────────────────
@@ -648,39 +608,11 @@ nvpnEvents.on('state-changed', () => {
 async function runServiceOp(
   op: 'install' | 'enable' | 'disable' | 'uninstall',
 ): Promise<ControlResult> {
-  const binPath = findBin('nvpn');
-  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
-  // For `install` (initial + Reinstall button): lay down our systemd
-  // drop-in BEFORE upstream's `nvpn service install` writes its unit
-  // and starts the daemon. systemd merges drop-ins with the base unit
-  // on daemon-reload, so the very first start picks up our caps —
-  // critical for a clean first-run log (no "Cannot open route/flush"
-  // red lines). Best-effort: if sudo fails here, install proceeds
-  // anyway and we surface the skip reason in the result detail.
-  let capsNote = '';
-  if (op === 'install') {
-    const caps = await applyLinuxCapsDropIn();
-    capsNote = caps.ok
-      ? (caps.detail ? ` (${caps.detail})` : '')
-      : ` (caps drop-in skipped: ${caps.detail})`;
-  }
-  try {
-    await execa('sudo', ['-n', binPath, 'service', op], {
-      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
-    });
-    return { ok: true, detail: `service ${op} ok${capsNote}` };
-  } catch (e: any) {
-    const stderr = (e?.stderr?.toString?.() || '').trim();
-    const needsPassword = /password is required|sudo:.*required/i.test(stderr);
-    if (needsPassword) {
-      return {
-        ok: false,
-        detail: `sudo cred cache empty — run \`sudo ${binPath} service ${op}\` manually, ` +
-                `then refresh the dashboard.`,
-      };
-    }
-    return { ok: false, detail: summarizeError(e) };
-  }
+  // Routed through the root-owned helper. The helper's `install` verb does
+  // the caps + config drop-ins itself (root-owned content), so there's no
+  // broad `sudo nvpn service …` grant. `enable`/`disable`/`uninstall` map
+  // 1:1 to helper verbs.
+  return runAdminVerb(op);
 }
 
 // ── Linux capabilities drop-in ─────────────────────────────────────────
@@ -964,35 +896,17 @@ function removeCargoBinShadow(): string | null {
 }
 
 export async function uninstallNvpnCli(): Promise<ControlResult> {
-  const binPath = findBin('nvpn');
-  if (!binPath) {
-    // Nothing on PATH — but a cargo-bin shadow may still be lurking and
-    // would block a clean reinstall. Sweep it and report success.
-    const swept = removeCargoBinShadow();
-    return { ok: true, detail: swept ? `removed stale ${swept}` : 'nvpn binary not installed' };
-  }
-  let detail = '';
-  // Try without sudo first — most setups have nvpn in ~/.cargo/bin
-  // (user-writable) which doesn't need root.
-  try {
-    await execa(binPath, ['uninstall-cli'], { timeout: 15_000, stdio: 'pipe' });
-    detail = 'cli removed from PATH';
-  } catch {
-    try {
-      await execa('sudo', ['-n', binPath, 'uninstall-cli'], { timeout: 15_000, stdio: 'pipe' });
-      detail = 'cli removed from PATH (via sudo)';
-    } catch (e: any) {
-      // Even if upstream uninstall-cli failed, still sweep the shadow so a
-      // reinstall isn't blocked; surface the original failure though.
-      removeCargoBinShadow();
-      return { ok: false, detail: summarizeError(e) };
-    }
-  }
-  // ALWAYS sweep the cargo-bin shadow too. `uninstall-cli` removes the PATH
-  // copy but leaves ~/.cargo/bin/nvpn, which makes a subsequent install
-  // short-circuit as "already installed" → no service → unrecoverable.
+  // Privileged removal (service uninstall + remove the root-owned
+  // /usr/local/bin/nvpn + our drop-ins) is the helper's `uninstall` verb.
+  const r = await runAdminVerb('uninstall');
+  // ALWAYS sweep the user-writable cargo-bin shadow too (no sudo needed) —
+  // the helper only manages the root-owned copy, and a leftover cargo-bin
+  // binary would make a later install short-circuit as "already installed".
   const swept = removeCargoBinShadow();
-  return { ok: true, detail: swept ? `${detail}; removed ${swept}` : detail };
+  if (!r.ok) {
+    return { ok: false, detail: `${r.detail}${swept ? ` (removed stale ${swept})` : ''}` };
+  }
+  return { ok: true, detail: swept ? `nvpn removed; cleared stale ${swept}` : 'nvpn removed' };
 }
 
 // ── Configured roster (config.toml) ──────────────────────────────────────

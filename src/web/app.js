@@ -660,92 +660,60 @@ function confirmDestructive({ title, description, typeToConfirm, confirmLabel = 
   });
 }
 
-// Admin unlock — warm the sudo cred cache so the dashboard's `sudo -n`
-// privileged ops (install / service control) succeed. The password is
-// posted once and is never stored client-side. Resolves true on success.
-function openSudoUnlockModal(onUnlocked) {
-  const body = document.createElement('div');
-  body.innerHTML = `
-    <p class="muted" style="margin-top:0">
-      Installing, updating, or managing the service needs root. Enter your
-      password for <code>sudo</code> — it's sent once to warm sudo for the
-      next few minutes and is <strong>never stored or logged</strong>.
-    </p>
-    <input id="sudo-pw" type="password" autocomplete="off" placeholder="sudo password" style="width:100%;box-sizing:border-box">
-    <div id="sudo-pw-err" class="err" style="margin-top:8px;display:none"></div>
-  `;
-  const foot = document.createElement('div');
-  foot.style.display = 'flex'; foot.style.gap = '8px';
-  const cancel = document.createElement('button'); cancel.textContent = 'Cancel';
-  const go = document.createElement('button'); go.textContent = 'Unlock'; go.className = 'primary';
-  foot.appendChild(cancel); foot.appendChild(go);
-  const modal = openModal({ title: 'Unlock admin actions', subtitle: 'Warm sudo for installs & service control', body, footer: foot });
-  const input = body.querySelector('#sudo-pw');
-  const err = body.querySelector('#sudo-pw-err');
-  cancel.addEventListener('click', modal.close);
-  input.focus();
-  const submit = async () => {
-    const pw = input.value;
-    if (!pw) { input.focus(); return; }
-    go.disabled = true; go.innerHTML = '<span class="spinner"></span> Unlocking…';
-    err.style.display = 'none';
-    let r = null;
-    try { r = await api('/api/nvpn/sudo/unlock', { method: 'POST', body: JSON.stringify({ password: pw }) }); }
-    catch { /* network — handled below */ }
-    input.value = '';
-    if (r?.ok) {
-      toast('Admin actions unlocked', 'sudo is warm for the next few minutes', 'ok');
-      modal.close();
-      onUnlocked?.();
-    } else {
-      err.textContent = r?.detail || 'unlock failed';
-      err.style.display = 'block';
-      go.disabled = false; go.textContent = 'Unlock';
-      input.focus();
-    }
-  };
-  go.addEventListener('click', submit);
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
-}
-
-// Populate an admin-unlock slot (#vpn-admin-unlock) inside `container`:
-// shows lock state + an unlock button, and the optional permanent-grant
-// command. Re-renders itself after a successful unlock.
+// Populate an admin-access slot (#vpn-admin-unlock) inside `container`.
+// Privileged ops route through a root-owned helper (sudo -n nvpn-admin
+// <verb>). When it's set up + the grant is active we show "ready"; when
+// not, we show the ONE-TIME setup command for the user to review and run
+// in a terminal (it installs a root-owned helper + a scoped, visudo-
+// validated sudo rule). The dashboard never runs it and never handles a
+// password. Re-checks on demand.
 async function wireAdminUnlock(container) {
   const slot = container.querySelector('#vpn-admin-unlock');
   if (!slot) return;
   let st = null;
   try { st = await api('/api/nvpn/sudo/status', undefined, { silent: true }); } catch { slot.remove(); return; }
-  const ready = !!st?.ready;
-  slot.innerHTML = `
-    <div class="vpn-meta-row vpn-meta-subrow">
-      <div>
-        <div class="vpn-empty-title">${ready ? '🔓 Admin actions unlocked' : '🔒 Admin actions locked'}</div>
-        <div class="vpn-empty-detail muted">
-          ${ready
-            ? 'Install, update, and service buttons can use sudo for the next few minutes.'
-            : 'Installing, updating, or managing the service needs sudo. Unlock once and these actions work for about 15 minutes.'}
+  const ready = !!st?.ready && !!st?.rootOwned;
+  const stale = ready && st?.manifestCurrent === false;
+  if (ready && !stale) {
+    slot.innerHTML = `
+      <div class="vpn-meta-row vpn-meta-subrow">
+        <div>
+          <div class="vpn-empty-title">✓ Admin access ready</div>
+          <div class="vpn-empty-detail muted">Install, update, and service actions run through the root-owned <code>nvpn-admin</code> helper.</div>
         </div>
+        <span class="vpn-meta-svc-actions"><button id="vpn-admin-recheck">Re-check</button></span>
+      </div>`;
+  } else {
+    const headline = !st?.helperInstalled
+      ? 'Set up admin access (one time)'
+      : st?.rootOwned === false
+        ? '⚠ Admin helper is not root-owned — re-run setup'
+        : stale
+          ? 'Admin helper version is stale — re-run setup'
+          : 'Finish admin setup';
+    slot.innerHTML = `
+      <div class="vpn-empty-title">${escapeHtml(headline)}</div>
+      <p class="vpn-empty-detail muted" style="margin-top:6px">
+        Installing and managing the service needs root. Run this once in a
+        terminal on the station. It installs a <strong>root-owned</strong>
+        helper that exposes only a fixed set of verbs, plus a scoped
+        <code>sudo</code> rule for just that helper — validated with
+        <code>visudo</code> before it's applied. The dashboard never runs it
+        and never sees your password. Review it, then paste:
+      </p>
+      <pre class="vpn-cmd" style="white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto"><code>${escapeHtml(st?.provisionCmd || '')}</code></pre>
+      <div class="vpn-meta-svc-actions" style="margin-top:10px">
+        <button id="vpn-admin-copy" class="primary">Copy command</button>
+        <button id="vpn-admin-recheck">I've run it — re-check</button>
       </div>
-      <span class="vpn-meta-svc-actions">
-        <button id="vpn-admin-unlock-btn" class="${ready ? '' : 'primary'}">${ready ? 'Re-unlock' : 'Unlock admin actions'}</button>
-      </span>
-    </div>
-    ${st?.permanentCmd ? `
-      <details class="vpn-admin-perm" style="margin-top:10px">
-        <summary class="muted" style="cursor:pointer">Make it permanent (optional, advanced)</summary>
-        <p class="vpn-empty-detail muted" style="margin-top:8px">
-          Run this once in a terminal to grant passwordless sudo for exactly
-          the nvpn service commands — then you'll never need to unlock again.
-          It's validated with <code>visudo</code> before it's installed:
-        </p>
-        <pre class="vpn-cmd" style="white-space:pre-wrap;word-break:break-all"><code>${escapeHtml(st.permanentCmd)}</code></pre>
-      </details>` : ''}
-  `;
-  slot.querySelector('#vpn-admin-unlock-btn')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    openSudoUnlockModal(() => { wireAdminUnlock(container); });
-  });
+      <div class="vpn-empty-detail muted" style="margin-top:6px">${escapeHtml(st?.detail || '')}</div>`;
+    slot.querySelector('#vpn-admin-copy')?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      try { await navigator.clipboard.writeText(st?.provisionCmd || ''); toast('Copied setup command', 'paste it into a terminal on the station', 'ok'); }
+      catch { toast('Copy failed', 'select the command and copy manually', 'err'); }
+    });
+  }
+  slot.querySelector('#vpn-admin-recheck')?.addEventListener('click', (e) => { e.preventDefault(); wireAdminUnlock(container); });
 }
 
 // Reusable terminal-output modal for streaming SSE from any POST endpoint
