@@ -38,7 +38,7 @@ import {
   publishRoster, createInvite, importInvite, whoisPeer, readNvpnRoster, readNvpnNetworks,
   joinNvpnNetwork, repairNvpnNetworkConfig,
   readNvpnNodeIdentity,
-  pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork,
+  pauseNvpn, resumeNvpn, reloadNvpn, repairNvpnNetwork, resetNvpnPeerState,
   pingNvpnPeer, netcheckNvpn, doctorNvpn, natDiscoverNvpn,
   setNvpnSettings, statsNvpn,
   setNvpnAlias, removeNvpnAlias,
@@ -53,6 +53,7 @@ import { nvpnRelayHealth } from '../nvpn-relay-health.js';
 import { detectContainer, natWarningFor, isPrivateEndpoint } from '../container-detect.js';
 import { detectSplitBrain, stopUserModeDaemon } from '../nvpn-split-brain.js';
 import { listJoinRequests, approveJoinRequest, denyJoinRequest } from '../nvpn-join-requests.js';
+import { adminState, buildAdminProvisionCommand } from '../nvpn-sudo.js';
 import { readBody } from './_shared.js';
 
 async function writeJson(
@@ -363,6 +364,29 @@ export async function handleNvpn(
     await writeJson(res, 200, r);
     return true;
   }
+  // ── Admin access (root-owned helper + scoped sudo grant) ──────────
+  // Privileged ops route through `sudo -n nvpn-admin <verb>`. There's no
+  // broad sudo and no cache-warming. status reports whether the helper is
+  // installed, root-owned, and the NOPASSWD grant is active; provisionCmd
+  // is the one-time, user-run, visudo-validated setup command (we never
+  // run it ourselves — the user reviews it, including the helper body).
+  if (url === '/api/nvpn/sudo/status' && method === 'GET') {
+    await writeJson(res, 200, {
+      ...(await adminState()),
+      provisionCmd: buildAdminProvisionCommand(),
+    });
+    return true;
+  }
+  // Service-tab Install / Reinstall buttons (vpn-svc-install,
+  // vpn-svc-reinstall) POST here. This route was MISSING — the buttons
+  // 404'd, so registering/reinstalling the unit from the Service tab did
+  // nothing. (Distinct from /api/nvpn/install-service, the Status-strip
+  // first-run install.) Registers/rewrites the systemd unit via sudo -n.
+  if (url === '/api/nvpn/service/install' && method === 'POST') {
+    const r = await installNvpnService();
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
   if (url === '/api/nvpn/service/enable' && method === 'POST') {
     const r = await enableNvpnService();
     await writeJson(res, r.ok ? 200 : 500, r);
@@ -513,6 +537,15 @@ export async function handleNvpn(
     const participants = Array.isArray(body.participants) ? body.participants : [];
     const publish = body.publish !== false; // default-on
     const r = await rosterRoute[url](participants, publish) as { ok: boolean };
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // Recover from runaway discovery: stop → clear the daemon's
+  // recent-peers cache → start. Restarts the daemon (brief tunnel blip),
+  // so the UI gates it behind a confirm.
+  if (url === '/api/nvpn/peers/reset' && method === 'POST') {
+    const r = await resetNvpnPeerState();
     await writeJson(res, r.ok ? 200 : 500, r);
     return true;
   }

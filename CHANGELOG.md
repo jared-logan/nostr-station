@@ -5,6 +5,55 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: lifecycle hardening — reliable install, uninstall & recovery
+
+Fixes the production failures the b2 acceptance test surfaced (binary
+stranded in `~/.cargo/bin`, no service, uninstall bricking the box) and
+closes the recovery + onboarding gaps from the full panel review.
+
+- **Root-owned, fixed-verb admin helper (the privilege model).** All
+  privileged ops route through `sudo -n nvpn-admin <verb>` — a root-owned,
+  non-user-writable helper at `/usr/local/lib/nostr-station/nvpn-admin`
+  exposing a fixed verb set (install/reinstall/uninstall/enable/disable/
+  start/stop/restart/reset-peers). It takes zero user input (one verb,
+  sanitized PATH, paths derived only from `SUDO_USER`), invokes only the
+  root-owned `/usr/local/bin/nvpn`, and **re-verifies the staged tarball's
+  SHA256 against a root-owned manifest before installing** — so a swapped
+  binary is refused (defeats binary-swap escalation). sudoers grants
+  NOPASSWD for *only* `<helper> <verb>` — each a complete Cmnd, no
+  wildcards, no trailing args. Setup is a one-time, user-run,
+  `visudo`-validated command the dashboard only displays (incl. the full
+  helper body). No `sudo -v` cache-warming, no broad grant. This replaces
+  the earlier (insecure) cache-warm + command-list approach.
+- **Atomic, recovery-proof install/uninstall.** Install =
+  download+verify → stage tarball → `sudo -n nvpn-admin install`. The
+  helper **snapshots the working binary and rolls back a failed
+  (re)install**, so a bad install never bricks a working box. The
+  "already installed" short-circuit now requires a *running service*, not
+  a stray cargo-bin binary, so reinstall-after-uninstall actually
+  re-provisions; uninstall sweeps the cargo-bin shadow; failures surface
+  `ok:false`, not a misleading green.
+- **Peer-state reset.** New Diagnostics action (+ `POST
+  /api/nvpn/peers/reset`) → `nvpn-admin reset-peers`: stop, clear
+  `daemon.recent-peers.json`, start — recovering from runaway discovery /
+  "max links exceeded: 256" without a shell.
+- **Guided host-vs-join onboarding** on the Network tab while the mesh is
+  empty.
+- **Panel cleanups.** Removed the dead `magic-dns-port` / `relay-for-others`
+  settings fields (nvpn 4.x ignores them); added confirms to Stop and
+  Remove service; renamed the route/interface clear to "Reset routes &
+  interface" to disambiguate it from "Repair network config" (de-fork);
+  fixed the Service-tab Install/Reinstall buttons (they 404'd on a missing
+  route).
+
+10 security-property unit tests assert the escalation defenses by
+construction (helper-only grant, exact verbs, no cargo path, SHA
+re-verify, `SUDO_USER`-derived paths, snapshot/rollback). Full suite 1576
+pass. The helper's runtime is **VM-gated** — the three escalation tests
+(binary-swap, extra-args, drop-in injection must all refuse) + the
+uninstall→reinstall round-trip + binary/dir ownership checks are the merge
+gate. The create-then-heal reconcile safety net is **left untouched**.
+
 ### nostr-vpn: daemon reads the canonical config (b2 stage 4 of 4)
 
 The behavior-flipping final stage. The installer now points the root nvpn

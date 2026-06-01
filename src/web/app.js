@@ -660,6 +660,62 @@ function confirmDestructive({ title, description, typeToConfirm, confirmLabel = 
   });
 }
 
+// Populate an admin-access slot (#vpn-admin-unlock) inside `container`.
+// Privileged ops route through a root-owned helper (sudo -n nvpn-admin
+// <verb>). When it's set up + the grant is active we show "ready"; when
+// not, we show the ONE-TIME setup command for the user to review and run
+// in a terminal (it installs a root-owned helper + a scoped, visudo-
+// validated sudo rule). The dashboard never runs it and never handles a
+// password. Re-checks on demand.
+async function wireAdminUnlock(container) {
+  const slot = container.querySelector('#vpn-admin-unlock');
+  if (!slot) return;
+  let st = null;
+  try { st = await api('/api/nvpn/sudo/status', undefined, { silent: true }); } catch { slot.remove(); return; }
+  const ready = !!st?.ready && !!st?.rootOwned;
+  const stale = ready && st?.manifestCurrent === false;
+  if (ready && !stale) {
+    slot.innerHTML = `
+      <div class="vpn-meta-row vpn-meta-subrow">
+        <div>
+          <div class="vpn-empty-title">✓ Admin access ready</div>
+          <div class="vpn-empty-detail muted">Install, update, and service actions run through the root-owned <code>nvpn-admin</code> helper.</div>
+        </div>
+        <span class="vpn-meta-svc-actions"><button id="vpn-admin-recheck">Re-check</button></span>
+      </div>`;
+  } else {
+    const headline = !st?.helperInstalled
+      ? 'Set up admin access (one time)'
+      : st?.rootOwned === false
+        ? '⚠ Admin helper is not root-owned — re-run setup'
+        : stale
+          ? 'Admin helper version is stale — re-run setup'
+          : 'Finish admin setup';
+    slot.innerHTML = `
+      <div class="vpn-empty-title">${escapeHtml(headline)}</div>
+      <p class="vpn-empty-detail muted" style="margin-top:6px">
+        Installing and managing the service needs root. Run this once in a
+        terminal on the station. It installs a <strong>root-owned</strong>
+        helper that exposes only a fixed set of verbs, plus a scoped
+        <code>sudo</code> rule for just that helper — validated with
+        <code>visudo</code> before it's applied. The dashboard never runs it
+        and never sees your password. Review it, then paste:
+      </p>
+      <pre class="vpn-cmd" style="white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto"><code>${escapeHtml(st?.provisionCmd || '')}</code></pre>
+      <div class="vpn-meta-svc-actions" style="margin-top:10px">
+        <button id="vpn-admin-copy" class="primary">Copy command</button>
+        <button id="vpn-admin-recheck">I've run it — re-check</button>
+      </div>
+      <div class="vpn-empty-detail muted" style="margin-top:6px">${escapeHtml(st?.detail || '')}</div>`;
+    slot.querySelector('#vpn-admin-copy')?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      try { await navigator.clipboard.writeText(st?.provisionCmd || ''); toast('Copied setup command', 'paste it into a terminal on the station', 'ok'); }
+      catch { toast('Copy failed', 'select the command and copy manually', 'err'); }
+    });
+  }
+  slot.querySelector('#vpn-admin-recheck')?.addEventListener('click', (e) => { e.preventDefault(); wireAdminUnlock(container); });
+}
+
 // Reusable terminal-output modal for streaming SSE from any POST endpoint
 // (/api/exec/:cmd, /api/projects/:id/git/push, …). Resolves when the stream
 // emits `done`. The footer button is enabled on done; the header × prompts
@@ -1891,6 +1947,12 @@ function appendNvpnControls(ctaRow, s) {
     stopBtn.textContent = 'Stop';
     stopBtn.addEventListener('click', async (e) => {
       e.preventDefault();
+      const ok = await confirmDestructive({
+        title: 'Stop the VPN daemon?',
+        description: 'The mesh tunnel goes down immediately and stays down until you Start it again — any device relying on this station loses connectivity.',
+        confirmLabel: 'Stop',
+      });
+      if (!ok) return;
       stopBtn.disabled = true;
       await callNvpnAction('stop', 'stopped');
       stopBtn.disabled = false;
@@ -14149,7 +14211,43 @@ const VpnPanel = (() => {
         </div>`
       : '';
 
+    // Guided entry — only while the mesh is empty (fresh node: no roster,
+    // no discovered peers). Signposts the two end-user paths so a new user
+    // isn't dropped into a wall of tabs. Disappears once anything's set up.
+    const meshEmpty = rosterParts.length === 0 && rosterAdmins.length === 0 && merged.length === 0;
+    const onboardingHtml = meshEmpty ? `
+      <div class="vpn-section vpn-onboard">
+        <div class="vpn-empty-title">Set up your mesh</div>
+        <p class="vpn-section-help" style="margin-top:4px">
+          Choose how this station fits into your Nostr VPN — you can do both later.
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">
+          <div style="border:1px solid var(--border);border-radius:8px;padding:14px">
+            <div class="vpn-empty-title">🏠 Host a mesh</div>
+            <p class="vpn-empty-detail muted" style="margin:6px 0 12px">
+              This station runs the network and your other devices join it.
+              Best when this is your always-on box. Share an invite, then
+              import it on each device you want on the mesh.
+            </p>
+            <button id="vpn-onboard-host" class="primary">Share an invite →</button>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:8px;padding:14px">
+            <div class="vpn-empty-title">🔗 Join a mesh</div>
+            <p class="vpn-empty-detail muted" style="margin:6px 0 12px">
+              Your other devices already run a nostr-vpn network; this station
+              joins it. Paste an invite from that network, or enter its
+              network id directly.
+            </p>
+            <div class="vpn-net-actions">
+              <button id="vpn-onboard-join-invite" class="primary">Import invite</button>
+              <button id="vpn-onboard-join-id">Join by ID</button>
+            </div>
+          </div>
+        </div>
+      </div>` : '';
+
     return `
+      ${onboardingHtml}
       <div class="vpn-section">
         <p class="vpn-section-help">
           Your mesh: the active network, its admin-signed roster of
@@ -14267,6 +14365,10 @@ const VpnPanel = (() => {
     if (importBtn) importBtn.addEventListener('click', (e) => { e.preventDefault(); openImportInviteModal(); });
     const joinByIdBtn = bodyEl.querySelector('#vpn-join-by-id');
     if (joinByIdBtn) joinByIdBtn.addEventListener('click', (e) => { e.preventDefault(); openJoinByIdModal(); });
+    // Guided-onboarding buttons reuse the same modal openers as the toolbar.
+    bodyEl.querySelector('#vpn-onboard-host')?.addEventListener('click', (e) => { e.preventDefault(); openShareInviteModal(); });
+    bodyEl.querySelector('#vpn-onboard-join-invite')?.addEventListener('click', (e) => { e.preventDefault(); openImportInviteModal(); });
+    bodyEl.querySelector('#vpn-onboard-join-id')?.addEventListener('click', (e) => { e.preventDefault(); openJoinByIdModal(); });
     const pubBtn = bodyEl.querySelector('#vpn-publish-roster');
     if (pubBtn) {
       pubBtn.addEventListener('click', async (e) => {
@@ -14785,12 +14887,14 @@ const VpnPanel = (() => {
             ${fld('node-name', 'node name')}
             ${fld('listen-port', 'listen port', 'number')}
             ${fld('magic-dns-suffix', 'magic DNS suffix')}
-            ${fld('magic-dns-port', 'magic DNS port', 'number')}
             ${fld('advertise-routes', 'advertise routes (a,b,c)')}
             ${fld('autoconnect', 'autoconnect', 'bool')}
             ${fld('advertise-exit-node', 'advertise exit node', 'bool')}
-            ${fld('relay-for-others', 'relay for others', 'bool')}
             ${exitNodeField}
+            <!-- magic-dns-port + relay-for-others removed: nvpn 4.x dropped
+                 both (daemon picks the DNS port automatically; relay-for-
+                 others went away in the FIPS mesh redesign). Showing them
+                 let users set values the daemon silently ignores. -->
           </div>
           <div class="vpn-meta-set-actions">
             <button id="vpn-set-save" class="primary"
@@ -14873,8 +14977,12 @@ const VpnPanel = (() => {
     if (svc.binaryVersion) meta.push(`v${escapeHtml(svc.binaryVersion)}`);
     if (svc.label)         meta.push(`unit: <code>${escapeHtml(svc.label)}</code>`);
     if (svc.error)         meta.push(`<span class="muted">${escapeHtml(svc.error)}</span>`);
+    // Admin-unlock slot (populated async in .wire). Privileged buttons
+    // below all run `sudo -n`; this lets the user warm the cred cache once.
+    const unlockSlot = '<div id="vpn-admin-unlock" class="vpn-section"></div>';
     if (!svc.installed) {
       return `
+        ${unlockSlot}
         <div class="vpn-section">
           <div class="vpn-meta-row vpn-meta-subrow vpn-meta-svc-head">
             <div>
@@ -14922,6 +15030,7 @@ const VpnPanel = (() => {
     actions.push('<button id="vpn-svc-reinstall" title="Rewrite the systemd unit / launchd plist. Useful after a binary upgrade so the ExecStart path matches the new install location.">Reinstall</button>');
     actions.push('<button id="vpn-svc-uninstall" class="danger" title="Remove the system service unit. Binary stays on PATH; config + keypair stay in ~/.config/nvpn/.">Remove service</button>');
     return `
+      ${unlockSlot}
       <div class="vpn-section">
         <p class="vpn-section-help">
           System service registration — whether nvpn runs as a managed
@@ -14962,7 +15071,28 @@ const VpnPanel = (() => {
     wireSvcBtn('vpn-svc-enable',    '/api/nvpn/service/enable',    'auto-start enabled');
     wireSvcBtn('vpn-svc-disable',   '/api/nvpn/service/disable',   'auto-start disabled');
     wireSvcBtn('vpn-svc-reinstall', '/api/nvpn/service/install',   'service reinstalled');
-    wireSvcBtn('vpn-svc-uninstall', '/api/nvpn/service/uninstall', 'service unit removed');
+    // Remove service is destructive — confirm before unregistering the unit.
+    const svcUninstallBtn = bodyEl.querySelector('#vpn-svc-uninstall');
+    if (svcUninstallBtn) svcUninstallBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const ok = await confirmDestructive({
+        title: 'Remove the system service?',
+        description: 'Unregisters the systemd unit so nvpn no longer auto-starts at boot (and stops it now). The binary, config, and keypair stay — you can reinstall the service later. Brief tunnel drop.',
+        confirmLabel: 'Remove service',
+      });
+      if (!ok) return;
+      svcUninstallBtn.disabled = true;
+      try {
+        const r = await api('/api/nvpn/service/uninstall', { method: 'POST' });
+        toast('service unit removed', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+        await refresh(); refreshHealth();
+      } catch { /* api() already toasted */ }
+      svcUninstallBtn.disabled = false;
+    });
+
+    // Admin unlock — warm the sudo cred cache so the privileged buttons
+    // (install / reinstall / enable / disable / remove) actually succeed.
+    wireAdminUnlock(bodyEl);
 
     // Danger zone — Uninstall nvpn entirely. Type-to-confirm so a
     // stray click can't wipe a working install. Sequence: stop daemon
@@ -15055,8 +15185,12 @@ const VpnPanel = (() => {
             Reload config
           </button>
           <button id="vpn-diag-repair"
-                  title="Clear stale routes / tun interface state left by a crashed session. Brief connectivity blip.">
-            Repair network
+                  title="Clear stale routes / tun interface state left by a crashed session (runs nvpn repair-network). Distinct from 'Repair network config' below, which de-forks config.toml. Brief connectivity blip.">
+            Reset routes &amp; interface
+          </button>
+          <button id="vpn-diag-reset-peers" class="danger"
+                  title="Stop the daemon, clear its discovered-peer cache (daemon.recent-peers.json), and restart. Recovers from runaway discovery / 'max links exceeded'. Brief tunnel blip.">
+            Reset peer state
           </button>
           <button id="vpn-diag-reachability" class="primary"
                   title="Walks you through a manual external probe — confirms peers can actually reach your public endpoint">
@@ -15346,9 +15480,9 @@ const VpnPanel = (() => {
     if (repairBtn) repairBtn.addEventListener('click', async (e) => {
       e.preventDefault();
       const ok = await confirmDestructive({
-        title: 'Repair network?',
-        description: 'Resets routes/iface state left behind by a stopped or crashed session. Safe on an idle daemon; brief connectivity blip if running.',
-        confirmLabel: 'Repair',
+        title: 'Reset routes & interface?',
+        description: 'Clears routes/tun-interface state left behind by a stopped or crashed session (nvpn repair-network). This does NOT touch config.toml — for forked/duplicate networks use "Repair network config" instead. Safe on an idle daemon; brief connectivity blip if running.',
+        confirmLabel: 'Reset routes',
       });
       if (!ok) return;
       repairBtn.disabled = true;
@@ -15357,6 +15491,24 @@ const VpnPanel = (() => {
         toast('repair network', r?.detail || '', r?.ok === false ? 'err' : 'ok');
       } catch { /* api() already toasted */ }
       repairBtn.disabled = false;
+    });
+    const resetPeersBtn = bodyEl.querySelector('#vpn-diag-reset-peers');
+    if (resetPeersBtn) resetPeersBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const ok = await confirmDestructive({
+        title: 'Reset peer state?',
+        description: 'Stops the daemon, clears its discovered-peer cache (daemon.recent-peers.json), and restarts it. Use this to recover from runaway discovery or "max links exceeded". The roster and your config are untouched; brief tunnel blip while it restarts.',
+        confirmLabel: 'Reset & restart',
+      });
+      if (!ok) return;
+      resetPeersBtn.disabled = true;
+      try {
+        const r = await api('/api/nvpn/peers/reset', { method: 'POST' });
+        toast('reset peer state', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+        await refresh();
+        refreshHealth();
+      } catch { /* api() already toasted */ }
+      resetPeersBtn.disabled = false;
     });
     const reachBtn = bodyEl.querySelector('#vpn-diag-reachability');
     if (reachBtn) reachBtn.addEventListener('click', async (e) => {
