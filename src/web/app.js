@@ -1947,6 +1947,12 @@ function appendNvpnControls(ctaRow, s) {
     stopBtn.textContent = 'Stop';
     stopBtn.addEventListener('click', async (e) => {
       e.preventDefault();
+      const ok = await confirmDestructive({
+        title: 'Stop the VPN daemon?',
+        description: 'The mesh tunnel goes down immediately and stays down until you Start it again — any device relying on this station loses connectivity.',
+        confirmLabel: 'Stop',
+      });
+      if (!ok) return;
       stopBtn.disabled = true;
       await callNvpnAction('stop', 'stopped');
       stopBtn.disabled = false;
@@ -14881,12 +14887,14 @@ const VpnPanel = (() => {
             ${fld('node-name', 'node name')}
             ${fld('listen-port', 'listen port', 'number')}
             ${fld('magic-dns-suffix', 'magic DNS suffix')}
-            ${fld('magic-dns-port', 'magic DNS port', 'number')}
             ${fld('advertise-routes', 'advertise routes (a,b,c)')}
             ${fld('autoconnect', 'autoconnect', 'bool')}
             ${fld('advertise-exit-node', 'advertise exit node', 'bool')}
-            ${fld('relay-for-others', 'relay for others', 'bool')}
             ${exitNodeField}
+            <!-- magic-dns-port + relay-for-others removed: nvpn 4.x dropped
+                 both (daemon picks the DNS port automatically; relay-for-
+                 others went away in the FIPS mesh redesign). Showing them
+                 let users set values the daemon silently ignores. -->
           </div>
           <div class="vpn-meta-set-actions">
             <button id="vpn-set-save" class="primary"
@@ -15063,7 +15071,24 @@ const VpnPanel = (() => {
     wireSvcBtn('vpn-svc-enable',    '/api/nvpn/service/enable',    'auto-start enabled');
     wireSvcBtn('vpn-svc-disable',   '/api/nvpn/service/disable',   'auto-start disabled');
     wireSvcBtn('vpn-svc-reinstall', '/api/nvpn/service/install',   'service reinstalled');
-    wireSvcBtn('vpn-svc-uninstall', '/api/nvpn/service/uninstall', 'service unit removed');
+    // Remove service is destructive — confirm before unregistering the unit.
+    const svcUninstallBtn = bodyEl.querySelector('#vpn-svc-uninstall');
+    if (svcUninstallBtn) svcUninstallBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const ok = await confirmDestructive({
+        title: 'Remove the system service?',
+        description: 'Unregisters the systemd unit so nvpn no longer auto-starts at boot (and stops it now). The binary, config, and keypair stay — you can reinstall the service later. Brief tunnel drop.',
+        confirmLabel: 'Remove service',
+      });
+      if (!ok) return;
+      svcUninstallBtn.disabled = true;
+      try {
+        const r = await api('/api/nvpn/service/uninstall', { method: 'POST' });
+        toast('service unit removed', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+        await refresh(); refreshHealth();
+      } catch { /* api() already toasted */ }
+      svcUninstallBtn.disabled = false;
+    });
 
     // Admin unlock — warm the sudo cred cache so the privileged buttons
     // (install / reinstall / enable / disable / remove) actually succeed.
@@ -15160,8 +15185,8 @@ const VpnPanel = (() => {
             Reload config
           </button>
           <button id="vpn-diag-repair"
-                  title="Clear stale routes / tun interface state left by a crashed session. Brief connectivity blip.">
-            Repair network
+                  title="Clear stale routes / tun interface state left by a crashed session (runs nvpn repair-network). Distinct from 'Repair network config' below, which de-forks config.toml. Brief connectivity blip.">
+            Reset routes &amp; interface
           </button>
           <button id="vpn-diag-reset-peers" class="danger"
                   title="Stop the daemon, clear its discovered-peer cache (daemon.recent-peers.json), and restart. Recovers from runaway discovery / 'max links exceeded'. Brief tunnel blip.">
@@ -15455,9 +15480,9 @@ const VpnPanel = (() => {
     if (repairBtn) repairBtn.addEventListener('click', async (e) => {
       e.preventDefault();
       const ok = await confirmDestructive({
-        title: 'Repair network?',
-        description: 'Resets routes/iface state left behind by a stopped or crashed session. Safe on an idle daemon; brief connectivity blip if running.',
-        confirmLabel: 'Repair',
+        title: 'Reset routes & interface?',
+        description: 'Clears routes/tun-interface state left behind by a stopped or crashed session (nvpn repair-network). This does NOT touch config.toml — for forked/duplicate networks use "Repair network config" instead. Safe on an idle daemon; brief connectivity blip if running.',
+        confirmLabel: 'Reset routes',
       });
       if (!ok) return;
       repairBtn.disabled = true;
