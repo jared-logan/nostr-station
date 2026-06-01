@@ -27,7 +27,7 @@ import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
 import { getCargoBin, getNvpnTarget } from './detect.js';
 import {
   applyLinuxCapsDropIn, seedFreeMagicDnsPort, reconcileDaemonIdentityAfterInstall,
-  applyNvpnConfigDropIn, canonicalConfigInstallPath,
+  applyNvpnConfigDropIn, canonicalConfigInstallPath, probeNvpnServiceStatusUncached,
 } from './nvpn.js';
 import {
   type InstallResult, type ProgressCallback,
@@ -103,9 +103,21 @@ export async function installNostrVpn(
     log.step('checking for existing install');
     try {
       await execa(nvpnBin, ['--help'], { stdio: 'pipe', timeout: 5000 });
-      log.append('already installed — skipping');
-      return { ok: true, detail: 'already installed' };
-    } catch { /* fall through to install */ }
+      // A working binary in ~/.cargo/bin is NOT a healthy install. After
+      // "Uninstall entirely" (which removes the PATH copy + service but can
+      // leave the cargo-bin copy behind), this short-circuit used to return
+      // "already installed" and no-op a re-install — stranding the box with
+      // no service and no way back from the dashboard. Only skip when the
+      // service is actually present (or unsupported on this platform);
+      // otherwise fall through and re-provision. Uncached probe so a stale
+      // "installed" reading can't re-trigger the no-op.
+      const svc = await probeNvpnServiceStatusUncached();
+      if (!svc.supported || svc.installed) {
+        log.append('already installed — skipping');
+        return { ok: true, detail: 'already installed' };
+      }
+      log.append('binary present but service not installed — re-provisioning');
+    } catch { /* binary missing/broken — full install */ }
   }
 
   const pinnedVersion = COMPONENT_VERSIONS['nvpn'];
@@ -210,6 +222,26 @@ export async function installNostrVpn(
     installCliErrDetail = stderr.slice(0, 160) || (e?.message || '').slice(0, 120);
     log.append(`install-cli FAILED: ${installCliErrDetail}`);
     installCliFailed = true;
+    // Fallback relocation. Upstream `install-cli` can refuse for reasons
+    // other than missing sudo (e.g. it won't overwrite without --force, or
+    // the subcommand shifted across versions). Place the binary on a system
+    // PATH dir ourselves so the root service AND the user's shell can find
+    // it — the half-state that left the binary only in ~/.cargo/bin. Needs
+    // sudo; if that's cold too we surface it loudly below. `install` is
+    // atomic (temp + rename) so a concurrent daemon never sees a partial.
+    if (process.platform === 'linux') {
+      try {
+        await execa('sudo', ['-n', 'install', '-m', '0755', nvpnBin, '/usr/local/bin/nvpn'], {
+          stdio: 'pipe', timeout: 10_000,
+        });
+        log.append('install-cli fallback ok — copied to /usr/local/bin/nvpn');
+        installCliFailed = false;
+        installCliErrDetail = '';
+      } catch (e2: any) {
+        const s2 = (e2?.stderr?.toString?.() || '').trim();
+        log.append(`install-cli fallback FAILED: ${s2.slice(0, 160) || (e2?.message || '').slice(0, 120)}`);
+      }
+    }
   }
 
   // Update path stops here: every remaining step is first-run setup
@@ -262,10 +294,17 @@ export async function installNostrVpn(
     // ok:true with the warning buried in the log file, so the user
     // got a green "✓ updated" dashboard while `nvpn` on PATH was
     // still the old binary (or the systemd unit was still pointing
-    // at the old binary path). The warn flag lets the dashboard
-    // render this case as yellow with a clear remediation hint.
+    // at the old binary path).
+    //
+    // FAIL LOUD: pre-fix this returned ok:true so the dashboard showed a
+    // green "✓ updated" while `nvpn` on PATH was the old binary or the
+    // service was stale. With the self-relocate fallback above, reaching
+    // here means sudo genuinely wasn't available (cred cache cold). That's
+    // a real failure, not a cosmetic warning — return ok:false so the user
+    // sees it didn't apply, with the exact remediation. The first hint is
+    // always: unlock admin actions, then retry.
     if (installCliFailed || serviceInstallFailed) {
-      const remediation: string[] = [];
+      const remediation: string[] = ['Unlock admin actions and retry, or run'];
       if (installCliFailed) {
         remediation.push(`\`sudo ${nvpnBin} install-cli --force\``);
       }
@@ -275,12 +314,11 @@ export async function installNostrVpn(
       remediation.push(`then \`${restartHint}\``);
       const errCauses = [installCliErrDetail, serviceInstallErr].filter(Boolean).join(' / ');
       return {
-        ok:     true,
-        warn:   true,
+        ok:     false,
         detail:
-          `binary updated at ${nvpnBin}, but post-install relocation didn't complete cleanly ` +
-          `(${errCauses || 'sudo cred cache empty / unknown'}). ` +
-          `Run ${remediation.join(', ')} to finish the upgrade. (log: ${log.logPath})`,
+          `binary downloaded to ${nvpnBin}, but the update could not be applied ` +
+          `(${errCauses || 'admin actions locked — sudo unavailable'}). ` +
+          `${remediation.join(' ')}. (log: ${log.logPath})`,
       };
     }
     log.append('update mode — skipping init / caps / port-seed');

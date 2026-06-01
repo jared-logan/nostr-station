@@ -508,7 +508,7 @@ export interface NvpnServiceStatus {
   error:         string | null;
 }
 
-async function probeNvpnServiceStatusUncached(): Promise<NvpnServiceStatus> {
+export async function probeNvpnServiceStatusUncached(): Promise<NvpnServiceStatus> {
   const binPath = findBin('nvpn');
   if (!binPath) {
     return {
@@ -876,21 +876,51 @@ export const uninstallNvpnService = (): Promise<ControlResult> => runServiceOp('
 // /usr/local/bin or /opt/homebrew/bin). May or may not need sudo
 // depending on the install location; we try sudo -n first and fall
 // back to a non-sudo invocation when the path is user-writable.
+// Remove the ~/.cargo/bin/nvpn "shadow" copy the installer leaves behind.
+// MUST run as part of uninstall: upstream `uninstall-cli` removes the PATH
+// copy (e.g. /usr/local/bin/nvpn) but NOT the cargo-bin copy. Left behind,
+// it makes the installer's "already installed" short-circuit think nvpn is
+// installed and silently no-op a re-install — the exact path that left a
+// box unrecoverable from the dashboard. User-writable, so no sudo needed.
+// Best-effort + idempotent (missing file is success).
+function removeCargoBinShadow(): string | null {
+  const shadow = path.join(os.homedir(), '.cargo', 'bin', 'nvpn');
+  try {
+    if (fs.existsSync(shadow)) { fs.rmSync(shadow, { force: true }); return shadow; }
+  } catch { /* best-effort */ }
+  return null;
+}
+
 export async function uninstallNvpnCli(): Promise<ControlResult> {
   const binPath = findBin('nvpn');
-  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  if (!binPath) {
+    // Nothing on PATH — but a cargo-bin shadow may still be lurking and
+    // would block a clean reinstall. Sweep it and report success.
+    const swept = removeCargoBinShadow();
+    return { ok: true, detail: swept ? `removed stale ${swept}` : 'nvpn binary not installed' };
+  }
+  let detail = '';
   // Try without sudo first — most setups have nvpn in ~/.cargo/bin
   // (user-writable) which doesn't need root.
   try {
     await execa(binPath, ['uninstall-cli'], { timeout: 15_000, stdio: 'pipe' });
-    return { ok: true, detail: 'cli removed from PATH' };
-  } catch { /* try with sudo */ }
-  try {
-    await execa('sudo', ['-n', binPath, 'uninstall-cli'], { timeout: 15_000, stdio: 'pipe' });
-    return { ok: true, detail: 'cli removed from PATH (via sudo)' };
-  } catch (e: any) {
-    return { ok: false, detail: summarizeError(e) };
+    detail = 'cli removed from PATH';
+  } catch {
+    try {
+      await execa('sudo', ['-n', binPath, 'uninstall-cli'], { timeout: 15_000, stdio: 'pipe' });
+      detail = 'cli removed from PATH (via sudo)';
+    } catch (e: any) {
+      // Even if upstream uninstall-cli failed, still sweep the shadow so a
+      // reinstall isn't blocked; surface the original failure though.
+      removeCargoBinShadow();
+      return { ok: false, detail: summarizeError(e) };
+    }
   }
+  // ALWAYS sweep the cargo-bin shadow too. `uninstall-cli` removes the PATH
+  // copy but leaves ~/.cargo/bin/nvpn, which makes a subsequent install
+  // short-circuit as "already installed" → no service → unrecoverable.
+  const swept = removeCargoBinShadow();
+  return { ok: true, detail: swept ? `${detail}; removed ${swept}` : detail };
 }
 
 // ── Configured roster (config.toml) ──────────────────────────────────────
