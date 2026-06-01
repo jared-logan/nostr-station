@@ -5,6 +5,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: route writes through canonical config (b2 stage 3 of 4)
+
+The 4 config mutators — join-network (network-id setter), repair, relay
+mutator, alias mutator — plus the CLI `--config` injector (`buildNvpnArgs`)
+now resolve their path via `resolveCanonicalConfig()` and persist through a
+new sync primitive `writeConfigTextSync()` (atomic temp-rename when we own
+the file; `sudo -n cp -p` backup + `sudo -n install -m 600 /dev/stdin` when
+root-owned). Their reads are routed onto the canonical resolver too, so
+each function's read and write paths stay in lockstep.
+
+Behavior-preserving today: stage 1's resolver still defaults to the
+user-side path, which is user-owned, so writes still take the direct
+temp-rename branch exactly as before. Backup policy is preserved per-call —
+repair backs up (as it always did); the high-frequency relay/alias/join
+edits pass `backup: false` to avoid littering `.bak` files, matching prior
+behavior. The sudo branch only activates once stage 4 points the daemon at
+a root-owned canonical path.
+
+With reads (stage 2) and writes (this stage) both on the canonical
+resolver, every dashboard config op is now ownership-aware. Stage 4 flips
+the installer's `ExecStart --config` to the canonical path and retires the
+create-then-heal reconcile layer. Synthetic test data; full suite 1555
+pass.
+
 ### nostr-vpn: route reads through canonical config (b2 stage 2 of 4)
 
 The 5 pure config readers — identity, roster, networks, relays, fips peer

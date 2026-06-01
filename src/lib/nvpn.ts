@@ -200,7 +200,7 @@ export interface NvpnStatusJson {
 // under sudo (or with a mismatched $HOME) would otherwise drop into
 // 4.x's silent config-snapshot fallback. Preempting that.
 function buildNvpnArgs(base: string[]): string[] {
-  const cfg = findNvpnConfigPath();
+  const cfg = resolveCanonicalConfig().path;
   if (!cfg) return base;
   const out: string[] = [];
   let inserted = false;
@@ -969,6 +969,61 @@ export async function writeConfigText(
   return { ok: true, detail: 'config written (sudo)', backedUpTo: backupPath };
 }
 
+// Synchronous sibling of writeConfigText, for the sync config mutators
+// (network-id setter, repair, relay/alias mutators) that aren't worth
+// turning async. Same ownership-aware discipline: when we own the file,
+// optional copy backup + atomic temp-rename (mode 0600); when root-owned,
+// optional `sudo -n cp -p` backup then `sudo -n install -o root -g root
+// -m 600 /dev/stdin` with the body piped via stdin (never a shell string),
+// all via spawnSync. `backup` defaults to true; callers that historically
+// didn't back up (relay/alias/network-id edits) pass false to stay
+// behavior-preserving. The body may carry secret key material — it's only
+// ever used as fs/stdin input, never returned.
+export function writeConfigTextSync(
+  configPath: string, body: string, opts: { rootOwned: boolean; backup?: boolean },
+): ConfigWriteResult {
+  if (!configPath) return { ok: false, detail: 'no config path' };
+  const wantBackup = opts.backup !== false;
+  const backupPath = `${configPath}.bak-${Date.now()}`;
+  if (!opts.rootOwned) {
+    // We own it — optional backup + atomic temp-rename, all direct.
+    if (wantBackup) {
+      try { if (fs.existsSync(configPath)) fs.copyFileSync(configPath, backupPath); }
+      catch (e: any) { return { ok: false, detail: `backup failed (refusing to write): ${(e?.message || '').slice(0, 160)}` }; }
+    }
+    const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      fs.writeFileSync(tmp, body, { mode: 0o600 });
+      fs.renameSync(tmp, configPath);
+    } catch (e: any) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+      return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}` };
+    }
+    return { ok: true, detail: 'config written', backedUpTo: (wantBackup && fs.existsSync(backupPath)) ? backupPath : undefined };
+  }
+  // Root-owned — optional sudo backup then sudo atomic install from stdin.
+  const sudoCredEmpty = (r: { stderr?: string | null }) =>
+    /password is required|sudo:.*required/i.test((r.stderr || '').toString().trim());
+  if (wantBackup) {
+    const b = spawnSync('sudo', ['-n', 'cp', '-p', configPath, backupPath], { timeout: SERVICE_OP_TIMEOUT_MS, encoding: 'utf8' });
+    if (b.status !== 0) {
+      if (sudoCredEmpty(b)) return { ok: false, detail: 'sudo cred cache empty — run `sudo -v` then retry. (Nothing changed.)' };
+      return { ok: false, detail: `backup failed (refusing to write): ${(b.stderr || b.error?.message || 'sudo cp failed').toString().slice(0, 160)}` };
+    }
+  }
+  const w = spawnSync('sudo', ['-n', 'install', '-o', 'root', '-g', 'root', '-m', '600', '/dev/stdin', configPath], {
+    timeout: SERVICE_OP_TIMEOUT_MS, encoding: 'utf8', input: body,
+  });
+  if (w.status !== 0) {
+    const bk = wantBackup ? backupPath : undefined;
+    if (sudoCredEmpty(w)) {
+      return { ok: false, detail: `sudo cred cache empty — run \`sudo -v\` then retry.${bk ? ` Backup at ${bk}; no overwrite.` : ''}`, backedUpTo: bk };
+    }
+    return { ok: false, detail: `write failed: ${(w.stderr || w.error?.message || 'sudo install failed').toString().slice(0, 160)}${bk ? ` (backup at ${bk})` : ''}`, backedUpTo: bk };
+  }
+  return { ok: true, detail: 'config written (sudo)', backedUpTo: wantBackup ? backupPath : undefined };
+}
+
 // Extract the first `[[networks]]` block — the active network for our
 // purposes. nvpn supports multi-network configs; we surface the first
 // for the dashboard, which is what `nvpn add-participant` (no flag)
@@ -1530,11 +1585,11 @@ export function joinNvpnNetwork(networkId: string): NvpnJoinResult {
   // exists to catch. Canonicalizing on write makes new forks impossible.
   const id = canonicalNetworkId(raw);
   if (!id) return { ok: false, detail: 'invalid network id' };
-  const configPath = findNvpnConfigPath();
+  const canon = resolveCanonicalConfig();
+  const configPath = canon.path;
   if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first' };
-  let toml = '';
-  try { toml = fs.readFileSync(configPath, 'utf8'); }
-  catch (e: any) { return { ok: false, detail: `read failed: ${(e?.message || '').slice(0, 160)}` }; }
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) return { ok: false, detail: 'config unreadable (permission or missing) — try `sudo -v` then retry' };
 
   const sections = extractAllNetworksSections(toml);
   const ids = sections.map(s => extractTomlString(s, 'network_id'));
@@ -1559,14 +1614,8 @@ export function joinNvpnNetwork(networkId: string): NvpnJoinResult {
   const block = buildNvpnNetworkBlock(id, relays);
   const updated = insertNetworkBlockFirst(toml, block);
 
-  const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    fs.writeFileSync(tmp, updated, { mode: 0o600 });
-    fs.renameSync(tmp, configPath);
-  } catch (e: any) {
-    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}` };
-  }
+  const w = writeConfigTextSync(configPath, updated, { rootOwned: canon.rootOwned, backup: false });
+  if (!w.ok) return { ok: false, detail: w.detail };
   return { ok: true, detail: 'joined network', networkId: id, relays };
 }
 
@@ -1792,11 +1841,11 @@ export function repairNvpnNetworkConfig(opts: { apply: boolean; pubkeyHex: strin
     needed: false, activeNetworkId: null, canonicalActiveId: null,
     removedNetworkIds: [], renamedActiveId: null, ipRepin: null, summary: [], newToml: null,
   };
-  const configPath = findNvpnConfigPath();
+  const canon = resolveCanonicalConfig();
+  const configPath = canon.path;
   if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first', plan: emptyPlan, applied: false };
-  let toml = '';
-  try { toml = fs.readFileSync(configPath, 'utf8'); }
-  catch (e: any) { return { ok: false, detail: `read failed: ${(e?.message || '').slice(0, 160)}`, plan: emptyPlan, applied: false }; }
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) return { ok: false, detail: 'config unreadable (permission or missing) — try `sudo -v` then retry', plan: emptyPlan, applied: false };
 
   const plan = planNvpnRepair(toml, opts.pubkeyHex);
   if (!plan.needed) {
@@ -1806,18 +1855,9 @@ export function repairNvpnNetworkConfig(opts: { apply: boolean; pubkeyHex: strin
     return { ok: true, detail: 'repair plan ready (preview)', plan, applied: false, restartRequired: true };
   }
   // Back up before writing; refuse the write if the backup fails.
-  const backupPath = `${configPath}.bak-${Date.now()}`;
-  try { fs.copyFileSync(configPath, backupPath); }
-  catch (e: any) { return { ok: false, detail: `backup failed (refusing to write): ${(e?.message || '').slice(0, 160)}`, plan, applied: false }; }
-  const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    fs.writeFileSync(tmp, plan.newToml, { mode: 0o600 });
-    fs.renameSync(tmp, configPath);
-  } catch (e: any) {
-    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}`, plan, applied: false, backedUpTo: backupPath };
-  }
-  return { ok: true, detail: 'config repaired', plan, applied: true, backedUpTo: backupPath, restartRequired: true };
+  const w = writeConfigTextSync(configPath, plan.newToml, { rootOwned: canon.rootOwned, backup: true });
+  if (!w.ok) return { ok: false, detail: w.detail, plan, applied: false, backedUpTo: w.backedUpTo };
+  return { ok: true, detail: 'config repaired', plan, applied: true, backedUpTo: w.backedUpTo, restartRequired: true };
 }
 
 // ── Discovery relays (Nostr presence/signaling) ──────────────────────
@@ -1974,11 +2014,11 @@ export function rebuildTomlWithRelays(toml: string, relays: string[]): string {
 function mutateRelays(
   mutator: (current: string[]) => string[],
 ): NvpnRelaysResult {
-  const configPath = findNvpnConfigPath();
+  const canon = resolveCanonicalConfig();
+  const configPath = canon.path;
   if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first' };
-  let toml = '';
-  try { toml = fs.readFileSync(configPath, 'utf8'); }
-  catch (e: any) { return { ok: false, detail: `read failed: ${(e?.message || '').slice(0, 160)}` }; }
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) return { ok: false, detail: 'config unreadable (permission or missing) — try `sudo -v` then retry' };
   if (!/^[^\S\r\n]*\[\[networks\]\]/m.test(toml)) {
     return { ok: false, detail: 'no [[networks]] block in config.toml — join or create a network first' };
   }
@@ -2005,14 +2045,8 @@ function mutateRelays(
     return { ok: true, detail: 'no change', relays: current };
   }
   const updated = rebuildTomlWithRelays(toml, next);
-  const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    fs.writeFileSync(tmp, updated, { mode: 0o600 });
-    fs.renameSync(tmp, configPath);
-  } catch (e: any) {
-    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}` };
-  }
+  const w = writeConfigTextSync(configPath, updated, { rootOwned: canon.rootOwned, backup: false });
+  if (!w.ok) return { ok: false, detail: w.detail };
   return { ok: true, detail: 'relays updated', relays: next };
 }
 
@@ -2105,27 +2139,19 @@ interface AliasWriteResult {
 function mutateAliases(
   mutator: (current: Record<string, string>) => Record<string, string>,
 ): AliasWriteResult {
-  const configPath = findNvpnConfigPath();
+  const canon = resolveCanonicalConfig();
+  const configPath = canon.path;
   if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first' };
-  let toml = '';
-  try { toml = fs.readFileSync(configPath, 'utf8'); }
-  catch (e: any) { return { ok: false, detail: `read failed: ${(e?.message || '').slice(0, 160)}` }; }
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) return { ok: false, detail: 'config unreadable (permission or missing) — try `sudo -v` then retry' };
   const current = extractAliasMap(extractPeerAliasesSection(toml));
   const next    = mutator({ ...current });
   if (JSON.stringify(next) === JSON.stringify(current)) {
     return { ok: true, detail: 'no change', aliases: current };
   }
   const updated = rebuildTomlWithAliases(toml, next);
-  // Atomic write: tmp file in the same dir → rename. Same dir matters
-  // because rename across filesystems isn't atomic.
-  const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    fs.writeFileSync(tmp, updated, { mode: 0o600 });
-    fs.renameSync(tmp, configPath);
-  } catch (e: any) {
-    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}` };
-  }
+  const w = writeConfigTextSync(configPath, updated, { rootOwned: canon.rootOwned, backup: false });
+  if (!w.ok) return { ok: false, detail: w.detail };
   return { ok: true, detail: 'aliases updated', aliases: next };
 }
 
