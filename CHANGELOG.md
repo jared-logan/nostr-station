@@ -5,6 +5,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: route reads through canonical config (b2 stage 2 of 4)
+
+The 5 pure config readers — identity, roster, networks, relays, fips peer
+endpoints — now resolve their path via `resolveCanonicalConfig()` and read
+through a new sync primitive `readConfigTextSync()` (direct fs first,
+`sudo -n cat` fallback when root-owned/unreadable, degrade-to-null on
+failure). Path selection is still user-side (stage 1's resolver default),
+so this is behavior-preserving today; it wires the ownership-aware read
+capability in ahead of stage 4 pointing the daemon at the canonical path.
+
+The 4 read-then-write functions (network-id setter, repair, relay/alias
+mutators) and the CLI `--config` injector (`buildNvpnArgs`) still use
+`findNvpnConfigPath()` — they're routed in stage 3 (writes) so their read
+and write paths stay in lockstep. Synthetic test data; full suite 1551
+pass.
+
 ### nostr-vpn: canonical-config foundation (b2 stage 1 of 4)
 
 First, behavior-preserving step toward a single authoritative nvpn config —
