@@ -30,7 +30,7 @@ import path from 'path';
 import os from 'os';
 import readline from 'readline';
 import { findBin } from './detect.js';
-import { runAdminVerb } from './nvpn-sudo.js';
+import { runAdminVerb, isAdminHelperInstalled } from './nvpn-sudo.js';
 import { canonicalNetworkId, computeNvpnTunnelIp } from './nvpn-diagnostics.js';
 import type { LogBuffer } from './log-buffer.js';
 
@@ -386,10 +386,29 @@ function summarizeError(e: any): string {
 async function systemctlControl(
   op: 'start' | 'stop' | 'restart',
 ): Promise<ControlResult> {
-  // Routed through the root-owned helper (sudo -n nvpn-admin <op>) — no
-  // broad `sudo systemctl` grant. When the helper isn't set up yet,
-  // runAdminVerb returns a clear "run the one-time setup" detail.
-  return runAdminVerb(op);
+  // Helper-primary: when the root-owned helper is provisioned, go through
+  // it (sudo -n nvpn-admin <op>) — passwordless, scoped. Otherwise fall
+  // back to the direct command so an un-provisioned box (e.g. right after
+  // upgrading) can still Start/Stop/Restart with the user's own sudo. The
+  // fallback creates NO persistent grant — it only works with a warm cache
+  // / existing NOPASSWD, same as before the helper existed.
+  if (isAdminHelperInstalled()) return runAdminVerb(op);
+  try {
+    await execa('sudo', ['-n', 'systemctl', op, 'nvpn.service'], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+    });
+    return { ok: true, detail: `systemctl ${op} nvpn.service` };
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) {
+      return {
+        ok: false,
+        detail: `needs admin access — set it up once in the Service tab ("Set up admin access"), ` +
+                `or run \`sudo systemctl ${op} nvpn.service\` in a terminal.`,
+      };
+    }
+    return { ok: false, detail: summarizeError(e) };
+  }
 }
 
 export async function startNvpn(): Promise<ControlResult> {
@@ -497,14 +516,23 @@ export function recentPeersCandidatePaths(): string[] {
 
 
 export async function resetNvpnPeerState(): Promise<ControlResult> {
-  // Routed through the root-owned helper: it stops the daemon, clears the
-  // recent-peers cache next to the canonical (and root) config, and starts
-  // again — all as root, with the path derived from SUDO_USER inside the
-  // helper (no user-supplied path). recentPeersCandidatePaths()/removePeer-
-  // StateFile() remain for reference + tests but the privileged clear is
-  // the helper's job now.
-  const r = await runAdminVerb('reset-peers');
-  return r.ok ? { ok: true, detail: 'cleared discovered-peer cache and restarted the daemon' } : r;
+  // Helper-primary: the helper stops the daemon, clears the recent-peers
+  // cache (path derived from SUDO_USER inside the helper), and restarts.
+  if (isAdminHelperInstalled()) {
+    const r = await runAdminVerb('reset-peers');
+    return r.ok ? { ok: true, detail: 'cleared discovered-peer cache and restarted the daemon' } : r;
+  }
+  // Fallback for un-provisioned boxes: stop (own fallback), clear the
+  // user-owned cache best-effort, start. Can't clear a root-owned cache
+  // without the helper — that's noted.
+  const stop = await stopNvpn();
+  let cleared = 0;
+  for (const p of recentPeersCandidatePaths()) {
+    try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); cleared++; } } catch { /* root-owned — needs the helper */ }
+  }
+  const start = await startNvpn();
+  if (!start.ok) return { ok: false, detail: `cleared ${cleared} cache file(s) but daemon failed to restart: ${start.detail}` };
+  return { ok: true, detail: `cleared ${cleared} peer-cache file(s) and restarted the daemon${stop.ok ? '' : ` (stop hint: ${stop.detail})`}` };
 }
 
 // ── System service lifecycle ─────────────────────────────────────────────
@@ -608,11 +636,30 @@ nvpnEvents.on('state-changed', () => {
 async function runServiceOp(
   op: 'install' | 'enable' | 'disable' | 'uninstall',
 ): Promise<ControlResult> {
-  // Routed through the root-owned helper. The helper's `install` verb does
-  // the caps + config drop-ins itself (root-owned content), so there's no
-  // broad `sudo nvpn service …` grant. `enable`/`disable`/`uninstall` map
-  // 1:1 to helper verbs.
-  return runAdminVerb(op);
+  const binPath = findBin('nvpn');
+  if (!binPath) return { ok: false, detail: 'nvpn binary not installed' };
+  // Helper-primary for enable/disable/uninstall (they map 1:1 to helper
+  // verbs). `install` here is the Service-tab "register/refresh the unit"
+  // button — the binary already exists, so it uses `nvpn service install`
+  // directly (the helper's `install` verb is the full download flow, driven
+  // by the Install wizard). Fall back to direct sudo when un-provisioned.
+  if (op !== 'install' && isAdminHelperInstalled()) return runAdminVerb(op);
+  try {
+    await execa('sudo', ['-n', binPath, 'service', op], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe',
+    });
+    return { ok: true, detail: `service ${op} ok` };
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) {
+      return {
+        ok: false,
+        detail: `needs admin access — set it up once in the Service tab ("Set up admin access"), ` +
+                `or run \`sudo ${binPath} service ${op}\` in a terminal.`,
+      };
+    }
+    return { ok: false, detail: summarizeError(e) };
+  }
 }
 
 // ── Linux capabilities drop-in ─────────────────────────────────────────
@@ -896,16 +943,27 @@ function removeCargoBinShadow(): string | null {
 }
 
 export async function uninstallNvpnCli(): Promise<ControlResult> {
-  // Privileged removal (service uninstall + remove the root-owned
-  // /usr/local/bin/nvpn + our drop-ins) is the helper's `uninstall` verb.
-  const r = await runAdminVerb('uninstall');
-  // ALWAYS sweep the user-writable cargo-bin shadow too (no sudo needed) —
-  // the helper only manages the root-owned copy, and a leftover cargo-bin
-  // binary would make a later install short-circuit as "already installed".
-  const swept = removeCargoBinShadow();
-  if (!r.ok) {
-    return { ok: false, detail: `${r.detail}${swept ? ` (removed stale ${swept})` : ''}` };
+  // Helper-primary: the `uninstall` verb does service uninstall + removes
+  // the root-owned /usr/local/bin/nvpn + our drop-ins.
+  let r: ControlResult;
+  if (isAdminHelperInstalled()) {
+    r = await runAdminVerb('uninstall');
+  } else {
+    // Fallback for un-provisioned boxes: direct service uninstall +
+    // uninstall-cli (needs the user's own sudo for the root copy).
+    const binPath = findBin('nvpn');
+    if (binPath) {
+      try { await execa('sudo', ['-n', binPath, 'service', 'uninstall'], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' }); } catch { /* best-effort */ }
+      try { await execa('sudo', ['-n', binPath, 'uninstall-cli'], { timeout: 15_000, stdio: 'pipe' }); }
+      catch { try { await execa(binPath, ['uninstall-cli'], { timeout: 15_000, stdio: 'pipe' }); } catch { /* best-effort */ } }
+    }
+    r = { ok: true, detail: 'nvpn removed (direct)' };
   }
+  // ALWAYS sweep the user-writable cargo-bin shadow too (no sudo needed) —
+  // a leftover cargo-bin binary would make a later install short-circuit
+  // as "already installed".
+  const swept = removeCargoBinShadow();
+  if (!r.ok) return { ok: false, detail: `${r.detail}${swept ? ` (removed stale ${swept})` : ''}` };
   return { ok: true, detail: swept ? `nvpn removed; cleared stale ${swept}` : 'nvpn removed' };
 }
 
@@ -1494,6 +1552,17 @@ export async function adoptIdentity(opts: { apply: boolean; daemonPid?: number |
   if (!opts.apply) {
     return { ok: true, detail: 'adopt plan ready (preview)', plan, applied: false };
   }
+  // Helper-primary (b2): instead of copying the managed config onto the
+  // daemon's root path, repoint the daemon's ExecStart at the canonical
+  // user config — single identity, no copy, no root-owned duplicate. The
+  // helper self-reverts if the daemon doesn't come back up.
+  if (isAdminHelperInstalled()) {
+    const r = await runAdminVerb('repoint');
+    if (!r.ok) return { ok: false, detail: r.detail, plan, applied: false };
+    return { ok: true, detail: 'daemon now reads your managed config (ExecStart repointed)', plan, applied: true };
+  }
+  // Fallback for un-provisioned boxes: the original copy-to-root approach
+  // (needs the user's own sudo). Kept so adopt still works pre-provisioning.
   const src = plan.managedConfigPath!;
   const dst = plan.daemonConfigPath!;
   const backupPath = `${dst}.bak-${Date.now()}`;
