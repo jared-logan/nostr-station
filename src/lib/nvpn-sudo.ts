@@ -306,6 +306,15 @@ function isRootOwned(p: string): boolean {
   try { return fs.statSync(p).uid === 0; } catch { return false; }
 }
 
+// Sync "is the helper installed + root-owned?" check, so callers can decide
+// between the helper path and a direct-sudo fallback without an await. On
+// non-Linux this is always false (helper is systemd-based).
+export function isAdminHelperInstalled(): boolean {
+  if (process.platform !== 'linux') return false;
+  try { return fs.statSync(ADMIN_HELPER).isFile() && isRootOwned(ADMIN_HELPER); }
+  catch { return false; }
+}
+
 export async function adminState(): Promise<AdminState> {
   // The helper is systemd-based (Linux). macOS/launchd is not yet covered —
   // report clearly rather than letting verbs fail cryptically.
