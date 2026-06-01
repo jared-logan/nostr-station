@@ -1552,6 +1552,17 @@ export async function adoptIdentity(opts: { apply: boolean; daemonPid?: number |
   if (!opts.apply) {
     return { ok: true, detail: 'adopt plan ready (preview)', plan, applied: false };
   }
+  // Helper-primary (b2): instead of copying the managed config onto the
+  // daemon's root path, repoint the daemon's ExecStart at the canonical
+  // user config — single identity, no copy, no root-owned duplicate. The
+  // helper self-reverts if the daemon doesn't come back up.
+  if (isAdminHelperInstalled()) {
+    const r = await runAdminVerb('repoint');
+    if (!r.ok) return { ok: false, detail: r.detail, plan, applied: false };
+    return { ok: true, detail: 'daemon now reads your managed config (ExecStart repointed)', plan, applied: true };
+  }
+  // Fallback for un-provisioned boxes: the original copy-to-root approach
+  // (needs the user's own sudo). Kept so adopt still works pre-provisioning.
   const src = plan.managedConfigPath!;
   const dst = plan.daemonConfigPath!;
   const backupPath = `${dst}.bak-${Date.now()}`;

@@ -59,6 +59,7 @@ export const ADMIN_VERBS = [
   'enable', 'disable',
   'start', 'stop', 'restart',
   'reset-peers',  // stop, clear daemon.recent-peers.json, start
+  'repoint',      // re-point ExecStart --config at the canonical config (b2 adopt)
 ] as const;
 export type AdminVerb = (typeof ADMIN_VERBS)[number];
 
@@ -253,6 +254,23 @@ case "\$verb" in
     systemctl stop "\$UNIT" 2>/dev/null || "\$NVPN_BIN" stop 2>/dev/null || true
     clear_recent_peers
     systemctl start "\$UNIT" 2>/dev/null || true
+    ;;
+  repoint)
+    # b2 "adopt": make the daemon read the canonical user config (single
+    # identity) by repointing ExecStart — no config copy. Self-reverts if
+    # the daemon doesn't come back up.
+    log "repoint: start"
+    [ -f "\$CANON_CONFIG" ] || die "canonical config \$CANON_CONFIG does not exist — pair/join first"
+    write_config_dropin
+    systemctl daemon-reload || true
+    systemctl try-restart "\$UNIT" || true
+    if systemctl is-active --quiet "\$UNIT"; then
+      log "repoint: daemon active on --config \$CANON_CONFIG"
+    else
+      log "repoint: daemon NOT active — reverting config drop-in"
+      rm -f "\$CONFIG_DROPIN"; systemctl daemon-reload || true; systemctl try-restart "\$UNIT" || true
+      die "daemon did not come up with --config repoint — reverted (daemon left on its prior config)"
+    fi
     ;;
   *) die "unknown verb: \$verb" ;;
 esac
