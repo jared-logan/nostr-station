@@ -1615,29 +1615,15 @@ export async function adoptIdentity(opts: { apply: boolean; daemonPid?: number |
 //
 // `daemonPid` is optional — when null we still resolve via the service
 // unit's ExecStart (the daemon may not be probed yet mid-install).
-// Pure gate: should the post-install reconcile even attempt an adopt?
-// We only reconcile when the dashboard user has a managed identity to
-// reconcile *to* — on a fresh install where the user hasn't paired yet,
-// the root identity is the only one and there's nothing to adopt. Exported
-// for tests.
-export function shouldReconcileAfterInstall(managed: { configPath: string | null; npub: string | null }): boolean {
-  return !!(managed.configPath && managed.npub);
-}
-
-export async function reconcileDaemonIdentityAfterInstall(
-  daemonPid?: number | null,
-): Promise<{ ok: boolean; detail: string; adopted: boolean }> {
-  const managed = readNvpnNodeIdentity();
-  if (!shouldReconcileAfterInstall(managed)) {
-    return { ok: true, detail: 'no managed identity to reconcile (skipped)', adopted: false };
-  }
-  const plan = await planAdoptIdentity(daemonPid);
-  if (!plan.needed) {
-    return { ok: true, detail: plan.blocker || 'identities already aligned', adopted: false };
-  }
-  const r = await adoptIdentity({ apply: true, daemonPid });
-  return { ok: r.ok, detail: r.detail, adopted: r.applied };
-}
+//
+// NOTE: the post-install create-then-heal layer
+// (reconcileDaemonIdentityAfterInstall / shouldReconcileAfterInstall) was
+// RETIRED here. Under b2 the helper's install seeds the canonical user
+// config and repoints the daemon's ExecStart --config at it, so the daemon
+// and dashboard share a single identity from first start — there's nothing
+// to "heal." The MANUAL "Make daemon use this identity" button
+// (planAdoptIdentity + adoptIdentity, now helper-repoint based) remains for
+// the rare drift case.
 
 export function extractTomlString(section: string, key: string): string | null {
   const re = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, 'm');

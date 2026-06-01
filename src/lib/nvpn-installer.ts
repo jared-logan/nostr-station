@@ -27,7 +27,7 @@ import os from 'os';
 import path from 'path';
 import { COMPONENT_VERSIONS, BINARY_SHA256 } from './versions.js';
 import { getNvpnTarget } from './detect.js';
-import { reconcileDaemonIdentityAfterInstall, probeNvpnServiceStatusUncached } from './nvpn.js';
+import { probeNvpnServiceStatusUncached } from './nvpn.js';
 import {
   adminState, runAdminVerb, ADMIN_STAGE_REL, ADMIN_HELPER,
 } from './nvpn-sudo.js';
@@ -134,16 +134,10 @@ export async function installNostrVpn(
   if (!r.ok) return { ok: false, detail: `${r.detail} (log: ${log.logPath})` };
   log.append('helper install ok');
 
-  // Dormant safety net (left untouched): under the helper's config drop-in
-  // the daemon already reads the canonical config, so reconcile no-ops —
-  // but we still invoke it best-effort so the net stays wired.
-  log.step('reconcile daemon identity (safety net)');
-  try {
-    const rec = await reconcileDaemonIdentityAfterInstall(null);
-    log.append(`reconcile: ${rec.adopted ? 'adopted managed identity' : 'no-op'} — ${rec.detail}`);
-  } catch (e: any) {
-    log.append(`reconcile skipped: ${(e?.message || '').slice(0, 160)}`);
-  }
+  // The create-then-heal reconcile is retired: the helper's install seeds
+  // the canonical user config and repoints the daemon's ExecStart --config
+  // at it, so the daemon reads the managed identity from first start. The
+  // manual "Make daemon use this identity" button covers any later drift.
 
   return { ok: true, detail: `nvpn installed + service registered (${tag})` };
 }
