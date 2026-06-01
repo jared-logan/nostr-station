@@ -15210,7 +15210,66 @@ const VpnPanel = (() => {
           </button>
         </div>
         <div id="vpn-diag-out" class="vpn-meta-diag-out muted">click an action to run it</div>
+        <div id="vpn-fips-section" class="vpn-section" style="margin-top:18px"></div>
       </div>`;
+  }
+
+  // Relay endpoints ([fips_peer_endpoints]) — the NAT-traversal lever. Behind
+  // NAT a peer often can't establish the relay link until you give it a
+  // reachable host:port; the diagnosis recommends this and this surface makes
+  // it a one-click write. Self-contained: GET the current map, list with
+  // remove, plus an add form.
+  async function renderFipsSection() {
+    const slot = bodyEl.querySelector('#vpn-fips-section');
+    if (!slot) return;
+    let data = null;
+    try { data = await api('/api/nvpn/fips', undefined, { silent: true }); } catch { slot.remove(); return; }
+    const eps = (data && data.endpoints && typeof data.endpoints === 'object') ? data.endpoints : {};
+    const rows = Object.entries(eps);
+    const aliasFor = (k) => { const a = lastRoster?.aliases?.[k]; return a ? `${escapeHtml(a)} · ` : ''; };
+    slot.innerHTML = `
+      <div class="vpn-empty-title">Relay endpoints <span class="muted" style="font-weight:normal">(NAT traversal)</span></div>
+      <p class="vpn-empty-detail muted" style="margin:6px 0 10px">
+        Behind NAT a peer may not connect until it has a reachable
+        <code>host:port</code>. If a peer shows reachable but never links, set
+        its endpoint here — the daemon re-dials on save.
+      </p>
+      ${rows.length ? `<div class="vpn-kv">${rows.map(([k, v]) => `
+        <div class="vpn-kv-row">
+          <span class="vpn-kv-key" title="${escapeHtml(k)}">${aliasFor(k)}${escapeHtml(truncNpub(k))}</span>
+          <span class="vpn-kv-val"><code>${escapeHtml(v)}</code></span>
+          <button class="danger rm-fips" data-k="${escapeHtml(k)}" style="margin-left:8px">Remove</button>
+        </div>`).join('')}</div>` : '<div class="vpn-empty-detail muted">No relay endpoints set.</div>'}
+      <div class="vpn-net-actions" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+        <input id="fips-peer" placeholder="peer npub or hex pubkey" style="flex:2;min-width:220px">
+        <input id="fips-endpoint" placeholder="host:port (e.g. 203.0.113.7:51820)" style="flex:1;min-width:160px">
+        <button id="fips-add" class="primary">Set endpoint</button>
+      </div>
+      <div id="fips-err" class="err" style="display:none;margin-top:6px"></div>`;
+
+    slot.querySelectorAll('.rm-fips').forEach(btn => btn.addEventListener('click', async (e) => {
+      e.preventDefault(); btn.disabled = true;
+      try {
+        const r = await api('/api/nvpn/fips/remove', { method: 'POST', body: JSON.stringify({ participant: btn.dataset.k }) });
+        toast('relay endpoint removed', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+      } catch { /* toasted */ }
+      renderFipsSection();
+    }));
+    const addBtn = slot.querySelector('#fips-add');
+    addBtn?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const participant = slot.querySelector('#fips-peer').value.trim();
+      const endpoint = slot.querySelector('#fips-endpoint').value.trim();
+      const err = slot.querySelector('#fips-err');
+      err.style.display = 'none';
+      if (!participant || !endpoint) { err.textContent = 'peer and host:port are both required'; err.style.display = 'block'; return; }
+      addBtn.disabled = true;
+      let r = null;
+      try { r = await api('/api/nvpn/fips/set', { method: 'POST', body: JSON.stringify({ participant, endpoint }) }, { silent: true }); }
+      catch { /* may be 400 */ }
+      if (r?.ok) { toast('relay endpoint saved', 'daemon re-dialing', 'ok'); renderFipsSection(); }
+      else { err.textContent = r?.detail || 'could not save endpoint'; err.style.display = 'block'; addBtn.disabled = false; }
+    });
   }
   // Render the auto-run connectivity diagnosis into #vpn-diag-net-body.
   // Read-only (GET /api/nvpn/network-diagnosis) so it's safe to fire on
@@ -15433,6 +15492,7 @@ const VpnPanel = (() => {
       try { await renderNetworkDiagnosis(); } finally { netRefresh.disabled = false; }
     });
     void renderNetworkDiagnosis();
+    void renderFipsSection();
 
     const diagOut = bodyEl.querySelector('#vpn-diag-out');
     const setDiagOut = (text, level = 'info') => {
