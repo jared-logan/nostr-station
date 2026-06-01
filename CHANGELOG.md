@@ -5,6 +5,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: lifecycle hardening — reliable install, uninstall & recovery
+
+Fixes the production failures the b2 acceptance test surfaced (binary
+stranded in `~/.cargo/bin`, no service, uninstall bricking the box) and
+closes the recovery + onboarding gaps from the full panel review.
+
+- **Admin unlock (root cause).** Every privileged op runs `sudo -n`, which
+  failed silently whenever the cred cache was cold (the normal case) — the
+  dashboard has no TTY to answer a prompt. New "Unlock admin actions"
+  control warms the cache via `sudo -S -v` (password stdin-only, never
+  stored/logged); afterwards every `sudo -n` call works for the cache
+  lifetime. Optional, user-run, `visudo`-validated `sudoers.d` one-liner
+  offered for a permanent grant (never auto-applied).
+- **Atomic, recovery-proof install/uninstall.** The "already installed"
+  short-circuit now requires a *healthy service*, not just a stray
+  cargo-bin binary, so a re-install after uninstall actually re-provisions
+  instead of silently no-op'ing. Added a self-relocate fallback to
+  `/usr/local/bin` when upstream `install-cli` fails. Uninstall now sweeps
+  the cargo-bin shadow so it can't block a reinstall. The update path
+  fails *loud* (`ok:false`) when it couldn't apply, instead of a misleading
+  green.
+- **Peer-state reset.** New Diagnostics action (+ `POST
+  /api/nvpn/peers/reset`) stops the daemon, clears
+  `daemon.recent-peers.json` (sudo-aware), and restarts — recovering from
+  runaway discovery / "max links exceeded: 256" without a shell.
+- **Guided host-vs-join onboarding.** The Network tab now signposts the two
+  end-user paths (host a mesh / join a mesh) while the mesh is empty.
+
+Pure helpers unit-tested; full suite 1570 pass. The privileged install /
+uninstall / peer-reset orchestration is **VM-verified** (CI can't exercise
+install behavior). The create-then-heal reconcile safety net is **left in
+place** — untouched.
+
 ### nostr-vpn: daemon reads the canonical config (b2 stage 4 of 4)
 
 The behavior-flipping final stage. The installer now points the root nvpn
