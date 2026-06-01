@@ -5,6 +5,42 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: daemon reads the canonical config (b2 stage 4 of 4)
+
+The behavior-flipping final stage. The installer now points the root nvpn
+daemon at the **canonical user-side config** the dashboard reads/writes —
+so the daemon and dashboard share a single identity and the
+create-then-heal copy is no longer the mechanism that aligns them. After
+`nvpn service install`, the installer:
+
+1. seeds the canonical config (`~/.config/nvpn/config.toml`) if absent —
+   the daemon can't `--config` a missing file; `nvpn init` won't clobber an
+   existing one;
+2. lays down a systemd drop-in
+   (`/etc/systemd/system/nvpn.service.d/20-nostr-station-config.conf`) that
+   overrides `ExecStart` to add `--config <canonical>`, layered over
+   upstream's unit exactly like the caps drop-in.
+
+**Fail-safe by construction:** `applyNvpnConfigDropIn` has a rollback guard —
+if the daemon was running and does NOT come back up after the repoint +
+restart, the drop-in is removed and the unit reloaded, returning the box to
+its working config. Every new step is best-effort + logged; on any failure
+the install degrades to the prior root-config behavior. The
+create-then-heal `reconcileDaemonIdentityAfterInstall` is **kept as a
+dormant safety net** (it no-ops once the daemon reads the canonical config)
+rather than deleted — removal is a follow-up after VM acceptance.
+
+Pure helpers `extractBaseExecStart` / `rewriteExecStartWithConfig` (strips
+any existing `--config`, so re-applying is idempotent) /
+`renderNvpnConfigDropIn` / `canonicalConfigInstallPath` are unit-tested; the
+sudo/systemctl orchestration + rollback are VM-verified. Synthetic test
+data; full suite 1563 pass.
+
+**VM acceptance test (gates the follow-up that deletes reconcile):** fresh
+install → then pair → daemon lands on the managed identity with zero adopt
+clicks. b1 (a simpler ExecStart→user-home approach) remains the fallback if
+the repoint hits an unforeseen wall.
+
 ### nostr-vpn: route writes through canonical config (b2 stage 3 of 4)
 
 The 4 config mutators — join-network (network-id setter), repair, relay
