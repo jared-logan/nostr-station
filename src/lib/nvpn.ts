@@ -2387,6 +2387,86 @@ export function removeNvpnAlias(participant: string): AliasWriteResult {
   });
 }
 
+// ── FIPS peer endpoints (the NAT-traversal lever) ────────────────────────
+//
+// `[fips_peer_endpoints]` maps a peer (npub/hex) → a reachable `host:port`.
+// Behind NAT this is what lets a peer actually establish the relay link —
+// on the VM the only reliably-connected peer was the one with an endpoint
+// set, and the connectivity diagnosis already recommends setting one. This
+// turns that recommendation into a one-click write. Same canonical +
+// ownership-aware write path as the relay/alias mutators.
+
+// host:port — host is IPv4, [IPv6], or a hostname; port 1–65535. Pure.
+export function isValidFipsEndpoint(s: string): boolean {
+  if (typeof s !== 'string') return false;
+  const m = /^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?):(\d{1,5})$/.exec(s.trim());
+  if (!m) return false;
+  const port = Number(m[2]);
+  return port >= 1 && port <= 65535;
+}
+
+// Generalized `[table]` rebuild (the alias rebuild, parameterized by table
+// name). Only ever called with literal table names. Pure.
+export function rebuildTomlWithNamedTable(
+  toml: string, table: string, next: Record<string, string>,
+): string {
+  const bodyLines: string[] = [];
+  for (const k of Object.keys(next).sort()) {
+    const escaped = next[k].replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    bodyLines.push(`${k} = "${escaped}"`);
+  }
+  const newBody = bodyLines.length > 0 ? bodyLines.join('\n') + '\n' : '';
+  const newSection = `[${table}]\n${newBody}`;
+  const sectionRe = new RegExp(`^\\s*\\[${table}\\][\\s\\S]*?(?=^\\s*\\[(?:\\[)?|$(?![\\r\\n]))`, 'm');
+  if (sectionRe.test(toml)) return toml.replace(sectionRe, newSection);
+  const sep = toml.endsWith('\n') ? '\n' : '\n\n';
+  return toml + sep + newSection;
+}
+
+export interface FipsEndpointWriteResult {
+  ok:        boolean;
+  detail:    string;
+  endpoints?: Record<string, string>;
+}
+
+function mutateFipsEndpoints(
+  mutator: (current: Record<string, string>) => Record<string, string>,
+): FipsEndpointWriteResult {
+  const canon = resolveCanonicalConfig();
+  const configPath = canon.path;
+  if (!configPath) return { ok: false, detail: 'no nvpn config.toml found — run `nvpn init` first' };
+  const toml = readConfigTextSync(configPath);
+  if (toml == null) return { ok: false, detail: 'config unreadable (permission or missing) — try `sudo -v` then retry' };
+  const current = extractAliasMap(extractNamedTableSection(toml, 'fips_peer_endpoints'));
+  const next = mutator({ ...current });
+  if (JSON.stringify(next) === JSON.stringify(current)) {
+    return { ok: true, detail: 'no change', endpoints: current };
+  }
+  const updated = rebuildTomlWithNamedTable(toml, 'fips_peer_endpoints', next);
+  const w = writeConfigTextSync(configPath, updated, { rootOwned: canon.rootOwned, backup: false });
+  if (!w.ok) return { ok: false, detail: w.detail };
+  return { ok: true, detail: 'relay endpoint saved', endpoints: next };
+}
+
+export function setNvpnFipsEndpoint(participant: string, endpoint: string): FipsEndpointWriteResult {
+  if (!isValidParticipant(participant)) return { ok: false, detail: 'invalid participant (npub or 64-char hex)' };
+  if (!isValidFipsEndpoint(endpoint)) return { ok: false, detail: 'endpoint must be host:port (e.g. 203.0.113.7:51820)' };
+  const p = participant.trim();
+  const e = endpoint.trim();
+  return mutateFipsEndpoints(map => ({ ...map, [p]: e }));
+}
+
+export function removeNvpnFipsEndpoint(participant: string): FipsEndpointWriteResult {
+  if (!isValidParticipant(participant)) return { ok: false, detail: 'invalid participant (npub or 64-char hex)' };
+  const p = participant.trim();
+  return mutateFipsEndpoints(map => {
+    const out = { ...map };
+    delete out[participant];
+    delete out[p];
+    return out;
+  });
+}
+
 // ── Roster + invites + whois ─────────────────────────────────────────────
 //
 // nvpn 0.3.x organises peers into a network roster: a set of `participants`

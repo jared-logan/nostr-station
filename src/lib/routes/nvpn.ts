@@ -43,7 +43,7 @@ import {
   setNvpnSettings, statsNvpn,
   setNvpnAlias, removeNvpnAlias,
   readNvpnRelays, addNvpnRelay, removeNvpnRelay, setNvpnRelays,
-  readNvpnFipsPeerEndpoints,
+  readNvpnFipsPeerEndpoints, setNvpnFipsEndpoint, removeNvpnFipsEndpoint,
   resolveDaemonConfigPath, readNodeNpubFromPath, adoptIdentity,
   RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
@@ -671,6 +671,34 @@ export async function handleNvpn(
     if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
     const participant = typeof body.participant === 'string' ? body.participant : '';
     const r = removeNvpnAlias(participant);
+    if (r.ok) await reloadNvpn().catch(() => null);
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
+  // ── FIPS peer endpoints (NAT-traversal lever) ─────────────────────
+  if (url === '/api/nvpn/fips' && method === 'GET') {
+    await writeJson(res, 200, readNvpnFipsPeerEndpoints());
+    return true;
+  }
+  if (url === '/api/nvpn/fips/set' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const participant = typeof body.participant === 'string' ? body.participant : '';
+    const endpoint    = typeof body.endpoint === 'string' ? body.endpoint : '';
+    const r = setNvpnFipsEndpoint(participant, endpoint);
+    // Reload so the daemon re-dials the peer using the new endpoint.
+    if (r.ok) await reloadNvpn().catch(() => null);
+    // Always 200 — {ok} carries success; validation failures show inline in
+    // the UI rather than as a generic red error toast.
+    await writeJson(res, 200, r);
+    return true;
+  }
+  if (url === '/api/nvpn/fips/remove' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const participant = typeof body.participant === 'string' ? body.participant : '';
+    const r = removeNvpnFipsEndpoint(participant);
     if (r.ok) await reloadNvpn().catch(() => null);
     await writeJson(res, r.ok ? 200 : 500, r);
     return true;
