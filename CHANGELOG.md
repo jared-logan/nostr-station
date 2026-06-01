@@ -5,6 +5,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### nostr-vpn: canonical-config foundation (b2 stage 1 of 4)
+
+First, behavior-preserving step toward a single authoritative nvpn config —
+the one the daemon actually runs — with the dashboard reading/writing it
+directly (via sudo when root-owned), so there's never a second identity to
+reconcile and no private key is ever copied. This stage adds the machinery
+without flipping any call site yet:
+
+- `chooseCanonicalConfigPath` (pure, unit-tested) — decides which config is
+  authoritative: the daemon's live `--config` path when it exists, else the
+  user-side path, else none.
+- `resolveCanonicalConfig` — wraps it with existence + ownership detection
+  (`pathIsForeignOwned`). Stage 1 still defaults to the user-side path, so
+  behavior is unchanged.
+- `readConfigText` / `writeConfigText` — ownership-aware primitives: direct
+  fs when we own the file, `sudo -n` (atomic `install -m 600` from stdin,
+  with backup) when root-owned. Mirrors the adopt/repair write discipline;
+  secret-bearing bodies are only ever used as fs/stdin input, never returned.
+
+No call sites switched (the 11 existing config readers/writers are
+untouched) — later stages route reads, then writes, then the installer
+through these, and retire the create-then-heal reconcile layer. Synthetic
+test data; full suite 1553 pass.
+
 ### nostr-vpn: installer reconciles to a single identity (prevention)
 
 The prevention half of the identity-split fix (the adopt flow is the cure
