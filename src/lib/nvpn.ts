@@ -812,6 +812,143 @@ function findNvpnConfigPath(): string | null {
   return null;
 }
 
+// ── Canonical config (b2 foundation) ─────────────────────────────────────
+//
+// The end state (b2): there is ONE authoritative nvpn config — the one the
+// running daemon reads — and the dashboard does all reads/writes against it,
+// using sudo when it's root-owned. No second identity, no key copying.
+//
+// This stage introduces the machinery WITHOUT flipping behavior yet:
+//   * resolveCanonicalConfig() decides which path is authoritative.
+//   * readConfigText() / writeConfigText() are ownership-aware primitives
+//     (direct fs when we can, sudo -n when root-owned) that later stages
+//     route every read/write through.
+// Stage 1 keeps the resolver defaulting to the user-side path (current
+// behavior); later stages prefer the daemon's path + switch call sites.
+
+export interface CanonicalConfig {
+  /** Authoritative config path, or null when none exists yet. */
+  path:    string | null;
+  /** True when the path is root-owned (writes/reads need sudo -n). */
+  rootOwned: boolean;
+  /** How the path was chosen — for diagnostics / "where from?" display. */
+  source:  'daemon' | 'user' | 'none';
+}
+
+// Is a path owned by someone other than this process's uid? Best-effort;
+// on stat failure we assume not-foreign (caller falls back to a direct read
+// attempt, which fails safe).
+export function pathIsForeignOwned(p: string): boolean {
+  try {
+    const st = fs.statSync(p);
+    return typeof process.getuid === 'function' ? st.uid !== process.getuid() : false;
+  } catch { return false; }
+}
+
+// Decide the authoritative config. `daemonPath` comes from
+// resolveDaemonConfigPath() (the daemon's live --config). Pure: takes the
+// candidate paths + existence/ownership predicates so it's unit-testable
+// without fs. Prefer the daemon's path when it exists (that's what actually
+// runs); else the user-side path; else none.
+export function chooseCanonicalConfigPath(in_: {
+  daemonPath:   string | null;
+  userPath:     string | null;
+  exists:       (p: string) => boolean;
+  foreignOwned: (p: string) => boolean;
+}): CanonicalConfig {
+  if (in_.daemonPath && in_.exists(in_.daemonPath)) {
+    return { path: in_.daemonPath, rootOwned: in_.foreignOwned(in_.daemonPath), source: 'daemon' };
+  }
+  if (in_.userPath && in_.exists(in_.userPath)) {
+    return { path: in_.userPath, rootOwned: in_.foreignOwned(in_.userPath), source: 'user' };
+  }
+  return { path: null, rootOwned: false, source: 'none' };
+}
+
+// Stage-1 resolver. IMPORTANT: behavior-preserving for now — it returns the
+// user-side path exactly like findNvpnConfigPath(), wrapped in the
+// CanonicalConfig shape with ownership detected. Later stages pass a
+// daemonPath to prefer the daemon's config.
+export function resolveCanonicalConfig(daemonPath?: string | null): CanonicalConfig {
+  return chooseCanonicalConfigPath({
+    daemonPath: daemonPath ?? null,
+    userPath:   findNvpnConfigPath(),
+    exists:     (p) => { try { fs.accessSync(p, fs.constants.F_OK); return true; } catch { return false; } },
+    foreignOwned: pathIsForeignOwned,
+  });
+}
+
+// Ownership-aware read: direct fs first, `sudo -n cat` fallback when the
+// file is root-owned / unreadable. Returns null when unreadable (e.g. empty
+// sudo cred cache) so callers degrade rather than throw. Callers handling
+// secret-bearing files must still only extract public fields.
+export async function readConfigText(configPath: string): Promise<string | null> {
+  if (!configPath) return null;
+  try { return fs.readFileSync(configPath, 'utf8'); }
+  catch {
+    try {
+      const { stdout } = await execa('sudo', ['-n', 'cat', configPath], { timeout: 5000, stdio: 'pipe' });
+      return stdout;
+    } catch { return null; }
+  }
+}
+
+export interface ConfigWriteResult {
+  ok:         boolean;
+  detail:     string;
+  backedUpTo?: string;
+}
+
+// Ownership-aware atomic write with backup. When we own the file: temp +
+// rename (mode 0600). When root-owned: `sudo -n cp -p` backup, then
+// `sudo -n install -o root -g root -m 600 /dev/stdin <path>` with the body
+// piped via stdin (never through a shell string). `rootOwned` is passed in
+// (from resolveCanonicalConfig) so the caller controls the path. Mirrors
+// the adopt/repair write discipline exactly. The body may contain secret
+// key material — it's only ever used as fs/stdin input, never returned.
+export async function writeConfigText(
+  configPath: string, body: string, opts: { rootOwned: boolean },
+): Promise<ConfigWriteResult> {
+  if (!configPath) return { ok: false, detail: 'no config path' };
+  const backupPath = `${configPath}.bak-${Date.now()}`;
+  if (!opts.rootOwned) {
+    // We own it — back up + atomic temp-rename, all direct.
+    try { if (fs.existsSync(configPath)) fs.copyFileSync(configPath, backupPath); }
+    catch (e: any) { return { ok: false, detail: `backup failed: ${(e?.message || '').slice(0, 160)}` }; }
+    const tmp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      fs.writeFileSync(tmp, body, { mode: 0o600 });
+      fs.renameSync(tmp, configPath);
+    } catch (e: any) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+      return { ok: false, detail: `write failed: ${(e?.message || '').slice(0, 160)}` };
+    }
+    return { ok: true, detail: 'config written', backedUpTo: fs.existsSync(backupPath) ? backupPath : undefined };
+  }
+  // Root-owned — sudo backup then sudo atomic install from stdin.
+  try {
+    await execa('sudo', ['-n', 'cp', '-p', configPath, backupPath], { timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe' });
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) {
+      return { ok: false, detail: 'sudo cred cache empty — run `sudo -v` then retry. (Nothing changed.)' };
+    }
+    return { ok: false, detail: `backup failed (refusing to write): ${summarizeError(e)}` };
+  }
+  try {
+    await execa('sudo', ['-n', 'install', '-o', 'root', '-g', 'root', '-m', '600', '/dev/stdin', configPath], {
+      timeout: SERVICE_OP_TIMEOUT_MS, stdio: 'pipe', input: body,
+    });
+  } catch (e: any) {
+    const stderr = (e?.stderr?.toString?.() || '').trim();
+    if (/password is required|sudo:.*required/i.test(stderr)) {
+      return { ok: false, detail: `sudo cred cache empty — run \`sudo -v\` then retry. Backup at ${backupPath}; no overwrite.`, backedUpTo: backupPath };
+    }
+    return { ok: false, detail: `write failed: ${summarizeError(e)} (backup at ${backupPath})`, backedUpTo: backupPath };
+  }
+  return { ok: true, detail: 'config written (sudo)', backedUpTo: backupPath };
+}
+
 // Extract the first `[[networks]]` block — the active network for our
 // purposes. nvpn supports multi-network configs; we surface the first
 // for the dashboard, which is what `nvpn add-participant` (no flag)
