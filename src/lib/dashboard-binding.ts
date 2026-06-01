@@ -55,6 +55,46 @@ export function isLoopbackAddress(ip: string | undefined | null): boolean {
   return false;
 }
 
+// Normalize an address for comparison: lowercase, strip IPv6 brackets, and
+// collapse an IPv4-mapped IPv6 form (`::ffff:10.44.x.y`) to plain IPv4 so a
+// dual-stack `socket.localAddress` compares equal to the IPv4 Host header.
+export function normalizeHostAddr(a: string | undefined | null): string {
+  if (!a) return '';
+  return String(a).toLowerCase().trim().replace(/^\[|\]$/g, '').replace(/^::ffff:/, '');
+}
+
+// Mesh Host/Origin gating (used ONLY for connections already verified as a
+// trusted mesh peer). The accepted Host/Origin is pinned to the request's
+// actual local interface address (the tunnel IP the connection arrived on)
+// + the bound port — so even a trusted peer can't inject a foreign Host
+// (DNS-rebinding) or a cross-origin Origin (CSRF); both must equal the real
+// interface the dashboard is being reached on. Pure — unit-tested.
+export function meshHostMatches(
+  hostHeader: string | undefined | null,
+  localAddress: string | undefined | null,
+  port: number,
+): boolean {
+  const want = normalizeHostAddr(localAddress);
+  if (!want) return false;
+  return normalizeHostAddr(hostHeader) === `${want}:${port}`;
+}
+
+export function meshUrlMatches(
+  urlStr: string | undefined | null,
+  localAddress: string | undefined | null,
+  port: number,
+): boolean {
+  if (!urlStr) return false;
+  const want = normalizeHostAddr(localAddress);
+  if (!want) return false;
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== 'http:' && u.protocol !== 'ws:') return false;
+    if (u.port !== String(port)) return false;
+    return normalizeHostAddr(u.hostname) === want;
+  } catch { return false; }
+}
+
 // =====================================================================
 // Peer-IP → pubkey lookup
 
