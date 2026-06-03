@@ -14553,7 +14553,10 @@ const VpnPanel = (() => {
     // tunnel IP, show the concrete URL; otherwise show the bind
     // address + a hint about why it isn't actionable yet.
     const port    = location.port || (location.protocol === 'https:' ? 443 : 80);
-    const target  = (enabled && tunnelIp) ? `http://${tunnelIp}:${port}` : null;
+    // tunnel_ip carries a CIDR suffix (e.g. "10.44.0.5/32"); strip it or the
+    // URL becomes the unusable "http://10.44.0.5/32:3000".
+    const ipForUrl = tunnelIp ? tunnelIp.split('/')[0] : null;
+    const target  = (enabled && ipForUrl) ? `http://${ipForUrl}:${port}` : null;
     host.innerHTML = `
       <p class="form-help" style="margin:6px 0">
         This toggle controls whether nostr-station's dashboard
