@@ -13777,6 +13777,13 @@ const VpnPanel = (() => {
   let lastDeployment   = null;  // GET /api/nvpn/deployment-context
   let lastSplitBrain   = null;  // GET /api/nvpn/split-brain
   let lastJoinRequests = null;  // GET /api/nvpn/join-requests
+  let lastConnectivity = null;  // GET /api/nvpn/connectivity (#255)
+  // Per-concern coverage flags, recomputed by renderConnectivityPanel each
+  // refresh. The legacy one-liner banners read these and step aside ONLY for
+  // the concern the panel is actually surfacing (#255, option 3) — a missing
+  // or empty report leaves them showing as a graceful fallback.
+  let connHidesNat   = false;
+  let connHidesStale = false;
 
   // Sub-tab switching is purely visual + lazy. Each sub-tab has a
   // render function that draws into bodyEl from the cached payloads.
@@ -13817,7 +13824,9 @@ const VpnPanel = (() => {
       return el;
     })();
     const w = lastDeployment && lastDeployment.warning ? lastDeployment.warning : null;
-    if (!w) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
+    // Step aside when the Connectivity panel is already surfacing this
+    // concern with specifics (#255 option 3) — but only then.
+    if (!w || connHidesNat) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
     slot.style.display = 'block';
     slot.className = `vpn-deployment-banner ${w.level}`;
     slot.innerHTML = `
@@ -13845,7 +13854,9 @@ const VpnPanel = (() => {
       return el;
     })();
     const stale = lastStatus && lastStatus.stale ? lastStatus.stale : null;
-    if (!stale) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
+    // Step aside when the Connectivity panel covers the daemon concern (a
+    // daemon.stopped card, or a clean verdict from a successful doctor run).
+    if (!stale || connHidesStale) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
     slot.style.display = 'block';
     slot.className = 'vpn-deployment-banner warn';
     slot.innerHTML = `
@@ -13854,6 +13865,89 @@ const VpnPanel = (() => {
       </div>
       <div class="muted vpn-deployment-banner-detail">${escapeHtml(stale.detail || '')}</div>
     `;
+  }
+
+  // Connectivity panel (#255 / Layer-1 1.6). Renders the structured
+  // /api/nvpn/connectivity report — one overall verdict + a card per signal
+  // (each with its inline action) — replacing the vague natWarning/STUN
+  // one-liner with the specific causes the analyzer surfaces (daemon stopped,
+  // no public UDP, multi-homing, captive portal, no port mapping). The raw
+  // `doctor` bundle export in Diagnostics stays as the advanced escape hatch.
+  const CONN_VERDICT = {
+    reachable:               { cls: 'info',  label: 'Reachable' },
+    reachable_with_caveats:  { cls: 'warn',  label: 'Reachable — with caveats' },
+    unreachable:             { cls: 'error', label: 'Not reachable' },
+  };
+  const CONN_LEVEL_ICON = { ok: '✓', info: 'ℹ', warn: '▲', error: '✕' };
+  // Which signal ids cover each legacy banner's concern (#255 option 3).
+  const CONN_NAT_IDS = ['net.no_public_udp', 'net.no_port_mapping', 'net.endpoint_subnet_mismatch'];
+
+  function renderConnectivityPanel() {
+    connHidesNat = connHidesStale = false;
+    const slot = $('vpn-connectivity-panel') || (() => {
+      const el = document.createElement('div');
+      el.id = 'vpn-connectivity-panel';
+      stripEl.parentNode.insertBefore(el, stripEl);
+      return el;
+    })();
+    const rep = lastConnectivity;
+    const verdict = rep && typeof rep.verdict === 'string' ? rep.verdict : 'unknown';
+    const signals = rep && Array.isArray(rep.signals) ? rep.signals : [];
+    // Nothing to say (no data / daemon+doctor both unknown) → hide and let
+    // the legacy banners fall back.
+    if (!rep || verdict === 'unknown') { slot.innerHTML = ''; slot.style.display = 'none'; return; }
+
+    const ids = new Set(signals.map(s => s && s.id));
+    let v = CONN_VERDICT[verdict] || { cls: 'warn', label: 'Connectivity' };
+    let headline = v.label;
+    if (verdict === 'unreachable' && ids.has('daemon.stopped')) headline = 'Not reachable — daemon stopped';
+
+    // Compute coverage: only step on a banner whose concern we're showing.
+    connHidesNat   = CONN_NAT_IDS.some(id => ids.has(id));
+    connHidesStale = ids.has('daemon.stopped')
+      || (!!rep.doctorOk && (verdict === 'reachable' || verdict === 'reachable_with_caveats'));
+
+    const cards = signals.map((sig) => {
+      const level = ['ok', 'info', 'warn', 'error'].includes(sig.level) ? sig.level : 'info';
+      const icon  = CONN_LEVEL_ICON[level] || 'ℹ';
+      const act = sig.action && sig.action.kind
+        ? `<button class="vpn-conn-action" data-conn-action="${escapeHtml(sig.action.kind)}">${escapeHtml(sig.action.label || 'Fix')}</button>`
+        : '';
+      const detail = sig.detail ? `<div class="muted vpn-conn-card-detail">${escapeHtml(sig.detail)}</div>` : '';
+      return `<div class="vpn-conn-card ${level}">
+        <div class="vpn-conn-card-title"><span class="vpn-conn-ic">${icon}</span>${escapeHtml(sig.title || '')}</div>
+        ${detail}${act}
+      </div>`;
+    }).join('');
+
+    // Keep the deployment-guide link reachable from the panel when a public-
+    // path signal is up (we may be hiding the banner that used to carry it).
+    const guide = connHidesNat
+      ? `<div class="vpn-conn-foot muted"><a href="docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a></div>`
+      : '';
+
+    slot.style.display = 'block';
+    slot.className = `vpn-connectivity ${v.cls}`;
+    slot.innerHTML = `
+      <div class="vpn-conn-head">
+        <span class="vpn-conn-verdict">${escapeHtml(headline)}</span>
+      </div>
+      ${cards ? `<div class="vpn-conn-signals">${cards}</div>` : ''}
+      ${guide}
+    `;
+    slot.querySelectorAll('[data-conn-action]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const kind = btn.getAttribute('data-conn-action');
+        if (kind === 'start-daemon') {
+          btn.disabled = true;
+          await callNvpnAction('start', 'started');
+          await refresh();
+        } else if (kind === 'setup-relay') {
+          selectTab('relays');
+        }
+      });
+    });
   }
 
   // Split-brain banner (#58). Renders above the status strip when the
@@ -14032,7 +14126,7 @@ const VpnPanel = (() => {
   // whole panel — each sub-tab handles missing data with its own
   // empty-state.
   async function refresh() {
-    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs, communities] = await Promise.all([
+    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs, communities, connectivity] = await Promise.all([
       api('/api/nvpn/status').catch(() => null),
       api('/api/nvpn/service/status').catch(() => null),
       api('/api/nvpn/roster').catch(() => null),
@@ -14042,6 +14136,7 @@ const VpnPanel = (() => {
       api('/api/nvpn/split-brain', undefined, { silent: true }).catch(() => null),
       api('/api/nvpn/join-requests', undefined, { silent: true }).catch(() => null),
       api('/api/communities', undefined, { silent: true }).catch(() => null),
+      api('/api/nvpn/connectivity', undefined, { silent: true }).catch(() => null),
     ]);
     lastStatus       = s;
     lastService      = svc;
@@ -14052,6 +14147,10 @@ const VpnPanel = (() => {
     lastSplitBrain   = splitBrain;
     lastJoinRequests = joinReqs;
     lastCommunities  = communities;
+    lastConnectivity = connectivity;
+    // Panel first — it computes the coverage flags the two banners below
+    // consult before deciding whether to step aside.
+    renderConnectivityPanel();
     renderDeploymentBanner();
     renderStaleStatusBanner();
     renderSplitBrainBanner();
