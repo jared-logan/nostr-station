@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { nip19 } from 'nostr-tools';
 
 const {
   isSafeRef,
@@ -9,7 +13,11 @@ const {
   clampInt,
   buildRepoAnnounceTemplate,
   decodeNgitRemote,
+  fetchRepoMeta,
+  buildNgitRemoteUrl,
 } = await import('../src/lib/routes/repo.ts');
+
+const { isCanonicalClientTag, CLIENT_TAG, CLIENT_NAME } = await import('../src/lib/client-tag.ts');
 
 // ── decodeNgitRemote (regression: 3-part remote forked the d-tag) ─────────
 // A `nostr://<npub>/<relay-host>/<repo>` remote must decode to d=<repo>,
@@ -474,6 +482,74 @@ test('buildRepoAnnounceTemplate: r-euc tag emitted only when euc provided', () =
   assert.deepEqual(withEuc.tags.find(t => t[0] === 'r'), ['r', sha, 'euc']);
 });
 
+// ── Bug 2: bare client tag upgrades to the canonical 4-element form ───────
+//
+// A prior announcement that carried the sticky bare ["client","nostr-station"]
+// (2-element) must NOT be preserved verbatim — it must be REPLACED with the
+// canonical 4-element CLIENT_TAG so the announcement links back to our
+// kind-31990 handler (NIP-89) like nsite deploys do.
+
+test('isCanonicalClientTag: true only for the byte-equal 4-element CLIENT_TAG', () => {
+  assert.equal(isCanonicalClientTag([...CLIENT_TAG]), true);
+  assert.equal(isCanonicalClientTag(['client', CLIENT_NAME]), false);          // bare 2-element
+  assert.equal(isCanonicalClientTag(['client', CLIENT_NAME, 'x', 'y']), false); // wrong coords
+  assert.equal(isCanonicalClientTag(['client', 'other', CLIENT_TAG[2], CLIENT_TAG[3]]), false);
+});
+
+test('buildRepoAnnounceTemplate: upgrades a prior BARE nostr-station client tag to canonical', () => {
+  const prior: any = {
+    kind: 30617,
+    tags: [['d', 'blip'], ['client', 'nostr-station']],   // sticky bare form
+  };
+  const tpl = buildRepoAnnounceTemplate({ identifier: 'blip' }, prior, ANCHOR_HEX);
+  const clients = tpl.tags.filter(t => t[0] === 'client');
+  assert.equal(clients.length, 1, 'exactly one client tag');
+  assert.deepEqual(clients[0], [...CLIENT_TAG]);
+  assert.equal(isCanonicalClientTag(clients[0]), true);
+});
+
+test('buildRepoAnnounceTemplate: leaves a DIFFERENT client tag untouched (only upgrades our own)', () => {
+  const prior: any = {
+    kind: 30617,
+    tags: [['d', 'blip'], ['client', 'shakespeare.diy']],
+  };
+  const tpl = buildRepoAnnounceTemplate({ identifier: 'blip' }, prior, ANCHOR_HEX);
+  const clients = tpl.tags.filter(t => t[0] === 'client');
+  assert.equal(clients.length, 1);
+  assert.deepEqual(clients[0], ['client', 'shakespeare.diy']);
+});
+
+// ── Bug 4: import remote normalization (buildNgitRemoteUrl) ───────────────
+
+test('buildNgitRemoteUrl: with a relay hint → full 3-part form (host stripped of scheme)', () => {
+  assert.equal(
+    buildNgitRemoteUrl('npubX', 'myrepo', ['wss://relay.ngit.dev']),
+    'nostr://npubX/relay.ngit.dev/myrepo',
+  );
+});
+
+test('buildNgitRemoteUrl: no relay hint → bare 2-part form', () => {
+  assert.equal(buildNgitRemoteUrl('npubX', 'myrepo', []), 'nostr://npubX/myrepo');
+  assert.equal(buildNgitRemoteUrl('npubX', 'myrepo'), 'nostr://npubX/myrepo');
+});
+
+test('buildNgitRemoteUrl: first non-empty hint wins; trailing slashes trimmed', () => {
+  assert.equal(
+    buildNgitRemoteUrl('npubX', 'r', ['', 'wss://relay.ngit.dev/']),
+    'nostr://npubX/relay.ngit.dev/r',
+  );
+});
+
+// A 3-part remote produced by buildNgitRemoteUrl round-trips through
+// decodeNgitRemote with a non-empty relayHints — closing the Bug 4 loop
+// (the bare form is what zeroed relayHints and stranded the read).
+test('buildNgitRemoteUrl ↔ decodeNgitRemote: 3-part form yields non-empty relayHints', () => {
+  const remote = buildNgitRemoteUrl(NPUB, 'hello-world', ['wss://relay.ngit.dev']);
+  const c = decodeNgitRemote({ remotes: { ngit: remote } });
+  assert.equal(c?.identifier, 'hello-world');
+  assert.deepEqual(c?.relayHints, ['wss://relay.ngit.dev']);
+});
+
 // ── publishEventToRelays ────────────────────────────────────────────────
 //
 // Round-trip test against an in-process WebSocketServer mock. Stands up
@@ -561,4 +637,98 @@ test('publishEventToRelays: relay that never responds → ok=false reason="timeo
     assert.equal(results[0].ok, false);
     assert.equal(results[0].reason, 'timeout');
   } finally { wss.close(); }
+});
+
+// ── Bug 1: fetchRepoMeta must find an announcement reachable ONLY on App Relays
+//
+// The exact stranded-Overview scenario: an ngit project whose remote is the
+// bare `nostr://<npub>/<d-tag>` form (empty relayHints), with a dead GRASP
+// override and no project read relays — but the 30617 WAS published to the
+// user's App Relays. The old union (relayHints+grasp+projRelays) excluded the
+// App Relays, so the announcement it had successfully published was
+// structurally unreadable. With App Relays in the union it must be found.
+
+function startMockRepoRelay(event: any): Promise<{ url: string; close: () => void }> {
+  return new Promise((resolve) => {
+    const wss = new WebSocketServer({ port: 0 });
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        let msg: any;
+        try { msg = JSON.parse(data.toString()); } catch { return; }
+        if (!Array.isArray(msg)) return;
+        if (msg[0] === 'REQ') {
+          const subId = msg[1];
+          ws.send(JSON.stringify(['EVENT', subId, event]));
+          ws.send(JSON.stringify(['EOSE', subId]));
+        }
+      });
+    });
+    wss.on('listening', () => {
+      const port = (wss.address() as AddressInfo).port;
+      resolve({ url: `ws://127.0.0.1:${port}`, close: () => wss.close() });
+    });
+  });
+}
+
+test('fetchRepoMeta: finds a 30617 reachable ONLY on App Relays (bare remote, dead grasp, no projRelays)', async () => {
+  const event = {
+    id:         'f'.repeat(64),
+    pubkey:     HEX,                       // matches NPUB used in the remote
+    kind:       30617,
+    created_at: 1_700_000_000,
+    tags:       [['d', 'app-only-repo'], ['name', 'App Only Repo']],
+    content:    '',
+    sig:        '0'.repeat(128),
+  };
+  const relay = await startMockRepoRelay(event);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-repo-'));
+  try {
+    const project: any = {
+      id:        'a'.repeat(12),
+      path:      tmp,
+      // Bare 2-part remote → decodeNgitRemote yields relayHints = [].
+      remotes:   { ngit: `nostr://${NPUB}/app-only-repo` },
+      readRelays: [],                      // no project read relays
+    };
+    // Sanity: the remote really does decode to empty relayHints.
+    assert.deepEqual(decodeNgitRemote(project)?.relayHints, []);
+
+    const result = await fetchRepoMeta(project, true, {
+      getGrasp:     () => ['wss://dead.invalid.example'],   // dead grasp
+      getAppRelays: () => [relay.url],                      // only home
+    });
+    assert.ok(result.repo, 'announcement should be found via App Relays');
+    assert.equal(result.repo?.identifier, 'app-only-repo');
+    assert.equal(result.repo?.name, 'App Only Repo');
+  } finally {
+    relay.close();
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test('fetchRepoMeta: without App Relays in the union the same announcement is NOT found (regression guard)', async () => {
+  // Pins the failure mode: if the union excludes App Relays (old behavior,
+  // simulated here by feeding only a dead grasp + no app relays), the
+  // announcement is unreadable. Guards against a future refactor dropping
+  // the App-Relay fallback.
+  const event = {
+    id: 'e'.repeat(64), pubkey: HEX, kind: 30617, created_at: 1_700_000_000,
+    tags: [['d', 'app-only-repo']], content: '', sig: '0'.repeat(128),
+  };
+  const relay = await startMockRepoRelay(event);   // running, but never queried
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-repo-'));
+  try {
+    const project: any = {
+      id: 'b'.repeat(12), path: tmp,
+      remotes: { ngit: `nostr://${NPUB}/app-only-repo` }, readRelays: [],
+    };
+    const result = await fetchRepoMeta(project, true, {
+      getGrasp:     () => ['wss://dead.invalid.example'],
+      getAppRelays: () => [],                                // App Relays empty
+    });
+    assert.equal(result.repo, null);
+  } finally {
+    relay.close();
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
 });

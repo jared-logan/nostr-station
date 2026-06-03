@@ -43,6 +43,23 @@ export function hasNostrStationClientTag(tags: string[][]): boolean {
   return tags.some(t => t[0] === 'client' && t[1] === CLIENT_NAME);
 }
 
+/** Returns true if a single tag is byte-equal to the canonical 4-element
+ *  CLIENT_TAG. A bare ["client","nostr-station"] (the sticky 2-element form
+ *  some early publishes carried) is NOT canonical and should be UPGRADED to
+ *  the full form on the next republish — see buildRepoAnnounceTemplate. */
+export function isCanonicalClientTag(tag: string[]): boolean {
+  if (!Array.isArray(tag) || tag.length !== CLIENT_TAG.length) return false;
+  return CLIENT_TAG.every((v, i) => tag[i] === v);
+}
+
+/** True for a nostr-station-OWNED client tag that is not yet canonical
+ *  (i.e. our name but missing the NIP-89 handler coordinate / relay hint).
+ *  Distinguishes "our stale bare tag, upgrade it" from "a different client's
+ *  tag, leave it alone". */
+export function isStaleNostrStationClientTag(tag: string[]): boolean {
+  return Array.isArray(tag) && tag[0] === 'client' && tag[1] === CLIENT_NAME && !isCanonicalClientTag(tag);
+}
+
 /** Append the canonical client tag to a tag array unless one is already
  *  present. Mutates and returns `tags` for chaining. */
 export function stampClientTag(tags: string[][]): string[][] {
