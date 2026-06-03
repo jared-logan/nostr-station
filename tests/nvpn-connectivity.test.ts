@@ -143,6 +143,53 @@ test('daemon-down dominates a stale mesh_ready:true snapshot', () => {
 });
 
 // ---------------------------------------------------------------------
+// (#252) public-UDP nuance — the wording IS the deliverable
+
+test('udp:false emits an explanatory no-public-udp signal with a relay pointer', () => {
+  const r = analyzeConnectivity(doctorRaw, statusRaw); // fixture: mesh_ready + udp:false
+  const s = r.signals.find(x => x.id === 'net.no_public_udp');
+  assert.ok(s, 'expected a net.no_public_udp signal');
+  assert.deepEqual(s!.action, { kind: 'setup-relay', label: 'Set up a relay' });
+  // It must explain (relay bridges; LAN still works), and must NOT frame it
+  // as WireGuard/network being blocked or a hard failure.
+  assert.match(s!.detail || '', /relay/i);
+  assert.match(s!.detail || '', /LAN|local mesh/i);
+  assert.doesNotMatch((s!.title + ' ' + s!.detail), /blocks WireGuard|fail|can’t connect|cannot connect/i);
+  // Verdict stays a caveat (mesh is up), never unreachable.
+  assert.equal(r.verdict, 'reachable_with_caveats');
+});
+
+test('ipv4:false ipv6:true is called out explicitly as IPv6-only', () => {
+  const r = analyzeConnectivity(doctorRaw, statusRaw); // fixture is ipv4:false ipv6:true
+  const s = r.signals.find(x => x.id === 'net.ipv6_only');
+  assert.ok(s, 'expected an explicit IPv6-only signal');
+  assert.equal(s!.level, 'info');
+  assert.match(s!.detail || '', /IPv4-only/i);
+});
+
+test('udp:true → no public-udp signals at all', () => {
+  const doctor = { netcheck: { udp: true, ipv4: true, ipv6: true } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1 };
+  const ids = analyzeConnectivity(doctor, status).signals.map(s => s.id);
+  assert.ok(!ids.includes('net.no_public_udp'));
+  assert.ok(!ids.includes('net.ipv6_only'));
+});
+
+test('udp:false with IPv4 present → no-public-udp but NOT ipv6-only', () => {
+  const doctor = { netcheck: { udp: false, ipv4: true, ipv6: true } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1 };
+  const ids = analyzeConnectivity(doctor, status).signals.map(s => s.id);
+  assert.ok(ids.includes('net.no_public_udp'));
+  assert.ok(!ids.includes('net.ipv6_only'));
+});
+
+test('daemon down suppresses the public-udp signal (one action: start it)', () => {
+  const r = analyzeConnectivity(doctorRaw, statusRaw, { daemonRunning: false });
+  assert.equal(r.signals.find(s => s.id === 'net.no_public_udp'), undefined);
+  assert.equal(r.signals[0].id, 'daemon.stopped');
+});
+
+// ---------------------------------------------------------------------
 // defensive — never throw on junk / partial input
 
 test('garbage and empty input → unknown, no throw, empty signals', () => {

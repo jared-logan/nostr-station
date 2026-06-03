@@ -39,7 +39,7 @@ export type ConnectivityVerdict =
  * extend the union (e.g. relay guidance in #252/#254).
  */
 export interface ConnectivityAction {
-  kind:  'start-daemon';
+  kind:  'start-daemon' | 'setup-relay';
   label: string;
 }
 
@@ -195,6 +195,43 @@ export function analyzeConnectivity(
     endpoint:           str(status?.endpoint),
     configuredEndpoint: str(status?.configured_endpoint),
   };
+
+  // (1.3 / #252) Public-UDP nuance — the wording the live-box capture
+  // corrected. `netcheck.udp === false` means "no public/STUN UDP path got
+  // out", NOT "this network blocks WireGuard": a LAN/direct mesh can be fully
+  // up alongside it (the fixture proves it — mesh_ready:true + a connected
+  // peer with udp:false). So this is an EXPLANATION + relay pointer, never a
+  // failure. The roll-up verdict already classifies it as a caveat (1.1);
+  // here we just say why and point at Layer 2. Suppressed when the daemon is
+  // down — that case has exactly one action (start it), and netcheck may be
+  // stale anyway.
+  const nc = context.netcheck;
+  if (!daemonDown && nc && nc.udp === false) {
+    signals.push({
+      id:     'net.no_public_udp',
+      level:  'warn',
+      title:  'No public UDP path — internet peers need a relay',
+      detail: 'STUN/UDP to the open internet did not get through on this network, '
+            + 'so peers out on the public internet can’t reach this node directly here. '
+            + 'A relay (Layer 2) bridges them. Peers on your LAN / this same network still '
+            + 'connect directly over UDP — this does not block your local mesh.',
+      source: 'analyzer',
+      action: { kind: 'setup-relay', label: 'Set up a relay' },
+    });
+    // IPv6-only is the exact incident state — call it out explicitly so the
+    // "udp blocked" reading isn't mistaken for a hard network failure.
+    if (nc.ipv4 === false && nc.ipv6 === true) {
+      signals.push({
+        id:     'net.ipv6_only',
+        level:  'info',
+        title:  'Only IPv6 reached the internet (IPv4 UDP didn’t get out)',
+        detail: 'This network gave us an IPv6 path but no public IPv4 UDP path. Many peers and '
+              + 'relays are IPv4-only, which is usually why the public UDP path looks blocked. '
+              + 'A relay bridges IPv4-only peers to you.',
+        source: 'analyzer',
+      });
+    }
+  }
 
   // A down daemon dominates everything else — nothing connects, regardless
   // of stale mesh fields in a config snapshot.
