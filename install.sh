@@ -8,7 +8,8 @@
 #   2b. Check that `make`, a C++ compiler, and `python3` are available —
 #       required for the node-gyp source builds of better-sqlite3 +
 #       node-pty when no platform prebuild is published.
-#   3. Install Node 22+ via nvm if missing or too old. Silent.
+#   3. Require Node 22+ (sourcing an already-installed nvm if present). Does
+#      NOT auto-install Node — prints install guidance and exits if missing.
 #   4. Clone nostr-station to ~/nostr-station (or fast-forward if already
 #      present), install dependencies, build, and `npm link` so the
 #      `nostr-station` command resolves to bin/nostr-station.sh in that
@@ -23,6 +24,7 @@
 # What it does NOT do:
 #   - install Docker, OrbStack, or docker-compose
 #   - install Rust / cargo / system build tools (only detects them)
+#   - install Node (only detects it; prints guidance if missing)
 #   - run sudo or apt-get
 #   - publish or consume an npm registry package
 #
@@ -98,27 +100,34 @@ if [ -n "${missing_build_tools}" ]; then
   exit 1
 fi
 
-# 3 — Node. Source nvm first in case it's already installed (handles
-# fresh shells on systems where the user installed nvm previously but
-# hasn't restarted their terminal). Then check Node version; install
-# only if missing or too old.
+# 3 — Node prerequisite. We deliberately do NOT auto-install Node: running
+# nvm's installer + `source nvm.sh` + `nvm use` from inside this script is
+# fragile under `set -u` — nvm.sh trips nounset and aborts the whole install
+# before the clone (#281). Instead: source an already-installed nvm if present
+# (so a user who set it up earlier but hasn't restarted their shell still gets
+# `node` on PATH), then require Node 22+ explicitly, with the same guidance the
+# README's prerequisites note gives. Keep this message in sync with the README.
 export NVM_DIR="${HOME}/.nvm"
-# shellcheck disable=SC1091
-[ -s "${NVM_DIR}/nvm.sh" ] && source "${NVM_DIR}/nvm.sh"
+if [ -s "${NVM_DIR}/nvm.sh" ]; then
+  # nvm.sh references unbound vars — sourcing it under `set -u` would abort.
+  set +u
+  # shellcheck disable=SC1091
+  source "${NVM_DIR}/nvm.sh"
+  set -u
+fi
 
 current_node_major() {
   node -e 'process.stdout.write(process.versions.node.split(".")[0])' 2>/dev/null || echo 0
 }
 
 if [ "$(current_node_major)" -lt "${REQUIRED_NODE}" ]; then
-  log "Installing Node ${REQUIRED_NODE}+ (one-time, ~30s)…"
-  # nvm's install script writes to .bashrc/.zshrc; we source nvm.sh in
-  # this shell directly so the rest of this script can use `nvm`/`node`.
-  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash >/dev/null 2>&1
-  # shellcheck disable=SC1091
-  source "${NVM_DIR}/nvm.sh"
-  nvm install --lts >/dev/null 2>&1
-  nvm use --lts >/dev/null 2>&1
+  echo "Node.js ${REQUIRED_NODE}+ is required, but wasn't found on your PATH."
+  echo ""
+  echo "Install it, then re-run this script:"
+  echo "  • nvm:        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && nvm install ${REQUIRED_NODE}"
+  echo "  • nodejs.org: download an LTS build (${REQUIRED_NODE}+)"
+  echo "  • or your system package manager (verify it provides ${REQUIRED_NODE}+)"
+  exit 1
 fi
 ok "Node $(node --version) ready"
 
