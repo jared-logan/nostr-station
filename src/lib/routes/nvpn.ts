@@ -49,6 +49,7 @@ import {
 } from '../nvpn.js';
 import { diagnoseNvpnNetwork } from '../nvpn-diagnostics.js';
 import { analyzeConnectivity } from '../nvpn-connectivity.js';
+import { analyzeMeshPeers } from '../nvpn-mesh-health.js';
 import { npubToHex } from '../identity.js';
 import { nvpnRelayHealth } from '../nvpn-relay-health.js';
 import { detectContainer, natWarningFor, isPrivateEndpoint } from '../container-detect.js';
@@ -795,6 +796,17 @@ export async function handleNvpn(
     // Echo whether doctor itself ran, so the UI can tell "analyzed: clear"
     // from "couldn't run doctor" (e.g. binary missing) rather than guessing.
     await writeJson(res, 200, { ...report, doctorOk: doc.ok, doctorDetail: doc.detail });
+    return true;
+  }
+  // Mesh-peer reachability (#256). Reads the DETAILED status.daemon.state.peers[]
+  // (stable participant_pubkey + FIPS reachability fields) and surfaces, per
+  // peer, whether it's reachable and pathing direct vs relayed. Distinct from
+  // /api/nvpn/relays/health, which tracks nostr publish relays.
+  if (url === '/api/nvpn/mesh-health' && method === 'GET') {
+    const status = await probeNvpnStatus();
+    const raw = status.raw as Record<string, any> | null;
+    const detailed = raw && raw.daemon && raw.daemon.state ? raw.daemon.state.peers : null;
+    await writeJson(res, 200, analyzeMeshPeers(detailed));
     return true;
   }
   // nat-discover is intentionally not surfaced as a button in the

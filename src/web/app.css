@@ -2080,6 +2080,20 @@ details.dashboard-health .dashboard-health-sub {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+/* Mesh-path chip (#256) — direct/relayed/down + latency, from the detailed
+   daemon.state.peers[] FIPS fields. */
+.vpn-mesh-path {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border: 1px solid var(--border, #2a2c33);
+}
+.vpn-mesh-path.direct  { background: rgba(108, 192, 112, 0.10); border-color: rgba(108, 192, 112, 0.40); color: #6cc070; }
+.vpn-mesh-path.relayed { background: rgba(220, 175, 75,  0.10); border-color: rgba(220, 175, 75,  0.40); color: #dcaf4b; }
+.vpn-mesh-path.down    { background: rgba(220, 90,  90,  0.10); border-color: rgba(220, 90,  90,  0.40); color: #dc5a5a; }
 .vpn-meta-peer-actions {
   margin-left: auto;
   display: flex;

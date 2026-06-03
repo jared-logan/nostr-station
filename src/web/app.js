@@ -13764,6 +13764,7 @@ const VpnPanel = (() => {
   let lastService      = null;  // GET /api/nvpn/service/status
   let lastRoster       = null;  // GET /api/nvpn/roster
   let lastRelays       = null;  // GET /api/nvpn/relays
+  let lastMeshHealth   = null;  // GET /api/nvpn/mesh-health (#256)
   let lastNetworks     = null;  // GET /api/nvpn/networks  (full [[networks]] list)
   // Communities cross-reference: which communities are bound to which
   // nvpn networks. Refreshed alongside the rest of the panel data so
@@ -14126,7 +14127,7 @@ const VpnPanel = (() => {
   // whole panel — each sub-tab handles missing data with its own
   // empty-state.
   async function refresh() {
-    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs, communities, connectivity] = await Promise.all([
+    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs, communities, connectivity, meshHealth] = await Promise.all([
       api('/api/nvpn/status').catch(() => null),
       api('/api/nvpn/service/status').catch(() => null),
       api('/api/nvpn/roster').catch(() => null),
@@ -14137,6 +14138,7 @@ const VpnPanel = (() => {
       api('/api/nvpn/join-requests', undefined, { silent: true }).catch(() => null),
       api('/api/communities', undefined, { silent: true }).catch(() => null),
       api('/api/nvpn/connectivity', undefined, { silent: true }).catch(() => null),
+      api('/api/nvpn/mesh-health', undefined, { silent: true }).catch(() => null),
     ]);
     lastStatus       = s;
     lastService      = svc;
@@ -14148,6 +14150,7 @@ const VpnPanel = (() => {
     lastJoinRequests = joinReqs;
     lastCommunities  = communities;
     lastConnectivity = connectivity;
+    lastMeshHealth   = meshHealth;
     // Panel first — it computes the coverage flags the two banners below
     // consult before deciding whether to step aside.
     renderConnectivityPanel();
@@ -15959,9 +15962,36 @@ const VpnPanel = (() => {
   // unit tests) — they normalize npub↔hex so a rostered peer that is
   // also FIPS-discovered renders as ONE row, not two.
 
+  // Match a peer row to its detailed mesh-health entry (#256). Keyed by
+  // participant_pubkey first (stable), then bare tunnel IP. Returns null when
+  // the daemon-state slice doesn't cover this peer (e.g. roster-only).
+  function meshHealthFor(p) {
+    const peers = lastMeshHealth && Array.isArray(lastMeshHealth.peers) ? lastMeshHealth.peers : null;
+    if (!peers) return null;
+    const pubkey = p.live && p.live.pubkey ? String(p.live.pubkey).toLowerCase() : null;
+    const ip = p.live && p.live.ip ? String(p.live.ip).split('/')[0] : null;
+    return peers.find(m => (pubkey && m.pubkey === pubkey) || (ip && m.tunnelIp === ip)) || null;
+  }
+  // Human label for a mesh-health entry's path/state.
+  const MESH_PATH_LABEL = { direct: 'direct', relayed: 'relayed', none: 'no path' };
+  function meshPathChip(mh) {
+    if (!mh) return '';
+    // Prefer the path word; for an unreachable peer with no path, show why.
+    const word = mh.reachable
+      ? (MESH_PATH_LABEL[mh.path] || mh.path)
+      : (mh.state === 'never' ? 'never connected' : 'pending');
+    const lat = mh.latencyMs != null ? ` · ${mh.latencyMs}ms` : '';
+    const cls = mh.reachable ? (mh.path === 'relayed' ? 'relayed' : 'direct') : 'down';
+    const title = mh.reachable
+      ? `Pathing ${mh.path}${mh.latencyMs != null ? ` (${mh.latencyMs}ms FIPS RTT)` : ''}`
+      : `Not reachable${mh.detail ? ` — ${mh.detail}` : ''}`;
+    return `<span class="vpn-mesh-path ${cls}" title="${escapeHtml(title)}">${escapeHtml(word + lat)}</span>`;
+  }
+
   function renderPeerRow(p) {
     const id  = p.id;
     const live = p.live;
+    const mh   = meshHealthFor(p);
     // Classify the peer state so we can render distinct UI states
     // (never_seen / reachable / stale / unreachable / online), each
     // with its own dot color + label. See classifyPeerState above.
@@ -16004,6 +16034,7 @@ const VpnPanel = (() => {
         <span class="dot ${dot}"></span>
         ${labelHtml}
         ${adminBadge}
+        ${meshPathChip(mh)}
         ${sub ? `<span class="muted vpn-meta-peer-sub">${escapeHtml(sub)}</span>` : ''}
         <span class="vpn-meta-peer-actions">${pingBtn}${whoisBtn}${aliasBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
         <div class="vpn-meta-peer-pingout" hidden></div>
