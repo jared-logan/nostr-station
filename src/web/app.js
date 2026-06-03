@@ -13787,6 +13787,13 @@ const VpnPanel = (() => {
   // or empty report leaves them showing as a graceful fallback.
   let connHidesNat   = false;
   let connHidesStale = false;
+  // Collapsible state for the Connectivity panel (#255). The panel re-renders
+  // on every poll, so we keep the expanded/collapsed choice here and only
+  // apply the default (collapsed when fine, expanded on a real problem) on the
+  // first render or when the verdict changes — never on a plain refresh — so a
+  // manual toggle survives the periodic re-render instead of snapping shut.
+  let connExpanded    = null;  // null = not yet initialised
+  let connLastVerdict = null;
 
   // Sub-tab switching is purely visual + lazy. Each sub-tab has a
   // render function that draws into bodyEl from the cached payloads.
@@ -13877,9 +13884,9 @@ const VpnPanel = (() => {
   // no public UDP, multi-homing, captive portal, no port mapping). The raw
   // `doctor` bundle export in Diagnostics stays as the advanced escape hatch.
   const CONN_VERDICT = {
-    reachable:               { cls: 'info',  label: 'Reachable' },
-    reachable_with_caveats:  { cls: 'warn',  label: 'Reachable — with caveats' },
-    unreachable:             { cls: 'error', label: 'Not reachable' },
+    reachable:               { cls: 'info',  label: 'Reachable',                 icon: '✓' },
+    reachable_with_caveats:  { cls: 'warn',  label: 'Reachable — with caveats',  icon: '✓' },
+    unreachable:             { cls: 'error', label: 'Not reachable',             icon: '✕' },
   };
   const CONN_LEVEL_ICON = { ok: '✓', info: 'ℹ', warn: '▲', error: '✕' };
 
@@ -13899,9 +13906,18 @@ const VpnPanel = (() => {
     if (!rep || verdict === 'unknown') { slot.innerHTML = ''; slot.style.display = 'none'; return; }
 
     const ids = new Set(signals.map(s => s && s.id));
-    let v = CONN_VERDICT[verdict] || { cls: 'warn', label: 'Connectivity' };
+    let v = CONN_VERDICT[verdict] || { cls: 'warn', label: 'Connectivity', icon: '▲' };
     let headline = v.label;
     if (verdict === 'unreachable' && ids.has('daemon.stopped')) headline = 'Not reachable — daemon stopped';
+
+    // Decide the default collapsed/expanded state: tidy and collapsed when
+    // things are fine, expanded on a genuine failure (unreachable, or any
+    // error-level signal such as daemon.stopped) so problems still surface.
+    // Apply it only on the first render or a verdict transition; otherwise
+    // keep whatever the user last toggled to (the panel re-renders each poll).
+    const expandByDefault = verdict === 'unreachable' || signals.some(s => s && s.level === 'error');
+    if (connExpanded === null || verdict !== connLastVerdict) connExpanded = expandByDefault;
+    connLastVerdict = verdict;
 
     // Compute coverage via the shared pure helper (tested in
     // tests/connectivity-coverage.test.ts) — only step on a banner whose
@@ -13927,15 +13943,30 @@ const VpnPanel = (() => {
       ? `<div class="vpn-conn-foot muted"><a href="https://github.com/jared-logan/nostr-station/blob/main/docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a></div>`
       : '';
 
+    const count = signals.length;
     slot.style.display = 'block';
-    slot.className = `vpn-connectivity ${v.cls}`;
+    slot.className = `vpn-connectivity ${v.cls}${connExpanded ? ' expanded' : ' collapsed'}`;
     slot.innerHTML = `
-      <div class="vpn-conn-head">
+      <button type="button" class="vpn-conn-head" aria-expanded="${connExpanded ? 'true' : 'false'}"
+              title="${connExpanded ? 'Hide connectivity detail' : 'Show connectivity detail'}">
+        <span class="vpn-conn-chevron" aria-hidden="true">${connExpanded ? '▾' : '▸'}</span>
+        <span class="vpn-conn-ic">${v.icon}</span>
         <span class="vpn-conn-verdict">${escapeHtml(headline)}</span>
-      </div>
-      ${cards ? `<div class="vpn-conn-signals">${cards}</div>` : ''}
-      ${guide}
+        ${count ? `<span class="vpn-conn-count">(${count})</span>` : ''}
+      </button>
+      ${connExpanded ? `<div class="vpn-conn-body">
+        ${cards ? `<div class="vpn-conn-signals">${cards}</div>` : ''}
+        ${guide}
+      </div>` : ''}
     `;
+    // The header line is the toggle. Flip our remembered state and re-render;
+    // because the verdict is unchanged, the default-state logic above leaves
+    // the manual choice intact.
+    const head = slot.querySelector('.vpn-conn-head');
+    if (head) head.addEventListener('click', () => {
+      connExpanded = !connExpanded;
+      renderConnectivityPanel();
+    });
     slot.querySelectorAll('[data-conn-action]').forEach((btn) => {
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
