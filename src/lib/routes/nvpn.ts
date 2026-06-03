@@ -350,7 +350,7 @@ export async function handleNvpn(
         'On the nostr-station host, run the host-verify command in a terminal.',
         'From any network outside your LAN (your phone on cell data, a cloud shell, a friend\'s machine), run the probe command. Type a few characters, press Enter, repeat.',
         'Watch the host-verify output: if the probe packets land (you see lines mentioning your source IP), the data plane is reachable end-to-end.',
-        'If no packets land, the chain is broken at one of: home router (UDP port-forward), container runtime (host → container forward), or host firewall. See docs/nvpn-deployment.md for fixes.',
+        'If no packets land, the chain is broken at one of: home router (UDP port-forward), container runtime (host → container forward), or host firewall. See https://github.com/jared-logan/nostr-station/blob/main/docs/nvpn-deployment.md for fixes.',
       ],
     });
     return true;

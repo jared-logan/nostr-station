@@ -13833,7 +13833,7 @@ const VpnPanel = (() => {
     slot.innerHTML = `
       <div class="vpn-deployment-banner-row">
         <strong>${escapeHtml(w.summary)}</strong>
-        <a href="docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a>
+        <a href="https://github.com/jared-logan/nostr-station/blob/main/docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a>
       </div>
       <div class="muted vpn-deployment-banner-detail">${escapeHtml(w.detail)}</div>
     `;
@@ -13924,7 +13924,7 @@ const VpnPanel = (() => {
     // Keep the deployment-guide link reachable from the panel when a public-
     // path signal is up (we may be hiding the banner that used to carry it).
     const guide = connHidesNat
-      ? `<div class="vpn-conn-foot muted"><a href="docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a></div>`
+      ? `<div class="vpn-conn-foot muted"><a href="https://github.com/jared-logan/nostr-station/blob/main/docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a></div>`
       : '';
 
     slot.style.display = 'block';
