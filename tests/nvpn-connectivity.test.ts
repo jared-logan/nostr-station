@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyzeConnectivity } from '../src/lib/nvpn-connectivity.ts';
-import { doctorRaw, statusRaw } from './fixtures/nvpn-connectivity.ts';
+import { doctorRaw, statusRaw, statusDownRaw } from './fixtures/nvpn-connectivity.ts';
 
 // ---------------------------------------------------------------------
 // health[] passthrough — the cheap win: surface nvpn's own findings
@@ -49,15 +49,15 @@ test('reads context fields from their exact casing locations', () => {
   assert.equal(context.netcheck?.udp, false);
   assert.equal(context.netcheck?.ipv4, false);
   assert.equal(context.netcheck?.ipv6, true);
-  assert.equal(context.primaryIpv4, '192.0.2.10');
+  assert.equal(context.primaryIpv4, '10.8.0.5');
   assert.equal(context.defaultInterface, 'wlp3s0');
   // status (snake_case) tree
   assert.equal(context.meshReady, true);
   assert.equal(context.peerCount, 1);
   assert.equal(context.expectedPeerCount, 2);
   assert.equal(context.statusSource, 'daemon');
-  assert.equal(context.endpoint, '192.0.2.10:51820');
-  assert.equal(context.configuredEndpoint, '198.51.100.10:51820');
+  assert.equal(context.endpoint, '10.8.0.5:51820');
+  assert.equal(context.configuredEndpoint, '192.168.50.10:51820');
 });
 
 test('does not cross casing — udp lives ONLY at doctor.netcheck.udp (#259 guard)', () => {
@@ -136,6 +136,15 @@ test('not installed (daemonRunning null, no status_source) → not mislabelled a
   assert.equal(r.signals.find(s => s.id === 'daemon.stopped'), undefined);
 });
 
+test('HW-verified daemon-down shape (#267) → daemon.stopped + unreachable', () => {
+  // statusDownRaw: status_source "config", daemon.state null, mesh_ready false,
+  // swapped peers[]. No daemonRunning hint needed — the config fallback alone
+  // must classify it.
+  const r = analyzeConnectivity(null, statusDownRaw);
+  assert.equal(r.verdict, 'unreachable');
+  assert.equal(r.signals[0].id, 'daemon.stopped');
+});
+
 test('daemon-down dominates a stale mesh_ready:true snapshot', () => {
   // A config snapshot can carry stale mesh_ready:true; daemon-down must win.
   const r = analyzeConnectivity(null, { status_source: 'config', mesh_ready: true, peer_count: 3 });
@@ -193,29 +202,29 @@ test('daemon down suppresses the public-udp signal (one action: start it)', () =
 // (#253) multi-homing — configured endpoint on a different network
 
 test('configured_endpoint on a different /24 than primaryIpv4 → mismatch signal', () => {
-  // Fixture: configured_endpoint 198.51.100.10 vs primaryIpv4 192.0.2.10.
+  // Fixture: configured_endpoint 192.168.50.10 vs primaryIpv4 10.8.0.5 (both private).
   const r = analyzeConnectivity(doctorRaw, statusRaw);
   const s = r.signals.find(x => x.id === 'net.endpoint_subnet_mismatch');
   assert.ok(s, 'expected a multi-homing mismatch signal');
   assert.equal(s!.level, 'warn');
   // Concrete "advertising X but routing via Y", with both IPs + the interface.
-  assert.match(s!.detail || '', /198\.51\.100\.10/);
-  assert.match(s!.detail || '', /192\.0\.2\.10/);
+  assert.match(s!.detail || '', /192\.168\.50\.10/);
+  assert.match(s!.detail || '', /10\.8\.0\.5/);
   assert.match(s!.detail || '', /wlp3s0/);
   // Not a generic NAT line.
   assert.doesNotMatch(s!.title + ' ' + s!.detail, /\bNAT\b/);
 });
 
 test('configured_endpoint on the SAME /24 as primaryIpv4 → no mismatch', () => {
-  const doctor = { network: { primaryIpv4: '192.0.2.10', defaultInterface: 'eth0' } };
+  const doctor = { network: { primaryIpv4: '10.8.0.5', defaultInterface: 'eth0' } };
   const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1,
-                   configured_endpoint: '192.0.2.99:51820' };
+                   configured_endpoint: '10.8.0.99:51820' };
   const ids = analyzeConnectivity(doctor, status).signals.map(s => s.id);
   assert.ok(!ids.includes('net.endpoint_subnet_mismatch'));
 });
 
 test('IPv6 configured_endpoint is skipped (v24 compare is IPv4-only)', () => {
-  const doctor = { network: { primaryIpv4: '192.0.2.10' } };
+  const doctor = { network: { primaryIpv4: '10.8.0.5' } };
   const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1,
                    configured_endpoint: '[2001:db8::9]:51820' };
   const ids = analyzeConnectivity(doctor, status).signals.map(s => s.id);
@@ -223,12 +232,29 @@ test('IPv6 configured_endpoint is skipped (v24 compare is IPv4-only)', () => {
 });
 
 test('no mismatch when configured_endpoint or primaryIpv4 is absent', () => {
-  const onlyPrimary = analyzeConnectivity({ network: { primaryIpv4: '192.0.2.10' } },
+  const onlyPrimary = analyzeConnectivity({ network: { primaryIpv4: '10.8.0.5' } },
     { status_source: 'daemon', mesh_ready: true, peer_count: 1 });
   assert.ok(!onlyPrimary.signals.some(s => s.id === 'net.endpoint_subnet_mismatch'));
   const onlyCfg = analyzeConnectivity(null,
-    { status_source: 'daemon', mesh_ready: true, peer_count: 1, configured_endpoint: '198.51.100.10:51820' });
+    { status_source: 'daemon', mesh_ready: true, peer_count: 1, configured_endpoint: '192.168.50.10:51820' });
   assert.ok(!onlyCfg.signals.some(s => s.id === 'net.endpoint_subnet_mismatch'));
+});
+
+// (#268) only warn for RFC1918-private endpoints — avoid public-endpoint FP
+test('public configured endpoint (non-RFC1918) + private primary → no mismatch', () => {
+  // A VPS / port-forwarded node legitimately advertises a public address that
+  // differs from its private routing interface — not a misconfiguration.
+  const doctor = { network: { primaryIpv4: '10.8.0.5', defaultInterface: 'eth0' } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1,
+                   configured_endpoint: '203.0.113.10:51820' };
+  assert.ok(!analyzeConnectivity(doctor, status).signals.some(s => s.id === 'net.endpoint_subnet_mismatch'));
+});
+
+test('two different RFC1918 /24s still fire the mismatch', () => {
+  const doctor = { network: { primaryIpv4: '172.16.4.2', defaultInterface: 'eth0' } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1,
+                   configured_endpoint: '192.168.9.9:51820' };
+  assert.ok(analyzeConnectivity(doctor, status).signals.some(s => s.id === 'net.endpoint_subnet_mismatch'));
 });
 
 test('daemon down suppresses the mismatch signal too', () => {

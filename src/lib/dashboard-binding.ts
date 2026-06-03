@@ -133,18 +133,23 @@ export function peerPubkeyForIp(
     // tunnel_ip carries a CIDR suffix in nvpn 4.x (e.g. "10.44.0.5/32");
     // compare the bare address against the socket remoteAddress.
     if (peerIp.split('/')[0] !== ip) continue;
-    // Pubkey field — nvpn 4.x puts the 64-hex pubkey in `node_id` (and leaves
-    // `public_key` EMPTY for every peer). Older variants: `pubkey`/`npub_hex`/
-    // `hex`. Empty strings are falsy here, so an empty `public_key` is skipped.
-    const pubkey = (
-      (typeof p.node_id    === 'string' && p.node_id)    ||
-      (typeof p.pubkey     === 'string' && p.pubkey)     ||
-      (typeof p.public_key === 'string' && p.public_key) ||
-      (typeof p.npub_hex   === 'string' && p.npub_hex)   ||
-      (typeof p.hex        === 'string' && p.hex)        ||
-      null
-    );
-    return pubkey ? pubkey.toLowerCase() : null;
+    // Pubkey field — nvpn 4.x SWAPS where the pubkey lives based on
+    // status_source (#266):
+    //   • daemon-up ("daemon"):  node_id = 64-hex pubkey, public_key = ""
+    //   • daemon-down ("config"): node_id = "<name>.nvpn", public_key = pubkey
+    // The gate only runs on incoming mesh connections (tunnel = daemon up), so
+    // it normally sees the first shape — but to be robust to that swap AND a
+    // daemon-flap race, prefer whichever candidate field is actually a 64-hex
+    // pubkey, then fall back to the first non-empty string. Older variants
+    // (npub_hex/hex) stay in the list.
+    const candidates = [p.node_id, p.public_key, p.pubkey, p.npub_hex, p.hex];
+    for (const c of candidates) {
+      if (typeof c === 'string' && /^[0-9a-f]{64}$/i.test(c)) return c.toLowerCase();
+    }
+    for (const c of candidates) {
+      if (typeof c === 'string' && c) return c.toLowerCase();
+    }
+    return null;
   }
   return null;
 }

@@ -1,12 +1,16 @@
 // Real nvpn 4.0.48 connectivity shapes (verified against a live box),
-// with SYNTHETIC values only — TEST-NET IPs (192.0.2.0/24, 198.51.100.0/24,
-// 2001:db8::/32), a placeholder network id, and dummy 64-hex pubkeys.
+// with SYNTHETIC values only — RFC1918 private ranges for the routing
+// interface / endpoints (10.8.0.0/24 routing, 192.168.50.0/24 stale
+// advertised — faithful to the incident, which was private↔private), plus
+// doc ranges elsewhere (2001:db8::/32), a placeholder network id, and dummy
+// 64-hex pubkeys.
 //
 // This is the regression anchor for the Phase-2 Layer-1 analyzers
-// (#250 and its followers #251–#254). It deliberately encodes the live
-// incident slice: mesh up over LAN while the PUBLIC udp path is blocked,
-// a stale `configured_endpoint` on a different subnet (multi-homing), and
-// an nvpn-emitted `nat.no_public_mapping` health entry.
+// (#250 and its followers #251–#254, #267, #268). It deliberately encodes
+// the live incident slice: mesh up over LAN while the PUBLIC udp path is
+// blocked, a stale `configured_endpoint` on a different PRIVATE subnet than
+// the routing interface (multi-homing — #268 only flags private↔private),
+// and an nvpn-emitted `nat.no_public_mapping` health entry.
 //
 // ⚠️ Casing is intentionally faithful to nvpn: `doctor` is camelCase
 // (`networkId`, `network.primaryIpv4`, `portMapping`, `netcheck`); `status`
@@ -18,9 +22,9 @@ export const doctorRaw = {
   networkId: 'feedface',
   network: {
     defaultInterface: 'wlp3s0',
-    primaryIpv4: '192.0.2.10',
+    primaryIpv4: '10.8.0.5',
     primaryIpv6: '2001:db8::f',
-    gatewayIpv4: '192.0.2.1',
+    gatewayIpv4: '10.8.0.1',
     changedAt: 1700000000,
     captivePortal: false,
   },
@@ -60,15 +64,39 @@ export const statusRaw = {
   network_id: 'feedface',
   node_id: '00000000-0000-4000-8000-000000000000',
   tunnel_ip: '10.44.0.1/32',
-  endpoint: '192.0.2.10:51820',
-  // Stale: points at a 198.51.100.x (dead) subnet, not the 192.0.2.x the
-  // node actually routes through — the #253 multi-homing signal.
-  configured_endpoint: '198.51.100.10:51820',
+  endpoint: '10.8.0.5:51820',
+  // Stale: points at a 192.168.50.x (dead) subnet, not the 10.8.0.x the node
+  // actually routes through — the #253 multi-homing signal. Both private, so
+  // #268's RFC1918 gate still flags it.
+  configured_endpoint: '192.168.50.10:51820',
   mesh_ready: true,
   expected_peer_count: 2,
   peer_count: 1,
   peers: [
     { node_id: 'a'.repeat(64), public_key: '', endpoint: 'fips', tunnel_ip: '10.44.0.5/32', timestamp: 1700000000 },
     { node_id: 'b'.repeat(64), public_key: '', endpoint: 'fips', tunnel_ip: '10.44.0.6/32', timestamp: 0 },
+  ],
+} as const;
+
+/**
+ * Parsed `nvpn status --json` with the daemon DOWN — HW-verified shape (#267).
+ * Note two #259-class twists: status_source flips to "config", `daemon.state`
+ * is null, and the top-level peers[] SWAPS — `node_id` becomes a magic-DNS
+ * name and the 64-hex pubkey moves to `public_key` (the inverse of the
+ * daemon-up shape above). Drives the #251 daemon-down regression and the
+ * #266 peerPubkeyForIp swap-hardening.
+ */
+export const statusDownRaw = {
+  status_source: 'config',
+  network_id: 'feedface',
+  node_id: '00000000-0000-4000-8000-000000000000',
+  tunnel_ip: '10.44.0.1/32',
+  endpoint: '10.8.0.5:51820',
+  daemon: { running: false, pid: null, state: null },
+  expected_peer_count: 5,
+  peer_count: 0,
+  mesh_ready: false,
+  peers: [
+    { node_id: 'peer-a.nvpn', public_key: 'a'.repeat(64), endpoint: 'fips', tunnel_ip: '10.44.0.5/32', timestamp: 0 },
   ],
 } as const;
