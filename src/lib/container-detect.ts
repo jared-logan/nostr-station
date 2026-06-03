@@ -136,7 +136,7 @@ export function natWarningFor(in_: NatWarningInput): NatWarning | null {
       return {
         level:   'warn',
         summary: `Running inside ${describeKind(in_.container.kind)} but no public endpoint discovered yet`,
-        detail:  'STUN may not have completed, or the container\'s outbound NAT may be blocking UDP. See docs/nvpn-deployment.md for the port-forward chain you need to set up.',
+        detail:  'STUN may not have completed, or the container\'s outbound NAT may be blocking UDP. See https://github.com/jared-logan/nostr-station/blob/main/docs/nvpn-deployment.md for the port-forward chain you need to set up.',
       };
     }
     // Have an endpoint, but we're in a container so its reachability
@@ -144,7 +144,7 @@ export function natWarningFor(in_: NatWarningInput): NatWarning | null {
     return {
       level:   'info',
       summary: `Running inside ${describeKind(in_.container.kind)} — peer reachability depends on your port-forward chain`,
-      detail:  `Public endpoint discovered (${in_.publicEndpoint}). Make sure UDP is forwarded from your router → host → container. See docs/nvpn-deployment.md for the specifics on ${describeKind(in_.container.kind)}.`,
+      detail:  `Public endpoint discovered (${in_.publicEndpoint}). Make sure UDP is forwarded from your router → host → container. See https://github.com/jared-logan/nostr-station/blob/main/docs/nvpn-deployment.md for the specifics on ${describeKind(in_.container.kind)}.`,
     };
   }
 
