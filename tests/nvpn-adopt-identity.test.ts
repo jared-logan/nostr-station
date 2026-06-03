@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decideAdoptIdentity, shouldReconcileAfterInstall } from '../src/lib/nvpn.ts';
+import { decideAdoptIdentity } from '../src/lib/nvpn.ts';
 
 // All npubs/paths synthetic. decideAdoptIdentity is the pure decision core
 // for "make the daemon run the managed identity"; the fs/proc/sudo I/O is
@@ -69,13 +69,7 @@ test('decideAdoptIdentity: distinct files, daemon identity unreadable (null) →
   assert.equal(p.daemonNpub, null);
 });
 
-// ── shouldReconcileAfterInstall (1.7 prevention gate) ──────────────────
-
-test('shouldReconcileAfterInstall: only when a managed identity exists', () => {
-  // User has paired (managed identity present) → reconcile.
-  assert.equal(shouldReconcileAfterInstall({ configPath: MANAGED, npub: 'npub1u' }), true);
-  // Fresh install, not paired yet → skip (nothing to adopt to).
-  assert.equal(shouldReconcileAfterInstall({ configPath: null, npub: null }), false);
-  assert.equal(shouldReconcileAfterInstall({ configPath: MANAGED, npub: null }), false);
-  assert.equal(shouldReconcileAfterInstall({ configPath: null, npub: 'npub1u' }), false);
-});
+// shouldReconcileAfterInstall + reconcileDaemonIdentityAfterInstall were
+// retired with the create-then-heal layer (the helper's install now seeds
+// the canonical config + repoints the daemon at it). The manual adopt path
+// (decideAdoptIdentity, above) is what remains.
