@@ -45,7 +45,7 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import { nip19 } from 'nostr-tools';
-import { CLIENT_TAG } from '../client-tag.js';
+import { CLIENT_TAG, CLIENT_NAME, isCanonicalClientTag, isStaleNostrStationClientTag } from '../client-tag.js';
 import { WebSocket } from 'ws';
 import { getProject, type Project } from '../projects.js';
 import { MAX_WS_PAYLOAD } from '../ws-limits.js';
@@ -248,6 +248,27 @@ export function decodeNgitRemote(project: Project): RepoCoords | null {
   return null;
 }
 
+/**
+ * Build an ngit `nostr://` remote URL. ngit's canonical remote is the
+ * 3-part `nostr://<npub>/<relay-host>/<d-tag>` form (the relay/GRASP host
+ * is what populates coords.relayHints on the read side). When we know a
+ * relay host (from naddr hints on import, or the announcement's relays),
+ * emit that full form so a re-clone/import doesn't store the bare
+ * `nostr://<npub>/<d-tag>` — which zeroes relayHints and helps strand the
+ * Overview read (Bug 1/Bug 4). Falls back to the 2-part form when no
+ * host is known. `relayHints` may carry a `wss://` scheme which is
+ * stripped — the remote path segment is a bare host.
+ *
+ * Pure; exported for tests.
+ */
+export function buildNgitRemoteUrl(npub: string, dTag: string, relayHints: string[] = []): string {
+  const host = (relayHints.find((h) => typeof h === 'string' && h.trim()) || '')
+    .trim()
+    .replace(/^wss?:\/\//i, '')
+    .replace(/\/+$/, '');
+  return host ? `nostr://${npub}/${host}/${dTag}` : `nostr://${npub}/${dTag}`;
+}
+
 // ── Git invocation helpers ───────────────────────────────────────────────
 
 async function gitRun(cwd: string, args: string[], timeoutMs = 5000): Promise<string> {
@@ -344,9 +365,52 @@ async function readPublishState(project: Project): Promise<any> {
 
 // ── 30617 fetch (cached + diagnostics) ───────────────────────────────────
 
-async function fetchRepoMeta(
+/**
+ * Merge a prioritized `primary` relay list with the user's App Relays into a
+ * single deduped, capped set. App Relays get a RESERVED quota (`appReserve`)
+ * so a long primary list (relayHints + grasp + projRelays) can never crowd
+ * them out past the cap — they're the guaranteed home every announcement
+ * publish reaches, so both the read paths and the publish path must always
+ * include them. Order: kept-primary, reserved-app, then any leftover app to
+ * backfill spare capacity.
+ *
+ * Single source of truth for "where do 30617 reads/writes go?" — used by
+ * fetchRepoMeta (read), the announce prior-fetch (read), and the announce
+ * publish targets. Sharing it keeps the three sets on one capping policy and
+ * keeps the read set a superset of the publish targets in the relays we
+ * actually control (GRASP + App Relays), rather than relying on parallel
+ * edits staying in sync. Pure; exported for tests.
+ */
+export function mergeRelaySet(
+  primary:   string[],
+  appRelays: string[],
+  opts: { cap?: number; appReserve?: number } = {},
+): string[] {
+  const cap        = opts.cap ?? 12;
+  const appReserve = opts.appReserve ?? 6;
+  const dedupeValid = (arr: string[]): string[] =>
+    arr.filter(isValidRelayUrl).filter((r, i, a) => a.indexOf(r) === i);
+  const prim = dedupeValid(primary);
+  // App Relays not already present in primary (dedupe across the boundary).
+  const app  = dedupeValid(appRelays).filter((r) => !prim.includes(r));
+  const appKeep     = app.slice(0, Math.min(app.length, appReserve));
+  const primKeep    = prim.slice(0, Math.max(0, cap - appKeep.length));
+  const leftoverApp = app.slice(appKeep.length);
+  return [...primKeep, ...appKeep, ...leftoverApp].slice(0, cap);
+}
+
+/** Injectable relay sources — defaults call the real identity helpers.
+ *  Exists so tests can drive fetchRepoMeta against a mock relay without a
+ *  populated identity.json on disk. */
+export interface RepoMetaDeps {
+  getGrasp?:     () => string[];
+  getAppRelays?: () => string[];
+}
+
+export async function fetchRepoMeta(
   project: Project,
   refresh: boolean,
+  deps:    RepoMetaDeps = {},
 ): Promise<{ repo: RepoMeta | null; cached: boolean; diagnostics: any | null }> {
   const coords = decodeNgitRemote(project);
   if (!coords || !project.path) return { repo: null, cached: false, diagnostics: null };
@@ -357,15 +421,19 @@ async function fetchRepoMeta(
     if (cached) return { repo: cached, cached: true, diagnostics: null };
   }
 
-  // GRASP servers + naddr hints + project read relays. Same union as
-  // the Discover handler — kind 30617 lives on GRASP servers in
-  // practice; read relays alone usually return nothing.
-  const grasp = getGraspServers();
+  // Read union: naddr/remote relay hints + GRASP servers + project read
+  // relays + the user's App Relays. kind-30617 lives on GRASP servers in
+  // practice, but for an ngit project whose remote is the bare
+  // `nostr://<npub>/<d-tag>` form (no relay-host segment → empty relayHints)
+  // and whose GRASP override is dead, the ONLY place the announcement is
+  // reachable is the App Relays it was ALSO published to (handleAnnounce
+  // publishes there). mergeRelaySet reserves App-Relay slots so they're
+  // never crowded out of the cap — that's what makes a successfully-published
+  // announcement readable by our own Overview.
+  const grasp      = (deps.getGrasp ?? getGraspServers)();
+  const appRelays  = (deps.getAppRelays ?? getEffectiveReadRelays)();
   const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
-  const relays = [...coords.relayHints, ...grasp, ...projRelays]
-    .filter(isValidRelayUrl)
-    .filter((r, i, a) => a.indexOf(r) === i)
-    .slice(0, 8);
+  const relays = mergeRelaySet([...coords.relayHints, ...grasp, ...projRelays], appRelays);
 
   const result = await queryRelays({
     filter: {
@@ -789,6 +857,12 @@ export function buildRepoAnnounceTemplate(
     for (const t of prior.tags) {
       if (!Array.isArray(t) || typeof t[0] !== 'string') continue;
       if (emittedTagNames.has(t[0])) continue;
+      // Never carry forward OUR OWN stale (bare 2-element) client tag — it's
+      // the sticky form that, once published, kept overriding the canonical
+      // injection below and so never upgraded to the NIP-89 4-element link.
+      // Step (3) re-injects the canonical tag. A DIFFERENT client's tag (e.g.
+      // shakespeare.diy / gitworkshop) is still preserved verbatim.
+      if (isStaleNostrStationClientTag(t)) continue;
       const key = JSON.stringify(t);
       if (seenCustomKey.has(key)) continue;
       // Only preserve if the form didn't supply the same tag name — form
@@ -798,11 +872,18 @@ export function buildRepoAnnounceTemplate(
       customs.push(t.map(v => typeof v === 'string' ? v : ''));
     }
   }
-  // (3) auto-inject the NIP-89 client marker if nothing else set it. The
-  // 4-element form links the announcement to nostr-station's kind-31990
-  // handler (same tag the Client panel's kind-1s carry).
-  if (!customs.some((c) => c[0] === 'client')) {
+  // (3) NIP-89 client marker. nostr-station's OWN client tag must always be
+  // the canonical 4-element CLIENT_TAG (links the announcement to our
+  // kind-31990 handler, same tag the Client panel's kind-1s carry):
+  //   - no client tag at all          → inject the canonical tag;
+  //   - our tag but not canonical      → REPLACE it with the canonical tag
+  //                                      (upgrades a bare ["client",name]);
+  //   - a different client's tag       → leave it untouched (forward compat).
+  const clientIdx = customs.findIndex((c) => c[0] === 'client');
+  if (clientIdx === -1) {
     customs.push([...CLIENT_TAG]);
+  } else if (customs[clientIdx][1] === CLIENT_NAME && !isCanonicalClientTag(customs[clientIdx])) {
+    customs[clientIdx] = [...CLIENT_TAG];
   }
   for (const c of customs) tags.push(c);
 
@@ -813,6 +894,20 @@ export function buildRepoAnnounceTemplate(
     content:    '',
   };
 }
+
+// In-flight announce guard. A single user "Announce" / "Save changes" action
+// must produce exactly ONE signed 30617 (it's a replaceable event). Without
+// this, a double-click, a client retry, or two near-simultaneous POSTs each
+// run their own prior-fetch → sign → publish, and because the prior-fetch can
+// race to different carry-through (euc / unknown tags) the resulting events
+// get DIFFERENT ids and all survive on relays — the "2–3 30617s at the same
+// created_at" symptom. Keyed by coordinate so distinct repos don't block each
+// other; a concurrent second request for the same coordinate gets 409.
+//
+// This guards CONCURRENCY only, by design — a deliberate, sequential
+// re-announce is a legitimate replaceable update (relays keep the freshest by
+// created_at) and is intentionally NOT deduped here.
+const announceInFlight = new Set<string>();
 
 interface RelayPublishResult { relay: string; ok: boolean; reason?: string }
 
@@ -917,16 +1012,29 @@ async function handleAnnounce(
     return json(res, 403, { error: 'only the trust anchor can edit this announcement' });
   }
 
+  // Idempotency: refuse a concurrent announce for the same coordinate so a
+  // single user action can never fan out into multiple 30617s (see
+  // announceInFlight above). Released in the finally at the end of the flow.
+  const coordKey = `${coords.pubkey}:${coords.identifier}`;
+  if (announceInFlight.has(coordKey)) {
+    return json(res, 409, { error: 'an announce for this repository is already in progress — please wait for it to finish' });
+  }
+  announceInFlight.add(coordKey);
+  try {
+
   // Pull the prior raw 30617 so we can carry through any tags the form
   // doesn't surface (forward compat). Direct relay query — fetchRepoMeta
   // caches the parsed shape, not the raw event. Failing to find it is
   // non-fatal: we just lose the carry-through and emit the form's tags
   // as-is.
+  // Same read set as fetchRepoMeta (incl. App Relays) so the prior-fetch
+  // can't miss an announcement that lives only on App Relays — otherwise the
+  // carry-through (euc / unknown tags) would be silently dropped on republish.
   const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
-  const priorRelays = [...coords.relayHints, ...getGraspServers(), ...projRelays]
-    .filter(isValidRelayUrl)
-    .filter((r, i, a) => a.indexOf(r) === i)
-    .slice(0, 8);
+  const priorRelays = mergeRelaySet(
+    [...coords.relayHints, ...getGraspServers(), ...projRelays],
+    getEffectiveReadRelays(),
+  );
   let priorEvent: NostrEvent | null = null;
   if (priorRelays.length > 0) {
     try {
@@ -989,20 +1097,18 @@ async function handleAnnounce(
   }
 
   // Publish to the union of: the input's own relay list, the user's grasp
-  // servers, AND their effective read/write relays. The read-relays were
-  // documented here but never actually included — which meant an
-  // announcement published ONLY to grasp servers (e.g. relay.ngit.dev +
-  // git.shakespeare.diy). GRASP relays can reject or drop a plain
+  // servers, AND their App Relays. GRASP relays can reject or drop a plain
   // kind-30617 publish (auth/rate-limit), so with no general public relay
   // in the set, every target could fail → a 502 even though signing
-  // succeeded. Including the read-relays gives the event reliable,
-  // broadly-queryable homes (damus/nos.lol/primal/…) so discovery works
-  // and a grasp rejection isn't fatal. De-duped + capped at 8.
-  const publishTargets = [...new Set([
-    ...input.relays || [],
-    ...getGraspServers().map(s => /^wss?:/i.test(s) ? s : `wss://${s}`),
-    ...getEffectiveReadRelays(),
-  ])].filter(isValidRelayUrl).slice(0, 12);
+  // succeeded. The App Relays give the event reliable, broadly-queryable
+  // homes (damus/nos.lol/primal/…) so discovery works and a grasp rejection
+  // isn't fatal. Built with the SAME mergeRelaySet as the read paths so the
+  // read set stays a superset of these publish targets (GRASP + App Relays)
+  // by construction — and so the App Relays are never crowded out of the cap.
+  const publishTargets = mergeRelaySet(
+    [...(input.relays || []), ...getGraspServers().map(s => /^wss?:/i.test(s) ? s : `wss://${s}`)],
+    getEffectiveReadRelays(),
+  );
 
   const results = publishTargets.length > 0
     ? await publishEventToRelays(signed.signedEvent, publishTargets)
@@ -1023,6 +1129,10 @@ async function handleAnnounce(
     accepted,
     targets:      publishTargets.length,
   });
+
+  } finally {
+    announceInFlight.delete(coordKey);
+  }
 }
 
 // ── Dispatcher ──────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ import { readIdentity, isValidRelayUrl, getGraspServers } from '../identity.js';
 import { seedRepoGitIdentityIfMissing } from '../git-identity.js';
 import { safeHttpUrl } from '../url-safety.js';
 import { readBody, streamExec } from './_shared.js';
+import { buildNgitRemoteUrl } from './repo.js';
 
 export async function handleNgit(
   req: http.IncomingMessage,
@@ -505,9 +506,12 @@ export async function handleNgit(
         // No announcement reachable (or no clone URLs in it).
         // Fall back to nostr:// and let git-remote-nostr try — if
         // the user's ngit relay config can find the event there's
-        // still a chance.
+        // still a chance. Carry the naddr's relay hints (else GRASP)
+        // into the FULL 3-part remote form so the stored remote keeps a
+        // relay host instead of the bare `nostr://<npub>/<d-tag>` that
+        // zeroes relayHints on the read side (Bug 4).
         const npub = nip19.npubEncode(pubkeyHex);
-        cloneUrl = `nostr://${npub}/${dTag}`;
+        cloneUrl = buildNgitRemoteUrl(npub, dTag, [...relayHints, ...getGraspServers()]);
       }
     }
     // repoName becomes the last segment of the clone target — reject
@@ -696,8 +700,11 @@ export async function handleNgit(
         cloneUrl = httpsCloneUrl;
       } else {
         try {
+          // Full 3-part remote form (relay host from naddr hints / GRASP)
+          // so a scratch checkout that's later saved keeps a relay host —
+          // see Bug 4 + buildNgitRemoteUrl.
           const npub = nip19.npubEncode(pubkeyHex);
-          cloneUrl = `nostr://${npub}/${dTag}`;
+          cloneUrl = buildNgitRemoteUrl(npub, dTag, [...relayHints, ...getGraspServers()]);
         } catch { /* leave cloneUrl = rawUrl */ }
       }
     }

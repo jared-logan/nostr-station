@@ -277,6 +277,16 @@ export async function handleProjectsNgit(
       }
     }
 
+    // NOTE (NIP-89 client tag): `ngit init` is an external CLI and writes
+    // the FIRST kind-30617 with its own tag set — it does NOT carry
+    // nostr-station's 4-element CLIENT_TAG. We can't inject a tag into the
+    // CLI's output. The canonical tag is applied on the first re-announce /
+    // Edit Repository save: buildRepoAnnounceTemplate now injects CLIENT_TAG
+    // when absent (and upgrades a stale bare one), so a single re-announce
+    // after init links the announcement to our handler. We deliberately do
+    // NOT auto-republish here — that would emit a second 30617 per init and
+    // reintroduce the duplicate-event problem (Bug 3).
+    //
     // argv assembly: always pass --name. If user provided grasp
     // servers, pass each as --grasp-server <url>; otherwise
     // --defaults so ngit picks a sensible grasp on its own.
