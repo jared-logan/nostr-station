@@ -14459,6 +14459,10 @@ const VpnPanel = (() => {
             <span class="vpn-meta-peers-counts muted">
               ${onlineCount} online · ${rosterAdmins.length} admin${rosterAdmins.length === 1 ? '' : 's'}
             </span>
+            ${(lastMeshHealth && lastMeshHealth.counts && lastMeshHealth.counts.unreachable > 0)
+              ? `<button id="vpn-redial-mesh" class="vpn-redial-btn"
+                    title="Reset peer state and re-dial the mesh — for stuck handshakes. Captures reachability before and after so you can see whether it helped.">re-dial mesh</button>`
+              : ''}
           </div>
           <div class="vpn-meta-peers-list">
             ${merged.length === 0
@@ -14680,11 +14684,46 @@ const VpnPanel = (() => {
       });
     });
 
+    // Re-dial mesh (#258) — reset peer state + re-check reachability, with a
+    // before→after delta so the action isn't fire-and-forget.
+    const redialBtn = bodyEl.querySelector('#vpn-redial-mesh');
+    if (redialBtn) redialBtn.addEventListener('click', (e) => { e.preventDefault(); reDialMesh(redialBtn); });
+
     // Dashboard access via mesh — fetch the current mobile-access
     // config + render the toggle UI inline. Async so the rest of the
     // network body paints first; placeholder shows while loading.
     renderDashboardAccessSection();
   };
+
+  // #258 — reset relay/peer state then report the reachability delta. The
+  // re-dial reset is mesh-wide (the daemon exposes no per-peer reset), so the
+  // before/after is the roll-up reachable count. Handshakes need a few seconds
+  // to re-establish, hence the delayed re-check.
+  async function reDialMesh(btn) {
+    const before = (lastMeshHealth && lastMeshHealth.counts) ? lastMeshHealth.counts.reachable : null;
+    if (btn) btn.disabled = true;
+    try {
+      const resp = await api('/api/nvpn/peers/reset', { method: 'POST' });
+      if (resp && resp.ok === false) {
+        toast('Re-dial failed', resp.detail || 'Could not reset peer state.', 'warn');
+        if (btn) btn.disabled = false;
+        return;
+      }
+      toast('Re-dialing mesh…', 'Reset peer state; re-establishing links. Re-checking reachability in a few seconds.', 'ok');
+      setTimeout(async () => {
+        await refresh();   // refetches mesh-health (and re-renders the row chips)
+        const after = (lastMeshHealth && lastMeshHealth.counts) ? lastMeshHealth.counts.reachable : null;
+        const total = (lastMeshHealth && lastMeshHealth.counts) ? lastMeshHealth.counts.total : null;
+        if (before != null && after != null) {
+          const delta = after - before;
+          const word = delta > 0 ? 'improved' : (delta < 0 ? 'dropped' : 'unchanged');
+          toast(`Re-dial ${word}`,
+                `Reachable peers ${before} → ${after}${total != null ? ` of ${total}` : ''}.`,
+                delta >= 0 ? 'ok' : 'warn');
+        }
+      }, 4000);
+    } catch { if (btn) btn.disabled = false; /* api() already toasted */ }
+  }
 
   // Renders the "Dashboard access via mesh" section into the slot
   // reserved by renderNetworkBody. Same persistence layer as the

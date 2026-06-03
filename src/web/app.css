@@ -2080,6 +2080,8 @@ details.dashboard-health .dashboard-health-sub {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+/* Re-dial mesh button (#258) — sits at the right of the peers header. */
+.vpn-redial-btn { margin-left: auto; font-size: 10px; }
 /* Mesh-path chip (#256) — direct/relayed/down + latency, from the detailed
    daemon.state.peers[] FIPS fields. */
 .vpn-mesh-path {
