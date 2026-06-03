@@ -33,8 +33,18 @@ export type ConnectivityVerdict =
   | 'unreachable'
   | 'unknown';
 
+/**
+ * An inline action the UI can offer alongside a signal. `kind` is a stable
+ * machine token the dashboard maps to a button/handler; later Layer-1 items
+ * extend the union (e.g. relay guidance in #252/#254).
+ */
+export interface ConnectivityAction {
+  kind:  'start-daemon';
+  label: string;
+}
+
 export interface ConnectivitySignal {
-  /** Stable id, e.g. `health:nat.no_public_mapping`. */
+  /** Stable id, e.g. `health:nat.no_public_mapping` or `daemon.stopped`. */
   id:      string;
   level:   ConnectivityLevel;
   /** Short one-line summary suitable for a card title. */
@@ -43,6 +53,19 @@ export interface ConnectivitySignal {
   detail?: string;
   /** Provenance — `nvpn-health` = passed through from doctor.health[]. */
   source:  'nvpn-health' | 'analyzer';
+  /** Optional inline remediation (e.g. Start the daemon). */
+  action?: ConnectivityAction;
+}
+
+export interface ConnectivityAnalyzeOpts {
+  /**
+   * The reconciled daemon-running truth — pass `NvpnStatus.running`, which
+   * already folds in the systemctl service state and the 4.x config-snapshot
+   * force-flip. `false` ⇒ the daemon isn't running and nothing can connect.
+   * Leave `null`/undefined when nvpn isn't installed (so we don't mislabel a
+   * not-installed box as "daemon stopped").
+   */
+  daemonRunning?: boolean | null;
 }
 
 export interface ConnectivityContext {
@@ -97,11 +120,38 @@ function mapSeverity(sev: string | null): ConnectivityLevel {
 export function analyzeConnectivity(
   doctorRaw: unknown,
   statusRaw: unknown,
+  opts: ConnectivityAnalyzeOpts = {},
 ): ConnectivityReport {
   const doctor = asObj(doctorRaw);
   const status = asObj(statusRaw);
 
   const signals: ConnectivitySignal[] = [];
+
+  // (1.2 / #251) Daemon stopped or unreachable — the single most prominent
+  // failure, and the one the live incident showed the dashboard hiding
+  // (it painted a "joined on its IP" row while the daemon was stopped).
+  // Grounded in two confirmed-real signals, no guessing at a daemon.state
+  // shape: (a) the reconciled `running` flag the caller passes in, and (b)
+  // the documented 4.x config-snapshot fallback — when the CLI can't reach
+  // the daemon it returns status_source !== "daemon" with live fields nulled.
+  // Either ⇒ nothing is connecting; emit a blocking signal with a Start
+  // action and short-circuit the mesh-based verdict to "unreachable". This
+  // leads the list so the UI can't render it as a joined row (cf. #255).
+  const statusSource = str(status?.status_source);
+  const daemonSnapshotFallback = statusSource !== null && statusSource !== 'daemon';
+  const daemonDown = opts.daemonRunning === false || daemonSnapshotFallback;
+  if (daemonDown) {
+    signals.push({
+      id:     'daemon.stopped',
+      level:  'error',
+      title:  'The nvpn daemon is not running — nothing is connecting',
+      detail: daemonSnapshotFallback
+        ? `nvpn returned a "${statusSource}" snapshot because the daemon is stopped or unreachable from the dashboard process. Start the daemon, then refresh. (If it is running, this is usually a $HOME / --config mismatch between the dashboard user and the daemon.)`
+        : 'The nvpn daemon is stopped. Start it, then refresh.',
+      source: 'analyzer',
+      action: { kind: 'start-daemon', label: 'Start nvpn' },
+    });
+  }
 
   // (1.1) Surface nvpn's OWN structured health[] directly. Pinned to
   // doctor.health[] (the camelCase tree); status has no health array.
@@ -146,7 +196,10 @@ export function analyzeConnectivity(
     configuredEndpoint: str(status?.configured_endpoint),
   };
 
-  return { verdict: overallVerdict(context, signals), signals, context };
+  // A down daemon dominates everything else — nothing connects, regardless
+  // of stale mesh fields in a config snapshot.
+  const verdict = daemonDown ? 'unreachable' : overallVerdict(context, signals);
+  return { verdict, signals, context };
 }
 
 /**

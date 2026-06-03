@@ -104,6 +104,45 @@ test('mesh up but zero peers → caveats even with a clean public path', () => {
 });
 
 // ---------------------------------------------------------------------
+// (#251) daemon stopped / unreachable — the most prominent failure
+
+test('daemonRunning:false → leading blocking daemon.stopped signal + unreachable', () => {
+  const r = analyzeConnectivity(doctorRaw, statusRaw, { daemonRunning: false });
+  assert.equal(r.verdict, 'unreachable');
+  const d = r.signals[0]; // leads the list so the UI can't paint a joined row
+  assert.equal(d.id, 'daemon.stopped');
+  assert.equal(d.level, 'error');
+  assert.deepEqual(d.action, { kind: 'start-daemon', label: 'Start nvpn' });
+  assert.match(d.detail || '', /stopped/);
+});
+
+test('config-snapshot fallback (status_source !== "daemon") ⇒ daemon down', () => {
+  // The documented 4.x behaviour: CLI can't reach the daemon, returns a
+  // "config" snapshot with live fields nulled. No daemonRunning hint needed.
+  const r = analyzeConnectivity(null, { status_source: 'config', mesh_ready: null });
+  assert.equal(r.verdict, 'unreachable');
+  assert.equal(r.signals[0].id, 'daemon.stopped');
+  assert.match(r.signals[0].detail || '', /config/);
+});
+
+test('daemon up (running true, status_source "daemon") → no daemon.stopped signal', () => {
+  const r = analyzeConnectivity(doctorRaw, statusRaw, { daemonRunning: true });
+  assert.equal(r.signals.find(s => s.id === 'daemon.stopped'), undefined);
+  assert.equal(r.verdict, 'reachable_with_caveats'); // unchanged from 1.1
+});
+
+test('not installed (daemonRunning null, no status_source) → not mislabelled as daemon down', () => {
+  const r = analyzeConnectivity(null, { mesh_ready: false }, { daemonRunning: null });
+  assert.equal(r.signals.find(s => s.id === 'daemon.stopped'), undefined);
+});
+
+test('daemon-down dominates a stale mesh_ready:true snapshot', () => {
+  // A config snapshot can carry stale mesh_ready:true; daemon-down must win.
+  const r = analyzeConnectivity(null, { status_source: 'config', mesh_ready: true, peer_count: 3 });
+  assert.equal(r.verdict, 'unreachable');
+});
+
+// ---------------------------------------------------------------------
 // defensive — never throw on junk / partial input
 
 test('garbage and empty input → unknown, no throw, empty signals', () => {

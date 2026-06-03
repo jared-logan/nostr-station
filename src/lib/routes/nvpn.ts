@@ -787,7 +787,11 @@ export async function handleNvpn(
   // than the hot status poll. Read-only — no bundle written.
   if (url === '/api/nvpn/connectivity' && method === 'GET') {
     const [status, doc] = await Promise.all([probeNvpnStatus(), doctorNvpn()]);
-    const report = analyzeConnectivity(doc.raw ?? null, status.raw ?? null);
+    // Pass the reconciled daemon-running truth (only when installed, so a
+    // not-installed box isn't mislabelled "daemon stopped") — #251.
+    const report = analyzeConnectivity(doc.raw ?? null, status.raw ?? null, {
+      daemonRunning: status.installed ? status.running : null,
+    });
     // Echo whether doctor itself ran, so the UI can tell "analyzed: clear"
     // from "couldn't run doctor" (e.g. binary missing) rather than guessing.
     await writeJson(res, 200, { ...report, doctorOk: doc.ok, doctorDetail: doc.detail });
