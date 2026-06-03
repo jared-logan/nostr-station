@@ -122,6 +122,22 @@ function sameV24(a: string, b: string): boolean {
 }
 
 /**
+ * True for RFC1918 private IPv4 (10/8, 172.16/12, 192.168/16). Used to gate
+ * the endpoint-mismatch warning (#268): a node with a deliberately PUBLIC
+ * configured endpoint (VPS / port-forwarded) legitimately differs from its
+ * private routing interface — that's not a misconfiguration, so we only flag
+ * the mismatch when BOTH addresses are private.
+ */
+function isRfc1918(ip: string): boolean {
+  const o = ip.split('.').map(n => parseInt(n, 10));
+  if (o.length !== 4 || o.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  if (o[0] === 10) return true;
+  if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true;
+  if (o[0] === 192 && o[1] === 168) return true;
+  return false;
+}
+
+/**
  * Summarize doctor.portMapping ({ upnp, natPmp, pcp: { state, detail } }).
  * Returns whether ANY protocol secured a mapping plus a human one-liner of
  * the per-protocol results. Null when no protocols are present.
@@ -288,7 +304,9 @@ export function analyzeConnectivity(
   // routing via Y"), NOT as a generic NAT line. IPv4-only and daemon-up only.
   const cfgHost = ipv4Host(context.configuredEndpoint);
   const primary = context.primaryIpv4;
-  if (!daemonDown && cfgHost && primary && ipv4Host(primary) && !sameV24(cfgHost, primary)) {
+  if (!daemonDown && cfgHost && primary && ipv4Host(primary)
+      && isRfc1918(cfgHost) && isRfc1918(primary)   // #268: skip public endpoints
+      && !sameV24(cfgHost, primary)) {
     const iface = context.defaultInterface ? ` (interface ${context.defaultInterface})` : '';
     signals.push({
       id:     'net.endpoint_subnet_mismatch',
