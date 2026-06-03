@@ -14700,6 +14700,15 @@ const VpnPanel = (() => {
   // before/after is the roll-up reachable count. Handshakes need a few seconds
   // to re-establish, hence the delayed re-check.
   async function reDialMesh(btn) {
+    // peers/reset is mesh-WIDE — it drops and re-establishes every link, so
+    // currently-working peers blip too. Gate it like the other destructive
+    // verbs (#236 Stop/Remove) with an explicit confirm.
+    const ok = await confirmDestructive({
+      title: 'Re-dial the whole mesh?',
+      description: 'This resets ALL peer connections — every link drops and re-establishes, so peers that are working now will briefly disconnect. Reachability is re-checked afterward so you can see the result.',
+      confirmLabel: 'Re-dial mesh',
+    });
+    if (!ok) return;
     const before = (lastMeshHealth && lastMeshHealth.counts) ? lastMeshHealth.counts.reachable : null;
     if (btn) btn.disabled = true;
     try {
