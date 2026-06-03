@@ -671,8 +671,29 @@ function confirmDestructive({ title, description, typeToConfirm, confirmLabel = 
 async function wireAdminUnlock(container) {
   const slot = container.querySelector('#vpn-admin-unlock');
   if (!slot) return;
+  // Cancel any in-flight auto-poll from a prior render of this slot (we set
+  // innerHTML, not replace the node, so a timer parked here survives).
+  if (slot._adminPoll) { clearTimeout(slot._adminPoll); slot._adminPoll = null; }
   let st = null;
-  try { st = await api('/api/nvpn/sudo/status', undefined, { silent: true }); } catch { slot.remove(); return; }
+  try { st = await api('/api/nvpn/sudo/status', undefined, { silent: true }); }
+  catch {
+    // Never silently delete the control on a transient status hiccup — that
+    // leaves the user staring at a Service tab with "no admin setup anywhere"
+    // (the exact symptom from the fresh-install report). Show an inline error
+    // + Retry instead so the path to setup is always reachable.
+    slot.innerHTML = `
+      <div class="vpn-empty-title">Admin access — status unavailable</div>
+      <p class="vpn-empty-detail muted" style="margin-top:6px">
+        Couldn't read admin-helper status just now (the dashboard API or daemon
+        may be briefly unavailable). Install / service actions need this — retry
+        in a moment.
+      </p>
+      <div class="vpn-meta-svc-actions" style="margin-top:10px">
+        <button id="vpn-admin-recheck" class="primary">Retry</button>
+      </div>`;
+    slot.querySelector('#vpn-admin-recheck')?.addEventListener('click', (e) => { e.preventDefault(); wireAdminUnlock(container); });
+    return;
+  }
   const ready = !!st?.ready && !!st?.rootOwned;
   const stale = ready && st?.manifestCurrent === false;
   if (ready && !stale) {
@@ -713,6 +734,22 @@ async function wireAdminUnlock(container) {
       try { await navigator.clipboard.writeText(st?.provisionCmd || ''); toast('Copied setup command', 'paste it into a terminal on the station', 'ok'); }
       catch { toast('Copy failed', 'select the command and copy manually', 'err'); }
     });
+    // Auto-poll so the user doesn't have to keep clicking "re-check" after
+    // pasting the command — the moment the helper + sudo grant go live we
+    // flip to the ready state on our own. Stops when ready, when the slot
+    // leaves the DOM (tab switched away), or when superseded by a re-render
+    // (cleared at the top of the next call).
+    const poll = async () => {
+      if (!document.body.contains(slot)) return;
+      let next = null;
+      try { next = await api('/api/nvpn/sudo/status', undefined, { silent: true }); } catch { /* keep waiting */ }
+      if (next?.ready && next?.rootOwned && next?.manifestCurrent !== false) {
+        wireAdminUnlock(container); // re-render → "✓ Admin access ready"
+        return;
+      }
+      slot._adminPoll = setTimeout(poll, 4000);
+    };
+    slot._adminPoll = setTimeout(poll, 4000);
   }
   slot.querySelector('#vpn-admin-recheck')?.addEventListener('click', (e) => { e.preventDefault(); wireAdminUnlock(container); });
 }
