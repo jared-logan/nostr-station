@@ -101,6 +101,26 @@ function str(v: unknown): string | null { return typeof v === 'string' ? v : nul
 function bool(v: unknown): boolean | null { return typeof v === 'boolean' ? v : null; }
 function num(v: unknown): number | null { return typeof v === 'number' ? v : null; }
 
+/**
+ * Extract the bare IPv4 host from an `endpoint` string. Handles `ip:port`
+ * and a bare `ip`; returns null for IPv6 (`[..]:port`), hostnames, or
+ * anything that isn't four dotted octets — we only do the v24 compare for
+ * IPv4, where "different /24" is a strong multi-homing signal.
+ */
+function ipv4Host(endpoint: string | null): string | null {
+  if (!endpoint) return null;
+  if (endpoint.startsWith('[')) return null;            // IPv6 literal — skip
+  const host = endpoint.split(':')[0];                  // strip :port if present
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(host) ? host : null;
+}
+
+/** True when two IPv4 addresses share a /24 (first three octets). */
+function sameV24(a: string, b: string): boolean {
+  const pa = a.split('.').slice(0, 3).join('.');
+  const pb = b.split('.').slice(0, 3).join('.');
+  return pa === pb;
+}
+
 /** Map nvpn's `severity` string to our level. nvpn uses "info" today. */
 function mapSeverity(sev: string | null): ConnectivityLevel {
   switch ((sev || '').toLowerCase()) {
@@ -231,6 +251,27 @@ export function analyzeConnectivity(
         source: 'analyzer',
       });
     }
+  }
+
+  // (1.4 / #253) Multi-homing — the net-new detection. On the live box the
+  // configured endpoint pointed at a different (dead) subnet than the
+  // interface nvpn was actually routing through; peers dialing the advertised
+  // address never found the node. Detect subnet(configured_endpoint) ≠
+  // subnet(primaryIpv4) on a /24 and word it concretely ("advertising X but
+  // routing via Y"), NOT as a generic NAT line. IPv4-only and daemon-up only.
+  const cfgHost = ipv4Host(context.configuredEndpoint);
+  const primary = context.primaryIpv4;
+  if (!daemonDown && cfgHost && primary && ipv4Host(primary) && !sameV24(cfgHost, primary)) {
+    const iface = context.defaultInterface ? ` (interface ${context.defaultInterface})` : '';
+    signals.push({
+      id:     'net.endpoint_subnet_mismatch',
+      level:  'warn',
+      title:  'Advertising an endpoint on a different network than you’re routing through',
+      detail: `nvpn’s configured endpoint ${cfgHost} is on a different subnet than the interface this node is actually routing through, ${primary}${iface}. `
+            + `Peers dialing the advertised ${cfgHost} won’t find you — it’s likely a stale or disconnected interface. `
+            + `Clear or update the configured endpoint so it matches ${primary}.`,
+      source: 'analyzer',
+    });
   }
 
   // A down daemon dominates everything else — nothing connects, regardless
