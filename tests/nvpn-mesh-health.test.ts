@@ -48,6 +48,12 @@ test('strips the CIDR from tunnel_ip', () => {
   assert.equal(analyzeMeshPeers(daemonStatePeers).peers[0].tunnelIp, '10.44.0.5');
 });
 
+test('passes through last_mesh_seen_at as lastMeshSeenAt (#279)', () => {
+  const { peers } = analyzeMeshPeers(daemonStatePeers);
+  assert.equal(peers[0].lastMeshSeenAt, 1700000400);
+  assert.equal(peers[3].lastMeshSeenAt, 0);
+});
+
 test('runtime_endpoint ip:port → direct, "fips" → relayed, absent → none', () => {
   const r = analyzeMeshPeers([
     { participant_pubkey: 'a'.repeat(64), runtime_endpoint: '198.51.100.9:51820', reachable: true },
