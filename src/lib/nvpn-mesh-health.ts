@@ -41,6 +41,9 @@ export interface MeshPeerHealth {
   state:           PeerState;
   /** fips_transport_type — only set on a direct path. */
   transportType:   string | null;
+  /** The reachable ip:port (runtime_endpoint) on a direct path, else null —
+   *  the address a relay-through can dial (#257). */
+  endpoint:        string | null;
   /** Daemon-reported error (e.g. "fips link pending"), or null. */
   detail:          string | null;
 }
@@ -92,7 +95,8 @@ export function analyzeMeshPeers(peersRaw: unknown): MeshHealthReport {
     const lastHandshakeAt = num(p.last_handshake_at);
     const srtt = num(p.fips_srtt_ms);
     const tunnelRaw = str(p.tunnel_ip);
-    const path = pathOf(str(p.runtime_endpoint));
+    const runtimeEndpoint = str(p.runtime_endpoint);
+    const path = pathOf(runtimeEndpoint);
     const state: PeerState = reachable ? 'up' : (lastHandshakeAt == null ? 'never' : 'pending');
     peers.push({
       pubkey:          peerPubkey(p),
@@ -103,6 +107,7 @@ export function analyzeMeshPeers(peersRaw: unknown): MeshHealthReport {
       lastHandshakeAt,
       state,
       transportType:   path === 'direct' ? str(p.fips_transport_type) : null,
+      endpoint:        path === 'direct' ? runtimeEndpoint : null,
       detail:          str(p.error),
     });
   }
@@ -114,4 +119,22 @@ export function analyzeMeshPeers(peersRaw: unknown): MeshHealthReport {
     unreachable: peers.filter(p => !p.reachable).length,
   };
   return { peers, counts };
+}
+
+// ── relay-through candidate logic (#257) ──────────────────────────────
+
+/**
+ * Peers eligible to serve as a relay for an unreachable peer: reachable, on a
+ * DIRECT path (so they have a public/dialable endpoint), with that endpoint
+ * known. These are the "use this online peer as a relay" candidates.
+ */
+export function relayCandidates(report: MeshHealthReport): MeshPeerHealth[] {
+  return report.peers.filter(p => p.reachable && p.path === 'direct' && !!p.endpoint);
+}
+
+/** The best relay candidate — lowest FIPS latency wins (nulls last). */
+export function pickBestRelay(report: MeshHealthReport): MeshPeerHealth | null {
+  const c = relayCandidates(report);
+  if (c.length === 0) return null;
+  return c.slice().sort((a, b) => (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity))[0];
 }
