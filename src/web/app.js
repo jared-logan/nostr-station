@@ -672,7 +672,25 @@ async function wireAdminUnlock(container) {
   const slot = container.querySelector('#vpn-admin-unlock');
   if (!slot) return;
   let st = null;
-  try { st = await api('/api/nvpn/sudo/status', undefined, { silent: true }); } catch { slot.remove(); return; }
+  try { st = await api('/api/nvpn/sudo/status', undefined, { silent: true }); }
+  catch {
+    // Never silently delete the control on a transient status hiccup — that
+    // leaves the user staring at a Service tab with "no admin setup anywhere"
+    // (the exact symptom from the fresh-install report). Show an inline error
+    // + Retry instead so the path to setup is always reachable.
+    slot.innerHTML = `
+      <div class="vpn-empty-title">Admin access — status unavailable</div>
+      <p class="vpn-empty-detail muted" style="margin-top:6px">
+        Couldn't read admin-helper status just now (the dashboard API or daemon
+        may be briefly unavailable). Install / service actions need this — retry
+        in a moment.
+      </p>
+      <div class="vpn-meta-svc-actions" style="margin-top:10px">
+        <button id="vpn-admin-recheck" class="primary">Retry</button>
+      </div>`;
+    slot.querySelector('#vpn-admin-recheck')?.addEventListener('click', (e) => { e.preventDefault(); wireAdminUnlock(container); });
+    return;
+  }
   const ready = !!st?.ready && !!st?.rootOwned;
   const stale = ready && st?.manifestCurrent === false;
   if (ready && !stale) {
