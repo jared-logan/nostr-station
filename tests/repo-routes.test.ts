@@ -15,6 +15,7 @@ const {
   decodeNgitRemote,
   fetchRepoMeta,
   buildNgitRemoteUrl,
+  mergeRelaySet,
 } = await import('../src/lib/routes/repo.ts');
 
 const { isCanonicalClientTag, CLIENT_TAG, CLIENT_NAME } = await import('../src/lib/client-tag.ts');
@@ -639,6 +640,48 @@ test('publishEventToRelays: relay that never responds → ok=false reason="timeo
   } finally { wss.close(); }
 });
 
+// ── mergeRelaySet: shared read/publish relay-set builder ──────────────────
+//
+// Note 2 from review: a naive append-then-slice drops App Relays when the
+// primary list already fills the cap. mergeRelaySet reserves slots so the
+// App Relays (the guaranteed announcement home) survive the cap.
+
+test('mergeRelaySet: dedupes across primary + app and preserves primary order', () => {
+  const out = mergeRelaySet(
+    ['wss://a', 'wss://b', 'wss://a'],
+    ['wss://b', 'wss://c'],
+  );
+  assert.deepEqual(out, ['wss://a', 'wss://b', 'wss://c']);
+});
+
+test('mergeRelaySet: App Relays are NOT crowded out when primary fills the cap', () => {
+  // 12 distinct primary relays + 2 App Relays, cap 12. A naive append+slice
+  // would keep only the 12 primary and drop both App Relays (the stranding
+  // bug). The reserve guarantees the App Relays survive.
+  const primary = Array.from({ length: 12 }, (_, i) => `wss://p${i}`);
+  const app     = ['wss://app1', 'wss://app2'];
+  const out = mergeRelaySet(primary, app, { cap: 12, appReserve: 6 });
+  assert.equal(out.length, 12);
+  assert.ok(out.includes('wss://app1'), 'app1 retained');
+  assert.ok(out.includes('wss://app2'), 'app2 retained');
+  // Reserve = 6, so 6 primary slots are yielded to make room (12 - 2 app = 10
+  // primary kept; the 2 reserved app slots are filled, 4 reserve unused).
+  assert.equal(out.filter(r => r.startsWith('wss://p')).length, 10);
+});
+
+test('mergeRelaySet: invalid relay URLs filtered out', () => {
+  const out = mergeRelaySet(['not-a-url', 'wss://ok'], ['http://nope', 'wss://app']);
+  assert.deepEqual(out, ['wss://ok', 'wss://app']);
+});
+
+test('mergeRelaySet: leftover App Relays backfill spare capacity past the reserve', () => {
+  // 8 App Relays, reserve 6, no primary, cap 12 → all 8 fit (6 reserved + 2
+  // backfilled). Confirms the reserve is a floor, not a ceiling.
+  const app = Array.from({ length: 8 }, (_, i) => `wss://app${i}`);
+  const out = mergeRelaySet([], app, { cap: 12, appReserve: 6 });
+  assert.equal(out.length, 8);
+});
+
 // ── Bug 1: fetchRepoMeta must find an announcement reachable ONLY on App Relays
 //
 // The exact stranded-Overview scenario: an ngit project whose remote is the
@@ -670,6 +713,22 @@ function startMockRepoRelay(event: any): Promise<{ url: string; close: () => voi
   });
 }
 
+// A reachable-but-silent relay: accepts the connection and the REQ but never
+// returns an EVENT/EOSE. Models a dead/unhelpful GRASP server faithfully
+// WITHOUT a fast connection-error that could end the one-shot query early
+// (queryRelaysDirect finishes once every socket has closed) — so the test
+// deterministically depends on the App-Relay mock being queried.
+function startSilentRelay(): Promise<{ url: string; close: () => void }> {
+  return new Promise((resolve) => {
+    const wss = new WebSocketServer({ port: 0 });
+    wss.on('connection', () => { /* swallow everything */ });
+    wss.on('listening', () => {
+      const port = (wss.address() as AddressInfo).port;
+      resolve({ url: `ws://127.0.0.1:${port}`, close: () => wss.close() });
+    });
+  });
+}
+
 test('fetchRepoMeta: finds a 30617 reachable ONLY on App Relays (bare remote, dead grasp, no projRelays)', async () => {
   const event = {
     id:         'f'.repeat(64),
@@ -680,7 +739,8 @@ test('fetchRepoMeta: finds a 30617 reachable ONLY on App Relays (bare remote, de
     content:    '',
     sig:        '0'.repeat(128),
   };
-  const relay = await startMockRepoRelay(event);
+  const relay      = await startMockRepoRelay(event);
+  const deadGrasp  = await startSilentRelay();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-repo-'));
   try {
     const project: any = {
@@ -694,23 +754,25 @@ test('fetchRepoMeta: finds a 30617 reachable ONLY on App Relays (bare remote, de
     assert.deepEqual(decodeNgitRemote(project)?.relayHints, []);
 
     const result = await fetchRepoMeta(project, true, {
-      getGrasp:     () => ['wss://dead.invalid.example'],   // dead grasp
-      getAppRelays: () => [relay.url],                      // only home
+      getGrasp:     () => [deadGrasp.url],   // reachable but returns nothing
+      getAppRelays: () => [relay.url],       // the announcement's only home
     });
     assert.ok(result.repo, 'announcement should be found via App Relays');
     assert.equal(result.repo?.identifier, 'app-only-repo');
     assert.equal(result.repo?.name, 'App Only Repo');
   } finally {
     relay.close();
+    deadGrasp.close();
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
   }
 });
 
 test('fetchRepoMeta: without App Relays in the union the same announcement is NOT found (regression guard)', async () => {
-  // Pins the failure mode: if the union excludes App Relays (old behavior,
-  // simulated here by feeding only a dead grasp + no app relays), the
-  // announcement is unreadable. Guards against a future refactor dropping
-  // the App-Relay fallback.
+  // Pins the failure mode: if the union excludes App Relays (old behavior),
+  // the relay set is empty (no relayHints, no grasp, no projRelays) so the
+  // announcement — live on the mock below, which is deliberately NOT in the
+  // set — is unreadable. Guards against a future refactor dropping the
+  // App-Relay fallback.
   const event = {
     id: 'e'.repeat(64), pubkey: HEX, kind: 30617, created_at: 1_700_000_000,
     tags: [['d', 'app-only-repo']], content: '', sig: '0'.repeat(128),
@@ -723,7 +785,7 @@ test('fetchRepoMeta: without App Relays in the union the same announcement is NO
       remotes: { ngit: `nostr://${NPUB}/app-only-repo` }, readRelays: [],
     };
     const result = await fetchRepoMeta(project, true, {
-      getGrasp:     () => ['wss://dead.invalid.example'],
+      getGrasp:     () => [],
       getAppRelays: () => [],                                // App Relays empty
     });
     assert.equal(result.repo, null);

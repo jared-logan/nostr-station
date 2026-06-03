@@ -365,6 +365,40 @@ async function readPublishState(project: Project): Promise<any> {
 
 // ── 30617 fetch (cached + diagnostics) ───────────────────────────────────
 
+/**
+ * Merge a prioritized `primary` relay list with the user's App Relays into a
+ * single deduped, capped set. App Relays get a RESERVED quota (`appReserve`)
+ * so a long primary list (relayHints + grasp + projRelays) can never crowd
+ * them out past the cap — they're the guaranteed home every announcement
+ * publish reaches, so both the read paths and the publish path must always
+ * include them. Order: kept-primary, reserved-app, then any leftover app to
+ * backfill spare capacity.
+ *
+ * Single source of truth for "where do 30617 reads/writes go?" — used by
+ * fetchRepoMeta (read), the announce prior-fetch (read), and the announce
+ * publish targets. Sharing it keeps the three sets on one capping policy and
+ * keeps the read set a superset of the publish targets in the relays we
+ * actually control (GRASP + App Relays), rather than relying on parallel
+ * edits staying in sync. Pure; exported for tests.
+ */
+export function mergeRelaySet(
+  primary:   string[],
+  appRelays: string[],
+  opts: { cap?: number; appReserve?: number } = {},
+): string[] {
+  const cap        = opts.cap ?? 12;
+  const appReserve = opts.appReserve ?? 6;
+  const dedupeValid = (arr: string[]): string[] =>
+    arr.filter(isValidRelayUrl).filter((r, i, a) => a.indexOf(r) === i);
+  const prim = dedupeValid(primary);
+  // App Relays not already present in primary (dedupe across the boundary).
+  const app  = dedupeValid(appRelays).filter((r) => !prim.includes(r));
+  const appKeep     = app.slice(0, Math.min(app.length, appReserve));
+  const primKeep    = prim.slice(0, Math.max(0, cap - appKeep.length));
+  const leftoverApp = app.slice(appKeep.length);
+  return [...primKeep, ...appKeep, ...leftoverApp].slice(0, cap);
+}
+
 /** Injectable relay sources — defaults call the real identity helpers.
  *  Exists so tests can drive fetchRepoMeta against a mock relay without a
  *  populated identity.json on disk. */
@@ -393,16 +427,13 @@ export async function fetchRepoMeta(
   // `nostr://<npub>/<d-tag>` form (no relay-host segment → empty relayHints)
   // and whose GRASP override is dead, the ONLY place the announcement is
   // reachable is the App Relays it was ALSO published to (handleAnnounce
-  // publishes there). Including getEffectiveReadRelays() here is what makes
-  // a successfully-published announcement readable by our own Overview —
-  // without it the union could exclude every relay that holds the event.
-  const grasp = (deps.getGrasp ?? getGraspServers)();
-  const appRelays = (deps.getAppRelays ?? getEffectiveReadRelays)();
+  // publishes there). mergeRelaySet reserves App-Relay slots so they're
+  // never crowded out of the cap — that's what makes a successfully-published
+  // announcement readable by our own Overview.
+  const grasp      = (deps.getGrasp ?? getGraspServers)();
+  const appRelays  = (deps.getAppRelays ?? getEffectiveReadRelays)();
   const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
-  const relays = [...coords.relayHints, ...grasp, ...projRelays, ...appRelays]
-    .filter(isValidRelayUrl)
-    .filter((r, i, a) => a.indexOf(r) === i)
-    .slice(0, 12);
+  const relays = mergeRelaySet([...coords.relayHints, ...grasp, ...projRelays], appRelays);
 
   const result = await queryRelays({
     filter: {
@@ -872,6 +903,10 @@ export function buildRepoAnnounceTemplate(
 // get DIFFERENT ids and all survive on relays — the "2–3 30617s at the same
 // created_at" symptom. Keyed by coordinate so distinct repos don't block each
 // other; a concurrent second request for the same coordinate gets 409.
+//
+// This guards CONCURRENCY only, by design — a deliberate, sequential
+// re-announce is a legitimate replaceable update (relays keep the freshest by
+// created_at) and is intentionally NOT deduped here.
 const announceInFlight = new Set<string>();
 
 interface RelayPublishResult { relay: string; ok: boolean; reason?: string }
@@ -992,11 +1027,14 @@ async function handleAnnounce(
   // caches the parsed shape, not the raw event. Failing to find it is
   // non-fatal: we just lose the carry-through and emit the form's tags
   // as-is.
+  // Same read set as fetchRepoMeta (incl. App Relays) so the prior-fetch
+  // can't miss an announcement that lives only on App Relays — otherwise the
+  // carry-through (euc / unknown tags) would be silently dropped on republish.
   const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
-  const priorRelays = [...coords.relayHints, ...getGraspServers(), ...projRelays]
-    .filter(isValidRelayUrl)
-    .filter((r, i, a) => a.indexOf(r) === i)
-    .slice(0, 8);
+  const priorRelays = mergeRelaySet(
+    [...coords.relayHints, ...getGraspServers(), ...projRelays],
+    getEffectiveReadRelays(),
+  );
   let priorEvent: NostrEvent | null = null;
   if (priorRelays.length > 0) {
     try {
@@ -1059,20 +1097,18 @@ async function handleAnnounce(
   }
 
   // Publish to the union of: the input's own relay list, the user's grasp
-  // servers, AND their effective read/write relays. The read-relays were
-  // documented here but never actually included — which meant an
-  // announcement published ONLY to grasp servers (e.g. relay.ngit.dev +
-  // git.shakespeare.diy). GRASP relays can reject or drop a plain
+  // servers, AND their App Relays. GRASP relays can reject or drop a plain
   // kind-30617 publish (auth/rate-limit), so with no general public relay
   // in the set, every target could fail → a 502 even though signing
-  // succeeded. Including the read-relays gives the event reliable,
-  // broadly-queryable homes (damus/nos.lol/primal/…) so discovery works
-  // and a grasp rejection isn't fatal. De-duped + capped at 8.
-  const publishTargets = [...new Set([
-    ...input.relays || [],
-    ...getGraspServers().map(s => /^wss?:/i.test(s) ? s : `wss://${s}`),
-    ...getEffectiveReadRelays(),
-  ])].filter(isValidRelayUrl).slice(0, 12);
+  // succeeded. The App Relays give the event reliable, broadly-queryable
+  // homes (damus/nos.lol/primal/…) so discovery works and a grasp rejection
+  // isn't fatal. Built with the SAME mergeRelaySet as the read paths so the
+  // read set stays a superset of these publish targets (GRASP + App Relays)
+  // by construction — and so the App Relays are never crowded out of the cap.
+  const publishTargets = mergeRelaySet(
+    [...(input.relays || []), ...getGraspServers().map(s => /^wss?:/i.test(s) ? s : `wss://${s}`)],
+    getEffectiveReadRelays(),
+  );
 
   const results = publishTargets.length > 0
     ? await publishEventToRelays(signed.signedEvent, publishTargets)
