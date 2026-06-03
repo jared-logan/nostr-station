@@ -547,7 +547,12 @@ export async function handleNvpn(
     const participants = Array.isArray(body.participants) ? body.participants : [];
     const publish = body.publish !== false; // default-on
     const r = await rosterRoute[url](participants, publish) as { ok: boolean };
-    await writeJson(res, r.ok ? 200 : 500, r);
+    // Roster-mutation failures are overwhelmingly user/permission errors —
+    // a member (non-admin) trying to change the roster, an invalid npub, etc.
+    // Return 4xx with the detail so the UI shows the actual reason instead of
+    // a generic "server error". (Operational verbs like reset/publish keep
+    // 500 — those are daemon failures, not bad requests.)
+    await writeJson(res, r.ok ? 200 : 400, r);
     return true;
   }
 
