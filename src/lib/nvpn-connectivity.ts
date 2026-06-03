@@ -121,6 +121,33 @@ function sameV24(a: string, b: string): boolean {
   return pa === pb;
 }
 
+/**
+ * Summarize doctor.portMapping ({ upnp, natPmp, pcp: { state, detail } }).
+ * Returns whether ANY protocol secured a mapping plus a human one-liner of
+ * the per-protocol results. Null when no protocols are present.
+ */
+function summarizePortMapping(
+  pm: Record<string, unknown> | null,
+): { anyActive: boolean; detail: string } | null {
+  if (!pm) return null;
+  const protos: Array<[string, string]> = [
+    ['upnp', 'UPnP'], ['natPmp', 'NAT-PMP'], ['pcp', 'PCP'],
+  ];
+  let anyActive = false;
+  let seen = 0;
+  const parts: string[] = [];
+  for (const [key, label] of protos) {
+    const e = asObj(pm[key]);
+    if (!e) continue;
+    seen++;
+    const state  = str(e.state) || 'unknown';
+    const detail = str(e.detail);
+    if (/^(active|mapped|ok|success|available|enabled)$/i.test(state)) anyActive = true;
+    parts.push(`${label}: ${state}${detail ? ` (${detail})` : ''}`);
+  }
+  return seen === 0 ? null : { anyActive, detail: parts.join('; ') };
+}
+
 /** Map nvpn's `severity` string to our level. nvpn uses "info" today. */
 function mapSeverity(sev: string | null): ConnectivityLevel {
   switch ((sev || '').toLowerCase()) {
@@ -272,6 +299,44 @@ export function analyzeConnectivity(
             + `Clear or update the configured endpoint so it matches ${primary}.`,
       source: 'analyzer',
     });
+  }
+
+  // (1.5 / #254) Turn the vague "STUN may not have succeeded" banner into
+  // the actual CAUSE. Two distinct, actionable causes the old one-liner hid:
+  //   • captive portal — sign into the network;
+  //   • no automatic port forward — the router-side reason there's no public
+  //     endpoint, which is why internet peers need the relay #252 points at.
+  // Pinned to the camelCase doctor tree (top-level portMapping, netcheck /
+  // network captivePortal). Daemon-up only.
+  if (!daemonDown) {
+    const captive = context.netcheck?.captivePortal === true
+      || bool(network?.captivePortal) === true;
+    if (captive) {
+      signals.push({
+        id:     'net.captive_portal',
+        level:  'warn',
+        title:  'This network requires sign-in (captive portal)',
+        detail: 'A captive portal is intercepting traffic on this network. Open a browser, '
+              + 'complete the sign-in, then refresh — until then nvpn can’t reach the internet '
+              + 'to establish public connectivity.',
+        source: 'analyzer',
+      });
+    }
+    // Only meaningful when the public UDP path is actually blocked — when UDP
+    // works, hole-punching can succeed without an explicit port mapping, so a
+    // missing mapping isn't a problem worth flagging.
+    const pm = summarizePortMapping(asObj(doctor?.portMapping));
+    if (context.netcheck?.udp === false && pm && !pm.anyActive) {
+      signals.push({
+        id:     'net.no_port_mapping',
+        level:  'info',
+        title:  'No automatic port forward — that’s why there’s no public endpoint',
+        detail: `Your router granted no UPnP/NAT-PMP/PCP port mapping, so nvpn couldn’t open a `
+              + `public inbound port (${pm.detail}). That’s the reason internet peers can’t reach `
+              + `you directly here — a relay bridges them.`,
+        source: 'analyzer',
+      });
+    }
   }
 
   // A down daemon dominates everything else — nothing connects, regardless

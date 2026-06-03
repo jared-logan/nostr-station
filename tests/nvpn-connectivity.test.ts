@@ -237,6 +237,55 @@ test('daemon down suppresses the mismatch signal too', () => {
 });
 
 // ---------------------------------------------------------------------
+// (#254) "STUN failed" → the actual cause (port-mapping / captive portal)
+
+test('fixture (udp:false, no mapping) → net.no_port_mapping enumerating protocols', () => {
+  const r = analyzeConnectivity(doctorRaw, statusRaw);
+  const s = r.signals.find(x => x.id === 'net.no_port_mapping');
+  assert.ok(s, 'expected a no-port-mapping cause signal');
+  assert.equal(s!.level, 'info');
+  assert.match(s!.detail || '', /UPnP/);
+  assert.match(s!.detail || '', /NAT-PMP/);
+  assert.match(s!.detail || '', /PCP/);
+  // No captive portal in the fixture.
+  assert.ok(!r.signals.some(x => x.id === 'net.captive_portal'));
+});
+
+test('captivePortal (netcheck) → distinct sign-in signal', () => {
+  const doctor = { netcheck: { udp: false, ipv4: false, ipv6: true, captivePortal: true } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1 };
+  const s = analyzeConnectivity(doctor, status).signals.find(x => x.id === 'net.captive_portal');
+  assert.ok(s);
+  assert.equal(s!.level, 'warn');
+  assert.match(s!.detail || '', /sign-in|sign in/i);
+});
+
+test('captivePortal can also come from doctor.network', () => {
+  const doctor = { network: { captivePortal: true }, netcheck: { udp: true } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1 };
+  assert.ok(analyzeConnectivity(doctor, status).signals.some(x => x.id === 'net.captive_portal'));
+});
+
+test('an ACTIVE port mapping suppresses net.no_port_mapping even with udp:false', () => {
+  const doctor = { netcheck: { udp: false }, portMapping: { upnp: { state: 'active' }, natPmp: { state: 'error' } } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1 };
+  assert.ok(!analyzeConnectivity(doctor, status).signals.some(x => x.id === 'net.no_port_mapping'));
+});
+
+test('no port-mapping signal when udp works (hole-punching is fine without a mapping)', () => {
+  const doctor = { netcheck: { udp: true }, portMapping: { upnp: { state: 'error' }, natPmp: { state: 'error' }, pcp: { state: 'error' } } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1 };
+  assert.ok(!analyzeConnectivity(doctor, status).signals.some(x => x.id === 'net.no_port_mapping'));
+});
+
+test('daemon down suppresses both 1.5 signals', () => {
+  const doctor = { netcheck: { udp: false, captivePortal: true }, portMapping: { upnp: { state: 'error' } } };
+  const r = analyzeConnectivity(doctor, { status_source: 'config', mesh_ready: false }, { daemonRunning: false });
+  assert.ok(!r.signals.some(x => x.id === 'net.captive_portal'));
+  assert.ok(!r.signals.some(x => x.id === 'net.no_port_mapping'));
+});
+
+// ---------------------------------------------------------------------
 // defensive — never throw on junk / partial input
 
 test('garbage and empty input → unknown, no throw, empty signals', () => {
