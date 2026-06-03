@@ -1775,6 +1775,8 @@ export function insertNetworkBlockFirst(toml: string, block: string): string {
 export interface NvpnJoinResult extends ControlResult {
   networkId?: string;
   relays?:    string[];
+  /** Deterministic [node].tunnel_ip written on join (null if unchanged). */
+  tunnelIp?:  string | null;
 }
 
 // Join (or activate) a network by id. Idempotent-ish: if the id is
@@ -1782,7 +1784,7 @@ export interface NvpnJoinResult extends ControlResult {
 // inactive we decline rather than silently reordering blocks (the user
 // can activate it from the native app), since reordering arbitrary TOML
 // is riskier than the additive insert.
-export function joinNvpnNetwork(networkId: string): NvpnJoinResult {
+export function joinNvpnNetwork(networkId: string, pubkeyHex?: string | null): NvpnJoinResult {
   const raw = String(networkId || '').trim();
   if (!isValidNetworkId(raw)) {
     return { ok: false, detail: 'invalid network id' };
@@ -1804,7 +1806,23 @@ export function joinNvpnNetwork(networkId: string): NvpnJoinResult {
   // Compare on the canonical form so we never create a duplicate of a
   // network that's already configured under a non-canonical id.
   const canonIds = ids.map(x => (x ? canonicalNetworkId(x) : null));
+  // Deterministic mesh IP for this node on the joined network. The daemon
+  // honors [node].tunnel_ip on the real fresh-install path, so we must write
+  // it — otherwise the node stays on the pre-join placeholder and is "online"
+  // at an unroutable address (the join P0 from the bare-metal punch-list).
+  const wantIp = pubkeyHex ? computeNvpnTunnelIp(id, pubkeyHex) : null;
   if (canonIds[0] === id) {
+    // Already active — but a node that joined before this fix is stuck on the
+    // placeholder. Re-pin to the deterministic IP if it drifted; restart picks
+    // it up. Otherwise a true no-op.
+    if (wantIp) {
+      const r = ensureNodeTunnelIp(toml, wantIp);
+      if (r.changed) {
+        const w = writeConfigTextSync(configPath, r.toml, { rootOwned: canon.rootOwned, backup: false });
+        if (!w.ok) return { ok: false, detail: w.detail };
+        return { ok: true, detail: 're-pinned tunnel IP', networkId: id, tunnelIp: wantIp };
+      }
+    }
     return { ok: true, detail: 'already the active network', networkId: id };
   }
   if (canonIds.includes(id)) {
@@ -1820,11 +1838,21 @@ export function joinNvpnNetwork(networkId: string): NvpnJoinResult {
   const seed = sections[0] ? extractTomlList(sections[0], 'relays') : [];
   const relays = seed.length > 0 ? seed : [...RECOMMENDED_NVPN_RELAYS];
   const block = buildNvpnNetworkBlock(id, relays);
-  const updated = insertNetworkBlockFirst(toml, block);
+  let updated = insertNetworkBlockFirst(toml, block);
+
+  // Re-pin [node].tunnel_ip to the joined network's deterministic IP in the
+  // SAME atomic write (see wantIp above). The route restarts after so the
+  // daemon comes up on the routable address with zero manual steps.
+  let tunnelIp: string | null = null;
+  if (wantIp) {
+    const r = ensureNodeTunnelIp(updated, wantIp);
+    updated = r.toml;
+    if (r.changed) tunnelIp = wantIp;
+  }
 
   const w = writeConfigTextSync(configPath, updated, { rootOwned: canon.rootOwned, backup: false });
   if (!w.ok) return { ok: false, detail: w.detail };
-  return { ok: true, detail: 'joined network', networkId: id, relays };
+  return { ok: true, detail: 'joined network', networkId: id, relays, tunnelIp };
 }
 
 // ── De-fork + re-pin repair (config.toml surgery) ─────────────────────
@@ -1881,10 +1909,11 @@ function rewriteBlockTunnelIp(text: string, ip: string): string {
 
 // Re-pin a stale `tunnel_ip` inside the `[node]` table — verified on real
 // hardware to be where nvpn persists the node's mesh IP (the [[networks]]
-// blocks carry only network_id). This is config HYGIENE: the daemon
-// re-derives the live interface IP from the canonical network_id on
-// restart and ignores this stored value, so fixing it doesn't move the
-// interface — it just stops config.toml from showing a wrong IP. Scoped to
+// blocks carry only network_id). NOTE: on the bare-metal fresh-install path
+// the daemon HONORS this stored value rather than re-deriving from
+// network_id (a node that joined without it stayed on the placeholder IP),
+// so the re-pin is load-bearing, and it only takes effect after a full
+// restart (a `reload` doesn't re-read it). Scoped to
 // the [node] section and rewrites ONLY the tunnel_ip line; the section's
 // private_key and every other field are left byte-identical. Returns the
 // rewritten toml + the stale value found (null when absent / already
@@ -1902,6 +1931,32 @@ function repinNodeTunnelIp(toml: string, correctIp: string): { toml: string; fro
   if (m[1] === correctIp) return { toml, from: null };
   const newSection = section.replace(/^([^\S\r\n]*tunnel_ip[^\S\r\n]*=[^\S\r\n]*")[^"]*(")/m, `$1${correctIp}$2`);
   return { toml: toml.slice(0, bodyStart) + newSection + toml.slice(sectionEnd), from: m[1] };
+}
+
+// Ensure `[node].tunnel_ip` equals `ip`: rewrite the existing line, or
+// insert one just after the `[node]` header when absent. Unlike
+// repinNodeTunnelIp (hygiene-only re-pin of a *stale* value) this is the
+// JOIN path — on a fresh join the bare-metal daemon stays on the pre-join
+// placeholder (e.g. 10.44.0.1) because join wrote network_id but never the
+// node IP, so we must set the deterministic value here. `changed` is false
+// when the value was already correct or there's no `[node]` table. Pure.
+export function ensureNodeTunnelIp(
+  toml: string, ip: string,
+): { toml: string; from: string | null; changed: boolean } {
+  const repin = repinNodeTunnelIp(toml, ip);
+  if (repin.from !== null) return { toml: repin.toml, from: repin.from, changed: true };
+  // from===null means: already correct, no tunnel_ip line, or no [node].
+  const header = toml.match(/^[^\S\r\n]*\[node\][^\S\r\n]*\r?\n/m);
+  if (!header || header.index === undefined) return { toml, from: null, changed: false };
+  const bodyStart = header.index + header[0].length;
+  const after = toml.slice(bodyStart);
+  const nextRel = after.search(/^[^\S\r\n]*\[(?:\[)?/m);
+  const section = toml.slice(bodyStart, nextRel >= 0 ? bodyStart + nextRel : toml.length);
+  if (/^[^\S\r\n]*tunnel_ip[^\S\r\n]*=/m.test(section)) {
+    return { toml, from: null, changed: false }; // already correct
+  }
+  const insert = `tunnel_ip = "${ip}"\n`;
+  return { toml: toml.slice(0, bodyStart) + insert + toml.slice(bodyStart), from: null, changed: true };
 }
 
 export interface NvpnRepairPlan {
