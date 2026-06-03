@@ -190,6 +190,53 @@ test('daemon down suppresses the public-udp signal (one action: start it)', () =
 });
 
 // ---------------------------------------------------------------------
+// (#253) multi-homing — configured endpoint on a different network
+
+test('configured_endpoint on a different /24 than primaryIpv4 → mismatch signal', () => {
+  // Fixture: configured_endpoint 198.51.100.10 vs primaryIpv4 192.0.2.10.
+  const r = analyzeConnectivity(doctorRaw, statusRaw);
+  const s = r.signals.find(x => x.id === 'net.endpoint_subnet_mismatch');
+  assert.ok(s, 'expected a multi-homing mismatch signal');
+  assert.equal(s!.level, 'warn');
+  // Concrete "advertising X but routing via Y", with both IPs + the interface.
+  assert.match(s!.detail || '', /198\.51\.100\.10/);
+  assert.match(s!.detail || '', /192\.0\.2\.10/);
+  assert.match(s!.detail || '', /wlp3s0/);
+  // Not a generic NAT line.
+  assert.doesNotMatch(s!.title + ' ' + s!.detail, /\bNAT\b/);
+});
+
+test('configured_endpoint on the SAME /24 as primaryIpv4 → no mismatch', () => {
+  const doctor = { network: { primaryIpv4: '192.0.2.10', defaultInterface: 'eth0' } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1,
+                   configured_endpoint: '192.0.2.99:51820' };
+  const ids = analyzeConnectivity(doctor, status).signals.map(s => s.id);
+  assert.ok(!ids.includes('net.endpoint_subnet_mismatch'));
+});
+
+test('IPv6 configured_endpoint is skipped (v24 compare is IPv4-only)', () => {
+  const doctor = { network: { primaryIpv4: '192.0.2.10' } };
+  const status = { status_source: 'daemon', mesh_ready: true, peer_count: 1,
+                   configured_endpoint: '[2001:db8::9]:51820' };
+  const ids = analyzeConnectivity(doctor, status).signals.map(s => s.id);
+  assert.ok(!ids.includes('net.endpoint_subnet_mismatch'));
+});
+
+test('no mismatch when configured_endpoint or primaryIpv4 is absent', () => {
+  const onlyPrimary = analyzeConnectivity({ network: { primaryIpv4: '192.0.2.10' } },
+    { status_source: 'daemon', mesh_ready: true, peer_count: 1 });
+  assert.ok(!onlyPrimary.signals.some(s => s.id === 'net.endpoint_subnet_mismatch'));
+  const onlyCfg = analyzeConnectivity(null,
+    { status_source: 'daemon', mesh_ready: true, peer_count: 1, configured_endpoint: '198.51.100.10:51820' });
+  assert.ok(!onlyCfg.signals.some(s => s.id === 'net.endpoint_subnet_mismatch'));
+});
+
+test('daemon down suppresses the mismatch signal too', () => {
+  const r = analyzeConnectivity(doctorRaw, statusRaw, { daemonRunning: false });
+  assert.ok(!r.signals.some(s => s.id === 'net.endpoint_subnet_mismatch'));
+});
+
+// ---------------------------------------------------------------------
 // defensive — never throw on junk / partial input
 
 test('garbage and empty input → unknown, no throw, empty signals', () => {
