@@ -12,14 +12,28 @@ touch the machine; your work never leaves the machine unless you push it.
 
 ## Install
 
+Requires **Node.js 22+** (plus `git` and a C build toolchain —
+`build-essential` on Debian/Ubuntu) already on your `PATH`.
+
+Don't have Node yet? Install it first — via [nodejs.org](https://nodejs.org/),
+your system package manager, or nvm:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && nvm install 22
+```
+
+Then install nostr-station:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jared-logan/nostr-station/main/install.sh | bash
 ```
 
-Installs Node 22+ if needed, clones nostr-station to `~/nostr-station`,
-builds it, links the `nostr-station` command globally, and launches the
-dashboard. Total time: ~30-45 seconds on a warm machine. No Docker, no
-Rust toolchain, no system service files, no `sudo`.
+Clones nostr-station to `~/nostr-station`, builds it, links the
+`nostr-station` command globally, and launches the dashboard. Total time:
+~30-45 seconds on a warm machine. No Docker, no Rust toolchain, no system
+service files, no `sudo`. If Node 22+, `git`, or the build toolchain is
+missing, the installer prints the exact one-line fix and exits — it never
+auto-installs system packages.
 
 The build also compiles a bundled [Ditto](https://about.ditto.pub/)
 client from source (pinned upstream SHA, baked with nostr-station theme
@@ -29,9 +43,10 @@ CI; the dashboard still boots and the Client panel surfaces a clear
 "Build Ditto now" button.
 
 Re-running the same one-liner upgrades an existing install (fast-forward
-pull, rebuild, relaunch). Git is the only added prerequisite — every
-mainstream macOS / Linux setup ships with it, and the installer prints
-a clear install hint if it's missing.
+pull, rebuild, relaunch). The prerequisites above (Node 22+, `git`, a C
+build toolchain) are the only requirements — the installer detects each
+and prints a clear, copy-pasteable fix if any is missing, rather than
+failing partway.
 
 Your browser opens at `http://localhost:3000/setup` for first-run pairing.
 
