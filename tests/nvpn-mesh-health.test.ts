@@ -6,7 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeMeshPeers } from '../src/lib/nvpn-mesh-health.ts';
+import { analyzeMeshPeers, relayCandidates, pickBestRelay } from '../src/lib/nvpn-mesh-health.ts';
 import { daemonStatePeers } from './fixtures/nvpn-mesh-peers.ts';
 
 test('classifies the full reachability spectrum from the ground-truth fixture', () => {
@@ -72,6 +72,35 @@ test('latency only when srtt is a positive measurement', () => {
   ]);
   assert.equal(r.peers[0].latencyMs, null);
   assert.equal(r.peers[1].latencyMs, 12);
+});
+
+// (#257) relay-through candidates
+test('endpoint is the direct ip:port, null for relayed/none', () => {
+  const { peers } = analyzeMeshPeers(daemonStatePeers);
+  assert.equal(peers[0].endpoint, '192.0.2.20:51820'); // direct
+  assert.equal(peers[1].endpoint, null);               // relayed
+  assert.equal(peers[2].endpoint, null);               // none
+});
+
+test('relayCandidates = reachable + direct + endpoint; pickBestRelay = lowest latency', () => {
+  const report = analyzeMeshPeers([
+    { participant_pubkey: 'a'.repeat(64), reachable: true,  runtime_endpoint: '192.0.2.20:51820', fips_srtt_ms: 30 },
+    { participant_pubkey: 'b'.repeat(64), reachable: true,  runtime_endpoint: '192.0.2.21:51820', fips_srtt_ms: 9 },
+    { participant_pubkey: 'c'.repeat(64), reachable: true,  runtime_endpoint: 'fips' },              // relayed — not a candidate
+    { participant_pubkey: 'd'.repeat(64), reachable: false, runtime_endpoint: '192.0.2.22:51820' }, // unreachable — not a candidate
+  ]);
+  const cands = relayCandidates(report);
+  assert.deepEqual(cands.map(c => c.pubkey), ['a'.repeat(64), 'b'.repeat(64)]);
+  assert.equal(pickBestRelay(report).pubkey, 'b'.repeat(64)); // 9ms < 30ms
+});
+
+test('pickBestRelay returns null when there are no eligible candidates', () => {
+  const report = analyzeMeshPeers([
+    { participant_pubkey: 'a'.repeat(64), reachable: true, runtime_endpoint: 'fips' },
+    { participant_pubkey: 'b'.repeat(64), reachable: false, runtime_endpoint: '192.0.2.20:51820' },
+  ]);
+  assert.equal(relayCandidates(report).length, 0);
+  assert.equal(pickBestRelay(report), null);
 });
 
 test('defensive — non-array / junk input yields an empty report, no throw', () => {

@@ -14654,6 +14654,23 @@ const VpnPanel = (() => {
             const current = peerEl.dataset.alias || '';
             await openAliasPrompt(id, current);
             await refresh();
+          } else if (btn.dataset.action === 'relay-via') {
+            // #257 — set this peer's FIPS endpoint to the chosen relay's
+            // address so the daemon dials it through that reachable peer.
+            const endpoint = btn.dataset.endpoint;
+            const relay = btn.dataset.relay || 'a reachable peer';
+            if (endpoint) {
+              const resp = await api('/api/nvpn/fips/set', {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ participant: id, endpoint }),
+              });
+              if (resp?.ok) {
+                toast('Routing via relay', `This peer will now be dialed via ${relay} (${endpoint}). Re-checking reachability…`, 'ok');
+              } else {
+                toast('Relay route failed', resp?.detail || 'Could not set the relay endpoint.', 'warn');
+              }
+              await refresh();
+            }
           } else {
             await peerAction(btn.dataset.action, id);
             await refresh();
@@ -15972,6 +15989,17 @@ const VpnPanel = (() => {
     const ip = p.live && p.live.ip ? String(p.live.ip).split('/')[0] : null;
     return peers.find(m => (pubkey && m.pubkey === pubkey) || (ip && m.tunnelIp === ip)) || null;
   }
+  // Best relay-through candidate (#257): the lowest-latency reachable DIRECT
+  // peer (it has a dialable endpoint). Mirrors pickBestRelay() in
+  // nvpn-mesh-health.ts. Null when nothing is eligible.
+  function bestRelayCandidate() {
+    const peers = lastMeshHealth && Array.isArray(lastMeshHealth.peers) ? lastMeshHealth.peers : [];
+    const cands = peers.filter(p => p.reachable && p.path === 'direct' && p.endpoint);
+    if (!cands.length) return null;
+    return cands.slice().sort((a, b) => (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity))[0];
+  }
+  const shortPk = (pk) => (pk && pk.length > 12 ? `${pk.slice(0, 8)}…${pk.slice(-4)}` : (pk || ''));
+
   // Human label for a mesh-health entry's path/state.
   const MESH_PATH_LABEL = { direct: 'direct', relayed: 'relayed', none: 'no path' };
   function meshPathChip(mh) {
@@ -16024,6 +16052,14 @@ const VpnPanel = (() => {
       ? '<button data-action="demote" title="Demote from admin">↓ admin</button>' : '';
     const removeBtn = p.roster
       ? '<button data-action="remove" class="danger" title="Remove from roster">remove</button>' : '';
+    // Relay-through (#257): for an unreachable peer, offer routing it via the
+    // best-reachable peer (the durable counterpart to the manual fips lever).
+    // Only when a candidate exists and it isn't this same peer.
+    const selfPk = (live && live.pubkey ? String(live.pubkey).toLowerCase() : null);
+    const relay  = (mh && !mh.reachable) ? bestRelayCandidate() : null;
+    const relayBtn = (relay && relay.pubkey && relay.pubkey !== selfPk)
+      ? `<button data-action="relay-via" data-endpoint="${escapeHtml(relay.endpoint)}" data-relay="${escapeHtml(shortPk(relay.pubkey))}" title="Route this peer via ${escapeHtml(shortPk(relay.pubkey))} (${escapeHtml(relay.endpoint)}) — the best-reachable peer. Sets a FIPS relay endpoint and reloads.">relay via ${escapeHtml(shortPk(relay.pubkey))}</button>`
+      : '';
     const truncId = id.length > 20 ? `${id.slice(0, 12)}…${id.slice(-6)}` : id;
     const labelHtml = p.alias
       ? `<span class="vpn-meta-peer-alias">${escapeHtml(p.alias)}</span>
@@ -16036,7 +16072,7 @@ const VpnPanel = (() => {
         ${adminBadge}
         ${meshPathChip(mh)}
         ${sub ? `<span class="muted vpn-meta-peer-sub">${escapeHtml(sub)}</span>` : ''}
-        <span class="vpn-meta-peer-actions">${pingBtn}${whoisBtn}${aliasBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
+        <span class="vpn-meta-peer-actions">${pingBtn}${whoisBtn}${relayBtn}${aliasBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
         <div class="vpn-meta-peer-pingout" hidden></div>
       </div>`;
   }
