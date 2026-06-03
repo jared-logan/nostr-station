@@ -440,11 +440,21 @@ export async function handleNvpn(
     const body = await parseJsonBody(req);
     if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
     const networkId = typeof body.networkId === 'string' ? body.networkId : '';
-    const r = joinNvpnNetwork(networkId);
+    // Decode our npub → hex so join can write the deterministic
+    // [node].tunnel_ip for the network (same derivation the diagnosis uses).
+    const ident = readNvpnNodeIdentity();
+    let joinPubkeyHex: string | null = null;
+    if (ident.npub) {
+      if (/^[0-9a-f]{64}$/i.test(ident.npub)) joinPubkeyHex = ident.npub.toLowerCase();
+      else { try { joinPubkeyHex = npubToHex(ident.npub).toLowerCase(); } catch { joinPubkeyHex = null; } }
+    }
+    const r = joinNvpnNetwork(networkId, joinPubkeyHex);
     if (r.ok && r.detail !== 'already the active network') {
-      // A new active network needs the daemon to re-read config. reload
-      // is best-effort; the UI nudges the user to restart if needed.
-      await reloadNvpn().catch(() => null);
+      // A new active network + the re-pinned node IP only take effect on a
+      // full restart (reload doesn't re-derive the interface on the
+      // fresh-install path) — restart so the node comes up routable with no
+      // manual `nvpn set --tunnel-ip` + systemctl step.
+      await restartNvpn().catch(() => null);
     }
     await writeJson(res, r.ok ? 200 : 400, r);
     return true;
