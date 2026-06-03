@@ -5,6 +5,7 @@
 import { previewRetryDecision } from './preview-retry.js';
 import { mergePeers, npubToHex } from './nvpn-peers.js';
 import { renderMarkdown, renderCodeBlock, proxyImageUrl, startMarkdownImageObserver } from './markdown.js';
+import { connectivityBannerCoverage } from './connectivity-coverage.js';
 
 // Async-sign external markdown image URLs after every renderMarkdown
 // mount. With CSP img-src 'self' data: + /api/img-proxy signature
@@ -13880,8 +13881,6 @@ const VpnPanel = (() => {
     unreachable:             { cls: 'error', label: 'Not reachable' },
   };
   const CONN_LEVEL_ICON = { ok: '✓', info: 'ℹ', warn: '▲', error: '✕' };
-  // Which signal ids cover each legacy banner's concern (#255 option 3).
-  const CONN_NAT_IDS = ['net.no_public_udp', 'net.no_port_mapping', 'net.endpoint_subnet_mismatch'];
 
   function renderConnectivityPanel() {
     connHidesNat = connHidesStale = false;
@@ -13903,10 +13902,10 @@ const VpnPanel = (() => {
     let headline = v.label;
     if (verdict === 'unreachable' && ids.has('daemon.stopped')) headline = 'Not reachable — daemon stopped';
 
-    // Compute coverage: only step on a banner whose concern we're showing.
-    connHidesNat   = CONN_NAT_IDS.some(id => ids.has(id));
-    connHidesStale = ids.has('daemon.stopped')
-      || (!!rep.doctorOk && (verdict === 'reachable' || verdict === 'reachable_with_caveats'));
+    // Compute coverage via the shared pure helper (tested in
+    // tests/connectivity-coverage.test.ts) — only step on a banner whose
+    // concern we're showing.
+    ({ hidesNat: connHidesNat, hidesStale: connHidesStale } = connectivityBannerCoverage(rep));
 
     const cards = signals.map((sig) => {
       const level = ['ok', 'info', 'warn', 'error'].includes(sig.level) ? sig.level : 'info';
