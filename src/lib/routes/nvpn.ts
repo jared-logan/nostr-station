@@ -48,6 +48,7 @@ import {
   RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
 import { diagnoseNvpnNetwork } from '../nvpn-diagnostics.js';
+import { analyzeConnectivity } from '../nvpn-connectivity.js';
 import { npubToHex } from '../identity.js';
 import { nvpnRelayHealth } from '../nvpn-relay-health.js';
 import { detectContainer, natWarningFor, isPrivateEndpoint } from '../container-detect.js';
@@ -777,6 +778,19 @@ export async function handleNvpn(
     const body = await parseJsonBody(req) || {};
     const r = await doctorNvpn({ writeBundle: !!body.bundle });
     await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  // Connectivity roll-up (#250). Runs `doctor` + `status` and folds them
+  // into one typed report via the pure analyzeConnectivity(); the Status
+  // panel renders this instead of the one-line natWarningFor banner.
+  // doctor is heavier than status, so this lives behind its own GET rather
+  // than the hot status poll. Read-only — no bundle written.
+  if (url === '/api/nvpn/connectivity' && method === 'GET') {
+    const [status, doc] = await Promise.all([probeNvpnStatus(), doctorNvpn()]);
+    const report = analyzeConnectivity(doc.raw ?? null, status.raw ?? null);
+    // Echo whether doctor itself ran, so the UI can tell "analyzed: clear"
+    // from "couldn't run doctor" (e.g. binary missing) rather than guessing.
+    await writeJson(res, 200, { ...report, doctorOk: doc.ok, doctorDetail: doc.detail });
     return true;
   }
   // nat-discover is intentionally not surfaced as a button in the
