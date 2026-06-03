@@ -101,10 +101,15 @@ export function meshUrlMatches(
 
 /**
  * Lookup table of "the IPs that map to a known nvpn peer pubkey".
- * Built from `nvpn status --json`'s `peers` array — whose shape has
- * shifted across nvpn versions, so we defensively probe several
- * field names. Returns `null` for IPs we can't resolve; the gate
- * function treats `null` as "not trusted" (fail closed).
+ * Built from `nvpn status --json`'s `peers` array. The real nvpn 4.x peer
+ * shape is:
+ *   { node_id: "<64-hex pubkey>", public_key: "" (empty for ALL peers),
+ *     endpoint, tunnel_ip: "10.44.x.y/32", timestamp }
+ * so two things bite: (1) `tunnel_ip` carries a `/32` and won't equal a bare
+ * remoteAddress, and (2) the pubkey is in `node_id`, NOT `public_key`. We read
+ * `node_id` first and strip the CIDR before comparing, keeping older field
+ * names as fallbacks for forward/backward compat. Returns `null` for IPs we
+ * can't resolve; the gate treats `null` as "not trusted" (fail closed).
  *
  * Exported as a pure function over the raw nvpn JSON so tests can
  * drive it without spawning nvpn — see tests/dashboard-binding.test.ts.
@@ -124,12 +129,19 @@ export function peerPubkeyForIp(
       (typeof p.address   === 'string' && p.address) ||
       null
     );
-    if (peerIp !== ip) continue;
-    // Pubkey field — variants seen: `pubkey`, `npub_hex`, `hex`.
+    if (!peerIp) continue;
+    // tunnel_ip carries a CIDR suffix in nvpn 4.x (e.g. "10.44.0.5/32");
+    // compare the bare address against the socket remoteAddress.
+    if (peerIp.split('/')[0] !== ip) continue;
+    // Pubkey field — nvpn 4.x puts the 64-hex pubkey in `node_id` (and leaves
+    // `public_key` EMPTY for every peer). Older variants: `pubkey`/`npub_hex`/
+    // `hex`. Empty strings are falsy here, so an empty `public_key` is skipped.
     const pubkey = (
-      (typeof p.pubkey    === 'string' && p.pubkey) ||
-      (typeof p.npub_hex  === 'string' && p.npub_hex) ||
-      (typeof p.hex       === 'string' && p.hex) ||
+      (typeof p.node_id    === 'string' && p.node_id)    ||
+      (typeof p.pubkey     === 'string' && p.pubkey)     ||
+      (typeof p.public_key === 'string' && p.public_key) ||
+      (typeof p.npub_hex   === 'string' && p.npub_hex)   ||
+      (typeof p.hex        === 'string' && p.hex)        ||
       null
     );
     return pubkey ? pubkey.toLowerCase() : null;

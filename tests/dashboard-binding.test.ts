@@ -55,6 +55,25 @@ test('peerPubkeyForIp: matches on tunnel_ip + pubkey fields', () => {
   assert.equal(peerPubkeyForIp(peers, '10.0.0.7'), null);
 });
 
+// Regression for #259: the REAL nvpn 4.x peer shape — pubkey lives in
+// `node_id`, `public_key` is empty for every peer, and `tunnel_ip` carries a
+// /32. The pre-fix code compared tunnel_ip exactly (never matched the bare
+// remoteAddress) AND read pubkey from `pubkey`/`hex` (always null), so the
+// gate's positive path was dead on arrival and #248's allowlist unreachable.
+// Synthetic keys only.
+test('peerPubkeyForIp: real nvpn 4.x shape — node_id + /32 tunnel_ip + empty public_key (#259)', () => {
+  const peers = [
+    { node_id: 'a'.repeat(64), public_key: '', endpoint: '203.0.113.7:51820', tunnel_ip: '10.44.0.5/32', timestamp: 1 },
+    { node_id: 'b'.repeat(64), public_key: '', endpoint: '198.51.100.9:51820', tunnel_ip: '10.44.0.6/32', timestamp: 2 },
+  ];
+  // bare remoteAddress matches the /32 tunnel_ip, and the pubkey comes from node_id
+  assert.equal(peerPubkeyForIp(peers, '10.44.0.5'), 'a'.repeat(64));
+  assert.equal(peerPubkeyForIp(peers, '10.44.0.6'), 'b'.repeat(64));
+  assert.equal(peerPubkeyForIp(peers, '10.44.0.7'), null);
+  // an empty public_key must NOT shadow node_id (would yield a bogus '' pubkey)
+  assert.notEqual(peerPubkeyForIp(peers, '10.44.0.5'), '');
+});
+
 test('peerPubkeyForIp: accepts the `ip` field variant', () => {
   const peers = [{ ip: '10.0.0.5', pubkey: 'c'.repeat(64) }];
   assert.equal(peerPubkeyForIp(peers, '10.0.0.5'), 'c'.repeat(64));
