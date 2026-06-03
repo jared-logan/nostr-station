@@ -111,6 +111,7 @@ import {
   trustedDevicePubkeys, meshHostMatches, meshUrlMatches,
 } from './dashboard-binding.js';
 import { readMobileAccessConfig, writeMobileAccessConfig, dashboardBindHost } from './mobile-access.js';
+import { readTrustedDevices, addTrustedDevice, removeTrustedDevice } from './trusted-devices.js';
 import {
   readCommunitiesFeatureConfig, writeCommunitiesFeatureConfig, isCommunitiesUsable,
 } from './communities-feature.js';
@@ -2282,6 +2283,35 @@ export async function startWebServer(port: number): Promise<http.Server> {
           // a no-op). The UI surfaces this as "Restart to apply".
           needsRestart: (saved.enabled ? '0.0.0.0' : '127.0.0.1') !== dashboardBindHost(),
         }));
+        return;
+      }
+
+      // ── Trusted devices (mesh dashboard allowlist) ─────────────────────
+      // Pubkeys (besides the owner's) allowed to reach the dashboard over a
+      // non-loopback interface. Consumed by dashboard-binding's connection
+      // gate; the mesh-origin gate + Bearer auth still apply on top.
+      if (url === '/api/trusted-devices' && method === 'GET') {
+        if (!requireSession(req, res)) return;
+        const cfg = readTrustedDevices();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, pubkeys: cfg.pubkeys, updatedAt: cfg.updatedAt ?? null }));
+        return;
+      }
+      if ((url === '/api/trusted-devices/add' || url === '/api/trusted-devices/remove') && method === 'POST') {
+        if (!requireSession(req, res)) return;
+        let raw: any;
+        try { raw = JSON.parse(await readBody(req)); }
+        catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, detail: 'invalid JSON body', pubkeys: readTrustedDevices().pubkeys }));
+          return;
+        }
+        const pubkey = typeof raw?.pubkey === 'string' ? raw.pubkey : '';
+        const r = url.endsWith('/add') ? addTrustedDevice(pubkey) : removeTrustedDevice(pubkey);
+        // Always 200 — {ok} carries success; a bad pubkey shows inline in the
+        // UI rather than as a generic error toast.
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r));
         return;
       }
 

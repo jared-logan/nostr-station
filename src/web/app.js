@@ -14584,7 +14584,9 @@ const VpnPanel = (() => {
           Toggle saved but not yet applied. Restart the dashboard from Config → About → Restart for changes to take effect.
         </div>
       ` : ''}
+      <div id="vpn-trusted-devices" class="vpn-section" style="margin-top:14px"></div>
     `;
+    renderTrustedDevices(host);
     const tog = host.querySelector('#vpn-dashboard-toggle');
     tog?.addEventListener('change', async () => {
       const next = tog.checked;
@@ -14599,6 +14601,58 @@ const VpnPanel = (() => {
         tog.checked = !next;  // revert on failure
         window.Toasts?.error?.(e?.message || String(e));
       }
+    });
+  }
+
+  // Trusted devices — the explicit allowlist of OTHER pubkeys (beyond your
+  // own) allowed past the connection-time mesh gate. Your own devices (phone
+  // + laptop sharing your pubkey via NIP-46) are already trusted and don't
+  // need listing. The mesh-origin gate + dashboard login still apply on top,
+  // so a listed device must also be on the mesh AND log in.
+  async function renderTrustedDevices(host) {
+    const slot = host.querySelector('#vpn-trusted-devices');
+    if (!slot) return;
+    let data = null;
+    try { data = await api('/api/trusted-devices', undefined, { silent: true }); } catch { slot.remove(); return; }
+    const keys = Array.isArray(data?.pubkeys) ? data.pubkeys : [];
+    slot.innerHTML = `
+      <div class="vpn-empty-title">Trusted devices <span class="muted" style="font-weight:normal">(mesh dashboard access)</span></div>
+      <p class="vpn-empty-detail muted" style="margin:6px 0 10px">
+        Pubkeys allowed to reach this dashboard from the mesh, in addition to
+        your own. They still need Mobile Access on, mesh connectivity, and a
+        dashboard login — this just lifts the connection-layer wall for them.
+      </p>
+      ${keys.length ? `<div class="vpn-kv">${keys.map(k => `
+        <div class="vpn-kv-row">
+          <span class="vpn-kv-key"><code title="${escapeHtml(k)}">${escapeHtml(truncNpub(k))}</code></span>
+          <button class="danger rm-trusted" data-k="${escapeHtml(k)}" style="margin-left:8px">Remove</button>
+        </div>`).join('')}</div>` : '<div class="vpn-empty-detail muted">No additional devices trusted.</div>'}
+      <div class="vpn-net-actions" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+        <input id="trusted-add-input" placeholder="device npub or 64-char hex pubkey" style="flex:1;min-width:240px">
+        <button id="trusted-add-btn" class="primary">Trust device</button>
+      </div>
+      <div id="trusted-add-err" class="err" style="display:none;margin-top:6px"></div>`;
+
+    slot.querySelectorAll('.rm-trusted').forEach(btn => btn.addEventListener('click', async (e) => {
+      e.preventDefault(); btn.disabled = true;
+      try { await api('/api/trusted-devices/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pubkey: btn.dataset.k }) }); }
+      catch { /* ignore */ }
+      renderTrustedDevices(host);
+    }));
+    const addBtn = slot.querySelector('#trusted-add-btn');
+    addBtn?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const input = slot.querySelector('#trusted-add-input');
+      const err = slot.querySelector('#trusted-add-err');
+      err.style.display = 'none';
+      const pubkey = (input.value || '').trim();
+      if (!pubkey) { err.textContent = 'enter an npub or hex pubkey'; err.style.display = 'block'; return; }
+      addBtn.disabled = true;
+      let r = null;
+      try { r = await api('/api/trusted-devices/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pubkey }) }, { silent: true }); }
+      catch { /* shown below */ }
+      if (r?.ok) { toast('Device trusted', 'it can now reach the dashboard over the mesh', 'ok'); renderTrustedDevices(host); }
+      else { err.textContent = r?.detail || 'could not add device'; err.style.display = 'block'; addBtn.disabled = false; }
     });
   }
 

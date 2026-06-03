@@ -35,6 +35,7 @@
 import type { Socket } from 'node:net';
 import { probeNvpnStatus } from './nvpn.js';
 import { readIdentity, npubToHex } from './identity.js';
+import { readTrustedDevices } from './trusted-devices.js';
 
 // =====================================================================
 // Loopback classification
@@ -180,6 +181,10 @@ export function trustedDevicePubkeys(): Set<string> {
   const out = new Set<string>();
   const owner = ownerPubkeyHex();
   if (owner) out.add(owner);
+  // Plus any device the owner has explicitly added to the allowlist (already
+  // validated + canonical hex). The owner is always trusted regardless, so
+  // the user can never lock their own devices out by editing the list.
+  for (const pk of readTrustedDevices().pubkeys) out.add(pk);
   return out;
 }
 
