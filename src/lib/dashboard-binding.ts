@@ -35,6 +35,7 @@
 import type { Socket } from 'node:net';
 import { probeNvpnStatus } from './nvpn.js';
 import { readIdentity, npubToHex } from './identity.js';
+import { readTrustedDevices } from './trusted-devices.js';
 
 // =====================================================================
 // Loopback classification
@@ -55,15 +56,60 @@ export function isLoopbackAddress(ip: string | undefined | null): boolean {
   return false;
 }
 
+// Normalize an address for comparison: lowercase, strip IPv6 brackets, and
+// collapse an IPv4-mapped IPv6 form (`::ffff:10.44.x.y`) to plain IPv4 so a
+// dual-stack `socket.localAddress` compares equal to the IPv4 Host header.
+export function normalizeHostAddr(a: string | undefined | null): string {
+  if (!a) return '';
+  return String(a).toLowerCase().trim().replace(/^\[|\]$/g, '').replace(/^::ffff:/, '');
+}
+
+// Mesh Host/Origin gating (used ONLY for connections already verified as a
+// trusted mesh peer). The accepted Host/Origin is pinned to the request's
+// actual local interface address (the tunnel IP the connection arrived on)
+// + the bound port — so even a trusted peer can't inject a foreign Host
+// (DNS-rebinding) or a cross-origin Origin (CSRF); both must equal the real
+// interface the dashboard is being reached on. Pure — unit-tested.
+export function meshHostMatches(
+  hostHeader: string | undefined | null,
+  localAddress: string | undefined | null,
+  port: number,
+): boolean {
+  const want = normalizeHostAddr(localAddress);
+  if (!want) return false;
+  return normalizeHostAddr(hostHeader) === `${want}:${port}`;
+}
+
+export function meshUrlMatches(
+  urlStr: string | undefined | null,
+  localAddress: string | undefined | null,
+  port: number,
+): boolean {
+  if (!urlStr) return false;
+  const want = normalizeHostAddr(localAddress);
+  if (!want) return false;
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== 'http:' && u.protocol !== 'ws:') return false;
+    if (u.port !== String(port)) return false;
+    return normalizeHostAddr(u.hostname) === want;
+  } catch { return false; }
+}
+
 // =====================================================================
 // Peer-IP → pubkey lookup
 
 /**
  * Lookup table of "the IPs that map to a known nvpn peer pubkey".
- * Built from `nvpn status --json`'s `peers` array — whose shape has
- * shifted across nvpn versions, so we defensively probe several
- * field names. Returns `null` for IPs we can't resolve; the gate
- * function treats `null` as "not trusted" (fail closed).
+ * Built from `nvpn status --json`'s `peers` array. The real nvpn 4.x peer
+ * shape is:
+ *   { node_id: "<64-hex pubkey>", public_key: "" (empty for ALL peers),
+ *     endpoint, tunnel_ip: "10.44.x.y/32", timestamp }
+ * so two things bite: (1) `tunnel_ip` carries a `/32` and won't equal a bare
+ * remoteAddress, and (2) the pubkey is in `node_id`, NOT `public_key`. We read
+ * `node_id` first and strip the CIDR before comparing, keeping older field
+ * names as fallbacks for forward/backward compat. Returns `null` for IPs we
+ * can't resolve; the gate treats `null` as "not trusted" (fail closed).
  *
  * Exported as a pure function over the raw nvpn JSON so tests can
  * drive it without spawning nvpn — see tests/dashboard-binding.test.ts.
@@ -83,15 +129,27 @@ export function peerPubkeyForIp(
       (typeof p.address   === 'string' && p.address) ||
       null
     );
-    if (peerIp !== ip) continue;
-    // Pubkey field — variants seen: `pubkey`, `npub_hex`, `hex`.
-    const pubkey = (
-      (typeof p.pubkey    === 'string' && p.pubkey) ||
-      (typeof p.npub_hex  === 'string' && p.npub_hex) ||
-      (typeof p.hex       === 'string' && p.hex) ||
-      null
-    );
-    return pubkey ? pubkey.toLowerCase() : null;
+    if (!peerIp) continue;
+    // tunnel_ip carries a CIDR suffix in nvpn 4.x (e.g. "10.44.0.5/32");
+    // compare the bare address against the socket remoteAddress.
+    if (peerIp.split('/')[0] !== ip) continue;
+    // Pubkey field — nvpn 4.x SWAPS where the pubkey lives based on
+    // status_source (#266):
+    //   • daemon-up ("daemon"):  node_id = 64-hex pubkey, public_key = ""
+    //   • daemon-down ("config"): node_id = "<name>.nvpn", public_key = pubkey
+    // The gate only runs on incoming mesh connections (tunnel = daemon up), so
+    // it normally sees the first shape — but to be robust to that swap AND a
+    // daemon-flap race, prefer whichever candidate field is actually a 64-hex
+    // pubkey, then fall back to the first non-empty string. Older variants
+    // (npub_hex/hex) stay in the list.
+    const candidates = [p.node_id, p.public_key, p.pubkey, p.npub_hex, p.hex];
+    for (const c of candidates) {
+      if (typeof c === 'string' && /^[0-9a-f]{64}$/i.test(c)) return c.toLowerCase();
+    }
+    for (const c of candidates) {
+      if (typeof c === 'string' && c) return c.toLowerCase();
+    }
+    return null;
   }
   return null;
 }
@@ -140,6 +198,10 @@ export function trustedDevicePubkeys(): Set<string> {
   const out = new Set<string>();
   const owner = ownerPubkeyHex();
   if (owner) out.add(owner);
+  // Plus any device the owner has explicitly added to the allowlist (already
+  // validated + canonical hex). The owner is always trusted regardless, so
+  // the user can never lock their own devices out by editing the list.
+  for (const pk of readTrustedDevices().pubkeys) out.add(pk);
   return out;
 }
 

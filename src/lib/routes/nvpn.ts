@@ -43,11 +43,13 @@ import {
   setNvpnSettings, statsNvpn,
   setNvpnAlias, removeNvpnAlias,
   readNvpnRelays, addNvpnRelay, removeNvpnRelay, setNvpnRelays,
-  readNvpnFipsPeerEndpoints,
+  readNvpnFipsPeerEndpoints, setNvpnFipsEndpoint, removeNvpnFipsEndpoint,
   resolveDaemonConfigPath, readNodeNpubFromPath, adoptIdentity,
   RECOMMENDED_NVPN_RELAYS,
 } from '../nvpn.js';
 import { diagnoseNvpnNetwork } from '../nvpn-diagnostics.js';
+import { analyzeConnectivity } from '../nvpn-connectivity.js';
+import { analyzeMeshPeers } from '../nvpn-mesh-health.js';
 import { npubToHex } from '../identity.js';
 import { nvpnRelayHealth } from '../nvpn-relay-health.js';
 import { detectContainer, natWarningFor, isPrivateEndpoint } from '../container-detect.js';
@@ -348,7 +350,7 @@ export async function handleNvpn(
         'On the nostr-station host, run the host-verify command in a terminal.',
         'From any network outside your LAN (your phone on cell data, a cloud shell, a friend\'s machine), run the probe command. Type a few characters, press Enter, repeat.',
         'Watch the host-verify output: if the probe packets land (you see lines mentioning your source IP), the data plane is reachable end-to-end.',
-        'If no packets land, the chain is broken at one of: home router (UDP port-forward), container runtime (host → container forward), or host firewall. See docs/nvpn-deployment.md for fixes.',
+        'If no packets land, the chain is broken at one of: home router (UDP port-forward), container runtime (host → container forward), or host firewall. See https://github.com/jared-logan/nostr-station/blob/main/docs/nvpn-deployment.md for fixes.',
       ],
     });
     return true;
@@ -440,11 +442,21 @@ export async function handleNvpn(
     const body = await parseJsonBody(req);
     if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
     const networkId = typeof body.networkId === 'string' ? body.networkId : '';
-    const r = joinNvpnNetwork(networkId);
+    // Decode our npub → hex so join can write the deterministic
+    // [node].tunnel_ip for the network (same derivation the diagnosis uses).
+    const ident = readNvpnNodeIdentity();
+    let joinPubkeyHex: string | null = null;
+    if (ident.npub) {
+      if (/^[0-9a-f]{64}$/i.test(ident.npub)) joinPubkeyHex = ident.npub.toLowerCase();
+      else { try { joinPubkeyHex = npubToHex(ident.npub).toLowerCase(); } catch { joinPubkeyHex = null; } }
+    }
+    const r = joinNvpnNetwork(networkId, joinPubkeyHex);
     if (r.ok && r.detail !== 'already the active network') {
-      // A new active network needs the daemon to re-read config. reload
-      // is best-effort; the UI nudges the user to restart if needed.
-      await reloadNvpn().catch(() => null);
+      // A new active network + the re-pinned node IP only take effect on a
+      // full restart (reload doesn't re-derive the interface on the
+      // fresh-install path) — restart so the node comes up routable with no
+      // manual `nvpn set --tunnel-ip` + systemctl step.
+      await restartNvpn().catch(() => null);
     }
     await writeJson(res, r.ok ? 200 : 400, r);
     return true;
@@ -537,7 +549,12 @@ export async function handleNvpn(
     const participants = Array.isArray(body.participants) ? body.participants : [];
     const publish = body.publish !== false; // default-on
     const r = await rosterRoute[url](participants, publish) as { ok: boolean };
-    await writeJson(res, r.ok ? 200 : 500, r);
+    // Roster-mutation failures are overwhelmingly user/permission errors —
+    // a member (non-admin) trying to change the roster, an invalid npub, etc.
+    // Return 4xx with the detail so the UI shows the actual reason instead of
+    // a generic "server error". (Operational verbs like reset/publish keep
+    // 500 — those are daemon failures, not bad requests.)
+    await writeJson(res, r.ok ? 200 : 400, r);
     return true;
   }
 
@@ -676,6 +693,34 @@ export async function handleNvpn(
     return true;
   }
 
+  // ── FIPS peer endpoints (NAT-traversal lever) ─────────────────────
+  if (url === '/api/nvpn/fips' && method === 'GET') {
+    await writeJson(res, 200, readNvpnFipsPeerEndpoints());
+    return true;
+  }
+  if (url === '/api/nvpn/fips/set' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const participant = typeof body.participant === 'string' ? body.participant : '';
+    const endpoint    = typeof body.endpoint === 'string' ? body.endpoint : '';
+    const r = setNvpnFipsEndpoint(participant, endpoint);
+    // Reload so the daemon re-dials the peer using the new endpoint.
+    if (r.ok) await reloadNvpn().catch(() => null);
+    // Always 200 — {ok} carries success; validation failures show inline in
+    // the UI rather than as a generic red error toast.
+    await writeJson(res, 200, r);
+    return true;
+  }
+  if (url === '/api/nvpn/fips/remove' && method === 'POST') {
+    const body = await parseJsonBody(req);
+    if (!body) { await writeJson(res, 400, { ok: false, detail: 'invalid JSON body' }); return true; }
+    const participant = typeof body.participant === 'string' ? body.participant : '';
+    const r = removeNvpnFipsEndpoint(participant);
+    if (r.ok) await reloadNvpn().catch(() => null);
+    await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+
   // ── Whois ─────────────────────────────────────────────────────────
   if (url === '/api/nvpn/whois' && method === 'POST') {
     const body = await parseJsonBody(req);
@@ -734,6 +779,34 @@ export async function handleNvpn(
     const body = await parseJsonBody(req) || {};
     const r = await doctorNvpn({ writeBundle: !!body.bundle });
     await writeJson(res, r.ok ? 200 : 500, r);
+    return true;
+  }
+  // Connectivity roll-up (#250). Runs `doctor` + `status` and folds them
+  // into one typed report via the pure analyzeConnectivity(); the Status
+  // panel renders this instead of the one-line natWarningFor banner.
+  // doctor is heavier than status, so this lives behind its own GET rather
+  // than the hot status poll. Read-only — no bundle written.
+  if (url === '/api/nvpn/connectivity' && method === 'GET') {
+    const [status, doc] = await Promise.all([probeNvpnStatus(), doctorNvpn()]);
+    // Pass the reconciled daemon-running truth (only when installed, so a
+    // not-installed box isn't mislabelled "daemon stopped") — #251.
+    const report = analyzeConnectivity(doc.raw ?? null, status.raw ?? null, {
+      daemonRunning: status.installed ? status.running : null,
+    });
+    // Echo whether doctor itself ran, so the UI can tell "analyzed: clear"
+    // from "couldn't run doctor" (e.g. binary missing) rather than guessing.
+    await writeJson(res, 200, { ...report, doctorOk: doc.ok, doctorDetail: doc.detail });
+    return true;
+  }
+  // Mesh-peer reachability (#256). Reads the DETAILED status.daemon.state.peers[]
+  // (stable participant_pubkey + FIPS reachability fields) and surfaces, per
+  // peer, whether it's reachable and pathing direct vs relayed. Distinct from
+  // /api/nvpn/relays/health, which tracks nostr publish relays.
+  if (url === '/api/nvpn/mesh-health' && method === 'GET') {
+    const status = await probeNvpnStatus();
+    const raw = status.raw as Record<string, any> | null;
+    const detailed = raw && raw.daemon && raw.daemon.state ? raw.daemon.state.peers : null;
+    await writeJson(res, 200, analyzeMeshPeers(detailed));
     return true;
   }
   // nat-discover is intentionally not surfaced as a button in the

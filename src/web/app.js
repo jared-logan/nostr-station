@@ -3,7 +3,10 @@
 // utilities (toast, modal, copy-button) at the bottom.
 
 import { previewRetryDecision } from './preview-retry.js';
+import { mergePeers, npubToHex } from './nvpn-peers.js';
 import { renderMarkdown, renderCodeBlock, proxyImageUrl, startMarkdownImageObserver } from './markdown.js';
+import { connectivityBannerCoverage } from './connectivity-coverage.js';
+import { isRelayTargetEligible } from './relay-eligibility.js';
 
 // Async-sign external markdown image URLs after every renderMarkdown
 // mount. With CSP img-src 'self' data: + /api/img-proxy signature
@@ -670,8 +673,29 @@ function confirmDestructive({ title, description, typeToConfirm, confirmLabel = 
 async function wireAdminUnlock(container) {
   const slot = container.querySelector('#vpn-admin-unlock');
   if (!slot) return;
+  // Cancel any in-flight auto-poll from a prior render of this slot (we set
+  // innerHTML, not replace the node, so a timer parked here survives).
+  if (slot._adminPoll) { clearTimeout(slot._adminPoll); slot._adminPoll = null; }
   let st = null;
-  try { st = await api('/api/nvpn/sudo/status', undefined, { silent: true }); } catch { slot.remove(); return; }
+  try { st = await api('/api/nvpn/sudo/status', undefined, { silent: true }); }
+  catch {
+    // Never silently delete the control on a transient status hiccup — that
+    // leaves the user staring at a Service tab with "no admin setup anywhere"
+    // (the exact symptom from the fresh-install report). Show an inline error
+    // + Retry instead so the path to setup is always reachable.
+    slot.innerHTML = `
+      <div class="vpn-empty-title">Admin access — status unavailable</div>
+      <p class="vpn-empty-detail muted" style="margin-top:6px">
+        Couldn't read admin-helper status just now (the dashboard API or daemon
+        may be briefly unavailable). Install / service actions need this — retry
+        in a moment.
+      </p>
+      <div class="vpn-meta-svc-actions" style="margin-top:10px">
+        <button id="vpn-admin-recheck" class="primary">Retry</button>
+      </div>`;
+    slot.querySelector('#vpn-admin-recheck')?.addEventListener('click', (e) => { e.preventDefault(); wireAdminUnlock(container); });
+    return;
+  }
   const ready = !!st?.ready && !!st?.rootOwned;
   const stale = ready && st?.manifestCurrent === false;
   if (ready && !stale) {
@@ -712,6 +736,22 @@ async function wireAdminUnlock(container) {
       try { await navigator.clipboard.writeText(st?.provisionCmd || ''); toast('Copied setup command', 'paste it into a terminal on the station', 'ok'); }
       catch { toast('Copy failed', 'select the command and copy manually', 'err'); }
     });
+    // Auto-poll so the user doesn't have to keep clicking "re-check" after
+    // pasting the command — the moment the helper + sudo grant go live we
+    // flip to the ready state on our own. Stops when ready, when the slot
+    // leaves the DOM (tab switched away), or when superseded by a re-render
+    // (cleared at the top of the next call).
+    const poll = async () => {
+      if (!document.body.contains(slot)) return;
+      let next = null;
+      try { next = await api('/api/nvpn/sudo/status', undefined, { silent: true }); } catch { /* keep waiting */ }
+      if (next?.ready && next?.rootOwned && next?.manifestCurrent !== false) {
+        wireAdminUnlock(container); // re-render → "✓ Admin access ready"
+        return;
+      }
+      slot._adminPoll = setTimeout(poll, 4000);
+    };
+    slot._adminPoll = setTimeout(poll, 4000);
   }
   slot.querySelector('#vpn-admin-recheck')?.addEventListener('click', (e) => { e.preventDefault(); wireAdminUnlock(container); });
 }
@@ -13726,6 +13766,7 @@ const VpnPanel = (() => {
   let lastService      = null;  // GET /api/nvpn/service/status
   let lastRoster       = null;  // GET /api/nvpn/roster
   let lastRelays       = null;  // GET /api/nvpn/relays
+  let lastMeshHealth   = null;  // GET /api/nvpn/mesh-health (#256)
   let lastNetworks     = null;  // GET /api/nvpn/networks  (full [[networks]] list)
   // Communities cross-reference: which communities are bound to which
   // nvpn networks. Refreshed alongside the rest of the panel data so
@@ -13739,6 +13780,13 @@ const VpnPanel = (() => {
   let lastDeployment   = null;  // GET /api/nvpn/deployment-context
   let lastSplitBrain   = null;  // GET /api/nvpn/split-brain
   let lastJoinRequests = null;  // GET /api/nvpn/join-requests
+  let lastConnectivity = null;  // GET /api/nvpn/connectivity (#255)
+  // Per-concern coverage flags, recomputed by renderConnectivityPanel each
+  // refresh. The legacy one-liner banners read these and step aside ONLY for
+  // the concern the panel is actually surfacing (#255, option 3) — a missing
+  // or empty report leaves them showing as a graceful fallback.
+  let connHidesNat   = false;
+  let connHidesStale = false;
 
   // Sub-tab switching is purely visual + lazy. Each sub-tab has a
   // render function that draws into bodyEl from the cached payloads.
@@ -13779,13 +13827,15 @@ const VpnPanel = (() => {
       return el;
     })();
     const w = lastDeployment && lastDeployment.warning ? lastDeployment.warning : null;
-    if (!w) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
+    // Step aside when the Connectivity panel is already surfacing this
+    // concern with specifics (#255 option 3) — but only then.
+    if (!w || connHidesNat) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
     slot.style.display = 'block';
     slot.className = `vpn-deployment-banner ${w.level}`;
     slot.innerHTML = `
       <div class="vpn-deployment-banner-row">
         <strong>${escapeHtml(w.summary)}</strong>
-        <a href="docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a>
+        <a href="https://github.com/jared-logan/nostr-station/blob/main/docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a>
       </div>
       <div class="muted vpn-deployment-banner-detail">${escapeHtml(w.detail)}</div>
     `;
@@ -13807,7 +13857,9 @@ const VpnPanel = (() => {
       return el;
     })();
     const stale = lastStatus && lastStatus.stale ? lastStatus.stale : null;
-    if (!stale) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
+    // Step aside when the Connectivity panel covers the daemon concern (a
+    // daemon.stopped card, or a clean verdict from a successful doctor run).
+    if (!stale || connHidesStale) { slot.innerHTML = ''; slot.style.display = 'none'; return; }
     slot.style.display = 'block';
     slot.className = 'vpn-deployment-banner warn';
     slot.innerHTML = `
@@ -13816,6 +13868,87 @@ const VpnPanel = (() => {
       </div>
       <div class="muted vpn-deployment-banner-detail">${escapeHtml(stale.detail || '')}</div>
     `;
+  }
+
+  // Connectivity panel (#255 / Layer-1 1.6). Renders the structured
+  // /api/nvpn/connectivity report — one overall verdict + a card per signal
+  // (each with its inline action) — replacing the vague natWarning/STUN
+  // one-liner with the specific causes the analyzer surfaces (daemon stopped,
+  // no public UDP, multi-homing, captive portal, no port mapping). The raw
+  // `doctor` bundle export in Diagnostics stays as the advanced escape hatch.
+  const CONN_VERDICT = {
+    reachable:               { cls: 'info',  label: 'Reachable' },
+    reachable_with_caveats:  { cls: 'warn',  label: 'Reachable — with caveats' },
+    unreachable:             { cls: 'error', label: 'Not reachable' },
+  };
+  const CONN_LEVEL_ICON = { ok: '✓', info: 'ℹ', warn: '▲', error: '✕' };
+
+  function renderConnectivityPanel() {
+    connHidesNat = connHidesStale = false;
+    const slot = $('vpn-connectivity-panel') || (() => {
+      const el = document.createElement('div');
+      el.id = 'vpn-connectivity-panel';
+      stripEl.parentNode.insertBefore(el, stripEl);
+      return el;
+    })();
+    const rep = lastConnectivity;
+    const verdict = rep && typeof rep.verdict === 'string' ? rep.verdict : 'unknown';
+    const signals = rep && Array.isArray(rep.signals) ? rep.signals : [];
+    // Nothing to say (no data / daemon+doctor both unknown) → hide and let
+    // the legacy banners fall back.
+    if (!rep || verdict === 'unknown') { slot.innerHTML = ''; slot.style.display = 'none'; return; }
+
+    const ids = new Set(signals.map(s => s && s.id));
+    let v = CONN_VERDICT[verdict] || { cls: 'warn', label: 'Connectivity' };
+    let headline = v.label;
+    if (verdict === 'unreachable' && ids.has('daemon.stopped')) headline = 'Not reachable — daemon stopped';
+
+    // Compute coverage via the shared pure helper (tested in
+    // tests/connectivity-coverage.test.ts) — only step on a banner whose
+    // concern we're showing.
+    ({ hidesNat: connHidesNat, hidesStale: connHidesStale } = connectivityBannerCoverage(rep));
+
+    const cards = signals.map((sig) => {
+      const level = ['ok', 'info', 'warn', 'error'].includes(sig.level) ? sig.level : 'info';
+      const icon  = CONN_LEVEL_ICON[level] || 'ℹ';
+      const act = sig.action && sig.action.kind
+        ? `<button class="vpn-conn-action" data-conn-action="${escapeHtml(sig.action.kind)}">${escapeHtml(sig.action.label || 'Fix')}</button>`
+        : '';
+      const detail = sig.detail ? `<div class="muted vpn-conn-card-detail">${escapeHtml(sig.detail)}</div>` : '';
+      return `<div class="vpn-conn-card ${level}">
+        <div class="vpn-conn-card-title"><span class="vpn-conn-ic">${icon}</span>${escapeHtml(sig.title || '')}</div>
+        ${detail}${act}
+      </div>`;
+    }).join('');
+
+    // Keep the deployment-guide link reachable from the panel when a public-
+    // path signal is up (we may be hiding the banner that used to carry it).
+    const guide = connHidesNat
+      ? `<div class="vpn-conn-foot muted"><a href="https://github.com/jared-logan/nostr-station/blob/main/docs/nvpn-deployment.md" target="_blank" rel="noopener noreferrer">deployment guide →</a></div>`
+      : '';
+
+    slot.style.display = 'block';
+    slot.className = `vpn-connectivity ${v.cls}`;
+    slot.innerHTML = `
+      <div class="vpn-conn-head">
+        <span class="vpn-conn-verdict">${escapeHtml(headline)}</span>
+      </div>
+      ${cards ? `<div class="vpn-conn-signals">${cards}</div>` : ''}
+      ${guide}
+    `;
+    slot.querySelectorAll('[data-conn-action]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const kind = btn.getAttribute('data-conn-action');
+        if (kind === 'start-daemon') {
+          btn.disabled = true;
+          await callNvpnAction('start', 'started');
+          await refresh();
+        } else if (kind === 'setup-relay') {
+          selectTab('relays');
+        }
+      });
+    });
   }
 
   // Split-brain banner (#58). Renders above the status strip when the
@@ -13994,7 +14127,7 @@ const VpnPanel = (() => {
   // whole panel — each sub-tab handles missing data with its own
   // empty-state.
   async function refresh() {
-    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs, communities] = await Promise.all([
+    const [s, svc, roster, relays, networks, deployment, splitBrain, joinReqs, communities, connectivity, meshHealth] = await Promise.all([
       api('/api/nvpn/status').catch(() => null),
       api('/api/nvpn/service/status').catch(() => null),
       api('/api/nvpn/roster').catch(() => null),
@@ -14004,6 +14137,8 @@ const VpnPanel = (() => {
       api('/api/nvpn/split-brain', undefined, { silent: true }).catch(() => null),
       api('/api/nvpn/join-requests', undefined, { silent: true }).catch(() => null),
       api('/api/communities', undefined, { silent: true }).catch(() => null),
+      api('/api/nvpn/connectivity', undefined, { silent: true }).catch(() => null),
+      api('/api/nvpn/mesh-health', undefined, { silent: true }).catch(() => null),
     ]);
     lastStatus       = s;
     lastService      = svc;
@@ -14014,6 +14149,11 @@ const VpnPanel = (() => {
     lastSplitBrain   = splitBrain;
     lastJoinRequests = joinReqs;
     lastCommunities  = communities;
+    lastConnectivity = connectivity;
+    lastMeshHealth   = meshHealth;
+    // Panel first — it computes the coverage flags the two banners below
+    // consult before deciding whether to step aside.
+    renderConnectivityPanel();
     renderDeploymentBanner();
     renderStaleStatusBanner();
     renderSplitBrainBanner();
@@ -14319,6 +14459,10 @@ const VpnPanel = (() => {
             <span class="vpn-meta-peers-counts muted">
               ${onlineCount} online · ${rosterAdmins.length} admin${rosterAdmins.length === 1 ? '' : 's'}
             </span>
+            ${(lastMeshHealth && lastMeshHealth.counts && lastMeshHealth.counts.unreachable > 0)
+              ? `<button id="vpn-redial-mesh" class="vpn-redial-btn"
+                    title="Reset peer state and re-dial the mesh — for stuck handshakes. Captures reachability before and after so you can see whether it helped.">re-dial mesh</button>`
+              : ''}
           </div>
           <div class="vpn-meta-peers-list">
             ${merged.length === 0
@@ -14514,6 +14658,23 @@ const VpnPanel = (() => {
             const current = peerEl.dataset.alias || '';
             await openAliasPrompt(id, current);
             await refresh();
+          } else if (btn.dataset.action === 'relay-via') {
+            // #257 — set this peer's FIPS endpoint to the chosen relay's
+            // address so the daemon dials it through that reachable peer.
+            const endpoint = btn.dataset.endpoint;
+            const relay = btn.dataset.relay || 'a reachable peer';
+            if (endpoint) {
+              const resp = await api('/api/nvpn/fips/set', {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ participant: id, endpoint }),
+              });
+              if (resp?.ok) {
+                toast('Routing via relay', `This peer will now be dialed via ${relay} (${endpoint}). Re-checking reachability…`, 'ok');
+              } else {
+                toast('Relay route failed', resp?.detail || 'Could not set the relay endpoint.', 'warn');
+              }
+              await refresh();
+            }
           } else {
             await peerAction(btn.dataset.action, id);
             await refresh();
@@ -14523,11 +14684,55 @@ const VpnPanel = (() => {
       });
     });
 
+    // Re-dial mesh (#258) — reset peer state + re-check reachability, with a
+    // before→after delta so the action isn't fire-and-forget.
+    const redialBtn = bodyEl.querySelector('#vpn-redial-mesh');
+    if (redialBtn) redialBtn.addEventListener('click', (e) => { e.preventDefault(); reDialMesh(redialBtn); });
+
     // Dashboard access via mesh — fetch the current mobile-access
     // config + render the toggle UI inline. Async so the rest of the
     // network body paints first; placeholder shows while loading.
     renderDashboardAccessSection();
   };
+
+  // #258 — reset relay/peer state then report the reachability delta. The
+  // re-dial reset is mesh-wide (the daemon exposes no per-peer reset), so the
+  // before/after is the roll-up reachable count. Handshakes need a few seconds
+  // to re-establish, hence the delayed re-check.
+  async function reDialMesh(btn) {
+    // peers/reset is mesh-WIDE — it drops and re-establishes every link, so
+    // currently-working peers blip too. Gate it like the other destructive
+    // verbs (#236 Stop/Remove) with an explicit confirm.
+    const ok = await confirmDestructive({
+      title: 'Re-dial the whole mesh?',
+      description: 'This resets ALL peer connections — every link drops and re-establishes, so peers that are working now will briefly disconnect. Reachability is re-checked afterward so you can see the result.',
+      confirmLabel: 'Re-dial mesh',
+    });
+    if (!ok) return;
+    const before = (lastMeshHealth && lastMeshHealth.counts) ? lastMeshHealth.counts.reachable : null;
+    if (btn) btn.disabled = true;
+    try {
+      const resp = await api('/api/nvpn/peers/reset', { method: 'POST' });
+      if (resp && resp.ok === false) {
+        toast('Re-dial failed', resp.detail || 'Could not reset peer state.', 'warn');
+        if (btn) btn.disabled = false;
+        return;
+      }
+      toast('Re-dialing mesh…', 'Reset peer state; re-establishing links. Re-checking reachability in a few seconds.', 'ok');
+      setTimeout(async () => {
+        await refresh();   // refetches mesh-health (and re-renders the row chips)
+        const after = (lastMeshHealth && lastMeshHealth.counts) ? lastMeshHealth.counts.reachable : null;
+        const total = (lastMeshHealth && lastMeshHealth.counts) ? lastMeshHealth.counts.total : null;
+        if (before != null && after != null) {
+          const delta = after - before;
+          const word = delta > 0 ? 'improved' : (delta < 0 ? 'dropped' : 'unchanged');
+          toast(`Re-dial ${word}`,
+                `Reachable peers ${before} → ${after}${total != null ? ` of ${total}` : ''}.`,
+                delta >= 0 ? 'ok' : 'warn');
+        }
+      }, 4000);
+    } catch { if (btn) btn.disabled = false; /* api() already toasted */ }
+  }
 
   // Renders the "Dashboard access via mesh" section into the slot
   // reserved by renderNetworkBody. Same persistence layer as the
@@ -14552,7 +14757,10 @@ const VpnPanel = (() => {
     // tunnel IP, show the concrete URL; otherwise show the bind
     // address + a hint about why it isn't actionable yet.
     const port    = location.port || (location.protocol === 'https:' ? 443 : 80);
-    const target  = (enabled && tunnelIp) ? `http://${tunnelIp}:${port}` : null;
+    // tunnel_ip carries a CIDR suffix (e.g. "10.44.0.5/32"); strip it or the
+    // URL becomes the unusable "http://10.44.0.5/32:3000".
+    const ipForUrl = tunnelIp ? tunnelIp.split('/')[0] : null;
+    const target  = (enabled && ipForUrl) ? `http://${ipForUrl}:${port}` : null;
     host.innerHTML = `
       <p class="form-help" style="margin:6px 0">
         This toggle controls whether nostr-station's dashboard
@@ -14580,7 +14788,9 @@ const VpnPanel = (() => {
           Toggle saved but not yet applied. Restart the dashboard from Config → About → Restart for changes to take effect.
         </div>
       ` : ''}
+      <div id="vpn-trusted-devices" class="vpn-section" style="margin-top:14px"></div>
     `;
+    renderTrustedDevices(host);
     const tog = host.querySelector('#vpn-dashboard-toggle');
     tog?.addEventListener('change', async () => {
       const next = tog.checked;
@@ -14595,6 +14805,58 @@ const VpnPanel = (() => {
         tog.checked = !next;  // revert on failure
         window.Toasts?.error?.(e?.message || String(e));
       }
+    });
+  }
+
+  // Trusted devices — the explicit allowlist of OTHER pubkeys (beyond your
+  // own) allowed past the connection-time mesh gate. Your own devices (phone
+  // + laptop sharing your pubkey via NIP-46) are already trusted and don't
+  // need listing. The mesh-origin gate + dashboard login still apply on top,
+  // so a listed device must also be on the mesh AND log in.
+  async function renderTrustedDevices(host) {
+    const slot = host.querySelector('#vpn-trusted-devices');
+    if (!slot) return;
+    let data = null;
+    try { data = await api('/api/trusted-devices', undefined, { silent: true }); } catch { slot.remove(); return; }
+    const keys = Array.isArray(data?.pubkeys) ? data.pubkeys : [];
+    slot.innerHTML = `
+      <div class="vpn-empty-title">Trusted devices <span class="muted" style="font-weight:normal">(mesh dashboard access)</span></div>
+      <p class="vpn-empty-detail muted" style="margin:6px 0 10px">
+        Pubkeys allowed to reach this dashboard from the mesh, in addition to
+        your own. They still need Mobile Access on, mesh connectivity, and a
+        dashboard login — this just lifts the connection-layer wall for them.
+      </p>
+      ${keys.length ? `<div class="vpn-kv">${keys.map(k => `
+        <div class="vpn-kv-row">
+          <span class="vpn-kv-key"><code title="${escapeHtml(k)}">${escapeHtml(truncNpub(k))}</code></span>
+          <button class="danger rm-trusted" data-k="${escapeHtml(k)}" style="margin-left:8px">Remove</button>
+        </div>`).join('')}</div>` : '<div class="vpn-empty-detail muted">No additional devices trusted.</div>'}
+      <div class="vpn-net-actions" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+        <input id="trusted-add-input" placeholder="device npub or 64-char hex pubkey" style="flex:1;min-width:240px">
+        <button id="trusted-add-btn" class="primary">Trust device</button>
+      </div>
+      <div id="trusted-add-err" class="err" style="display:none;margin-top:6px"></div>`;
+
+    slot.querySelectorAll('.rm-trusted').forEach(btn => btn.addEventListener('click', async (e) => {
+      e.preventDefault(); btn.disabled = true;
+      try { await api('/api/trusted-devices/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pubkey: btn.dataset.k }) }); }
+      catch { /* ignore */ }
+      renderTrustedDevices(host);
+    }));
+    const addBtn = slot.querySelector('#trusted-add-btn');
+    addBtn?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const input = slot.querySelector('#trusted-add-input');
+      const err = slot.querySelector('#trusted-add-err');
+      err.style.display = 'none';
+      const pubkey = (input.value || '').trim();
+      if (!pubkey) { err.textContent = 'enter an npub or hex pubkey'; err.style.display = 'block'; return; }
+      addBtn.disabled = true;
+      let r = null;
+      try { r = await api('/api/trusted-devices/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pubkey }) }, { silent: true }); }
+      catch { /* shown below */ }
+      if (r?.ok) { toast('Device trusted', 'it can now reach the dashboard over the mesh', 'ok'); renderTrustedDevices(host); }
+      else { err.textContent = r?.detail || 'could not add device'; err.style.display = 'block'; addBtn.disabled = false; }
     });
   }
 
@@ -15209,7 +15471,66 @@ const VpnPanel = (() => {
           </button>
         </div>
         <div id="vpn-diag-out" class="vpn-meta-diag-out muted">click an action to run it</div>
+        <div id="vpn-fips-section" class="vpn-section" style="margin-top:18px"></div>
       </div>`;
+  }
+
+  // Relay endpoints ([fips_peer_endpoints]) — the NAT-traversal lever. Behind
+  // NAT a peer often can't establish the relay link until you give it a
+  // reachable host:port; the diagnosis recommends this and this surface makes
+  // it a one-click write. Self-contained: GET the current map, list with
+  // remove, plus an add form.
+  async function renderFipsSection() {
+    const slot = bodyEl.querySelector('#vpn-fips-section');
+    if (!slot) return;
+    let data = null;
+    try { data = await api('/api/nvpn/fips', undefined, { silent: true }); } catch { slot.remove(); return; }
+    const eps = (data && data.endpoints && typeof data.endpoints === 'object') ? data.endpoints : {};
+    const rows = Object.entries(eps);
+    const aliasFor = (k) => { const a = lastRoster?.aliases?.[k]; return a ? `${escapeHtml(a)} · ` : ''; };
+    slot.innerHTML = `
+      <div class="vpn-empty-title">Relay endpoints <span class="muted" style="font-weight:normal">(NAT traversal)</span></div>
+      <p class="vpn-empty-detail muted" style="margin:6px 0 10px">
+        Behind NAT a peer may not connect until it has a reachable
+        <code>host:port</code>. If a peer shows reachable but never links, set
+        its endpoint here — the daemon re-dials on save.
+      </p>
+      ${rows.length ? `<div class="vpn-kv">${rows.map(([k, v]) => `
+        <div class="vpn-kv-row">
+          <span class="vpn-kv-key" title="${escapeHtml(k)}">${aliasFor(k)}${escapeHtml(truncNpub(k))}</span>
+          <span class="vpn-kv-val"><code>${escapeHtml(v)}</code></span>
+          <button class="danger rm-fips" data-k="${escapeHtml(k)}" style="margin-left:8px">Remove</button>
+        </div>`).join('')}</div>` : '<div class="vpn-empty-detail muted">No relay endpoints set.</div>'}
+      <div class="vpn-net-actions" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+        <input id="fips-peer" placeholder="peer npub or hex pubkey" style="flex:2;min-width:220px">
+        <input id="fips-endpoint" placeholder="host:port (e.g. 203.0.113.7:51820)" style="flex:1;min-width:160px">
+        <button id="fips-add" class="primary">Set endpoint</button>
+      </div>
+      <div id="fips-err" class="err" style="display:none;margin-top:6px"></div>`;
+
+    slot.querySelectorAll('.rm-fips').forEach(btn => btn.addEventListener('click', async (e) => {
+      e.preventDefault(); btn.disabled = true;
+      try {
+        const r = await api('/api/nvpn/fips/remove', { method: 'POST', body: JSON.stringify({ participant: btn.dataset.k }) });
+        toast('relay endpoint removed', r?.detail || '', r?.ok === false ? 'err' : 'ok');
+      } catch { /* toasted */ }
+      renderFipsSection();
+    }));
+    const addBtn = slot.querySelector('#fips-add');
+    addBtn?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const participant = slot.querySelector('#fips-peer').value.trim();
+      const endpoint = slot.querySelector('#fips-endpoint').value.trim();
+      const err = slot.querySelector('#fips-err');
+      err.style.display = 'none';
+      if (!participant || !endpoint) { err.textContent = 'peer and host:port are both required'; err.style.display = 'block'; return; }
+      addBtn.disabled = true;
+      let r = null;
+      try { r = await api('/api/nvpn/fips/set', { method: 'POST', body: JSON.stringify({ participant, endpoint }) }, { silent: true }); }
+      catch { /* may be 400 */ }
+      if (r?.ok) { toast('relay endpoint saved', 'daemon re-dialing', 'ok'); renderFipsSection(); }
+      else { err.textContent = r?.detail || 'could not save endpoint'; err.style.display = 'block'; addBtn.disabled = false; }
+    });
   }
   // Render the auto-run connectivity diagnosis into #vpn-diag-net-body.
   // Read-only (GET /api/nvpn/network-diagnosis) so it's safe to fire on
@@ -15432,6 +15753,7 @@ const VpnPanel = (() => {
       try { await renderNetworkDiagnosis(); } finally { netRefresh.disabled = false; }
     });
     void renderNetworkDiagnosis();
+    void renderFipsSection();
 
     const diagOut = bodyEl.querySelector('#vpn-diag-out');
     const setDiagOut = (text, level = 'info') => {
@@ -15701,89 +16023,51 @@ const VpnPanel = (() => {
     }
   }
 
-  // Roster + live peers rarely match exactly (live peers may show
-  // before the roster updates locally; offline roster entries never
-  // appear in live). Merge keys on hex pubkey or npub equivalence so
-  // the row count matches the user's mental model: "the people in my
-  // network."
-  function mergePeers(rosterParts, rosterAdmins, livePeers, aliases = {}) {
-    const adminSet = new Set(rosterAdmins.map(s => String(s).toLowerCase()));
-    const aliasLookup = new Map();
-    for (const [k, v] of Object.entries(aliases)) {
-      if (typeof k === 'string' && typeof v === 'string') {
-        aliasLookup.set(k.toLowerCase(), { aliasKey: k, alias: v });
-      }
-    }
-    // Live peers indexed three ways so we can match rostered entries by
-    // any identity field they happen to share. In 4.x the same physical
-    // node can appear under one identity in a live FIPS entry and a
-    // different identity in a config-roster entry; we use tunnel-IP as
-    // the tiebreaker. Without this, a rostered peer that's also been
-    // FIPS-discovered renders as TWO rows in the Network tab.
-    const liveByIdentity = new Map();
-    const liveByIp = new Map();
-    for (const lp of livePeers) {
-      const idKey = (lp.npub || lp.pubkey || '').toLowerCase();
-      if (idKey) liveByIdentity.set(idKey, lp);
-      const ipKey = (lp.ip || '').toLowerCase();
-      if (ipKey) liveByIp.set(ipKey, lp);
-    }
-    const out = [];
-    const seenIds = new Set();
-    const consumedLive = new Set();   // identity-keys of live peers already folded into a rostered row
-    const consumedLiveIps = new Set();
-    for (const p of rosterParts) {
-      const k = String(p).toLowerCase();
-      seenIds.add(k);
-      // Try identity first — that's the canonical join. Falls through
-      // to "any live entry whose tunnel_ip matches a rostered peer's
-      // tunnel_ip" via the second map. Roster entries don't carry a
-      // tunnel_ip themselves so the tunnel-IP join only fires when
-      // some other live peer (under a different identity) is already
-      // associated with this roster member's hex pubkey via a prior
-      // discovery — which is exactly the 4.x dup case.
-      let live = liveByIdentity.get(k);
-      if (live) { consumedLive.add(k); if (live.ip) consumedLiveIps.add(live.ip.toLowerCase()); }
-      const aliasEntry = aliasLookup.get(k);
-      out.push({
-        id:        p,
-        rosterKey: p,
-        live,
-        alias:     aliasEntry?.alias || null,
-        connected: !!live?.connected,
-        admin:     adminSet.has(k),
-        roster:    true,
-      });
-    }
-    // Second pass: live entries not yet folded into a rostered row.
-    // Dedup by tunnel_ip — if two live entries share the same IP
-    // (FIPS-overlay entry + raw discovered entry, common in 4.x),
-    // keep only the first. Anything truly novel goes through as
-    // "discovered (not in roster)."
-    for (const live of livePeers) {
-      const idKey = (live.npub || live.pubkey || '').toLowerCase();
-      if (idKey && consumedLive.has(idKey)) continue;
-      const ipKey = (live.ip || '').toLowerCase();
-      if (ipKey && consumedLiveIps.has(ipKey)) continue;
-      if (ipKey) consumedLiveIps.add(ipKey);
-      if (idKey) consumedLive.add(idKey);
-      const aliasEntry = aliasLookup.get(idKey);
-      out.push({
-        id:        live.npub || live.pubkey || live.ip || idKey || `peer-${out.length}`,
-        rosterKey: null,
-        live,
-        alias:     aliasEntry?.alias || null,
-        connected: !!live.connected,
-        admin:     false,
-        roster:    false,
-      });
-    }
-    return out;
+  // mergePeers + npubToHex now live in ./nvpn-peers.js (shared with
+  // unit tests) — they normalize npub↔hex so a rostered peer that is
+  // also FIPS-discovered renders as ONE row, not two.
+
+  // Match a peer row to its detailed mesh-health entry (#256). Keyed by
+  // participant_pubkey first (stable), then bare tunnel IP. Returns null when
+  // the daemon-state slice doesn't cover this peer (e.g. roster-only).
+  function meshHealthFor(p) {
+    const peers = lastMeshHealth && Array.isArray(lastMeshHealth.peers) ? lastMeshHealth.peers : null;
+    if (!peers) return null;
+    const pubkey = p.live && p.live.pubkey ? String(p.live.pubkey).toLowerCase() : null;
+    const ip = p.live && p.live.ip ? String(p.live.ip).split('/')[0] : null;
+    return peers.find(m => (pubkey && m.pubkey === pubkey) || (ip && m.tunnelIp === ip)) || null;
+  }
+  // Best relay-through candidate (#257): the lowest-latency reachable DIRECT
+  // peer (it has a dialable endpoint). Mirrors pickBestRelay() in
+  // nvpn-mesh-health.ts. Null when nothing is eligible.
+  function bestRelayCandidate() {
+    const peers = lastMeshHealth && Array.isArray(lastMeshHealth.peers) ? lastMeshHealth.peers : [];
+    const cands = peers.filter(p => p.reachable && p.path === 'direct' && p.endpoint);
+    if (!cands.length) return null;
+    return cands.slice().sort((a, b) => (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity))[0];
+  }
+  const shortPk = (pk) => (pk && pk.length > 12 ? `${pk.slice(0, 8)}…${pk.slice(-4)}` : (pk || ''));
+
+  // Human label for a mesh-health entry's path/state.
+  const MESH_PATH_LABEL = { direct: 'direct', relayed: 'relayed', none: 'no path' };
+  function meshPathChip(mh) {
+    if (!mh) return '';
+    // Prefer the path word; for an unreachable peer with no path, show why.
+    const word = mh.reachable
+      ? (MESH_PATH_LABEL[mh.path] || mh.path)
+      : (mh.state === 'never' ? 'never connected' : 'pending');
+    const lat = mh.latencyMs != null ? ` · ${mh.latencyMs}ms` : '';
+    const cls = mh.reachable ? (mh.path === 'relayed' ? 'relayed' : 'direct') : 'down';
+    const title = mh.reachable
+      ? `Pathing ${mh.path}${mh.latencyMs != null ? ` (${mh.latencyMs}ms FIPS RTT)` : ''}`
+      : `Not reachable${mh.detail ? ` — ${mh.detail}` : ''}`;
+    return `<span class="vpn-mesh-path ${cls}" title="${escapeHtml(title)}">${escapeHtml(word + lat)}</span>`;
   }
 
   function renderPeerRow(p) {
     const id  = p.id;
     const live = p.live;
+    const mh   = meshHealthFor(p);
     // Classify the peer state so we can render distinct UI states
     // (never_seen / reachable / stale / unreachable / online), each
     // with its own dot color + label. See classifyPeerState above.
@@ -15816,6 +16100,17 @@ const VpnPanel = (() => {
       ? '<button data-action="demote" title="Demote from admin">↓ admin</button>' : '';
     const removeBtn = p.roster
       ? '<button data-action="remove" class="danger" title="Remove from roster">remove</button>' : '';
+    // Relay-through (#257): for an unreachable peer, offer routing it via the
+    // best-reachable peer (the durable counterpart to the manual fips lever).
+    // Gated on presence recency (#279), not just !reachable — only offer it
+    // for peers that are online-but-unreachable (recent presence beacon), so
+    // genuinely-OFF peers (stale/0 last_mesh_seen_at) don't get a futile
+    // action. Also requires a candidate that isn't this same peer.
+    const selfPk = (live && live.pubkey ? String(live.pubkey).toLowerCase() : null);
+    const relay  = (mh && isRelayTargetEligible(mh, Date.now() / 1000)) ? bestRelayCandidate() : null;
+    const relayBtn = (relay && relay.pubkey && relay.pubkey !== selfPk)
+      ? `<button data-action="relay-via" data-endpoint="${escapeHtml(relay.endpoint)}" data-relay="${escapeHtml(shortPk(relay.pubkey))}" title="Route this peer via ${escapeHtml(shortPk(relay.pubkey))} (${escapeHtml(relay.endpoint)}) — the best-reachable peer. Sets a FIPS relay endpoint and reloads.">relay via ${escapeHtml(shortPk(relay.pubkey))}</button>`
+      : '';
     const truncId = id.length > 20 ? `${id.slice(0, 12)}…${id.slice(-6)}` : id;
     const labelHtml = p.alias
       ? `<span class="vpn-meta-peer-alias">${escapeHtml(p.alias)}</span>
@@ -15826,8 +16121,9 @@ const VpnPanel = (() => {
         <span class="dot ${dot}"></span>
         ${labelHtml}
         ${adminBadge}
+        ${meshPathChip(mh)}
         ${sub ? `<span class="muted vpn-meta-peer-sub">${escapeHtml(sub)}</span>` : ''}
-        <span class="vpn-meta-peer-actions">${pingBtn}${whoisBtn}${aliasBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
+        <span class="vpn-meta-peer-actions">${pingBtn}${whoisBtn}${relayBtn}${aliasBtn}${promoteBtn}${demoteBtn}${removeBtn}</span>
         <div class="vpn-meta-peer-pingout" hidden></div>
       </div>`;
   }

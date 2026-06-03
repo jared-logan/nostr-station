@@ -299,20 +299,33 @@ export function buildAdminProvisionCommand(opts?: {
   const helper64   = b64(renderAdminHelperScript());
   const manifest64 = b64(renderAdminManifest(tag, shas));
   const sudoers64  = b64(renderAdminSudoers(user));
-  const tmpSudoers = '/tmp/nostr-station-nvpn.sudoers';
-  // Each step is a single line (base64 is one token) joined by `&& \`.
+  // CRITICAL: `sudo` must NEVER appear inside a pipeline. The previous
+  // `printf … | base64 -d | sudo tee` form fails on a normal (password-
+  // prompting) sudo — sudo can't read a password when its stdin is the pipe,
+  // so it returns "sudo: a password is required" and provisioning dies. It
+  // only worked where sudo was already passwordless (e.g. an OrbStack VM).
+  //
+  // Fix: warm the credential cache once with `sudo -v` (a single clean
+  // prompt), decode each base64 body to an UNPRIVILEGED temp with NO sudo in
+  // the pipe, then `sudo install` it to its destination — install sets owner
+  // + mode atomically, so no separate chown/chmod. `mktemp` gives an
+  // unpredictable 0600 user-owned file, closing the /tmp TOCTOU window the
+  // old fixed sudoers temp had. The whole thing is one `&&` chain in a single
+  // shell, so the `H=`/`M=`/`S=` vars persist across steps.
   return [
+    `sudo -v`,
+    `H="$(mktemp)"`,
+    `printf %s '${helper64}' | base64 -d > "$H"`,
     `sudo install -d -m 0755 -o root -g root ${ADMIN_LIB_DIR}`,
-    `printf %s '${helper64}' | base64 -d | sudo tee ${ADMIN_HELPER} >/dev/null`,
-    `sudo chown root:root ${ADMIN_HELPER}`,
-    `sudo chmod 0755 ${ADMIN_HELPER}`,
-    `printf %s '${manifest64}' | base64 -d | sudo tee ${ADMIN_MANIFEST} >/dev/null`,
-    `sudo chown root:root ${ADMIN_MANIFEST}`,
-    `sudo chmod 0644 ${ADMIN_MANIFEST}`,
-    `printf %s '${sudoers64}' | base64 -d | sudo tee ${tmpSudoers} >/dev/null`,
-    `sudo visudo -cf ${tmpSudoers}`,
-    `sudo install -m 0440 -o root -g root ${tmpSudoers} ${ADMIN_SUDOERS}`,
-    `sudo rm -f ${tmpSudoers}`,
+    `sudo install -m 0755 -o root -g root "$H" ${ADMIN_HELPER}`,
+    `M="$(mktemp)"`,
+    `printf %s '${manifest64}' | base64 -d > "$M"`,
+    `sudo install -m 0644 -o root -g root "$M" ${ADMIN_MANIFEST}`,
+    `S="$(mktemp)"`,
+    `printf %s '${sudoers64}' | base64 -d > "$S"`,
+    `sudo visudo -cf "$S"`,
+    `sudo install -m 0440 -o root -g root "$S" ${ADMIN_SUDOERS}`,
+    `rm -f "$H" "$M" "$S"`,
   ].join(' && \\\n');
 }
 
