@@ -6,6 +6,7 @@ import { previewRetryDecision } from './preview-retry.js';
 import { mergePeers, npubToHex } from './nvpn-peers.js';
 import { renderMarkdown, renderCodeBlock, proxyImageUrl, startMarkdownImageObserver } from './markdown.js';
 import { connectivityBannerCoverage } from './connectivity-coverage.js';
+import { isRelayTargetEligible } from './relay-eligibility.js';
 
 // Async-sign external markdown image URLs after every renderMarkdown
 // mount. With CSP img-src 'self' data: + /api/img-proxy signature
@@ -16101,9 +16102,12 @@ const VpnPanel = (() => {
       ? '<button data-action="remove" class="danger" title="Remove from roster">remove</button>' : '';
     // Relay-through (#257): for an unreachable peer, offer routing it via the
     // best-reachable peer (the durable counterpart to the manual fips lever).
-    // Only when a candidate exists and it isn't this same peer.
+    // Gated on presence recency (#279), not just !reachable — only offer it
+    // for peers that are online-but-unreachable (recent presence beacon), so
+    // genuinely-OFF peers (stale/0 last_mesh_seen_at) don't get a futile
+    // action. Also requires a candidate that isn't this same peer.
     const selfPk = (live && live.pubkey ? String(live.pubkey).toLowerCase() : null);
-    const relay  = (mh && !mh.reachable) ? bestRelayCandidate() : null;
+    const relay  = (mh && isRelayTargetEligible(mh, Date.now() / 1000)) ? bestRelayCandidate() : null;
     const relayBtn = (relay && relay.pubkey && relay.pubkey !== selfPk)
       ? `<button data-action="relay-via" data-endpoint="${escapeHtml(relay.endpoint)}" data-relay="${escapeHtml(shortPk(relay.pubkey))}" title="Route this peer via ${escapeHtml(shortPk(relay.pubkey))} (${escapeHtml(relay.endpoint)}) — the best-reachable peer. Sets a FIPS relay endpoint and reloads.">relay via ${escapeHtml(shortPk(relay.pubkey))}</button>`
       : '';

@@ -37,6 +37,11 @@ export interface MeshPeerHealth {
   latencyMs:       number | null;
   /** null ⇒ never handshook. */
   lastHandshakeAt: number | null;
+  /** last_mesh_seen_at — the presence-beacon timestamp (secs), published
+   *  while the peer is online, independent of the FIPS link. Recent + not
+   *  reachable ⇒ online-but-unreachable (relay can help); 0/stale ⇒ offline.
+   *  Drives relay-target eligibility (#279). */
+  lastMeshSeenAt:  number | null;
   /** up = reachable; pending = down but handshook before; never = no handshake. */
   state:           PeerState;
   /** fips_transport_type — only set on a direct path. */
@@ -108,6 +113,7 @@ export function analyzeMeshPeers(peersRaw: unknown): MeshHealthReport {
       state,
       transportType:   path === 'direct' ? str(p.fips_transport_type) : null,
       endpoint:        path === 'direct' ? runtimeEndpoint : null,
+      lastMeshSeenAt:  num(p.last_mesh_seen_at),
       detail:          str(p.error),
     });
   }
