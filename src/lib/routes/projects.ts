@@ -374,7 +374,7 @@ export async function handleProjects(
 
     // Native nsite deploy (in-process pipeline over SSE). Must run before
     // handleProjectsExec so the old CLI shell-out can't claim the route.
-    if (tail === 'nsite/deploy') {
+    if (tail === 'nsite/deploy' || tail === 'nsite/deploy-defaults') {
       if (await handleProjectsNsiteDeploy(req, res, project, tail, method)) return true;
     }
 

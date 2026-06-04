@@ -11466,6 +11466,24 @@ const ProjectsPanel = (() => {
     titleInp.addEventListener('input', paintPreview);
     paintPreview();
 
+    // Prefill title + description from the server's default cascade (prior
+    // deploy → 30617 announcement → package.json). These are DEFAULTS — only
+    // applied when the user hasn't already typed into the field, so an edit
+    // made during the (relay-backed) round-trip is never clobbered.
+    api(`/api/projects/${p.id}/nsite/deploy-defaults`, undefined, { silent: true })
+      .then(d => {
+        if (!d) return;
+        if (typeof d.title === 'string' && d.title.trim()
+            && (titleInp.value === defaultTitle || !titleInp.value.trim())) {
+          titleInp.value = d.title;
+        }
+        if (typeof d.description === 'string' && d.description.trim() && !descInp.value.trim()) {
+          descInp.value = d.description;
+        }
+        paintPreview();
+      })
+      .catch(() => {});
+
     container.querySelector('.deploy-go').addEventListener('click', () => {
       const siteTitle   = (titleInp.value || '').trim() || p.name;
       const description = (descInp.value  || '').trim();

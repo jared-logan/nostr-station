@@ -160,6 +160,62 @@ export function ngitRemoteDTag(remote: string): string | null {
   return segs.length ? segs[segs.length - 1] : null;
 }
 
+// ── Deploy-form default resolution (pure) ────────────────────────────────────
+
+/** Title/description extracted from a prior kind:35128 manifest event. */
+export interface ManifestMeta { title: string; description: string }
+
+/**
+ * Pull the `title` / `description` tag values out of a kind:35128 manifest
+ * event (or anything tag-shaped). Missing tags → empty string. Pure.
+ */
+export function extractManifestMeta(event: { tags?: unknown } | null | undefined): ManifestMeta {
+  const tags = Array.isArray(event?.tags) ? (event!.tags as unknown[]) : [];
+  const get = (name: string): string => {
+    for (const t of tags) {
+      if (Array.isArray(t) && t[0] === name && typeof t[1] === 'string') return t[1];
+    }
+    return '';
+  };
+  return { title: get('title'), description: get('description') };
+}
+
+export interface DeployDefaultsInput {
+  /** Most recent prior kind:35128 deploy for this site, if any. */
+  priorDeploy?:             ManifestMeta | null;
+  /** `description` from the repo's kind:30617 announcement (read-only). */
+  announcementDescription?: string | null;
+  /** `description` from package.json. */
+  packageDescription?:      string | null;
+  /** Project name — the title fallback (current behavior). */
+  projectName:              string;
+}
+
+/**
+ * Resolve the deploy form's default title + description via a cascade. These
+ * are DEFAULTS the user can edit/clear before deploying — never forced at
+ * publish. Read-only of the 30617 (deploy still never writes the announcement).
+ *
+ *   description: prior deploy → 30617 announcement → package.json → ''
+ *   title:       prior deploy → project name
+ *
+ * Pure; exported for tests.
+ */
+export function resolveDeployDefaults(input: DeployDefaultsInput): ManifestMeta {
+  const firstNonEmpty = (...vals: (string | null | undefined)[]): string => {
+    for (const v of vals) if (typeof v === 'string' && v.trim()) return v.trim();
+    return '';
+  };
+  return {
+    title:       firstNonEmpty(input.priorDeploy?.title, input.projectName),
+    description: firstNonEmpty(
+      input.priorDeploy?.description,
+      input.announcementDescription,
+      input.packageDescription,
+    ),
+  };
+}
+
 // ── Build output discovery + walk ────────────────────────────────────────────
 
 const BUILD_DIR_CANDIDATES = ['dist', 'build', 'out', 'public'];
