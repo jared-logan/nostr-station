@@ -405,21 +405,27 @@ async function readPublishState(project: Project): Promise<any> {
 
   // suggestedEuc seeds the RECOVERY re-announce (Settings → "Announce now")
   // when no live 30617 exists, so the resurrected announcement keeps the euc
-  // anchor that tracks the repo across forks/renames. Prefer a reachable prior
-  // announcement's euc (cache-first via fetchRepoMeta) so we reuse the exact
-  // original; else derive it from the local checkout's earliest root commit —
-  // the SAME value ngit stamps, so a recovery can never write a DIFFERENT euc
-  // (which would fork the coordinate). Best-effort: the relay lookup degrades
-  // to local derivation on miss/timeout.
+  // anchor that tracks the repo across forks/renames. Derived from the local
+  // checkout's earliest root commit — the SAME value ngit stamps, so a
+  // recovery can never write a DIFFERENT euc (which would fork the
+  // coordinate). We deliberately do NOT issue a relay lookup here: this feeds
+  // synthRepoPrefill, which runs ONLY when no live announcement is reachable
+  // (the live case is prefilled client-side from the live repo), so a fresh
+  // fetch would miss and fall to local derivation anyway — at the cost of an
+  // 8s cold-cache timeout on every publish-state call (the Edit modal awaits
+  // it). As a free refinement we still prefer a WARM-CACHED prior announcement
+  // euc when one happens to be on disk — never a round-trip.
   let suggestedEuc = '';
-  if (ngitRemote) {
+  if (ngitRemote && project.path) {
     try {
-      const meta = await fetchRepoMeta(project, false);
-      const priorEuc = meta.repo?.euc;
+      const cached = getCached<RepoMeta>({
+        projectId: project.id, projectPath: project.path, key: 'repo-30617', ttlMs: REPO_CACHE_TTL_MS,
+      });
+      const priorEuc = cached?.euc;
       if (typeof priorEuc === 'string' && /^[0-9a-f]{40}$/.test(priorEuc.toLowerCase())) {
         suggestedEuc = priorEuc.toLowerCase();
       }
-    } catch { /* no reachable announcement — fall through to local git */ }
+    } catch { /* no warm cache — fall through to local derivation */ }
   }
   if (!suggestedEuc && isGitRepo && pPath) {
     suggestedEuc = await deriveLocalEuc(pPath);
