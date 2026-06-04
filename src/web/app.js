@@ -9657,14 +9657,27 @@ const ProjectsPanel = (() => {
     if (!identifier) identifier = p.name || 'repo';
 
     // Inherit the user's configured GRASP servers + npub (Config → Git).
-    // Falls back to the remote host alone if the fetch fails.
+    // Falls back to the remote host alone if the fetch fails. In parallel,
+    // pull publish-state for suggestedEuc — the server derives the repo's
+    // euc anchor (prior announcement if reachable, else the local root
+    // commit, matching ngit) so this recovery re-announce keeps the anchor
+    // instead of dropping it and forking the coordinate.
     let configGrasp = [];
     let npub = '';
-    try {
-      const cfg = await api('/api/identity/config', undefined, { silent: true });
-      if (Array.isArray(cfg?.graspServers)) configGrasp = cfg.graspServers;
-      if (typeof cfg?.npub === 'string') npub = cfg.npub;
-    } catch { /* fall back to remote host below */ }
+    let suggestedEuc = '';
+    const [cfgRes, pubRes] = await Promise.allSettled([
+      api('/api/identity/config', undefined, { silent: true }),
+      api(`/api/projects/${p.id}/publish-state`, undefined, { silent: true }),
+    ]);
+    if (cfgRes.status === 'fulfilled' && cfgRes.value) {
+      const cfg = cfgRes.value;
+      if (Array.isArray(cfg.graspServers)) configGrasp = cfg.graspServers;
+      if (typeof cfg.npub === 'string') npub = cfg.npub;
+    }
+    if (pubRes.status === 'fulfilled' && pubRes.value
+        && typeof pubRes.value.suggestedEuc === 'string') {
+      suggestedEuc = pubRes.value.suggestedEuc;
+    }
 
     const grasp = [...new Set([...(remoteGrasp ? [remoteGrasp] : []), ...configGrasp])];
     // One clone URL per grasp server — same pattern the publish wizard uses
@@ -9681,7 +9694,7 @@ const ProjectsPanel = (() => {
       description: p.description || '',
       web:         [],
       hashtags:    [],
-      euc:         '',
+      euc:         suggestedEuc,
       clone,
       relays:      grasp,
       maintainers: [],

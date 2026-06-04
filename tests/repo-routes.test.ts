@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { nip19 } from 'nostr-tools';
 
 const {
@@ -20,6 +21,7 @@ const {
   computeSuggestedHashtags,
   computeSuggestedOtherRelays,
   STATION_TOPIC,
+  deriveLocalEuc,
 } = await import('../src/lib/routes/repo.ts');
 
 const { isCanonicalClientTag, CLIENT_TAG, CLIENT_NAME } = await import('../src/lib/client-tag.ts');
@@ -898,4 +900,76 @@ test('buildRepoAnnounceTemplate: re-announce does NOT re-inject nostr-station wh
   const tTags = tpl.tags.filter(t => t[0] === 't').map(t => t[1]);
   assert.deepEqual(tTags, ['rust']);
   assert.ok(!tTags.includes(STATION_TOPIC), 'nostr-station NOT re-added on re-announce');
+});
+
+// ── Recovery prefill: euc is locally recoverable (deriveLocalEuc) ─────────
+//
+// When the announcement is genuinely missing, the synth prefill must still
+// carry the repo's euc anchor — derived the SAME way ngit does (earliest root
+// commit) so a recovery re-announce can't write a DIFFERENT euc and fork the
+// coordinate.
+
+function makeGitRepo(commits: number): { dir: string; rootSha: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-euc-'));
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com',
+    GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com',
+  };
+  const git = (...args: string[]): string =>
+    execFileSync('git', args, { cwd: dir, env, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  git('init', '-q');
+  // Disable commit signing locally — some environments globally enable it
+  // (gpg.program / commit.gpgsign), which would make `git commit` fail here.
+  git('config', 'commit.gpgsign', 'false');
+  git('config', 'tag.gpgsign', 'false');
+  let rootSha = '';
+  for (let i = 0; i < commits; i++) {
+    fs.writeFileSync(path.join(dir, `f${i}.txt`), `content ${i}\n`);
+    git('add', '-A');
+    git('commit', '-q', '-m', `commit ${i}`);
+    if (i === 0) rootSha = git('rev-list', '--max-parents=0', 'HEAD');
+  }
+  return { dir, rootSha };
+}
+
+test('deriveLocalEuc: returns the repo root commit for a checkout with history', async () => {
+  const { dir, rootSha } = makeGitRepo(3);
+  try {
+    const euc = await deriveLocalEuc(dir);
+    assert.match(euc, /^[0-9a-f]{40}$/);
+    assert.equal(euc, rootSha, 'euc == earliest root commit');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('deriveLocalEuc: empty string when the path is not a git repo', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ns-noeuc-'));
+  try { assert.equal(await deriveLocalEuc(dir), ''); }
+  finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('recovery prefill: synth-prefill announce (no live 30617) carries the derived euc, matching a normal re-announce', async () => {
+  const { dir, rootSha } = makeGitRepo(2);
+  try {
+    // suggestedEuc / synthRepoPrefill source the euc from deriveLocalEuc.
+    const euc = await deriveLocalEuc(dir);
+    const synth = buildRepoAnnounceTemplate(
+      {
+        identifier: 'beacon',
+        euc,                                   // ← was '' before the fix (euc dropped)
+        relays: ['wss://relay.ngit.dev'],
+        clone:  ['https://relay.ngit.dev/npub/beacon.git'],
+      },
+      null,                                    // no live event — genuine recovery
+      ANCHOR_HEX,
+    );
+    const rTag = synth.tags.find(t => t[0] === 'r');
+    assert.deepEqual(rTag, ['r', rootSha, 'euc'], 'synth re-announce carries the euc anchor');
+
+    // A normal re-announce prefills euc from the live event; with the same euc
+    // value the `r` tag is byte-identical — i.e. recovery never forks the
+    // coordinate by writing a different euc than a normal re-announce would.
+    const normal = buildRepoAnnounceTemplate({ identifier: 'beacon', euc: rootSha }, null, ANCHOR_HEX);
+    assert.deepEqual(rTag, normal.tags.find(t => t[0] === 'r'));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
