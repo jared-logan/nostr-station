@@ -292,6 +292,24 @@ async function gitRunBuffer(cwd: string, args: string[], timeoutMs = 5000): Prom
 
 // ── publish-state ────────────────────────────────────────────────────────
 
+/**
+ * Earliest-unique-commit derived from the local checkout: the earliest ROOT
+ * commit. `git rev-list --max-parents=0 HEAD` lists root commits newest-first,
+ * so the earliest root (the euc by convention) is the LAST line. This matches
+ * the value `ngit init` stamps as the repo's euc anchor — so a recovery
+ * re-announce reuses the SAME euc and can never fork the coordinate by writing
+ * a different one. Returns '' when it can't be derived (no git / detached HEAD
+ * / empty repo). One git call; exported for tests.
+ */
+export async function deriveLocalEuc(repoPath: string): Promise<string> {
+  if (!repoPath) return '';
+  try {
+    const roots = (await gitRun(repoPath, ['rev-list', '--max-parents=0', 'HEAD']))
+      .split(/\s+/).map(s => s.trim().toLowerCase()).filter(s => /^[0-9a-f]{40}$/.test(s));
+    return roots.length > 0 ? roots[roots.length - 1] : '';
+  } catch { return ''; }
+}
+
 /** The default-on, REMOVABLE discovery topic nostr-station-published repos
  *  carry (mirrors shakespeare.diy's t=shakespeare/mkstack). Lives in the
  *  form-default layer ONLY — buildRepoAnnounceTemplate never injects it — so a
@@ -385,6 +403,28 @@ async function readPublishState(project: Project): Promise<any> {
   // event is actually pushed (handleAnnounce publishes to both).
   const suggestedOtherRelays = computeSuggestedOtherRelays(getEffectiveReadRelays(), grasp);
 
+  // suggestedEuc seeds the RECOVERY re-announce (Settings → "Announce now")
+  // when no live 30617 exists, so the resurrected announcement keeps the euc
+  // anchor that tracks the repo across forks/renames. Prefer a reachable prior
+  // announcement's euc (cache-first via fetchRepoMeta) so we reuse the exact
+  // original; else derive it from the local checkout's earliest root commit —
+  // the SAME value ngit stamps, so a recovery can never write a DIFFERENT euc
+  // (which would fork the coordinate). Best-effort: the relay lookup degrades
+  // to local derivation on miss/timeout.
+  let suggestedEuc = '';
+  if (ngitRemote) {
+    try {
+      const meta = await fetchRepoMeta(project, false);
+      const priorEuc = meta.repo?.euc;
+      if (typeof priorEuc === 'string' && /^[0-9a-f]{40}$/.test(priorEuc.toLowerCase())) {
+        suggestedEuc = priorEuc.toLowerCase();
+      }
+    } catch { /* no reachable announcement — fall through to local git */ }
+  }
+  if (!suggestedEuc && isGitRepo && pPath) {
+    suggestedEuc = await deriveLocalEuc(pPath);
+  }
+
   // State derivation:
   //   published       → has an ngit remote (we can compute coordinates)
   //   local-only      → everything else (no `nostr.repo`, no `nostr://` origin)
@@ -405,6 +445,7 @@ async function readPublishState(project: Project): Promise<any> {
     suggestedGraspServer,
     suggestedGraspServers,
     suggestedOtherRelays,
+    suggestedEuc,
   };
 }
 
@@ -1153,14 +1194,9 @@ async function handleAnnounce(
       }
     }
     if (!input.euc && project.path) {
-      try {
-        // A repo can have multiple root commits (merged unrelated
-        // histories); rev-list emits newest-first, so the EARLIEST root —
-        // the EUC by convention — is last.
-        const roots = (await gitRun(project.path, ['rev-list', '--max-parents=0', 'HEAD']))
-          .split(/\s+/).map(s => s.trim().toLowerCase()).filter(s => /^[0-9a-f]{40}$/.test(s));
-        if (roots.length > 0) input.euc = roots[roots.length - 1];
-      } catch { /* no git / detached HEAD — emit without euc */ }
+      // Derive from the local checkout's earliest root commit — the same
+      // helper publish-state uses for suggestedEuc, so both paths agree.
+      input.euc = await deriveLocalEuc(project.path);
     }
   }
 
