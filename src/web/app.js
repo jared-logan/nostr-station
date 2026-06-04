@@ -8392,6 +8392,22 @@ const ProjectsPanel = (() => {
   //   - Other git servers (clone URLs, multi-value, https://)
   //   - Other maintainers — npub or hex, hex-decoded server-side
   //   - Custom tags (advanced) — preserves forward-compat tags
+
+  // Canonical topic form — MUST mirror normalizeTopic in
+  // src/lib/routes/repo.ts so a chip looks identical to what the server
+  // publishes. Trims; strips a leading '#'; collapses internal
+  // whitespace/commas to a single '-'; strips leading/trailing punctuation;
+  // lowercases. '' for anything empty after cleaning (callers drop those).
+  function normalizeTopic(raw) {
+    if (typeof raw !== 'string') return '';
+    return raw
+      .trim()
+      .replace(/^#+/, '')
+      .replace(/[\s,]+/g, '-')
+      .replace(/^\p{P}+|\p{P}+$/gu, '')
+      .toLowerCase();
+  }
+
   async function openEditRepositoryModal(p, repo, ms, onSaved) {
     // Server-computed defaults (App relays minus GRASP) used to pre-fill the
     // "Other relays" field ONLY when the prior announcement contributed none
@@ -8573,15 +8589,45 @@ const ProjectsPanel = (() => {
       });
       const topicInput = body.querySelector('[data-input="topic"]');
       if (topicInput) {
+        // Commit clean topic chips. `all` (Enter) commits the whole value;
+        // otherwise commit every token up to the last comma/space delimiter
+        // and keep the trailing partial in the field. Each token is run
+        // through normalizeTopic, so "nostr-station," / "a b c" / a pasted
+        // list each yield one clean chip per token — never a comma-laden or
+        // '#'-prefixed chip.
+        const commitTopics = (all) => {
+          const val = topicInput.value;
+          let toProcess = val, remainder = '';
+          if (!all) {
+            const m = val.match(/^(.*[\s,])([^\s,]*)$/);
+            if (!m) return;                     // no delimiter yet
+            toProcess = m[1]; remainder = m[2];
+          }
+          let added = false;
+          for (const tok of toProcess.split(/[\s,]+/)) {
+            const v = normalizeTopic(tok);
+            if (v && !state.topics.includes(v)) { state.topics.push(v); added = true; }
+          }
+          if (added) {
+            renderBody();
+            // Re-render wipes the input; restore the trailing partial + focus.
+            setTimeout(() => {
+              const inp = body.querySelector('[data-input="topic"]');
+              if (inp) { inp.value = remainder; inp.focus(); }
+            }, 0);
+          } else if (remainder !== val) {
+            topicInput.value = remainder;       // drop a stray lone delimiter
+          }
+        };
         topicInput.addEventListener('keydown', e => {
           if (e.key === 'Enter' && topicInput.value.trim()) {
             e.preventDefault();
-            const v = topicInput.value.trim().replace(/^#/, '');
-            if (v && !state.topics.includes(v)) state.topics.push(v);
-            renderBody();
-            // Re-focus into the input after re-render for fast multi-add.
-            setTimeout(() => body.querySelector('[data-input="topic"]')?.focus(), 0);
+            commitTopics(true);
           }
+        });
+        // Comma / space (typed or pasted) act as commit delimiters too.
+        topicInput.addEventListener('input', () => {
+          if (/[\s,]/.test(topicInput.value)) commitTopics(false);
         });
       }
 
@@ -8641,10 +8687,12 @@ const ProjectsPanel = (() => {
     save.addEventListener('click', async () => {
       // Commit any pending text in the topic chip-input that the user
       // didn't press Enter on. Otherwise typing a topic and clicking
-      // Save loses the topic silently — confusing.
-      const pendingTopic = body.querySelector('[data-input="topic"]')?.value?.trim().replace(/^#/, '');
-      if (pendingTopic && !state.topics.includes(pendingTopic)) {
-        state.topics.push(pendingTopic);
+      // Save loses the topic silently — confusing. Split on comma/space and
+      // normalize so a trailing token like "nostr-station," isn't saved
+      // malformed.
+      for (const tok of (body.querySelector('[data-input="topic"]')?.value || '').split(/[\s,]+/)) {
+        const v = normalizeTopic(tok);
+        if (v && !state.topics.includes(v)) state.topics.push(v);
       }
 
       save.disabled = true;
@@ -8679,7 +8727,7 @@ const ProjectsPanel = (() => {
         web:         state.web.map(s => s.trim()).filter(Boolean),
         clone:       state.cloneUrls.map(s => s.trim()).filter(Boolean),
         relays:      allRelays,
-        hashtags:    state.topics.map(s => s.trim().replace(/^#/, '')).filter(Boolean),
+        hashtags:    state.topics.map(normalizeTopic).filter(Boolean),
         maintainers,
         euc:         state.euc || null,
         customTags,

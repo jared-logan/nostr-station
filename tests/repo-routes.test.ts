@@ -22,6 +22,7 @@ const {
   computeSuggestedOtherRelays,
   STATION_TOPIC,
   deriveLocalEuc,
+  normalizeTopic,
 } = await import('../src/lib/routes/repo.ts');
 
 const { isCanonicalClientTag, CLIENT_TAG, CLIENT_NAME } = await import('../src/lib/client-tag.ts');
@@ -900,6 +901,54 @@ test('buildRepoAnnounceTemplate: re-announce does NOT re-inject nostr-station wh
   const tTags = tpl.tags.filter(t => t[0] === 't').map(t => t[1]);
   assert.deepEqual(tTags, ['rust']);
   assert.ok(!tTags.includes(STATION_TOPIC), 'nostr-station NOT re-added on re-announce');
+});
+
+// ── normalizeTopic + server backstop ──────────────────────────────────────
+//
+// beacon published t="nostr-station," (trailing comma) because nothing
+// stripped it. normalizeTopic is the shared contract; buildRepoAnnounceTemplate
+// is the authoritative backstop so no client can publish a malformed t tag.
+
+test('normalizeTopic: strips trailing comma / leading # / casing', () => {
+  assert.equal(normalizeTopic('nostr-station,'), 'nostr-station');
+  assert.equal(normalizeTopic('#Nostr-Station'), 'nostr-station');
+  assert.equal(normalizeTopic('  #FOO,  '), 'foo');
+});
+
+test('normalizeTopic: collapses internal whitespace/commas to a single hyphen', () => {
+  assert.equal(normalizeTopic(' a, b '), 'a-b');
+  assert.equal(normalizeTopic('a b c'), 'a-b-c');
+  assert.equal(normalizeTopic('hello   world'), 'hello-world');
+});
+
+test('normalizeTopic: empties / punctuation-only → ""', () => {
+  assert.equal(normalizeTopic(''), '');
+  assert.equal(normalizeTopic('   '), '');
+  assert.equal(normalizeTopic(',,,'), '');
+  assert.equal(normalizeTopic('###'), '');
+  assert.equal(normalizeTopic('---'), '');
+  assert.equal(normalizeTopic(null as any), '');
+});
+
+test('buildRepoAnnounceTemplate: backstop normalizes t tags (no comma, no #, lowercased)', () => {
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', hashtags: ['nostr-station,', '#Foo'] },
+    null,
+    ANCHOR_HEX,
+  );
+  const tTags = tpl.tags.filter(t => t[0] === 't');
+  assert.deepEqual(tTags, [['t', 'nostr-station'], ['t', 'foo']]);
+});
+
+test('buildRepoAnnounceTemplate: backstop drops empties and dedupes after normalization', () => {
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', hashtags: ['Foo', 'foo,', ',,', '   ', '#FOO'] },
+    null,
+    ANCHOR_HEX,
+  );
+  const tTags = tpl.tags.filter(t => t[0] === 't');
+  // 'Foo' / 'foo,' / '#FOO' all normalize to 'foo' → one tag; blanks dropped.
+  assert.deepEqual(tTags, [['t', 'foo']]);
 });
 
 // ── Recovery prefill: euc is locally recoverable (deriveLocalEuc) ─────────
