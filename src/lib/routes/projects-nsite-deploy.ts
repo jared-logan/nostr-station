@@ -17,20 +17,26 @@
  */
 
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
 import { spawn } from 'child_process';
 import { nip19 } from 'nostr-tools';
 import type { Project } from '../projects.js';
 import { updateProject, projectEnvContract } from '../projects.js';
-import { readIdentity } from '../identity.js';
+import { readIdentity, getEffectiveReadRelays } from '../identity.js';
 import { readNsiteConfig, effectiveDeployBlossomServers, effectiveDeployRelays } from '../nsite-config.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
-import { publishEventToRelays } from './repo.js';
+import { publishEventToRelays, fetchRepoMeta } from './repo.js';
+import { queryRelaysDirect, getTagValue, type NostrEvent } from '../nostr-query.js';
 import { detectBuildCommand } from '../ai-tools/build.js';
 import {
   deployFiles, resolveBuildDir, walkBuildDir, withSpaFallbacks, ngitRemoteDTag,
-  DEFAULT_NSITE_GATEWAY, type DeployDeps, type SignedEvent,
+  slugifyTitle, extractManifestMeta, resolveDeployDefaults,
+  DEFAULT_NSITE_GATEWAY, type DeployDeps, type SignedEvent, type ManifestMeta,
 } from '../nsite-deploy.js';
 import { readBody } from './_shared.js';
+
+const NSITE_MANIFEST_KIND = 35128;
 
 const REPO_ANNOUNCE_KIND      = 30617;
 const BUILD_TIMEOUT_MS        = 600_000;  // 10 min ceiling for big builds
@@ -43,6 +49,14 @@ export async function handleProjectsNsiteDeploy(
   tail: string,
   method: string,
 ): Promise<boolean> {
+  // Deploy-form defaults (read-only). Sources the title + description the
+  // form pre-fills with so a redeploy doesn't silently drop the description.
+  if (tail === 'nsite/deploy-defaults' && method === 'GET') {
+    const defaults = await resolveDeployFormDefaults(project);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(defaults));
+    return true;
+  }
   if (tail !== 'nsite/deploy' || method !== 'POST') return false;
 
   // Parse body up front (before we open the SSE stream).
@@ -229,4 +243,83 @@ function resolveSourceCoordinate(project: Project, ownerHex: string): string | u
 
 function ident_npubOf(hex: string): string | null {
   try { return nip19.npubEncode(hex); } catch { return null; }
+}
+
+// ── Deploy-form defaults ─────────────────────────────────────────────────────
+
+/**
+ * Resolve the deploy form's default { title, description }. READ-ONLY: this
+ * never writes or modifies the 30617 announcement (or the 35128 manifest) —
+ * it only sources sensible default values so a redeploy doesn't drop the
+ * site's description. Cascade (see resolveDeployDefaults):
+ *   description: prior 35128 deploy → 30617 announcement → package.json → ''
+ *   title:       prior 35128 deploy → project name
+ * Every relay/fs lookup is best-effort; failures degrade to the next source.
+ */
+async function resolveDeployFormDefaults(project: Project): Promise<ManifestMeta> {
+  let ownerHex = '';
+  try {
+    const ident = readIdentity();
+    ownerHex = ident.npub ? (nip19.decode(ident.npub).data as string) : '';
+  } catch { ownerHex = ''; }
+
+  // (1) Most recent prior deploy for this site.
+  let priorDeploy: ManifestMeta | null = null;
+  if (/^[0-9a-f]{64}$/.test(ownerHex)) {
+    try { priorDeploy = await findPriorDeploy(project, ownerHex); } catch { priorDeploy = null; }
+  }
+
+  // (2) The repo's 30617 announcement description (read-only — same fetch the
+  //     Overview uses, so it's usually warm in cache).
+  let announcementDescription: string | null = null;
+  try {
+    const meta = await fetchRepoMeta(project, false);
+    announcementDescription = meta.repo?.description || null;
+  } catch { announcementDescription = null; }
+
+  // (3) package.json description.
+  let packageDescription: string | null = null;
+  if (project.path) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(project.path, 'package.json'), 'utf8'));
+      if (typeof pkg.description === 'string') packageDescription = pkg.description;
+    } catch { /* no package.json */ }
+  }
+
+  return resolveDeployDefaults({
+    priorDeploy,
+    announcementDescription,
+    packageDescription,
+    projectName: project.name,
+  });
+}
+
+/**
+ * Find the most recent kind:35128 manifest this owner published for THIS
+ * project's site. Matches on the manifest `source` coordinate (when the
+ * project has an ngit remote) or the slug derived from the project name —
+ * the same d-tag a default-titled deploy produces. Returns its title +
+ * description, or null when nothing matches.
+ */
+async function findPriorDeploy(project: Project, ownerHex: string): Promise<ManifestMeta | null> {
+  const relays = getEffectiveReadRelays();
+  if (relays.length === 0) return null;
+  const result = await queryRelaysDirect({
+    filter: { kinds: [NSITE_MANIFEST_KIND], authors: [ownerHex], limit: 50 },
+    relays,
+    timeoutMs: 6_000,
+    stream: false,
+  });
+  const source   = resolveSourceCoordinate(project, ownerHex);
+  const wantSlug = slugifyTitle(project.name);
+  let best: NostrEvent | null = null;
+  for (const ev of result.events) {
+    if (ev.kind !== NSITE_MANIFEST_KIND || ev.pubkey !== ownerHex) continue;
+    const dTag     = getTagValue(ev, 'd');
+    const evSource = getTagValue(ev, 'source');
+    const matches  = (!!source && evSource === source) || dTag === wantSlug;
+    if (!matches) continue;
+    if (!best || (ev.created_at || 0) > (best.created_at || 0)) best = ev;
+  }
+  return best ? extractManifestMeta(best) : null;
 }

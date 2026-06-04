@@ -21,6 +21,8 @@ const {
   deployFiles,
   mimeForPath,
   DEFAULT_NSITE_GATEWAY,
+  extractManifestMeta,
+  resolveDeployDefaults,
   // @ts-expect-error — runtime import of .ts
 } = await import('../src/lib/nsite-deploy.ts');
 
@@ -48,6 +50,65 @@ test('pubkeyToBase36: deterministic + matches known-style prefix length', () => 
   const b = pubkeyToBase36(pk.toUpperCase());
   assert.equal(a, b); // case-insensitive input
   assert.equal(a.length, 50);
+});
+
+// ── deploy-form default resolution ───────────────────────────────────────────
+
+test('extractManifestMeta: pulls title + description tags from a 35128 event', () => {
+  const ev = { kind: 35128, tags: [['d', 'site'], ['title', 'My Site'], ['description', 'A nice site'], ['relay', 'wss://x']] };
+  assert.deepEqual(extractManifestMeta(ev), { title: 'My Site', description: 'A nice site' });
+});
+
+test('extractManifestMeta: missing tags → empty strings; tolerates junk', () => {
+  assert.deepEqual(extractManifestMeta({ tags: [['d', 'site']] }), { title: '', description: '' });
+  assert.deepEqual(extractManifestMeta(null), { title: '', description: '' });
+  assert.deepEqual(extractManifestMeta({}), { title: '', description: '' });
+});
+
+test('resolveDeployDefaults: description resolves from the 30617 announcement when no prior deploy', () => {
+  const out = resolveDeployDefaults({
+    priorDeploy:             null,
+    announcementDescription: 'From the repo announcement',
+    packageDescription:      'From package.json',
+    projectName:             'my-project',
+  });
+  assert.equal(out.description, 'From the repo announcement');   // 30617 wins over package.json
+  assert.equal(out.title, 'my-project');                        // title falls back to project name
+});
+
+test('resolveDeployDefaults: prefers the prior deploy description (and title) when one exists', () => {
+  const out = resolveDeployDefaults({
+    priorDeploy:             { title: 'Prior Title', description: 'Prior description' },
+    announcementDescription: 'From the repo announcement',
+    packageDescription:      'From package.json',
+    projectName:             'my-project',
+  });
+  assert.equal(out.description, 'Prior description');   // prior deploy beats the 30617
+  assert.equal(out.title, 'Prior Title');              // prior title beats project name
+});
+
+test('resolveDeployDefaults: cascades past empty/whitespace prior-deploy fields', () => {
+  // A prior deploy with a title but a blank description must fall through to
+  // the 30617 for the description, while still using its title.
+  const out = resolveDeployDefaults({
+    priorDeploy:             { title: 'Prior Title', description: '   ' },
+    announcementDescription: 'From the repo announcement',
+    packageDescription:      'From package.json',
+    projectName:             'my-project',
+  });
+  assert.equal(out.title, 'Prior Title');
+  assert.equal(out.description, 'From the repo announcement');
+});
+
+test('resolveDeployDefaults: falls to package.json then empty when nothing else set', () => {
+  assert.deepEqual(
+    resolveDeployDefaults({ projectName: 'proj', packageDescription: 'pkg desc' }),
+    { title: 'proj', description: 'pkg desc' },
+  );
+  assert.deepEqual(
+    resolveDeployDefaults({ projectName: 'proj' }),
+    { title: 'proj', description: '' },
+  );
 });
 
 test('pubkeyToBase36: rejects non-hex / wrong length', () => {
