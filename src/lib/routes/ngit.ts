@@ -174,7 +174,12 @@ export async function handleNgit(
         } catch {}
         try {
           const npub = nip19.npubEncode(ev.pubkey);
-          cloneUrl = `nostr://${npub}/${String(dTag)}`;
+          // Carry the in-scope relay set (same hints used for the naddr above)
+          // into the FULL 3-part remote form so a clone started from the
+          // Discover panel stores a remote WITH relay hints — not the bare
+          // `nostr://<npub>/<d-tag>` that zeroes relayHints (Bug 4). Matches
+          // the clone/explore fallbacks normalized in #284.
+          cloneUrl = buildNgitRemoteUrl(npub, String(dTag), relays);
         } catch {}
         repos.set(key, {
           pubkey: ev.pubkey,

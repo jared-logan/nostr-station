@@ -558,6 +558,19 @@ test('buildNgitRemoteUrl ↔ decodeNgitRemote: 3-part form yields non-empty rela
   assert.deepEqual(c?.relayHints, ['wss://relay.ngit.dev']);
 });
 
+test('discover-path remote → non-empty relayHints (every clone entry point carries hints)', () => {
+  // The Discover handler builds its remote with the in-scope GRASP relay set
+  // (getGraspServers()) via buildNgitRemoteUrl(npub, dTag, relays) — same call
+  // the clone/explore fallbacks use. A repo cloned from Discover must therefore
+  // store a remote that decodes to a non-empty relayHints, not the bare form.
+  const discoverRelays = ['wss://relay.ngit.dev', 'wss://git.shakespeare.diy'];
+  const remote = buildNgitRemoteUrl(NPUB, 'hello-world', discoverRelays);
+  const c = decodeNgitRemote({ remotes: { ngit: remote } });
+  assert.equal(c?.identifier, 'hello-world');
+  assert.deepEqual(c?.relayHints, ['wss://relay.ngit.dev']);   // first grasp host
+  assert.ok((c?.relayHints.length ?? 0) > 0, 'relayHints is non-empty');
+});
+
 // ── publishEventToRelays ────────────────────────────────────────────────
 //
 // Round-trip test against an in-process WebSocketServer mock. Stands up
