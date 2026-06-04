@@ -8392,7 +8392,16 @@ const ProjectsPanel = (() => {
   //   - Other git servers (clone URLs, multi-value, https://)
   //   - Other maintainers — npub or hex, hex-decoded server-side
   //   - Custom tags (advanced) — preserves forward-compat tags
-  function openEditRepositoryModal(p, repo, ms, onSaved) {
+  async function openEditRepositoryModal(p, repo, ms, onSaved) {
+    // Server-computed defaults (App relays minus GRASP) used to pre-fill the
+    // "Other relays" field ONLY when the prior announcement contributed none
+    // — so re-announcing an old repo (e.g. one that advertised only GRASP)
+    // defaults to advertising the App Relays it's actually published to. A
+    // non-empty prior list is the user's source of truth and is left as-is
+    // (anti-sticky: a removed App Relay stays removed). Best-effort.
+    const pub = await api(`/api/projects/${p.id}/publish-state`).catch(() => null);
+    const suggestedOtherRelays = Array.isArray(pub?.suggestedOtherRelays) ? pub.suggestedOtherRelays : [];
+    const derivedOtherRelays   = deriveOtherRelaysForEdit(ms);
     // Pre-fill arrays mutated by add/remove buttons in-modal. The
     // confirmed value is the array state at submit time.
     const state = {
@@ -8411,7 +8420,7 @@ const ProjectsPanel = (() => {
       graspServers: deriveGraspHostsForEdit(ms).length
                       ? deriveGraspHostsForEdit(ms)
                       : (repo.relays || []).slice(),
-      otherRelays:  deriveOtherRelaysForEdit(ms),
+      otherRelays:  derivedOtherRelays.length ? derivedOtherRelays : suggestedOtherRelays.slice(),
       cloneUrls:    (repo.clone || []).slice(),
       otherMaintainers: ((ms?.events || [])
         // Include the anchor's own maintainers tag — that's whose
