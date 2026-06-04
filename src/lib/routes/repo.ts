@@ -903,6 +903,29 @@ export function mergeRelaysTagValues(formRelays: string[], required: string[]): 
 }
 
 /**
+ * Normalize a single hashtag/topic to its canonical published form. Shared
+ * contract with the client's chip input so a topic looks identical no matter
+ * which layer cleaned it:
+ *   - trim outer whitespace;
+ *   - strip a leading '#';
+ *   - strip leading/trailing punctuation (commas etc.) — beacon published
+ *     t="nostr-station," because nothing stripped the trailing comma;
+ *   - collapse internal whitespace to single '-';
+ *   - lowercase (NIP-34 / gitworkshop convention — shakespeare uses lowercase
+ *     "shakespeare" / "mkstack").
+ * Returns '' for anything empty after cleaning (callers drop those). Pure.
+ */
+export function normalizeTopic(raw: string): string {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .trim()
+    .replace(/^#+/, '')                  // leading hashes
+    .replace(/[\s,]+/g, '-')             // internal whitespace/commas → single hyphen
+    .replace(/^\p{P}+|\p{P}+$/gu, '')    // strip leading/trailing punctuation (commas, stray hyphens, …)
+    .toLowerCase();
+}
+
+/**
  * Build the unsigned 30617 event template from form input + the prior
  * announcement (used to preserve tags the form doesn't surface, like
  * future tag types nostr-station hasn't learned about yet). Pure — no
@@ -942,8 +965,16 @@ export function buildRepoAnnounceTemplate(
     tags.push(['relays', ...relaysTag]);
   }
   // Hashtags emit ONE `t` tag per value (matches how relays index them).
+  // Authoritative backstop: normalize every topic the SAME way the client
+  // chip input does, drop anything empty after cleaning, and dedupe — so no
+  // client (native or future) can publish a malformed t tag like the
+  // trailing-comma "nostr-station," beacon shipped. Length cap kept.
+  const seenTopic = new Set<string>();
   for (const t of input.hashtags || []) {
-    if (typeof t === 'string' && t.length > 0 && t.length <= 64) tags.push(['t', t]);
+    const norm = normalizeTopic(typeof t === 'string' ? t : '');
+    if (!norm || norm.length > 64 || seenTopic.has(norm)) continue;
+    seenTopic.add(norm);
+    tags.push(['t', norm]);
   }
   // Maintainers: only the OTHER ones — the signer is the trust anchor by
   // construction and including their own pubkey here would be redundant.
