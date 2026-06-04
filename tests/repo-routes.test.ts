@@ -16,6 +16,10 @@ const {
   fetchRepoMeta,
   buildNgitRemoteUrl,
   mergeRelaySet,
+  mergeRelaysTagValues,
+  computeSuggestedHashtags,
+  computeSuggestedOtherRelays,
+  STATION_TOPIC,
 } = await import('../src/lib/routes/repo.ts');
 
 const { isCanonicalClientTag, CLIENT_TAG, CLIENT_NAME } = await import('../src/lib/client-tag.ts');
@@ -793,4 +797,105 @@ test('fetchRepoMeta: without App Relays in the union the same announcement is NO
     relay.close();
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
   }
+});
+
+// ── Feature A: `relays` tag advertises where the event is actually published ─
+//
+// The form's "Other relays" default + the guard-rail union ensure the written
+// `relays` tag covers GRASP ∪ App Relays without ever dropping the in-use
+// GRASP servers, while respecting a user's deliberate App-Relay removal.
+
+test('computeSuggestedOtherRelays: App relays minus GRASP, deduped, invalid filtered', () => {
+  const grasp = ['wss://relay.ngit.dev', 'wss://git.shakespeare.diy'];
+  const app   = ['wss://relay.damus.io', 'wss://relay.ngit.dev', 'wss://nos.lol', 'wss://nos.lol', 'not-a-url'];
+  assert.deepEqual(
+    computeSuggestedOtherRelays(app, grasp),
+    ['wss://relay.damus.io', 'wss://nos.lol'],   // ngit.dev removed (grasp), dupe + invalid dropped
+  );
+});
+
+test('first-publish defaults: GRASP ∪ "Other relays" default == GRASP ∪ App Relays', () => {
+  // The form advertises grasp (suggestedGraspServers) + other (suggestedOtherRelays);
+  // their union must equal GRASP ∪ App Relays so the relays tag matches the
+  // publish targets by default.
+  const grasp = ['wss://relay.ngit.dev', 'wss://git.shakespeare.diy'];
+  const app   = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.ngit.dev'];
+  const other = computeSuggestedOtherRelays(app, grasp);
+  const formUnion = [...new Set([...grasp, ...other])].sort();
+  const expected  = [...new Set([...grasp, ...app])].sort();
+  assert.deepEqual(formUnion, expected);
+});
+
+test('mergeRelaysTagValues: form order preserved, required (grasp) appended, deduped', () => {
+  assert.deepEqual(
+    mergeRelaysTagValues(['wss://nos.lol', 'wss://relay.ngit.dev'], ['wss://relay.ngit.dev', 'wss://git.shakespeare.diy']),
+    ['wss://nos.lol', 'wss://relay.ngit.dev', 'wss://git.shakespeare.diy'],
+  );
+});
+
+test('buildRepoAnnounceTemplate: relays tag ALWAYS advertises in-use GRASP even when form relays empty', () => {
+  // Guard rail: a re-announce with no form relays must still publish a
+  // `relays` tag carrying the in-use grasp — otherwise nostr:// clones break.
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', relays: [], requiredRelays: ['wss://relay.ngit.dev'] },
+    null,
+    ANCHOR_HEX,
+  );
+  assert.deepEqual(tpl.tags.find(t => t[0] === 'relays'), ['relays', 'wss://relay.ngit.dev']);
+});
+
+test('buildRepoAnnounceTemplate: re-announce never drops the in-use GRASP servers from relays', () => {
+  // User kept only App Relays in the form (trimmed grasp); the guard rail
+  // re-adds the in-use grasp so the announcement still advertises it.
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', relays: ['wss://relay.damus.io'], requiredRelays: ['wss://relay.ngit.dev'] },
+    null,
+    ANCHOR_HEX,
+  );
+  const relays = tpl.tags.find(t => t[0] === 'relays');
+  assert.ok(relays?.includes('wss://relay.ngit.dev'), 'in-use grasp retained');
+  assert.ok(relays?.includes('wss://relay.damus.io'), 'app relay retained');
+});
+
+test('buildRepoAnnounceTemplate: App Relays are NOT force-re-added (anti-sticky) — only grasp is required', () => {
+  // A user who removed an App Relay (it's absent from form relays) must not
+  // see it forced back; requiredRelays carries grasp only.
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', relays: ['wss://relay.ngit.dev'], requiredRelays: ['wss://relay.ngit.dev'] },
+    null,
+    ANCHOR_HEX,
+  );
+  const relays = tpl.tags.find(t => t[0] === 'relays');
+  assert.deepEqual(relays, ['relays', 'wss://relay.ngit.dev']);
+  assert.ok(!relays?.includes('wss://relay.damus.io'), 'removed app relay stays removed');
+});
+
+// ── Feature B: default-on, REMOVABLE nostr-station topic ──────────────────
+
+test('computeSuggestedHashtags: appends nostr-station; not doubled if keywords already have it', () => {
+  assert.deepEqual(computeSuggestedHashtags(['rust', 'nostr']), ['rust', 'nostr', STATION_TOPIC]);
+  assert.deepEqual(computeSuggestedHashtags([]), [STATION_TOPIC]);
+  // Already present → kept once, no duplicate.
+  const out = computeSuggestedHashtags(['nostr-station', 'app']);
+  assert.deepEqual(out, ['nostr-station', 'app']);
+  assert.equal(out.filter(t => t === STATION_TOPIC).length, 1);
+});
+
+test('buildRepoAnnounceTemplate: re-announce does NOT re-inject nostr-station when prior t tags lack it', () => {
+  // Anti-sticky regression guard: the topic default lives in the form layer,
+  // NOT in buildRepoAnnounceTemplate. On re-announce the form loads the prior
+  // event's `t` tags into input.hashtags; if the user had removed
+  // nostr-station, the output must not re-add it.
+  const prior: any = {
+    kind: 30617,
+    tags: [['d', 'blip'], ['t', 'rust']],   // nostr-station deliberately absent
+  };
+  const tpl = buildRepoAnnounceTemplate(
+    { identifier: 'blip', hashtags: ['rust'] },   // form-loaded prior topics, no station topic
+    prior,
+    ANCHOR_HEX,
+  );
+  const tTags = tpl.tags.filter(t => t[0] === 't').map(t => t[1]);
+  assert.deepEqual(tTags, ['rust']);
+  assert.ok(!tTags.includes(STATION_TOPIC), 'nostr-station NOT re-added on re-announce');
 });

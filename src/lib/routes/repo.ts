@@ -292,6 +292,41 @@ async function gitRunBuffer(cwd: string, args: string[], timeoutMs = 5000): Prom
 
 // ── publish-state ────────────────────────────────────────────────────────
 
+/** The default-on, REMOVABLE discovery topic nostr-station-published repos
+ *  carry (mirrors shakespeare.diy's t=shakespeare/mkstack). Lives in the
+ *  form-default layer ONLY — buildRepoAnnounceTemplate never injects it — so a
+ *  user who deletes the chip keeps it deleted on re-announce. */
+export const STATION_TOPIC = 'nostr-station';
+
+/** First-publish hashtag defaults: package.json-derived keywords plus the
+ *  STATION_TOPIC, deduped so a project whose keywords already list it isn't
+ *  doubled. */
+export function computeSuggestedHashtags(pkgKeywords: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const k of [...pkgKeywords, STATION_TOPIC]) {
+    if (typeof k !== 'string') continue;
+    const v = k.trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
+/** Announce-form "Other relays" default — the user's effective read/App
+ *  relays minus the GRASP servers (which are advertised separately). Deduped,
+ *  valid wss/ws only. Pre-fills the field so the written `relays` tag
+ *  advertises where the event is actually published (GRASP + App Relays),
+ *  not just GRASP. */
+export function computeSuggestedOtherRelays(appRelays: string[], grasp: string[]): string[] {
+  const graspSet = new Set(grasp.filter(isValidRelayUrl));
+  return appRelays
+    .filter(isValidRelayUrl)
+    .filter((r) => !graspSet.has(r))
+    .filter((r, i, a) => a.indexOf(r) === i);
+}
+
 async function readPublishState(project: Project): Promise<any> {
   const pPath = project.path;
   const isGitRepo = !!pPath && fs.existsSync(path.join(pPath, '.git'));
@@ -301,7 +336,7 @@ async function readPublishState(project: Project): Promise<any> {
   // its `name`, `description`, and `keywords` fields when present.
   let detectedName        = project.name;
   let detectedDescription = '';
-  let suggestedHashtags: string[] = [];
+  let pkgKeywords: string[] = [];
   if (pPath) {
     const pkgPath = path.join(pPath, 'package.json');
     try {
@@ -315,12 +350,16 @@ async function readPublishState(project: Project): Promise<any> {
         detectedDescription = pkg.description.trim().slice(0, 280);
       }
       if (Array.isArray(pkg.keywords)) {
-        suggestedHashtags = pkg.keywords
+        pkgKeywords = pkg.keywords
           .filter((k: any): k is string => typeof k === 'string' && /^[a-z0-9-]{1,32}$/i.test(k))
           .slice(0, 8);
       }
     } catch { /* no package.json — fall back to project.name */ }
   }
+  // Default the Topics field to the package keywords + the removable
+  // STATION_TOPIC so nostr-station-published repos are discoverable via
+  // #nostr-station out of the box (editable; never re-injected server-side).
+  const suggestedHashtags = computeSuggestedHashtags(pkgKeywords);
   let detectedBranch = 'main';
   let hasOrigin = false;
   let originUrl: string | null = null;
@@ -340,6 +379,11 @@ async function readPublishState(project: Project): Promise<any> {
   // rather than just the first one.
   const suggestedGraspServer  = grasp[0] ?? 'wss://relay.ngit.dev';
   const suggestedGraspServers = grasp.length ? grasp : ['wss://relay.ngit.dev'];
+  // "Other relays" default = the user's App/read relays minus GRASP. Combined
+  // with the grasp default this makes the form's relay fields advertise the
+  // full publish set (GRASP ∪ App Relays) by default — matching where the
+  // event is actually pushed (handleAnnounce publishes to both).
+  const suggestedOtherRelays = computeSuggestedOtherRelays(getEffectiveReadRelays(), grasp);
 
   // State derivation:
   //   published       → has an ngit remote (we can compute coordinates)
@@ -360,6 +404,7 @@ async function readPublishState(project: Project): Promise<any> {
     suggestedHashtags,
     suggestedGraspServer,
     suggestedGraspServers,
+    suggestedOtherRelays,
   };
 }
 
@@ -788,6 +833,26 @@ interface AnnounceInput {
   maintainers?:      string[];           // OTHER maintainers (hex pubkeys); anchor is auto-added
   euc?:              string | null;      // earliest-unique-commit
   customTags?:       string[][];         // forward-compat ['name', ...vals]; preserved verbatim
+  requiredRelays?:   string[];           // in-use GRASP servers ALWAYS advertised in `relays` (guard rail)
+}
+
+/** Union the form's relay list with the relays that MUST be advertised
+ *  (the in-use GRASP servers) — form order preserved, required relays not
+ *  already present appended. Guarantees a published announcement never omits
+ *  its grasp (which would break `nostr://` clones) WITHOUT forcing App Relays
+ *  back in if the user removed them — only GRASP is guaranteed; App Relays
+ *  stay a form-level default. Deduped; pure. */
+export function mergeRelaysTagValues(formRelays: string[], required: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of [...formRelays, ...required]) {
+    if (typeof r !== 'string') continue;
+    const v = r.trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
 }
 
 /**
@@ -818,8 +883,16 @@ export function buildRepoAnnounceTemplate(
   if (input.web?.length) {
     tags.push(['web', ...input.web]);
   }
-  if (input.relays?.length) {
-    tags.push(['relays', ...input.relays]);
+  // Always advertise the in-use GRASP servers (requiredRelays) in the
+  // `relays` tag — an announcement that omits its grasp can't be cloned via
+  // nostr://. Unioned with the form's relays (form first, preserving order
+  // AND the user's choice to include/exclude App Relays). We deliberately do
+  // NOT force App Relays in here — that's a form-level default only, so a
+  // removed App Relay stays removed on re-announce (anti-sticky, same
+  // principle as the client tag).
+  const relaysTag = mergeRelaysTagValues(input.relays || [], input.requiredRelays || []);
+  if (relaysTag.length) {
+    tags.push(['relays', ...relaysTag]);
   }
   // Hashtags emit ONE `t` tag per value (matches how relays index them).
   for (const t of input.hashtags || []) {
@@ -998,6 +1071,12 @@ async function handleAnnounce(
                  ? body.euc.toLowerCase()
                  : null,
     customTags:  tagArr(body.customTags),
+    // Guard rail: the in-use GRASP servers are ALWAYS advertised in the
+    // `relays` tag (normalized to wss://) so a re-announce can never drop the
+    // grasp the repo is hosted on — which would break nostr:// clones.
+    requiredRelays: getGraspServers()
+      .map(s => /^wss?:\/\//i.test(s) ? s : `wss://${s}`)
+      .filter(isValidRelayUrl),
   };
 
   // Owner-only guard: the signed-in pubkey must equal the trust anchor
