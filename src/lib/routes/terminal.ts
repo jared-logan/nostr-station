@@ -141,12 +141,16 @@ export function mountTerminalWebSocket(
   ctx: {
     allowedHosts: Set<string>;
     isLoopbackUrl: (u: string | undefined | null) => boolean;
+    port: number;
+    meshHostMatches: (host: string | undefined | null, localAddr: string | undefined | null, port: number) => boolean;
+    meshUrlMatches: (url: string | undefined | null, localAddr: string | undefined | null, port: number) => boolean;
+    computeMeshTrusted: (remoteAddr: string | undefined | null) => Promise<boolean>;
   },
 ): void {
-  const { allowedHosts, isLoopbackUrl } = ctx;
+  const { allowedHosts, isLoopbackUrl, port, meshHostMatches, meshUrlMatches, computeMeshTrusted } = ctx;
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD });
 
-  server.on('upgrade', (req, socket, head) => {
+  server.on('upgrade', async (req, socket, head) => {
     const url = req.url || '';
     // Only act on /api/terminal/ws/* URLs — other upgrade handlers (e.g.
     // relay-proxy in routes/relay-proxy.ts) own different path prefixes
@@ -160,18 +164,26 @@ export function mountTerminalWebSocket(
     }
     const sessionId = match[1];
 
-    // Mirror the HTTP Host + Origin checks at the WebSocket layer.
-    // Browsers always send Origin on upgrade handshakes, so rejecting
-    // missing/foreign Origin blocks cross-origin WS attempts (e.g. a
-    // malicious page trying to attach to a live terminal session).
+    // Mirror the HTTP layer's H1 (Host) + H2 (Origin) checks at the WebSocket
+    // layer, INCLUDING the Mobile-Access relaxation: a trusted mesh peer whose
+    // Host/Origin pin to the dashboard's actual bound interface is accepted, so
+    // the terminal connects over the nvpn tunnel exactly where the dashboard's
+    // HTTP API already does. A cross-origin page (DNS rebinding from evil.com)
+    // still fails — its Origin won't equal the tunnel-IP interface. Browsers
+    // always send Origin on upgrade handshakes; a missing/foreign Origin is
+    // treated as hostile. Fail closed: computeMeshTrusted returns false for
+    // loopback remotes (which fall back to the allowedHosts gate) and on error.
     const hostHeader = String(req.headers['host'] || '').toLowerCase();
-    if (!allowedHosts.has(hostHeader)) {
+    const remoteAddr = req.socket.remoteAddress;
+    const localAddr  = req.socket.localAddress;
+    const meshTrusted = await computeMeshTrusted(remoteAddr);
+    if (!allowedHosts.has(hostHeader) && !(meshTrusted && meshHostMatches(hostHeader, localAddr, port))) {
       socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
       socket.destroy();
       return;
     }
     const wsOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
-    if (!isLoopbackUrl(wsOrigin)) {
+    if (!isLoopbackUrl(wsOrigin) && !(meshTrusted && meshUrlMatches(wsOrigin, localAddr, port))) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
