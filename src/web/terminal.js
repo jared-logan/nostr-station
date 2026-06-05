@@ -23,10 +23,11 @@
 (() => {
   'use strict';
 
-  const LS_TABS     = 'ns-term-tabs';     // JSON [{ id, label }, …]
-  const LS_ACTIVE   = 'ns-term-active';   // id of the active tab
-  const LS_EXPANDED = 'ns-term-expanded'; // '1' | '0'
-  const LS_HEIGHT   = 'ns-term-height';   // pixel height of expanded panel
+  const LS_TABS        = 'ns-term-tabs';        // JSON [{ id, label }, …]
+  const LS_ACTIVE      = 'ns-term-active';      // id of the active tab
+  const LS_EXPANDED    = 'ns-term-expanded';    // '1' | '0'
+  const LS_HEIGHT      = 'ns-term-height';      // pixel height of expanded panel
+  const LS_KEYS_HIDDEN = 'ns-term-keys-hidden'; // '1' | '0' — mobile extra-keys row
 
   // Floor keeps 8+ rows readable; ceiling keeps header + sidebar visible.
   const MIN_HEIGHT_PX = 180;
@@ -66,6 +67,12 @@
   /** @type {Array<Tab>} */
   const tabs = [];
   let activeIdx = -1;
+
+  // Sticky-Ctrl modifier for the mobile extra-keys row: when armed, the next
+  // single letter (from the keys row OR the soft keyboard) is sent as its
+  // control code. Module-scoped so it's shared across the keys row and the
+  // per-tab input bridge.
+  let ctrlSticky = false;
 
   // Shape of a Tab (documented here so IDE autocomplete in the block below
   // gives useful hints, even without TS types):
@@ -321,6 +328,80 @@
     }
   }
 
+  // ── Mobile extra-keys row ───────────────────────────────────────────────────
+  // Terminal byte sequences for the on-screen accessory keys (#term-keys).
+  const KEY_SEQ = {
+    esc:      '\x1b',
+    tab:      '\t',
+    'ctrl-c': '\x03',
+    up:       '\x1b[A',
+    down:     '\x1b[B',
+    left:     '\x1b[D',
+    right:    '\x1b[C',
+  };
+
+  function updateCtrlVisual() {
+    for (const b of document.querySelectorAll('.term-key-ctrl')) {
+      b.setAttribute('aria-pressed', ctrlSticky ? 'true' : 'false');
+    }
+  }
+
+  // Send user text to the PTY, applying a pending sticky-Ctrl to a single
+  // letter (a–z → control code). Anything else passes through untouched; a
+  // sticky-Ctrl followed by a non-letter is simply cleared. Used by both the
+  // soft-keyboard bridge and the extra-keys row.
+  function emitText(tab, text) {
+    if (ctrlSticky && text && text.length === 1) {
+      const code = text.toLowerCase().charCodeAt(0);
+      ctrlSticky = false;
+      updateCtrlVisual();
+      if (code >= 97 && code <= 122) { sendInputBytes(tab, String.fromCharCode(code - 96)); return; }
+    }
+    sendInputBytes(tab, text);
+  }
+
+  function handleExtraKey(seq) {
+    if (seq === 'ctrl') { ctrlSticky = !ctrlSticky; updateCtrlVisual(); return; }
+    const bytes = KEY_SEQ[seq];
+    if (bytes == null) return;
+    const tab = tabs[activeIdx];
+    if (!tab) return;
+    sendInputBytes(tab, bytes);
+    if (ctrlSticky) { ctrlSticky = false; updateCtrlVisual(); }
+  }
+
+  function wireExtraKeys() {
+    const row = $('term-keys');
+    if (row) {
+      for (const btn of row.querySelectorAll('.term-key')) {
+        const seq = btn.getAttribute('data-seq');
+        // Act on press, NOT click: preventDefault on touchstart/mousedown keeps
+        // focus on the hidden textarea, so tapping a key never blurs the
+        // keyboard (when up) or re-opens it (when the user minimized it) — and
+        // it makes the key feel instant. On touch, the touchstart preventDefault
+        // also suppresses the emulated mousedown/click, so we fire exactly once.
+        const fire = (e) => { e.preventDefault(); handleExtraKey(seq); };
+        btn.addEventListener('touchstart', fire, { passive: false });
+        btn.addEventListener('mousedown', fire);
+        btn.addEventListener('click', (e) => e.preventDefault());
+      }
+    }
+    const toggle = $('term-keys-toggle');
+    if (toggle) {
+      if (localStorage.getItem(LS_KEYS_HIDDEN) === '1') {
+        document.body.classList.add('term-keys-hidden');
+      }
+      toggle.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();   // don't also trigger the bar's expand/collapse
+        const hidden = !document.body.classList.contains('term-keys-hidden');
+        document.body.classList.toggle('term-keys-hidden', hidden);
+        try { localStorage.setItem(LS_KEYS_HIDDEN, hidden ? '1' : '0'); } catch {}
+        scheduleFit();   // row appearing/disappearing changes xterm's height
+      });
+    }
+  }
+
   // ── Mobile keyboard bridge ─────────────────────────────────────────────────
   // xterm's built-in keyboard handling drops most soft-keyboard input: Android
   // (Gboard) and iOS compose predictive text inside the hidden textarea and
@@ -342,7 +423,9 @@
     ta.setAttribute('enterkeyhint', 'send');
 
     let composing = false;
-    const send = (d) => sendInputBytes(tab, d);
+    // Route through emitText so a sticky-Ctrl armed from the extra-keys row
+    // applies to the next letter typed on the soft keyboard, too.
+    const send = (d) => emitText(tab, d);
 
     // Own composition end-to-end so xterm's CompositionHelper can't also fire.
     ta.addEventListener('compositionstart', (e) => { composing = true; e.stopPropagation(); }, true);
@@ -895,6 +978,7 @@
     applyStoredHeight();
     wireResize();
     wireStrip();
+    wireExtraKeys();
 
     // Capability probe — gates the bar so we don't advertise a broken
     // feature (missing node-pty on an unusual arch, or install failure).
