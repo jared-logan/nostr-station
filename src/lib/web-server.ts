@@ -95,6 +95,7 @@ import { listAllTestPubkeys } from './test-identities.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleDitto } from './routes/ditto.js';
 import { handleClient } from './routes/client.js';
+import { handleApps } from './routes/apps.js';
 import { handleNgit } from './routes/ngit.js';
 import { handleRepo } from './routes/repo.js';
 import { handlePatches } from './routes/patches.js';
@@ -1969,6 +1970,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // lookup + kind-1 publish. Reads from identity.readRelays; signs via
       // the persisted bunker pairing. Auto-stamps ["client","nostr-station"].
       if (await handleClient(req, res, fullUrl, method)) return;
+
+      // ── App Center (routes/apps.ts) ────────────────────────────────────
+      // Manage the owner's NIP-89 handler events (kind 31990): list, build,
+      // sign (bunker/project/NIP-07), publish, Blossom image upload, delete.
+      // Auto-stamps the same ["client","nostr-station",…] tag as the Client
+      // panel so published apps link back to nostr-station.
+      if (await handleApps(req, res, fullUrl, method)) return;
 
       // ── nsite browser (routes/nsite.ts) ────────────────────────────────
       // Read side of NIP-5A v1: resolves npub/NIP-05/NSIT addresses, fetches

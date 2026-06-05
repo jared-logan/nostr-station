@@ -25,7 +25,7 @@ if (typeof document !== 'undefined') {
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'blossom', 'projects', 'vpn', 'logs', 'client', 'nsite', 'mail', 'config', 'communities'];
+const PANELS = ['status', 'chat', 'relay', 'blossom', 'projects', 'vpn', 'logs', 'client', 'apps', 'nsite', 'mail', 'config', 'communities'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -26217,6 +26217,592 @@ const CommunitiesPanel = (() => {
   return { onEnter, openDetail, openWizard };
 })();
 
+// ── App Center panel ──────────────────────────────────────────────────────
+//
+// Lists the owner's NIP-89 handler events (kind 31990) as a grid of cards
+// and provides a fully-guided editor for creating / editing them. Every
+// field is annotated with the tag it maps to; every published event is
+// auto-stamped (server-side) with the canonical nostr-station client tag.
+//
+// Publishing mirrors the Client panel's signer routing:
+//   - session source 'nip07' → fetch unsigned template, sign with
+//     window.nostr, POST the signed event back
+//   - session source 'bunker' → POST the form; the server signs via the
+//     saved Amber pairing
+//   - signing identity 'project' → server signs with NOSTR_STATION_NSEC
+const AppsPanel = (() => {
+  // Popular event kinds surfaced as one-tap presets (mirrors the curated
+  // list shakespeare/nostrhub show). Anything else goes through "custom".
+  const POPULAR_KINDS = [
+    { kind: 1,     label: 'Text Notes',          desc: 'Short text posts and messages' },
+    { kind: 6,     label: 'Reposts',             desc: "Sharing other users' content" },
+    { kind: 7,     label: 'Reactions',           desc: 'Likes, hearts, emoji reactions' },
+    { kind: 9,     label: 'Chat Messages',       desc: 'Direct messages and group chats' },
+    { kind: 1111,  label: 'Comments',            desc: 'NIP-22 threaded comments' },
+    { kind: 30023, label: 'Articles',            desc: 'Long-form content and blog posts' },
+    { kind: 31922, label: 'Calendar (Date)',     desc: 'Date-based calendar events' },
+    { kind: 31923, label: 'Calendar (Time)',     desc: 'Time-based calendar events' },
+    { kind: 30402, label: 'Classified Listings', desc: 'Marketplace and classified ads' },
+    { kind: 1063,  label: 'File Metadata',       desc: 'File sharing and metadata' },
+    { kind: 30078, label: 'App Data',            desc: 'Application-specific data storage' },
+    { kind: 30617, label: 'Repositories',        desc: 'NIP-34 git repo announcements' },
+  ];
+  const KIND_LABEL = new Map(POPULAR_KINDS.map(k => [k.kind, k.label]));
+  const ENTITY_TYPES = ['', 'nevent', 'naddr', 'nprofile', 'npub', 'note'];
+  const IMAGE_MIMES = 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml,image/avif';
+
+  const listView  = $('apps-list-view');
+  const editorView= $('apps-editor-view');
+  const grid      = $('apps-grid');
+  const authorSel = $('apps-author');
+  const refreshBtn= $('apps-refresh');
+  const newBtn    = $('apps-new');
+
+  let signers = null;     // { owner, bunker, project, projectPubkey }
+  let apps    = [];       // current author's app summaries
+  let author  = 'me';     // 'me' | 'project'
+  let editing = null;     // working copy in the editor, or null when listing
+  let booted  = false;
+
+  function slugify(raw) {
+    return String(raw || '').toLowerCase().trim()
+      .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+  }
+  function kindLabel(k) { return KIND_LABEL.get(k) || `kind ${k}`; }
+
+  async function onEnter() {
+    if (!booted) {
+      booted = true;
+      try { signers = await api('/api/apps/signers', undefined, { silent: true }); }
+      catch { signers = { owner: null, bunker: false, project: false }; }
+      // Reveal the project author option only when the project key is around.
+      const projOpt = authorSel?.querySelector('option[value="project"]');
+      if (projOpt) projOpt.hidden = !signers?.project;
+      authorSel?.addEventListener('change', () => {
+        author = authorSel.value === 'project' ? 'project' : 'me';
+        loadApps(true);
+      });
+      refreshBtn?.addEventListener('click', () => loadApps(true));
+      newBtn?.addEventListener('click', () => openEditor(null));
+      grid?.addEventListener('click', onGridClick);
+      editorView?.addEventListener('click', onEditorClick);
+      editorView?.addEventListener('input', onEditorInput);
+      editorView?.addEventListener('change', onEditorChange);
+      editorView?.addEventListener('keydown', onEditorKeydown);
+    }
+    if (!editing) loadApps(false);
+  }
+
+  // ── List ────────────────────────────────────────────────────────────────
+  async function loadApps(force) {
+    showList();
+    if (apps.length === 0 || force) {
+      grid.innerHTML = `<div class="apps-empty muted">Loading your apps…</div>`;
+    }
+    try {
+      const data = await api(`/api/apps/list?author=${encodeURIComponent(author)}`);
+      if (data.unavailable) {
+        grid.innerHTML = `<div class="apps-empty muted">${escapeHtml(data.empty || 'unavailable')}</div>`;
+        apps = [];
+        return;
+      }
+      apps = Array.isArray(data.apps) ? data.apps : [];
+      renderList();
+    } catch {
+      grid.innerHTML = `<div class="apps-empty muted">Couldn't reach your relays. <button class="link-btn" id="apps-retry">Retry</button></div>`;
+      grid.querySelector('#apps-retry')?.addEventListener('click', () => loadApps(true));
+    }
+  }
+
+  function renderList() {
+    if (apps.length === 0) {
+      grid.innerHTML = `
+        <div class="apps-empty">
+          <div class="apps-empty-title">No apps yet</div>
+          <div class="muted">Publish a NIP-89 handler so other Nostr clients can discover ${author === 'project' ? 'the project' : 'your app'} and open content in it.</div>
+          <button class="primary" id="apps-empty-new">+ New App</button>
+        </div>`;
+      grid.querySelector('#apps-empty-new')?.addEventListener('click', () => openEditor(null));
+      return;
+    }
+    grid.innerHTML = apps.map(cardHtml).join('');
+  }
+
+  function cardHtml(app) {
+    const initial = escapeHtml((app.name || app.d || '?').slice(0, 1).toUpperCase());
+    const icon = app.picture
+      ? `<img class="apps-card-icon" src="${escapeHtml(proxyImageUrl(app.picture))}" alt="" loading="lazy">`
+      : `<div class="apps-card-icon apps-card-icon-empty">${initial}</div>`;
+    const banner = app.banner
+      ? `<div class="apps-card-banner" style="background-image:linear-gradient(rgba(10,10,10,.15),rgba(10,10,10,.65)),url(&quot;${escapeHtml(proxyImageUrl(app.banner))}&quot;)"></div>`
+      : `<div class="apps-card-banner apps-card-banner-empty"></div>`;
+    const kinds = app.kinds.slice(0, 5).map(k => `<span class="apps-chip" title="kind ${k}">${escapeHtml(kindLabel(k))}</span>`).join('')
+      + (app.kinds.length > 5 ? `<span class="apps-chip apps-chip-more">+${app.kinds.length - 5}</span>` : '');
+    const topics = app.topics.slice(0, 4).map(t => `<span class="apps-chip apps-chip-topic">#${escapeHtml(t)}</span>`).join('');
+    const anchor = (author === 'project' && app.d === 'nostr-station')
+      ? `<span class="apps-anchor-badge" title="This is nostr-station's own handler — the event every client tag points at.">⚓ anchor</span>` : '';
+    const site = app.website
+      ? `<a class="apps-card-site" href="${escapeHtml(app.website)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(app.website)}">website ↗</a>` : '';
+    return `
+      <div class="apps-card" data-d="${escapeHtml(app.d)}">
+        ${banner}
+        <div class="apps-card-main">
+          ${icon}
+          <div class="apps-card-text">
+            <div class="apps-card-name">${escapeHtml(app.name || app.d || '(unnamed)')} ${anchor}</div>
+            <div class="apps-card-id muted" title="d-tag — the replaceable address">id: ${escapeHtml(app.d || '—')}</div>
+            ${app.about ? `<div class="apps-card-about muted">${escapeHtml(app.about)}</div>` : ''}
+          </div>
+        </div>
+        <div class="apps-card-chips">${kinds}${topics}</div>
+        <div class="apps-card-foot">
+          <button class="apps-card-edit" data-act="edit" data-d="${escapeHtml(app.d)}">Edit</button>
+          ${site}
+          <button class="apps-card-del" data-act="delete" data-d="${escapeHtml(app.d)}" title="Publish a deletion request">Delete</button>
+        </div>
+      </div>`;
+  }
+
+  function onGridClick(e) {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const d = btn.dataset.d;
+    const app = apps.find(a => a.d === d);
+    if (btn.dataset.act === 'edit' && app) openEditor(app);
+    else if (btn.dataset.act === 'delete' && app) deleteApp(app);
+  }
+
+  async function deleteApp(app) {
+    const ok = await confirmDestructive({
+      title: `Delete “${app.name || app.d}”?`,
+      description: 'Publishes a NIP-09 deletion request for this app event. Relays may keep the latest replaceable copy, but most clients will hide it.',
+      confirmLabel: 'Publish deletion',
+    });
+    if (!ok) return;
+    const headers = { 'Content-Type': 'application/json' };
+    try {
+      if (author !== 'project' && getSessionSource() === 'nip07') {
+        // NIP-07 user — build + sign the kind-5 in the browser.
+        if (!window.nostr) throw new Error('NIP-07 extension not found');
+        const a = `31990:${signers?.owner}:${app.d}`;
+        const template = {
+          kind: 5, created_at: Math.floor(Date.now() / 1000),
+          tags: [['a', a], ['k', '31990']],
+          content: 'Retracted via nostr-station App Center',
+        };
+        const signed = await window.nostr.signEvent(template);
+        await api('/api/apps/delete', { method: 'POST', headers, body: JSON.stringify({ event: signed }) });
+      } else {
+        await api('/api/apps/delete', {
+          method: 'POST', headers,
+          body: JSON.stringify({ d: app.d, signWith: author === 'project' ? 'project' : 'bunker' }),
+        });
+      }
+      toast('Deletion requested', app.name || app.d, 'ok');
+      loadApps(true);
+    } catch (e) {
+      if (e && e.message && !/\b\d{3}\b/.test(e.message)) toast('Delete failed', e.message, 'err');
+    }
+  }
+
+  // ── Editor ──────────────────────────────────────────────────────────────
+  function blankApp() {
+    return {
+      id: null, isNew: true,
+      name: '', d: '', website: '', about: '', lud16: '', nip05: '',
+      picture: '', banner: '',
+      kinds: [], handlers: [{ platform: 'web', template: 'https://example.com/<bech32>', entity: '' }],
+      topics: [], extraTags: [],
+      dManual: false,
+      signWith: author === 'project' && signers?.project ? 'project' : 'me',
+      _tab: { picture: 'upload', banner: 'upload' },
+    };
+  }
+
+  function openEditor(app) {
+    if (app) {
+      editing = {
+        id: app.id, isNew: false,
+        name: app.name, d: app.d, website: app.website, about: app.about,
+        lud16: app.lud16, nip05: app.nip05, picture: app.picture, banner: app.banner,
+        kinds: app.kinds.slice(), handlers: app.handlers.map(h => ({ ...h })),
+        topics: app.topics.slice(), extraTags: app.extraTags.map(t => t.slice()),
+        dManual: true,
+        signWith: author === 'project' && signers?.project ? 'project' : 'me',
+        _tab: { picture: app.picture ? 'link' : 'upload', banner: app.banner ? 'link' : 'upload' },
+      };
+    } else {
+      editing = blankApp();
+    }
+    renderEditor();
+    showEditor();
+  }
+
+  function closeEditor() { editing = null; showList(); loadApps(false); }
+  function showList()   { listView.hidden = false; editorView.hidden = true; }
+  function showEditor() { listView.hidden = true; editorView.hidden = false; editorView.scrollTop = 0; }
+
+  function fieldRow(label, hint, html) {
+    return `<label class="apps-field"><span class="apps-field-label">${label}</span>${html}<span class="apps-field-hint muted">${hint}</span></label>`;
+  }
+
+  function imageField(field, label, recommend) {
+    const tab = editing._tab[field];
+    const val = editing[field];
+    const preview = val
+      ? `<img src="${escapeHtml(proxyImageUrl(val))}" alt="">`
+      : `<span class="apps-img-noimg muted">No image</span>`;
+    return `
+      <div class="apps-imgfield">
+        <div class="apps-field-label">${label}</div>
+        <div class="apps-field-hint muted">→ content.${field} · ${recommend}</div>
+        <div class="apps-imgfield-row">
+          <div class="apps-img-preview">${preview}</div>
+          <div class="apps-imgfield-ctrl">
+            <div class="apps-img-tabs">
+              <button type="button" class="apps-img-tab ${tab === 'upload' ? 'active' : ''}" data-act="img-tab" data-field="${field}" data-mode="upload">⤒ Upload</button>
+              <button type="button" class="apps-img-tab ${tab === 'link' ? 'active' : ''}" data-act="img-tab" data-field="${field}" data-mode="link">🔗 Link</button>
+            </div>
+            ${tab === 'upload'
+              ? `<button type="button" class="apps-img-drop" data-act="choose-file" data-field="${field}">
+                   <span class="apps-img-drop-title">Click to browse</span>
+                   <span class="muted">PNG, JPG, GIF, WebP, SVG, AVIF</span>
+                 </button>
+                 <input type="file" accept="${IMAGE_MIMES}" data-file-field="${field}" hidden>`
+              : `<input type="url" class="apps-input" data-bind="${field}" value="${escapeHtml(val)}" placeholder="https://…">`}
+            ${val ? `<button type="button" class="link-btn apps-img-clear" data-act="img-clear" data-field="${field}">remove image</button>` : ''}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function signerOptions() {
+    const opts = [];
+    if (signers?.owner || signers?.bunker || getSessionSource() === 'nip07') {
+      opts.push(`<option value="me" ${editing.signWith === 'me' ? 'selected' : ''}>This station — my key</option>`);
+    }
+    if (signers?.project) {
+      opts.push(`<option value="project" ${editing.signWith === 'project' ? 'selected' : ''}>nostr-station project key</option>`);
+    }
+    if (opts.length === 0) opts.push(`<option value="me" selected>This station — my key</option>`);
+    return opts.join('');
+  }
+
+  function renderEditor() {
+    const anchorWarn = (editing.signWith === 'project' && editing.d === 'nostr-station')
+      ? `<div class="apps-warn">⚓ This is <b>nostr-station's own handler</b> — the event every client tag points at. Publishing replaces it. Keep the supported kinds &amp; handlers intact unless you mean to change how the app itself is advertised.</div>`
+      : '';
+
+    // Supported kinds — preset grid + selected chips + custom add.
+    const presetGrid = POPULAR_KINDS.map(k => {
+      const on = editing.kinds.includes(k.kind);
+      return `<button type="button" class="apps-kind ${on ? 'on' : ''}" data-act="toggle-kind" data-kind="${k.kind}">
+        <span class="apps-kind-top"><span class="apps-kind-name">${escapeHtml(k.label)}</span><span class="apps-kind-num">${k.kind}</span></span>
+        <span class="apps-kind-desc muted">${escapeHtml(k.desc)}</span>
+      </button>`;
+    }).join('');
+    const customKinds = editing.kinds.filter(k => !KIND_LABEL.has(k));
+    const customChips = customKinds.map(k =>
+      `<span class="apps-chip apps-chip-rm" data-act="remove-kind" data-kind="${k}">kind ${k} ✕</span>`).join('');
+
+    // Handlers.
+    const handlerRows = editing.handlers.map((h, i) => `
+      <div class="apps-handler-row" data-handler-idx="${i}">
+        <select class="apps-input apps-handler-platform" data-handler-idx="${i}" data-handler-key="platform">
+          ${['web', 'ios', 'android'].map(p => `<option value="${p}" ${h.platform === p ? 'selected' : ''}>${p}</option>`).join('')}
+        </select>
+        <input class="apps-input apps-handler-template" data-handler-idx="${i}" data-handler-key="template" value="${escapeHtml(h.template)}" placeholder="https://myapp.com/&lt;bech32&gt;">
+        <select class="apps-input apps-handler-entity" data-handler-idx="${i}" data-handler-key="entity" title="Entity type (optional)">
+          ${ENTITY_TYPES.map(en => `<option value="${en}" ${h.entity === en ? 'selected' : ''}>${en || '(any)'}</option>`).join('')}
+        </select>
+        <button type="button" class="apps-icon-btn" data-act="remove-handler" data-idx="${i}" title="Remove handler">✕</button>
+      </div>`).join('');
+
+    // Topics.
+    const topicChips = editing.topics.map(t =>
+      `<span class="apps-chip apps-chip-rm apps-chip-topic" data-act="remove-topic" data-topic="${escapeHtml(t)}">#${escapeHtml(t)} ✕</span>`).join('');
+
+    // Extra tags.
+    const extraRows = editing.extraTags.map((t, i) => `
+      <div class="apps-extra-row" data-extra-idx="${i}">
+        <input class="apps-input apps-extra-name" data-extra-idx="${i}" data-extra-key="name" value="${escapeHtml(t[0] || '')}" placeholder="tag name (e.g. r, L)">
+        <input class="apps-input apps-extra-vals" data-extra-idx="${i}" data-extra-key="vals" value="${escapeHtml(t.slice(1).join(', '))}" placeholder="value(s), comma-separated">
+        <button type="button" class="apps-icon-btn" data-act="remove-tag" data-idx="${i}" title="Remove tag">✕</button>
+      </div>`).join('');
+
+    editorView.innerHTML = `
+      <div class="apps-editor">
+        <div class="apps-editor-head">
+          <button type="button" class="link-btn" data-act="cancel">← Back to apps</button>
+          <div class="apps-editor-title">${editing.isNew ? 'New App' : 'Edit App'}</div>
+        </div>
+
+        <div class="apps-info">
+          Publishing creates a <b>kind 31990</b> handler event. It's auto-stamped with the
+          <code>["client","nostr-station",…]</code> tag, so other clients show that this app was published from nostr-station.
+        </div>
+        ${anchorWarn}
+
+        <section class="apps-card-section">
+          <div class="apps-section-title">Basic Information</div>
+          <div class="apps-grid2">
+            ${fieldRow('App Name <span class="req">*</span>', '→ content.name', `<input class="apps-input" data-bind="name" value="${escapeHtml(editing.name)}" placeholder="My Nostr App">`)}
+            ${fieldRow('Website', '→ content.website', `<input class="apps-input" data-bind="website" value="${escapeHtml(editing.website)}" placeholder="https://myapp.com">`)}
+          </div>
+          ${fieldRow('App identifier (d-tag)', '→ <code>d</code> tag — the replaceable address. Keep it stable across edits; changing it creates a new app.', `<input class="apps-input" data-bind="d" value="${escapeHtml(editing.d)}" placeholder="my-nostr-app">`)}
+          ${fieldRow('Description', '→ content.about', `<textarea class="apps-input apps-textarea" data-bind="about" placeholder="A brief description of what your app does…">${escapeHtml(editing.about)}</textarea>`)}
+          <div class="apps-grid2">
+            ${fieldRow('Lightning Address', '→ content.lud16', `<input class="apps-input" data-bind="lud16" value="${escapeHtml(editing.lud16)}" placeholder="app@wallet.com">`)}
+            ${fieldRow('NIP-05 Identifier', '→ content.nip05', `<input class="apps-input" data-bind="nip05" value="${escapeHtml(editing.nip05)}" placeholder="app@domain.com">`)}
+          </div>
+        </section>
+
+        <section class="apps-card-section">
+          <div class="apps-section-title">Images</div>
+          <div class="apps-section-sub muted">Upload a file or paste a URL for your icon and banner.</div>
+          ${imageField('picture', 'App Icon', 'Recommended: 256×256px or larger, square')}
+          ${imageField('banner', 'Banner Image', 'Recommended: 1024×300px or similar wide format')}
+        </section>
+
+        <section class="apps-card-section">
+          <div class="apps-section-title">Supported Event Kinds</div>
+          <div class="apps-section-sub muted">Which event kinds can your app open? → one <code>k</code> tag each.</div>
+          <div class="apps-kind-grid">${presetGrid}</div>
+          <div class="apps-customkind">
+            <input class="apps-input" id="apps-customkind-input" type="number" min="0" max="65535" placeholder="Add custom kind number…">
+            <button type="button" class="apps-add-btn" data-act="add-custom-kind">+ Add kind</button>
+          </div>
+          ${customChips ? `<div class="apps-chip-row">${customChips}</div>` : ''}
+        </section>
+
+        <section class="apps-card-section">
+          <div class="apps-section-title">Handlers</div>
+          <div class="apps-section-sub muted">How clients open content in your app → <code>web</code> / <code>ios</code> / <code>android</code> tags. Use <code>&lt;bech32&gt;</code> as the entity placeholder.</div>
+          <div class="apps-handler-head muted"><span>Platform</span><span>URL Template</span><span>Entity Type</span><span></span></div>
+          ${handlerRows || '<div class="muted">No handlers yet.</div>'}
+          <button type="button" class="apps-add-btn" data-act="add-handler">+ Add Handler</button>
+        </section>
+
+        <section class="apps-card-section">
+          <div class="apps-section-title">Categories</div>
+          <div class="apps-section-sub muted">Hashtags that help users discover your app → one <code>t</code> tag each.</div>
+          <div class="apps-chip-row">${topicChips}</div>
+          <div class="apps-customkind">
+            <input class="apps-input" id="apps-topic-input" placeholder="e.g. client, relay, social — Enter to add">
+            <button type="button" class="apps-add-btn" data-act="add-topic">+ Add</button>
+          </div>
+        </section>
+
+        <section class="apps-card-section">
+          <div class="apps-section-title">Additional Tags</div>
+          <div class="apps-section-sub muted">Optional extra tags included in the published event (e.g. <code>r</code>, <code>L</code>).</div>
+          ${extraRows || '<div class="muted">No additional tags.</div>'}
+          <button type="button" class="apps-add-btn" data-act="add-tag">+ Add Tag</button>
+        </section>
+
+        <div class="apps-editor-foot">
+          <label class="apps-signwith">
+            <span class="muted">Sign as</span>
+            <select class="apps-input" id="apps-signwith">${signerOptions()}</select>
+          </label>
+          <div class="apps-foot-actions">
+            <button type="button" data-act="cancel">Cancel</button>
+            <button type="button" class="primary" data-act="publish">${editing.isNew ? 'Publish App' : 'Update App'}</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // ── Editor events ─────────────────────────────────────────────────────────
+  function onEditorInput(e) {
+    const t = e.target;
+    if (t.dataset.bind) {
+      editing[t.dataset.bind] = t.value;
+      // Auto-derive the d-tag from the name until the user edits it directly.
+      if (t.dataset.bind === 'name' && !editing.dManual) {
+        editing.d = slugify(t.value);
+        const dInput = editorView.querySelector('[data-bind="d"]');
+        if (dInput) dInput.value = editing.d;
+      }
+      if (t.dataset.bind === 'd') editing.dManual = true;
+    } else if (t.dataset.handlerIdx != null) {
+      editing.handlers[+t.dataset.handlerIdx][t.dataset.handlerKey] = t.value;
+    } else if (t.dataset.extraIdx != null) {
+      const row = editing.extraTags[+t.dataset.extraIdx];
+      if (t.dataset.extraKey === 'name') row[0] = t.value;
+      else { const vals = t.value.split(',').map(s => s.trim()).filter(Boolean); editing.extraTags[+t.dataset.extraIdx] = [row[0], ...vals]; }
+    }
+  }
+  function onEditorChange(e) {
+    const t = e.target;
+    if (t.id === 'apps-signwith') {
+      editing.signWith = t.value === 'project' ? 'project' : 'me';
+      // The anchor warning depends on signWith — re-render to surface it.
+      syncFromDom(); renderEditor();
+      return;
+    }
+    if (t.dataset.handlerIdx != null && t.dataset.handlerKey) {
+      editing.handlers[+t.dataset.handlerIdx][t.dataset.handlerKey] = t.value;
+    }
+    if (t.dataset.fileField) {
+      const file = t.files && t.files[0];
+      if (file) uploadImage(t.dataset.fileField, file);
+    }
+  }
+  function onEditorKeydown(e) {
+    if (e.key !== 'Enter') return;
+    if (e.target.id === 'apps-topic-input') { e.preventDefault(); addTopic(); }
+    else if (e.target.id === 'apps-customkind-input') { e.preventDefault(); addCustomKind(); }
+  }
+  function onEditorClick(e) {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    if (act === 'cancel') return closeEditor();
+    if (act === 'publish') return publish();
+    if (act === 'add-handler') { syncFromDom(); editing.handlers.push({ platform: 'web', template: 'https://myapp.com/<bech32>', entity: '' }); return renderEditor(); }
+    if (act === 'remove-handler') { syncFromDom(); editing.handlers.splice(+btn.dataset.idx, 1); return renderEditor(); }
+    if (act === 'add-tag') { syncFromDom(); editing.extraTags.push(['', '']); return renderEditor(); }
+    if (act === 'remove-tag') { syncFromDom(); editing.extraTags.splice(+btn.dataset.idx, 1); return renderEditor(); }
+    if (act === 'toggle-kind') { syncFromDom(); toggleKind(+btn.dataset.kind); return renderEditor(); }
+    if (act === 'remove-kind') { syncFromDom(); editing.kinds = editing.kinds.filter(k => k !== +btn.dataset.kind); return renderEditor(); }
+    if (act === 'add-custom-kind') { return addCustomKind(); }
+    if (act === 'add-topic') { return addTopic(); }
+    if (act === 'remove-topic') { syncFromDom(); editing.topics = editing.topics.filter(t => t !== btn.dataset.topic); return renderEditor(); }
+    if (act === 'img-tab') { syncFromDom(); editing._tab[btn.dataset.field] = btn.dataset.mode; return renderEditor(); }
+    if (act === 'img-clear') { syncFromDom(); editing[btn.dataset.field] = ''; return renderEditor(); }
+    if (act === 'choose-file') { editorView.querySelector(`[data-file-field="${btn.dataset.field}"]`)?.click(); return; }
+  }
+
+  function toggleKind(k) {
+    if (editing.kinds.includes(k)) editing.kinds = editing.kinds.filter(x => x !== k);
+    else editing.kinds.push(k);
+  }
+  function addCustomKind() {
+    syncFromDom();
+    const input = editorView.querySelector('#apps-customkind-input');
+    const n = parseInt(input?.value, 10);
+    if (!Number.isInteger(n) || n < 0 || n > 65535) { toast('Invalid kind', 'enter a number 0–65535', 'err'); return; }
+    if (!editing.kinds.includes(n)) editing.kinds.push(n);
+    renderEditor();
+  }
+  function addTopic() {
+    syncFromDom();
+    const input = editorView.querySelector('#apps-topic-input');
+    const raw = (input?.value || '').toLowerCase().trim().replace(/^#/, '');
+    if (!raw) return;
+    for (const t of raw.split(/[,\s]+/).filter(Boolean)) {
+      if (!editing.topics.includes(t)) editing.topics.push(t);
+    }
+    renderEditor();
+  }
+
+  // Read every editor input back into `editing` so structural re-renders
+  // never drop in-progress text.
+  function syncFromDom() {
+    if (!editing) return;
+    editorView.querySelectorAll('[data-bind]').forEach(el => { editing[el.dataset.bind] = el.value; });
+    editorView.querySelectorAll('[data-handler-idx]').forEach(el => {
+      if (el.dataset.handlerKey) editing.handlers[+el.dataset.handlerIdx][el.dataset.handlerKey] = el.value;
+    });
+    editorView.querySelectorAll('.apps-extra-row').forEach(row => {
+      const i = +row.dataset.extraIdx;
+      const name = row.querySelector('[data-extra-key="name"]')?.value || '';
+      const valsRaw = row.querySelector('[data-extra-key="vals"]')?.value || '';
+      const vals = valsRaw.split(',').map(s => s.trim()).filter(Boolean);
+      editing.extraTags[i] = [name, ...vals];
+    });
+    const sw = editorView.querySelector('#apps-signwith');
+    if (sw) editing.signWith = sw.value === 'project' ? 'project' : 'me';
+  }
+
+  // ── Image upload ──────────────────────────────────────────────────────────
+  async function sha256Hex(buf) {
+    const digest = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function uploadImage(field, file) {
+    const dropBtn = editorView.querySelector(`[data-act="choose-file"][data-field="${field}"]`);
+    if (dropBtn) dropBtn.classList.add('busy');
+    try {
+      const buf = await file.arrayBuffer();
+      const mime = file.type || 'application/octet-stream';
+      const headers = { 'Content-Type': mime };
+      // NIP-07 users have no server-side signer — sign the BUD-02 auth in the
+      // browser and pass it along. Bunker / project users let the server sign.
+      if (editing.signWith === 'project') {
+        headers['X-Sign-With'] = 'project';
+      } else if (getSessionSource() === 'nip07') {
+        if (!window.nostr) throw new Error('NIP-07 extension not found');
+        const hash = await sha256Hex(buf);
+        const { template } = await api(`/api/apps/upload/auth?sha256=${hash}`);
+        const signed = await window.nostr.signEvent(template);
+        headers['X-Auth-Event'] = btoa(JSON.stringify(signed));
+      } else {
+        headers['X-Sign-With'] = 'bunker';
+      }
+      const r = await api('/api/apps/upload', { method: 'POST', headers, body: buf });
+      editing[field] = r.url;
+      editing._tab[field] = 'link';
+      renderEditor();
+      toast('Uploaded', field, 'ok');
+    } catch (e) {
+      if (dropBtn) dropBtn.classList.remove('busy');
+      // api() already toasts HTTP errors; surface the rest.
+      if (e && e.message && !/\b\d{3}\b/.test(e.message)) toast('Upload failed', e.message, 'err');
+    }
+  }
+
+  // ── Publish ────────────────────────────────────────────────────────────────
+  function collectFields() {
+    return {
+      name: editing.name.trim(), d: editing.d.trim(),
+      website: editing.website.trim(), about: editing.about.trim(),
+      lud16: editing.lud16.trim(), nip05: editing.nip05.trim(),
+      picture: editing.picture.trim(), banner: editing.banner.trim(),
+      kinds: editing.kinds.slice(),
+      handlers: editing.handlers
+        .map(h => ({ platform: h.platform, template: (h.template || '').trim(), entity: (h.entity || '').trim() }))
+        .filter(h => h.template),
+      topics: editing.topics.slice(),
+      extraTags: editing.extraTags.map(t => t.slice()).filter(t => (t[0] || '').trim()),
+    };
+  }
+
+  async function publish() {
+    syncFromDom();
+    const fields = collectFields();
+    if (!fields.name) { toast('Name required', 'enter an app name', 'err'); return; }
+    for (const h of fields.handlers) {
+      if (!h.template.includes('<bech32>')) { toast('Handler needs <bech32>', `${h.platform} template must contain <bech32>`, 'err'); return; }
+    }
+    const publishBtn = editorView.querySelector('[data-act="publish"]');
+    if (publishBtn) { publishBtn.disabled = true; publishBtn.textContent = 'Publishing…'; }
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (editing.signWith === 'project') {
+        await api('/api/apps/publish', { method: 'POST', headers, body: JSON.stringify({ ...fields, signWith: 'project' }) });
+      } else if (getSessionSource() === 'nip07') {
+        if (!window.nostr) throw new Error('NIP-07 extension not found');
+        const { template } = await api('/api/apps/publish/build', { method: 'POST', headers, body: JSON.stringify(fields) });
+        const signed = await window.nostr.signEvent(template);
+        await api('/api/apps/publish', { method: 'POST', headers, body: JSON.stringify({ event: signed }) });
+      } else {
+        await api('/api/apps/publish', { method: 'POST', headers, body: JSON.stringify({ ...fields, signWith: 'bunker' }) });
+      }
+      toast(editing.isNew ? 'App published' : 'App updated', fields.name, 'ok');
+      closeEditor();
+      loadApps(true);
+    } catch (e) {
+      if (publishBtn) { publishBtn.disabled = false; publishBtn.textContent = editing.isNew ? 'Publish App' : 'Update App'; }
+      if (e && e.message && !/\b\d{3}\b/.test(e.message)) toast('Publish failed', e.message, 'err');
+    }
+  }
+
+  return { onEnter };
+})();
+
 const Panels = {
   status:      StatusPanel,
   chat:        ChatPanel,
@@ -26226,6 +26812,7 @@ const Panels = {
   vpn:         VpnPanel,
   logs:        LogsPanel,
   client:      ClientPanel,
+  apps:        AppsPanel,
   nsite:       NsitePanel,
   mail:        MailPanel,
   config:      ConfigPanel,
