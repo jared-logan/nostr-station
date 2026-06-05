@@ -488,6 +488,28 @@
   }
   window.addEventListener('resize', scheduleFit);
 
+  // ── Mobile keyboard tracking ───────────────────────────────────────────────
+  // On phones the expanded terminal is a full-screen sheet (see the
+  // max-width:640px block in app.css) whose bottom edge is lifted by the
+  // --kb-inset CSS var so the prompt clears the on-screen keyboard. The layout
+  // viewport (innerHeight) stays full-height when the keyboard opens; only the
+  // VisualViewport shrinks, so the gap between them is the keyboard's height.
+  // Writing that to --kb-inset floats the sheet up, and a refit reflows xterm
+  // to the now-shorter host. On desktop the inset stays 0 (no keyboard), so the
+  // var is a harmless no-op there and the CSS only consumes it on phones.
+  const vv = window.visualViewport;
+  function updateKeyboardInset() {
+    if (!vv) return;
+    const inset = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+    document.documentElement.style.setProperty('--kb-inset', `${inset}px`);
+    if (isExpanded()) scheduleFit();
+  }
+  if (vv) {
+    vv.addEventListener('resize', updateKeyboardInset);
+    vv.addEventListener('scroll', updateKeyboardInset);
+    updateKeyboardInset();
+  }
+
   // Re-attach any tab whose socket dropped the moment we plausibly have
   // connectivity again — the laptop woke, the tab regained focus, or the
   // network came back. Backoff retries can exhaust during a long sleep (timers
