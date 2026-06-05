@@ -40,6 +40,15 @@
   const RECONNECT_BASE_MS     = 500;
   const RECONNECT_MAX_ATTEMPTS = 8;
 
+  // True on phones — a coarse pointer at a narrow width. Gates the full-screen
+  // terminal sheet's companion JS: the keyboard-input bridge and the
+  // render-robustness kicks below. Desktop (any width, mouse) never matches, so
+  // none of the mobile-only paths can touch the desktop experience. Matches the
+  // CSS max-width:640px sheet breakpoint, plus pointer:coarse so a narrow
+  // *desktop* window keeps xterm's normal (working) input path.
+  const MOBILE_MQ = window.matchMedia('(max-width: 640px) and (pointer: coarse)');
+  const isMobile = () => MOBILE_MQ.matches;
+
   let available    = null;   // null = not probed; true/false after probe
   let xtermLoaded  = false;
   let xtermLoading = null;   // Promise when the library fetch is in flight
@@ -184,6 +193,15 @@
       scheduleFit();
       const active = tabs[activeIdx];
       if (active) { try { active.term.focus(); } catch {} }
+      // On phones the sheet snaps to full-screen and the keyboard animates in
+      // over a few hundred ms; the host's final height (and the visible rows
+      // above the keyboard) only settle after that. Re-fit on a couple of
+      // delays so the prompt paints into the correct grid rather than a blank
+      // or clipped one. No-op churn on desktop is avoided by the gate.
+      if (isMobile()) {
+        setTimeout(scheduleFit, 160);
+        setTimeout(scheduleFit, 420);
+      }
     }));
   }
 
@@ -286,6 +304,113 @@
     return { term, fitAddon };
   }
 
+  // Single funnel for bytes headed to the PTY, shared by xterm's onData (desktop)
+  // and the mobile input bridge. While the server is replaying historical output
+  // on (re)connect, drop xterm's automatic answers to any device/cursor queries
+  // embedded in that scrollback — replaying old query bytes makes xterm reply
+  // *now*, and those stale answers would land in the live prompt as junk input.
+  // Real keystrokes are extremely unlikely in that sub-second window; pre-connect
+  // input is preserved separately via pendingInput.
+  function sendInputBytes(tab, data) {
+    if (!data) return;
+    if (tab.suppressTx) return;
+    if (tab.ws && tab.ws.readyState === 1) {
+      tab.ws.send(JSON.stringify({ type: 'input', data }));
+    } else {
+      tab.pendingInput.push(data);
+    }
+  }
+
+  // ── Mobile keyboard bridge ─────────────────────────────────────────────────
+  // xterm's built-in keyboard handling drops most soft-keyboard input: Android
+  // (Gboard) and iOS compose predictive text inside the hidden textarea and
+  // commit it via composition/beforeinput events that xterm's path mishandles,
+  // so onData never fires and nothing reaches the shell — the exact "keyboard
+  // looks alive but nothing types" symptom. We attach our own capture-phase
+  // listeners on that textarea, translate the events to terminal bytes, forward
+  // them via sendInputBytes, and stop them before xterm sees them (no
+  // double-send). Phone-only; desktop keeps xterm's native path untouched.
+  function attachMobileInput(tab) {
+    const ta = tab.host.querySelector('.xterm-helper-textarea');
+    if (!ta) return;
+    // Nudge the keyboard toward discrete character inserts instead of a
+    // composed/predicted word, which the beforeinput path handles cleanly.
+    ta.setAttribute('autocomplete', 'off');
+    ta.setAttribute('autocorrect', 'off');
+    ta.setAttribute('autocapitalize', 'off');
+    ta.setAttribute('spellcheck', 'false');
+    ta.setAttribute('enterkeyhint', 'send');
+
+    let composing = false;
+    const send = (d) => sendInputBytes(tab, d);
+
+    // Own composition end-to-end so xterm's CompositionHelper can't also fire.
+    ta.addEventListener('compositionstart', (e) => { composing = true; e.stopPropagation(); }, true);
+    ta.addEventListener('compositionupdate', (e) => { e.stopPropagation(); }, true);
+    ta.addEventListener('compositionend', (e) => {
+      composing = false;
+      e.stopPropagation();
+      send(e.data != null ? e.data : ta.value);
+      ta.value = '';
+    }, true);
+
+    // Printable text, paste, and Gboard-style backspace arrive as beforeinput.
+    // preventDefault keeps the textarea empty so xterm's own input never fires.
+    ta.addEventListener('beforeinput', (e) => {
+      if (composing || e.inputType === 'insertCompositionText') return;
+      switch (e.inputType) {
+        case 'insertText':
+        case 'insertReplacementText':
+        case 'insertFromPaste':
+          send(e.data); e.preventDefault(); break;
+        case 'insertLineBreak':
+        case 'insertParagraph':
+          send('\r'); e.preventDefault(); break;
+        case 'deleteContentBackward':
+          send('\x7f'); e.preventDefault(); break;
+        case 'deleteWordBackward':
+          send('\x17'); e.preventDefault(); break;
+        default: break;
+      }
+    }, true);
+
+    // Control keys (Enter, Backspace, arrows, Tab, Ctrl-combos) that hardware
+    // and some soft keyboards send as keydown. preventDefault here suppresses
+    // the matching beforeinput, so a key is never sent twice.
+    ta.addEventListener('keydown', (e) => {
+      if (composing || e.isComposing) return;
+      const k = e.key;
+      let seq = null;
+      if (e.ctrlKey && !e.altKey && !e.metaKey && k.length === 1) {
+        const c = k.toLowerCase().charCodeAt(0);
+        if (c >= 97 && c <= 122) seq = String.fromCharCode(c - 96); // Ctrl-A..Z
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && k.length === 1) {
+        // A real printable key (hardware keyboard, or a soft keyboard not in a
+        // composition). Own it here and preventDefault so neither xterm's
+        // keydown nor the beforeinput path also emits it — that double-send is
+        // the only way a phone with a physical keyboard could echo each char
+        // twice. Composing soft keyboards report key='Unidentified' (keyCode
+        // 229) instead, fall through, and go via beforeinput/compositionend.
+        seq = k;
+      } else {
+        switch (k) {
+          case 'Enter':      seq = '\r';     break;
+          case 'Backspace':  seq = '\x7f';   break;
+          case 'Tab':        seq = '\t';     break;
+          case 'Escape':     seq = '\x1b';   break;
+          case 'ArrowUp':    seq = '\x1b[A'; break;
+          case 'ArrowDown':  seq = '\x1b[B'; break;
+          case 'ArrowRight': seq = '\x1b[C'; break;
+          case 'ArrowLeft':  seq = '\x1b[D'; break;
+          case 'Home':       seq = '\x1b[H'; break;
+          case 'End':        seq = '\x1b[F'; break;
+          default: break;
+        }
+      }
+      if (seq != null) { send(seq); e.preventDefault(); e.stopPropagation(); }
+    }, true);
+  }
+
   function createTab({ id, label }) {
     const bodies = $('term-bodies');
     if (!bodies) throw new Error('term-bodies host missing');
@@ -316,19 +441,15 @@
         // sequences are legible and a literal "/clear" stands out plainly.
         try { console.debug('[ns-term tx]', tab.label, tab.suppressTx ? '(suppressed)' : '', JSON.stringify(data)); } catch {}
       }
-      // While the server is replaying historical output on (re)connect, drop
-      // xterm's automatic answers to any device/cursor queries embedded in
-      // that scrollback. Replaying old query bytes makes xterm reply *now*,
-      // and those stale answers would land in the live prompt as junk input.
-      // Real keystrokes are extremely unlikely in this sub-second window, and
-      // pre-connect input is preserved separately via pendingInput.
-      if (tab.suppressTx) return;
-      if (tab.ws && tab.ws.readyState === 1) {
-        tab.ws.send(JSON.stringify({ type: 'input', data }));
-      } else {
-        tab.pendingInput.push(data);
-      }
+      sendInputBytes(tab, data);
     });
+
+    // On phones, drive input through our own bridge (attachMobileInput) which
+    // bypasses xterm's keyboard path — that path drops Android/iOS soft-keyboard
+    // input (predictive text composes in the hidden textarea and never reaches
+    // onData). The bridge feeds the PTY via sendInputBytes directly, so xterm's
+    // onData stays effectively the desktop path and there's no double-send.
+    if (isMobile()) attachMobileInput(tab);
 
     // Keep xterm's grid aligned to its host on resize — but ONLY when this
     // tab is active. Hidden tabs report their last-active dimensions, so
@@ -482,6 +603,14 @@
         tab.fitAddon.fit();
         if (tab.ws && tab.ws.readyState === 1 && tab.term.cols > 0 && tab.term.rows > 0) {
           tab.ws.send(JSON.stringify({ type: 'resize', cols: tab.term.cols, rows: tab.term.rows }));
+        }
+        if (isMobile()) {
+          // The full-screen sheet mounts xterm while its host is still 0-height
+          // (collapsed), so the first prompt can render into a stale grid and
+          // look blank. Repaint and pin to the latest line once we have a real
+          // fit, so the shell prompt is actually visible after the sheet opens.
+          try { tab.term.refresh(0, tab.term.rows - 1); } catch {}
+          try { tab.term.scrollToBottom(); } catch {}
         }
       } catch {}
     });
