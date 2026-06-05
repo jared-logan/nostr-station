@@ -537,6 +537,21 @@ export async function startWebServer(port: number): Promise<http.Server> {
       return h === '127.0.0.1' || h === 'localhost' || h === '[::1]' || h === '::1';
     } catch { return false; }
   };
+  // Re-verify a non-loopback remote socket maps to a trusted mesh device
+  // pubkey — the authoritative gate (dashboard-binding's connection filter can
+  // race the HTTP parse) that lets the loopback Host/Origin checks relax for
+  // Mobile-Access (mesh tunnel) connections. Shared by the HTTP request handler
+  // (H1/H2) AND the terminal WebSocket upgrade so the two can never drift. Fail
+  // closed: loopback short-circuits to false, any error → not trusted.
+  const computeMeshTrusted = async (remoteAddr: string | undefined | null): Promise<boolean> => {
+    if (!remoteAddr || isLoopbackAddress(remoteAddr)) return false;
+    try {
+      const peers = ((await probeNvpnStatus()).raw as Record<string, unknown> | null)?.peers ?? null;
+      return allowDashboardConnection({
+        remoteAddress: remoteAddr, nvpnPeers: peers, trusted: trustedDevicePubkeys(),
+      }).ok;
+    } catch { return false; }
+  };
   // Per-nsite-origin host pattern: <16hex>.nsite.localhost:<port>.
   //
   // Why this exists: nsites used to render inside an iframe served from the
@@ -615,15 +630,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // closed: any error → not trusted → loopback-only (view-only).
       const remoteAddr = req.socket.remoteAddress;
       const localAddr  = req.socket.localAddress;
-      let meshTrusted = false;
-      if (remoteAddr && !isLoopbackAddress(remoteAddr)) {
-        try {
-          const peers = ((await probeNvpnStatus()).raw as Record<string, unknown> | null)?.peers ?? null;
-          meshTrusted = allowDashboardConnection({
-            remoteAddress: remoteAddr, nvpnPeers: peers, trusted: trustedDevicePubkeys(),
-          }).ok;
-        } catch { meshTrusted = false; }
-      }
+      const meshTrusted = await computeMeshTrusted(remoteAddr);
       const meshHostOk = meshTrusted && meshHostMatches(hostHeader, localAddr, port);
 
       // ── H1a: Nsite per-origin subdomain dispatch ──────────────────────
@@ -2413,11 +2420,15 @@ export async function startWebServer(port: number): Promise<http.Server> {
     });
 
     // ── Terminal WebSocket upgrade (extracted to routes/terminal.ts) ──
-    // Mounted as a closure-receiving function so the WS layer reuses
-    // this request handler's `allowedHosts` + `isLoopbackUrl` primitives
-    // for H1 (DNS rebinding) and H2 (CSRF) checks. See the route module
-    // for the full URL grammar + control-frame protocol.
-    mountTerminalWebSocket(server, { allowedHosts, isLoopbackUrl });
+    // Mounted as a closure-receiving function so the WS layer reuses this
+    // request handler's H1 (DNS rebinding) + H2 (CSRF) primitives — including
+    // the mesh-trust relaxation, so the terminal connects over Mobile Access
+    // (nvpn tunnel) exactly where the dashboard's HTTP API already does. See
+    // the route module for the full URL grammar + control-frame protocol.
+    mountTerminalWebSocket(server, {
+      allowedHosts, isLoopbackUrl, port,
+      meshHostMatches, meshUrlMatches, computeMeshTrusted,
+    });
 
     // ── Relay-proxy WebSocket (extracted to routes/relay-proxy.ts) ────
     // Browser-side stats/following lookups used to open wss:// connections
