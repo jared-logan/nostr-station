@@ -11728,6 +11728,7 @@ a.client-mention {
   color: var(--text-dim);
 }
 .apps-img-drop:hover { border-color: var(--accent); }
+.apps-img-drop.dragover { border-color: var(--accent); background: var(--accent-soft); }
 .apps-img-drop.busy { opacity: .6; pointer-events: none; }
 .apps-img-drop-title { color: var(--accent-bright); font-size: 13px; }
 .apps-img-clear { font-size: 11px; align-self: flex-start; }
@@ -11781,3 +11782,25 @@ a.client-mention {
 .apps-signwith { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .apps-signwith .apps-input { width: auto; }
 .apps-foot-actions { display: flex; gap: 10px; margin-left: auto; }
+
+/* ── App Center: small-screen passes ─────────────────────────────────────── */
+@media (max-width: 640px) {
+  /* Stack the icon/banner preview above its controls so neither is cramped. */
+  .apps-imgfield-row { flex-direction: column; }
+  .apps-img-preview { width: 100%; height: 140px; }
+  .apps-editor { padding-left: 2px; padding-right: 2px; }
+}
+@media (max-width: 420px) {
+  /* The author switcher shares the full-width action row with refresh/new. */
+  .panel[data-panel="apps"] .panel-head-actions { flex-wrap: wrap; }
+  .panel[data-panel="apps"] .panel-head-actions .apps-author-select { flex: 1 1 100%; }
+  .panel[data-panel="apps"] .panel-head-actions button { flex: 1 1 auto; }
+  /* Footer: sign-as select + actions stack and go full-width. */
+  .apps-editor-foot { flex-direction: column; align-items: stretch; }
+  .apps-signwith { justify-content: space-between; }
+  .apps-signwith .apps-input { flex: 1 1 auto; }
+  .apps-foot-actions { margin-left: 0; }
+  .apps-foot-actions button { flex: 1 1 auto; }
+  /* Single-column app grid on the narrowest phones. */
+  .apps-grid { grid-template-columns: 1fr; }
+}

@@ -26289,6 +26289,26 @@ const AppsPanel = (() => {
       editorView?.addEventListener('input', onEditorInput);
       editorView?.addEventListener('change', onEditorChange);
       editorView?.addEventListener('keydown', onEditorKeydown);
+      // Drag-and-drop onto an image drop zone (delegated — zones are
+      // re-rendered on every editor paint). dragover must preventDefault
+      // or the browser navigates to the dropped file.
+      editorView?.addEventListener('dragover', (e) => {
+        const zone = e.target.closest?.('.apps-img-drop');
+        if (!zone) return;
+        e.preventDefault();
+        zone.classList.add('dragover');
+      });
+      editorView?.addEventListener('dragleave', (e) => {
+        e.target.closest?.('.apps-img-drop')?.classList.remove('dragover');
+      });
+      editorView?.addEventListener('drop', (e) => {
+        const zone = e.target.closest?.('.apps-img-drop');
+        if (!zone) return;
+        e.preventDefault();
+        zone.classList.remove('dragover');
+        const file = e.dataTransfer?.files?.[0];
+        if (file) uploadImage(zone.dataset.field, file);
+      });
     }
     if (!editing) loadApps(false);
   }
@@ -26465,7 +26485,7 @@ const AppsPanel = (() => {
             </div>
             ${tab === 'upload'
               ? `<button type="button" class="apps-img-drop" data-act="choose-file" data-field="${field}">
-                   <span class="apps-img-drop-title">Click to browse</span>
+                   <span class="apps-img-drop-title">Drag &amp; drop or click to browse</span>
                    <span class="muted">PNG, JPG, GIF, WebP, SVG, AVIF</span>
                  </button>
                  <input type="file" accept="${IMAGE_MIMES}" data-file-field="${field}" hidden>`
