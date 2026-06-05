@@ -6093,6 +6093,85 @@ body:not(.term-expanded) .main {
   }
 }
 
+/* ── On-screen extra-keys row (mobile terminal) ──────────────────────────────
+   A docked, horizontally-scrollable strip of accessory keys (Esc/Tab/Ctrl/
+   arrows) for driving TUIs where the soft keyboard has no arrow keys. It's a
+   flex sibling of .term-panel at the bottom of the sheet, so xterm re-fits
+   ABOVE it (never overlaid). Visible only on phones, only when the sheet is
+   expanded, and only when not toggled off — so it shows with the keyboard up
+   OR minimized (it rides the sheet's bottom edge, which already tracks
+   --kb-inset). Desktop never renders it. */
+.term-keys { display: none; }
+.term-keys-toggle { display: none; }
+
+.term-key {
+  flex: 0 0 auto;
+  min-width: 42px;
+  height: 34px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  color: var(--text-bright);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.term-key:active { background: var(--bg-hover); border-color: var(--accent); }
+.term-key-ctrl[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-bright);
+}
+
+@media (max-width: 640px) {
+  body.term-expanded .term-keys {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: stretch;
+    gap: 6px;
+    padding: 6px 8px;
+    background: var(--bg-elev);
+    border-top: 1px solid var(--border-strong);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  body.term-expanded.term-keys-hidden .term-keys { display: none; }
+  .term-keys::-webkit-scrollbar { display: none; }
+
+  /* Toggle lives at the right of the bar; absolute so it doesn't disturb the
+     full-width expand/collapse button it overlays the empty spacer of. */
+  .term-bar { position: relative; }
+  body.term-expanded .term-keys-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 2;
+    width: 32px;
+    height: 24px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--r-sm);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .term-keys-toggle:active { background: var(--bg-hover); }
+  body.term-keys-hidden .term-keys-toggle { color: var(--text-dim); opacity: 0.65; }
+}
+
 .term-resize-handle {
   height: 4px;
   cursor: ns-resize;
