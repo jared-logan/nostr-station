@@ -138,7 +138,13 @@ input:focus, textarea:focus, select:focus {
   grid-template-areas:
     "header header"
     "sidebar main";
+  /* 100vh keeps the shell exactly viewport-tall on desktop; 100dvh (dynamic
+     viewport) overrides it on mobile so the grid tracks the *visible* area as
+     the browser's URL bar shows/hides. Without dvh the top grid row (the
+     header) sits behind Brave/Chrome's address bar on Android. Older engines
+     that don't parse dvh fall back to the 100vh line above. */
   height: 100vh;
+  height: 100dvh;
   width: 100vw;
 }
 
@@ -6027,6 +6033,11 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 :root {
   --term-bar-h: 30px;
   --term-h: 340px;
+  /* Height of the on-screen keyboard, measured live from the VisualViewport
+     API (terminal.js). 0 on desktop and whenever no keyboard is up. The
+     mobile full-screen terminal lifts its bottom edge by this much so the
+     input row never hides behind the keyboard. */
+  --kb-inset: 0px;
 }
 .term-shell {
   position: fixed;
@@ -6054,6 +6065,32 @@ body.term-expanded .main {
 }
 body:not(.term-expanded) .main {
   padding-bottom: calc(var(--term-bar-h) + 4px);
+}
+
+/* ── Terminal on mobile ─────────────────────────────────────────────────────
+   The drag-to-resize drawer model doesn't survive a soft keyboard: the
+   keyboard covers the bottom of the layout viewport, hiding the very rows the
+   user is typing into. On phone widths we instead promote the expanded
+   terminal to a full-screen sheet that fills from just below the header to the
+   top of the keyboard. --kb-inset (driven by the VisualViewport API in
+   terminal.js) is the live keyboard height, so the shell's bottom rides up to
+   sit flush above the keyboard; xterm is re-fit on every viewport change so
+   the prompt stays visible. Collapsed behaviour (the 30px bottom bar) is
+   unchanged. Desktop is untouched — this whole block is phone-only. */
+@media (max-width: 640px) {
+  body.term-expanded .term-shell {
+    top: var(--header-h);
+    bottom: var(--kb-inset);
+    height: auto;
+    z-index: 60;   /* above the sidebar (50) so nothing overlaps the sheet */
+  }
+  /* The drag handle is meaningless on a fixed full-screen sheet — the height
+     is dictated by the viewport, not the user — so hide it on phones. */
+  body.term-expanded .term-resize-handle { display: none; }
+  /* No need to reserve drawer space under main; the sheet overlays it fully. */
+  body.term-expanded .main {
+    padding-bottom: calc(var(--term-bar-h) + 4px);
+  }
 }
 
 .term-resize-handle {
