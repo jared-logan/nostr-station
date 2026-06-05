@@ -3240,11 +3240,6 @@ body.sidebar-open .sidebar-toggle-bars span:nth-child(3) { transform: translateY
   /* ── shell: collapse to single column + off-canvas sidebar ───────── */
   .app {
     grid-template-columns: 1fr;
-    /* Grow the header row by the top safe-area inset so the brand/identity
-       don't tuck under a notch or rounded corner now that viewport-fit=cover
-       lets the page paint into those regions. env() is 0 where there's no
-       inset (most Android browsers, all desktops), so this is a no-op there. */
-    grid-template-rows: calc(var(--header-h) + env(safe-area-inset-top, 0px)) 1fr;
     grid-template-areas:
       "header"
       "main";
@@ -3253,7 +3248,7 @@ body.sidebar-open .sidebar-toggle-bars span:nth-child(3) { transform: translateY
 
   .sidebar {
     position: fixed;
-    top: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+    top: var(--header-h);
     left: 0;
     bottom: 0;
     width: min(280px, 84vw);
@@ -3269,10 +3264,8 @@ body.sidebar-open .sidebar-toggle-bars span:nth-child(3) { transform: translateY
     pointer-events: auto;
   }
 
-  /* Header tightens up. Tagline drops to make room for the chip + identity.
-     padding-top carries the top safe-area inset so content clears a notch;
-     the header background still fills the inset above it. */
-  .header { padding: env(safe-area-inset-top, 0px) 12px 0; gap: 10px; }
+  /* Header tightens up. Tagline drops to make room for the chip + identity. */
+  .header { padding: 0 12px; gap: 10px; }
   .brand { gap: 8px; min-width: 0; flex: 1 1 auto; }
   .brand .nori { width: 30px; height: 30px; }
   .brand .wordmark { font-size: 13px; }
@@ -3353,9 +3346,8 @@ body.sidebar-open .sidebar-toggle-bars span:nth-child(3) { transform: translateY
 
 @media (max-width: 640px) {
   /* Smaller header — drop the brand text wordmark to a single line and
-     hide the relay chip (the dashboard cards already surface it). Keep the
-     top safe-area inset (set in the 900px block) so a notch never clips. */
-  .header { padding: env(safe-area-inset-top, 0px) 10px 0; }
+     hide the relay chip (the dashboard cards already surface it). */
+  .header { padding: 0 10px; }
   .hdr-meta { gap: 8px; }
   .hdr-meta > .chip { display: none; }
   .brand .wordmark { font-size: 12px; letter-spacing: 0.4px; }
@@ -6087,7 +6079,7 @@ body:not(.term-expanded) .main {
    unchanged. Desktop is untouched — this whole block is phone-only. */
 @media (max-width: 640px) {
   body.term-expanded .term-shell {
-    top: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+    top: var(--header-h);
     bottom: var(--kb-inset);
     height: auto;
     z-index: 60;   /* above the sidebar (50) so nothing overlaps the sheet */
