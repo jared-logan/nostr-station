@@ -10,7 +10,7 @@
  *
  * The comparison is: the authoritative signed `30618` oid for a branch vs. the
  * oid each GRASP git host actually advertises (`git ls-remote`). Match →
- * in-sync; differ → out-of-sync; no answer → unreachable. The functions here
+ * in-sync; differ → behind/ahead/diverged; no answer → unreachable. The helpers
  * are pure (parse + compare) so the route just supplies ls-remote output and
  * the signed state; ancestry-based behind/ahead is intentionally out of scope
  * for this first cut (see the "differs" label).

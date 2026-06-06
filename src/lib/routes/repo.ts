@@ -600,7 +600,7 @@ export async function fetchRepoMeta(
 export interface GraspServerState {
   host:     string;       // display host (git.shakespeare.diy)
   cloneUrl: string;       // full https clone URL
-  sync:     GraspSync;    // in-sync | out-of-sync | missing | unreachable | unknown
+  sync:     GraspSync;    // in-sync | behind | ahead | diverged | differs | missing | unreachable | unknown
   has:      string | null; // short oid the host actually holds (null = no answer)
 }
 
