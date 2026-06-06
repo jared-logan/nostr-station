@@ -6299,11 +6299,12 @@ const ProjectsPanel = (() => {
       if (hasNgit) {
         return openExecModal({
           title:    `ngit sync · ${p.name}`,
-          subtitle: 'Pull from your relays + GRASP server, then push your commits. Amber signs.',
+          subtitle: 'Pull from your relays + GRASP servers, then push your commits to every GRASP server. Approve the state event on your signer.',
           endpoint: `/api/projects/${p.id}/ngit/sync`,
         }).then(r => {
-          if (r.ok) toast('ngit sync complete', '', 'ok');
-          else      toast('ngit sync failed', `exit ${r.code}`, 'err');
+          if (r.ok)        toast('ngit sync complete', 'pushed to all GRASP servers', 'ok');
+          else if (r.warn) toast('Sync incomplete', 'some GRASP servers lagged — re-run to retry', 'warn');
+          else             toast('ngit sync failed', `exit ${r.code}`, 'err');
           refreshAfter();
           return !!r.ok;
         });
@@ -6359,8 +6360,9 @@ const ProjectsPanel = (() => {
           subtitle: 'Publish the signed repo state to your relays, then push your commits to every GRASP git host. Approve the state event on your signer.',
           endpoint: `/api/projects/${p.id}/ngit/grasp-push`,
         }).then(r => {
-          if (r.ok) toast('Pushed to all GRASP servers', '', 'ok');
-          else      toast('GRASP push incomplete', `exit ${r.code}`, 'err');
+          if (r.ok)        toast('Pushed to all GRASP servers', '', 'ok');
+          else if (r.warn) toast('Push incomplete', 'some GRASP servers lagged — re-run to retry', 'warn');
+          else             toast('GRASP push failed', `exit ${r.code}`, 'err');
           refreshAfter();
           return !!r.ok;
         });
@@ -12673,8 +12675,9 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
         subtitle: 'Publish the signed repo state to your relays, then push your commits to every GRASP git host. Approve the state event on your signer.',
         endpoint: `/api/projects/${p.id}/ngit/grasp-push`,
       }).then(r => {
-        if (r.ok) toast('Pushed to all GRASP servers', '', 'ok');
-        else      toast('GRASP push incomplete', `exit ${r.code}`, 'err');
+        if (r.ok)        toast('Pushed to all GRASP servers', '', 'ok');
+        else if (r.warn) toast('Push incomplete', 'some GRASP servers lagged — re-run to retry', 'warn');
+        else             toast('GRASP push failed', `exit ${r.code}`, 'err');
         if (state.view === 'detail' && state.projectId === p.id) render();
       });
     }

@@ -7,7 +7,8 @@
  *   GET    /api/projects/:id/ngit/status        — bunker domain + ngit remote
  *   GET    /api/projects/:id/ngit/proposals     — kind-1617 list
  *   POST   /api/projects/:id/ngit/push          — SSE: git push origin HEAD
- *   POST   /api/projects/:id/ngit/sync          — SSE: pull (ff-only) + push
+ *   POST   /api/projects/:id/ngit/grasp-push    — SSE: publish state + push to every GRASP host
+ *   POST   /api/projects/:id/ngit/sync          — SSE: pull (ff-only) + GRASP push
  *   POST   /api/projects/:id/ngit/send          — SSE: ngit send --defaults
  *   POST   /api/projects/:id/ngit/download      — SSE: ngit pr checkout <id>
  *   POST   /api/projects/:id/ngit/init          — SSE: ngit init (signer-gated)
@@ -168,8 +169,33 @@ export async function handleProjectsNgit(
         try { res.end(); } catch {}
         return true;
       }
-      const pushCode = await runPhase('git push origin HEAD', 'git', ['push', 'origin', 'HEAD']);
-      emit({ done: true, code: pushCode });
+      // Phase 2: GRASP direct push so the sync lands on EVERY server, not just
+      // one. Replaces `git push origin HEAD` via git-remote-nostr (which could
+      // leave a host "behind signed") with the same delivery the Push/Publish
+      // buttons use — pull + push, both landing everywhere.
+      const coords = decodeNgitRemote(project);
+      if (!coords) {
+        emit({ line: 'pulled; project has no ngit remote so there is nothing to push', stream: 'stderr' });
+        emit({ done: true, code: 0 });
+        try { res.end(); } catch {}
+        return true;
+      }
+      const log = (line: string, stream: 'stdout' | 'stderr' = 'stdout') => emit({ line, stream });
+      const coordKey = `${coords.pubkey}:${coords.identifier}`;
+      if (graspPushInFlight.has(coordKey)) {
+        emit({ line: 'another GRASP push is already in progress — pulled, skipping push', stream: 'stderr' });
+        emit({ done: true, code: 0 });
+        try { res.end(); } catch {}
+        return true;
+      }
+      graspPushInFlight.add(coordKey);
+      let outcome: GraspDeliveryOutcome;
+      try {
+        outcome = await runGraspDelivery(cwd, coords, project, log);
+      } finally {
+        graspPushInFlight.delete(coordKey);
+      }
+      emit({ done: true, code: outcome.status === 'failed' ? 1 : 0, warn: outcome.status === 'partial' });
     } finally {
       try { res.end(); } catch {}
     }
@@ -572,37 +598,30 @@ const hostOf = (url: string): string => {
   try { return new URL(url).host; } catch { return url; }
 };
 
-async function handleGraspPush(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
+type GraspDeliveryStatus = 'ok' | 'partial' | 'failed';
+
+interface GraspDeliveryOutcome {
+  status: GraspDeliveryStatus;
+  landed: number;       // hosts that accepted the pack
+  total:  number;       // clone URLs we tried
+}
+
+/**
+ * The reusable Shakespeare-`nostrPush` core: resolve the announcement + state,
+ * publish the signed state to the relays, then push the current branch to every
+ * GRASP git host, and advance the upstream tracking ref on success. Emits
+ * progress via `log` and returns an outcome — it does NOT own the SSE framing,
+ * so both the dedicated Push and the Sync push-phase can drive it onto their
+ * own stream. Caller is responsible for the in-flight guard.
+ */
+async function runGraspDelivery(
+  repoPath: string,
+  coords: { pubkey: string; identifier: string; relayHints: string[] },
   project: Project,
-): Promise<boolean> {
-  if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
-  const coords = decodeNgitRemote(project);
-  if (!coords) { res.writeHead(400); res.end('project has no ngit remote — announce it first'); return true; }
-
-  const coordKey = `${coords.pubkey}:${coords.identifier}`;
-  if (graspPushInFlight.has(coordKey)) {
-    res.writeHead(409); res.end('a GRASP push for this repository is already in progress'); return true;
-  }
-  graspPushInFlight.add(coordKey);
-
-  res.writeHead(200, {
-    'Content-Type':  'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection':    'keep-alive',
-  });
-  const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
-  const log  = (line: string, stream: 'stdout' | 'stderr' = 'stdout') => emit({ line, stream });
-  const finish = (code: number, warn = false): boolean => {
-    emit({ done: true, code, warn });
-    try { res.end(); } catch {}
-    graspPushInFlight.delete(coordKey);
-    return true;
-  };
-
+  log: (line: string, stream?: 'stdout' | 'stderr') => void,
+): Promise<GraspDeliveryOutcome> {
+  const fail = (): GraspDeliveryOutcome => ({ status: 'failed', landed: 0, total: 0 });
   try {
-    const repoPath   = project.path;
     const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
     const grasp      = getGraspServers().map(s => /^wss?:\/\//i.test(s) ? s : `wss://${s}`);
     // Same merge policy the announce/read paths use, so the state lands where
@@ -633,7 +652,7 @@ async function handleGraspPush(
     if (!repoEvent) {
       log('No repository announcement (kind 30617) found on the relays.', 'stderr');
       log('Announce the repository first (Edit Repository → Save changes), then retry.', 'stderr');
-      return finish(1);
+      return fail();
     }
     const statePrior = await queryOne(30618);
 
@@ -642,7 +661,7 @@ async function handleGraspPush(
     const cloneUrls = selectGraspCloneUrls(cloneTags);
     if (cloneUrls.length === 0) {
       log('The announcement lists no https:// clone URLs — nothing to push to.', 'stderr');
-      return finish(1);
+      return fail();
     }
     log(`GRASP git hosts: ${cloneUrls.map(hostOf).join(', ')}`);
 
@@ -655,7 +674,7 @@ async function handleGraspPush(
     const refs = await readLocalRefs(gitStdout);
     if (!refs.currentBranch) {
       log('HEAD is detached — check out a branch before pushing. Aborting.', 'stderr');
-      return finish(1);
+      return fail();
     }
     const existingHeadTag = statePrior?.tags.find(t => t[0] === 'HEAD') ?? null;
     const newStateTags = buildRepoStateTags(coords.identifier, refs, existingHeadTag);
@@ -678,7 +697,7 @@ async function handleGraspPush(
       if (!signed.ok || !signed.signedEvent) {
         log(`Could not sign the state event: ${signed.error || (signed.tried ? 'signer rejected' : 'no paired signer')}`, 'stderr');
         log('Without a signed state, GRASP hosts will not authorize the push. Aborting.', 'stderr');
-        return finish(1);
+        return fail();
       }
       stateEvent = signed.signedEvent;
     }
@@ -691,7 +710,7 @@ async function handleGraspPush(
     }
     if (stateAccepted === 0) {
       log('No relay accepted the signed state — GRASP hosts will reject the push. Aborting.', 'stderr');
-      return finish(1);
+      return fail();
     }
 
     // (c) Push the pack to every GRASP git host, in parallel. Current branch
@@ -737,11 +756,48 @@ async function handleGraspPush(
     if (landed > 0 && landed < cloneUrls.length) {
       log('Some hosts did not accept the push — re-run to retry the laggards.', 'stderr');
     }
-    // Full success → 0; partial → 0 + warn (so the modal flags "needs action"
-    // without crying failure); total failure → 1.
-    return finish(landed === 0 ? 1 : 0, landed > 0 && landed < cloneUrls.length);
+    return {
+      status: landed === 0 ? 'failed' : (landed < cloneUrls.length ? 'partial' : 'ok'),
+      landed,
+      total: cloneUrls.length,
+    };
   } catch (e: any) {
     log(`GRASP push error: ${(e?.message || String(e)).slice(0, 240)}`, 'stderr');
-    return finish(1);
+    return fail();
   }
+}
+
+async function handleGraspPush(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  project: Project,
+): Promise<boolean> {
+  if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+  const coords = decodeNgitRemote(project);
+  if (!coords) { res.writeHead(400); res.end('project has no ngit remote — announce it first'); return true; }
+
+  const coordKey = `${coords.pubkey}:${coords.identifier}`;
+  if (graspPushInFlight.has(coordKey)) {
+    res.writeHead(409); res.end('a GRASP push for this repository is already in progress'); return true;
+  }
+  graspPushInFlight.add(coordKey);
+
+  res.writeHead(200, {
+    'Content-Type':  'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection':    'keep-alive',
+  });
+  const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+  const log  = (line: string, stream: 'stdout' | 'stderr' = 'stdout') => emit({ line, stream });
+
+  try {
+    const outcome = await runGraspDelivery(project.path, coords, project, log);
+    // Full success → 0; partial → 0 + warn (so the modal flags "needs action"
+    // without crying failure); total failure → 1.
+    emit({ done: true, code: outcome.status === 'failed' ? 1 : 0, warn: outcome.status === 'partial' });
+  } finally {
+    try { res.end(); } catch {}
+    graspPushInFlight.delete(coordKey);
+  }
+  return true;
 }

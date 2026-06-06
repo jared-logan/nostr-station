@@ -32,10 +32,13 @@ signed" in gitworkshop while another showed "signed".
   (mirroring `git push origin HEAD`'s side effect) so the dashboard's
   ahead/behind badge clears — without it, pushing to the clone URLs directly
   would leave the card reading "Push N commits" after a clean push.
-- Both ngit push affordances route here — the sync-popover **Push** and the
-  pure-ngit **Publish** quick action — so they behave identically. git-only
-  and combined git+ngit repos keep their existing terminal/SSE publish flow
-  unchanged (it must also reach GitHub).
+- Every ngit push verb now lands everywhere — the sync-popover **Push**, the
+  pure-ngit **Publish** quick action, AND the **Sync** button (its push phase
+  was `git push origin HEAD`; it now pulls ff-only then runs the same GRASP
+  delivery). The delivery core is shared (`runGraspDelivery`) so the three
+  paths can't drift. git-only and combined git+ngit repos keep their existing
+  terminal/SSE publish flow unchanged (it must also reach GitHub). Partial
+  delivery surfaces as a "re-run to retry" toast across all three.
 - `src/lib/grasp-push.ts` holds the pure, unit-tested ref/tag logic
   (`selectGraspCloneUrls`, `buildRepoStateTags`, `repoStateTagsEqual`,
   `readLocalRefs`); 12 tests cover URL selection, NIP-34 state shape, HEAD
