@@ -26294,7 +26294,7 @@ const AppsPanel = (() => {
           ${icon}
           <div class="apps-card-text">
             <div class="apps-card-name">${escapeHtml(app.name || app.d || '(unnamed)')} ${anchor}</div>
-            <div class="apps-card-id muted" title="d-tag — the replaceable address">id: ${escapeHtml(app.d || '—')}</div>
+            <div class="apps-card-id muted" title="d-tag — this app's permanent identifier">id: ${escapeHtml(app.d || '—')}</div>
             ${app.about ? `<div class="apps-card-about muted">${escapeHtml(app.about)}</div>` : ''}
           </div>
         </div>
@@ -26402,7 +26402,7 @@ const AppsPanel = (() => {
     return `
       <div class="apps-imgfield">
         <div class="apps-field-label">${label}</div>
-        <div class="apps-field-hint muted">→ content.${field} · ${recommend}</div>
+        <div class="apps-field-hint muted">${recommend} → <code>content.${field}</code></div>
         <div class="apps-imgfield-row">
           <div class="apps-img-preview">${preview}</div>
           <div class="apps-imgfield-ctrl">
@@ -26492,30 +26492,31 @@ const AppsPanel = (() => {
 
         <section class="apps-card-section">
           <div class="apps-section-title">Basic Information</div>
+          <div class="apps-section-sub muted">Describe your app so people can discover it. These fields go into the event's profile content.</div>
           <div class="apps-grid2">
-            ${fieldRow('App Name <span class="req">*</span>', '→ content.name', `<input class="apps-input" data-bind="name" value="${escapeHtml(editing.name)}" placeholder="My Nostr App">`)}
-            ${fieldRow('Website', '→ content.website', `<input class="apps-input" data-bind="website" value="${escapeHtml(editing.website)}" placeholder="https://myapp.com">`)}
+            ${fieldRow('App Name <span class="req">*</span>', 'The display name shown wherever your app appears. → <code>content.name</code>', `<input class="apps-input" data-bind="name" value="${escapeHtml(editing.name)}" placeholder="My Nostr App">`)}
+            ${fieldRow('Website', "Your app's homepage — shown as a link on your listing. Informational; it does <i>not</i> open content (that's a Handler). → <code>content.website</code>", `<input class="apps-input" data-bind="website" value="${escapeHtml(editing.website)}" placeholder="https://myapp.com">`)}
           </div>
           ${editing.isNew
-            ? fieldRow('App identifier (d-tag)', '→ <code>d</code> tag — the replaceable address. Auto-filled from the name; customize it now, but it locks once published.', `<input class="apps-input" data-bind="d" value="${escapeHtml(editing.d)}" placeholder="my-nostr-app">`)
-            : fieldRow('App identifier (d-tag) <span class="apps-lock" title="Locked">🔒</span>', '→ <code>d</code> tag — the replaceable address. Locked: changing it would publish a <i>new</i> app and leave this one untouched.', `<input class="apps-input" value="${escapeHtml(editing.d)}" readonly disabled>`)}
-          ${fieldRow('Description', '→ content.about', `<textarea class="apps-input apps-textarea" data-bind="about" placeholder="A brief description of what your app does…">${escapeHtml(editing.about)}</textarea>`)}
+            ? fieldRow('App identifier (d-tag)', 'A permanent identifier for this app (the <code>d</code> tag). Auto-filled from the name. Future edits update the listing with this same id — it <b>can\'t be changed later</b>, so keep it stable.', `<input class="apps-input" data-bind="d" value="${escapeHtml(editing.d)}" placeholder="my-nostr-app">`)
+            : fieldRow('App identifier (d-tag) <span class="apps-lock" title="Locked">🔒</span>', "This app's permanent id (the <code>d</code> tag) — it's what lets edits replace this listing <i>in place</i>. Locked, because a different id would publish a separate app instead of editing this one.", `<input class="apps-input" value="${escapeHtml(editing.d)}" readonly disabled>`)}
+          ${fieldRow('Description', 'A short summary of what your app does and what makes it special. → <code>content.about</code>', `<textarea class="apps-input apps-textarea" data-bind="about" placeholder="A brief description of what your app does…">${escapeHtml(editing.about)}</textarea>`)}
           <div class="apps-grid2">
-            ${fieldRow('Lightning Address', '→ content.lud16', `<input class="apps-input" data-bind="lud16" value="${escapeHtml(editing.lud16)}" placeholder="app@wallet.com">`)}
-            ${fieldRow('NIP-05 Identifier', '→ content.nip05', `<input class="apps-input" data-bind="nip05" value="${escapeHtml(editing.nip05)}" placeholder="app@domain.com">`)}
+            ${fieldRow('Lightning Address', 'A lightning address for zaps / tips to your app, e.g. app@wallet.com. → <code>content.lud16</code>', `<input class="apps-input" data-bind="lud16" value="${escapeHtml(editing.lud16)}" placeholder="app@wallet.com">`)}
+            ${fieldRow('NIP-05 Identifier', "A NIP-05 that verifies your app's identity, e.g. app@domain.com. → <code>content.nip05</code>", `<input class="apps-input" data-bind="nip05" value="${escapeHtml(editing.nip05)}" placeholder="app@domain.com">`)}
           </div>
         </section>
 
         <section class="apps-card-section">
           <div class="apps-section-title">Images</div>
-          <div class="apps-section-sub muted">Upload a file or paste a URL for your icon and banner.</div>
-          ${imageField('picture', 'App Icon', 'Recommended: 256×256px or larger, square')}
-          ${imageField('banner', 'Banner Image', 'Recommended: 1024×300px or similar wide format')}
+          <div class="apps-section-sub muted">Upload a file or paste a URL for each. Both are optional — cards fall back gracefully when an image is missing.</div>
+          ${imageField('picture', 'App Icon', 'Square logo shown next to your app name. Recommended 256×256px or larger.')}
+          ${imageField('banner', 'Banner Image', 'Wide header across the top of your app card. Recommended ~1024×300px.')}
         </section>
 
         <section class="apps-card-section">
           <div class="apps-section-title">Supported Event Kinds</div>
-          <div class="apps-section-sub muted">Which event kinds can your app open? → one <code>k</code> tag each.</div>
+          <div class="apps-section-sub muted">The event kinds your app can open or handle. Other clients use these to suggest your app for matching content (e.g. pick Articles so it's offered for kind-30023 posts). → one <code>k</code> tag each.</div>
           <div class="apps-kind-grid">${presetGrid}</div>
           <div class="apps-customkind">
             <input class="apps-input" id="apps-customkind-input" type="number" min="0" max="65535" placeholder="Add custom kind number…">
@@ -26526,7 +26527,7 @@ const AppsPanel = (() => {
 
         <section class="apps-card-section">
           <div class="apps-section-title">Handlers</div>
-          <div class="apps-section-sub muted">How clients open content in your app → <code>web</code> / <code>ios</code> / <code>android</code> tags. Put <code>&lt;bech32&gt;</code> where a Nostr entity should go (then pick its type), or leave a plain URL to just open your app.</div>
+          <div class="apps-section-sub muted">How other clients open content <i>in</i> your app — this powers the “Open App” button elsewhere (unlike Website, which is just a link). Put <code>&lt;bech32&gt;</code> where a Nostr entity id goes, then pick its type; or leave a plain URL to just open your app. → <code>web</code> / <code>ios</code> / <code>android</code> tags.</div>
           <div class="apps-handler-head muted"><span>Platform</span><span>URL Template</span><span>Entity Type</span><span></span></div>
           ${handlerRows || '<div class="muted">No handlers yet.</div>'}
           <button type="button" class="apps-add-btn" data-act="add-handler">+ Add Handler</button>
@@ -26534,7 +26535,7 @@ const AppsPanel = (() => {
 
         <section class="apps-card-section">
           <div class="apps-section-title">Categories</div>
-          <div class="apps-section-sub muted">Hashtags that help users discover your app → one <code>t</code> tag each.</div>
+          <div class="apps-section-sub muted">Hashtags that help people find your app in directories — e.g. client, relay, social. → one <code>t</code> tag each.</div>
           <div class="apps-chip-row">${topicChips}</div>
           <div class="apps-customkind">
             <input class="apps-input" id="apps-topic-input" placeholder="e.g. client, relay, social — Enter to add">
@@ -26544,7 +26545,7 @@ const AppsPanel = (() => {
 
         <section class="apps-card-section">
           <div class="apps-section-title">Additional Tags</div>
-          <div class="apps-section-sub muted">Optional extra tags included in the published event (e.g. <code>r</code>, <code>L</code>).</div>
+          <div class="apps-section-sub muted">Advanced — any other raw tags to include in the event, e.g. <code>r</code> (a reference URL like your source repo) or <code>L</code> (a label). Leave empty if unsure.</div>
           ${extraRows || '<div class="muted">No additional tags.</div>'}
           <button type="button" class="apps-add-btn" data-act="add-tag">+ Add Tag</button>
         </section>
