@@ -100,6 +100,10 @@
             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></span>
             Client
           </a>
+          <a href="#apps" data-panel="apps">
+            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
+            Apps
+          </a>
         </details>
         <details class="sidebar-group" id="group-infrastructure" open>
           <summary>Infrastructure<svg class="sidebar-group-chevron" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></summary>
@@ -533,6 +537,30 @@
             <button id="client-ditto-retry">Reload</button>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- APP CENTER — manage NIP-89 handler events (kind 31990) -->
+    <section class="panel" data-panel="apps">
+      <div class="panel-head">
+        <div>
+          <div class="title">Apps <span class="env-chip env-chip-public" title="NIP-89 application handler events (kind 31990). Discoverable across the Nostr network.">NIP-89</span></div>
+          <div class="subtitle">Publish &amp; manage your app listings — every app links back to nostr-station.</div>
+        </div>
+        <div class="panel-head-actions">
+          <select id="apps-author" class="apps-author-select" title="Whose app events to show">
+            <option value="me">My apps</option>
+            <option value="project" hidden>nostr-station project</option>
+          </select>
+          <button id="apps-refresh" title="Re-query relays for your app events">refresh</button>
+          <button class="primary" id="apps-new">+ New App</button>
+        </div>
+      </div>
+      <div class="panel-body" id="apps-body">
+        <div id="apps-list-view">
+          <div id="apps-grid" class="apps-grid"></div>
+        </div>
+        <div id="apps-editor-view" hidden></div>
       </div>
     </section>
 
