@@ -6,6 +6,9 @@ const {
   stateOidForRef,
   defaultBranchFromState,
   compareServerRef,
+  classifyLsRemoteFailure,
+  stateRefMap,
+  otherRefDivergence,
 } = await import('../src/lib/grasp-state.ts');
 
 const A = 'a'.repeat(40);
@@ -76,10 +79,72 @@ test('compareServerRef: out-of-sync when they differ', () => {
   assert.equal(compareServerRef(C, A), 'out-of-sync');
 });
 
-test('compareServerRef: unreachable when the host gave no oid', () => {
-  assert.equal(compareServerRef(null, A), 'unreachable');
+test('compareServerRef: out-of-sync when reachable but missing the branch ref', () => {
+  // Reachability/missing is decided by the caller; a null oid here means the
+  // host answered but doesn't carry the branch → behind, not unreachable.
+  assert.equal(compareServerRef(null, A), 'out-of-sync');
 });
 
 test('compareServerRef: unknown when there is no signed state', () => {
   assert.equal(compareServerRef(A, null), 'unknown');
+});
+
+// ── classifyLsRemoteFailure ──────────────────────────────────────────────
+
+test('classifyLsRemoteFailure: 404 / not-found → missing', () => {
+  assert.equal(classifyLsRemoteFailure('fatal: repository not found'), 'missing');
+  assert.equal(classifyLsRemoteFailure('The requested URL returned error: 404'), 'missing');
+  assert.equal(classifyLsRemoteFailure('remote: Repository does not exist'), 'missing');
+});
+
+test('classifyLsRemoteFailure: network/timeout → unreachable', () => {
+  assert.equal(classifyLsRemoteFailure('Could not resolve host: git.example'), 'unreachable');
+  assert.equal(classifyLsRemoteFailure('Connection timed out'), 'unreachable');
+  assert.equal(classifyLsRemoteFailure(''), 'unreachable');
+});
+
+// ── stateRefMap ──────────────────────────────────────────────────────────
+
+test('stateRefMap: keeps only refs/* oid tags, skips HEAD and d', () => {
+  const map = stateRefMap([
+    ['d', 'r'], ['HEAD', 'ref: refs/heads/main'],
+    ['refs/heads/main', A], ['refs/tags/v1', B], ['refs/heads/bad', 'nope'],
+  ]);
+  assert.equal(map.get('refs/heads/main'), A);
+  assert.equal(map.get('refs/tags/v1'), B);
+  assert.equal(map.has('HEAD'), false);
+  assert.equal(map.has('refs/heads/bad'), false);
+});
+
+// ── otherRefDivergence ───────────────────────────────────────────────────
+
+test('otherRefDivergence: flags a tag whose oid differs across servers', () => {
+  const signed = new Map([['refs/heads/main', A], ['refs/tags/v1', B]]);
+  const servers = [
+    { host: 'h1', map: new Map([['refs/heads/main', A], ['refs/tags/v1', B]]) },
+    { host: 'h2', map: new Map([['refs/heads/main', A], ['refs/tags/v1', C]]) }, // diverges
+  ];
+  const out = otherRefDivergence(servers, signed, 'refs/heads/main');
+  assert.equal(out.length, 1);
+  assert.equal(out[0].ref, 'refs/tags/v1');
+  assert.equal(out[0].signed, B.slice(0, 8));
+  assert.deepEqual(out[0].servers, [{ host: 'h1', has: B.slice(0, 8) }, { host: 'h2', has: C.slice(0, 8) }]);
+});
+
+test('otherRefDivergence: excludes the displayed branch and HEAD', () => {
+  const signed = new Map([['refs/heads/main', A]]);
+  const servers = [
+    { host: 'h1', map: new Map([['refs/heads/main', A], ['HEAD', A]]) },
+    { host: 'h2', map: new Map([['refs/heads/main', C], ['HEAD', C]]) }, // main diverges, but excluded
+  ];
+  assert.deepEqual(otherRefDivergence(servers, signed, 'refs/heads/main'), []);
+});
+
+test('otherRefDivergence: agreement across servers is not flagged; failed servers ignored', () => {
+  const signed = new Map([['refs/tags/v1', B]]);
+  const servers = [
+    { host: 'h1', map: new Map([['refs/tags/v1', B]]) },
+    { host: 'h2', map: null }, // unreachable — ignored, not a divergence
+  ];
+  assert.deepEqual(otherRefDivergence(servers, signed, 'refs/heads/main'), []);
 });

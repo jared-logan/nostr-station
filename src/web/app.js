@@ -9250,6 +9250,12 @@ const ProjectsPanel = (() => {
       }));
       hostEl.appendChild(menu);
       triggerEl.setAttribute('aria-expanded', 'true');
+      // Upgrade the placeholder maintainer cells once the signer profile lands.
+      if (data.signerHex) {
+        resolveProfiles([data.signerHex]).then(() => {
+          menu?.querySelectorAll('.grasp-maint').forEach(el => { el.innerHTML = graspMaintInner(data.signerHex); });
+        }).catch(() => {});
+      }
     };
     const toggle = (e) => { e.stopPropagation(); if (menu) close(); else open(); };
     triggerEl.addEventListener('click', toggle);
@@ -9263,26 +9269,58 @@ const ProjectsPanel = (() => {
     });
   }
 
+  // Avatar + name for the state's signer (same maintainer across rows). Starts
+  // as an identicon + short npub; upgraded in place once the profile resolves.
+  function graspMaintInner(hex) {
+    if (!hex) return '';
+    const pic = profilePictureOf(hex);
+    const av = pic
+      ? `<img class="grasp-maint-av" src="${escapeHtml(proxyImageUrl(pic))}" alt="" referrerpolicy="no-referrer">`
+      : `<span class="grasp-maint-av">${pixelAvatar(hex, 16)}</span>`;
+    return `${av}<span class="grasp-maint-name">${escapeHtml(profileNameOf(hex))}</span>`;
+  }
+
+  const GRASP_META = {
+    'in-sync':     { cls: 'sig',     icon: '✓', label: 'signed' },
+    'out-of-sync': { cls: 'behind',  icon: '!', label: 'behind signed' },
+    'missing':     { cls: 'err',     icon: '○', label: 'error' },
+    'unreachable': { cls: 'unreach', icon: '–', label: 'unreachable' },
+    'unknown':     { cls: 'unknown', icon: '–', label: 'no signed state' },
+  };
+
   function buildGraspPopover(p, data, onRefresh) {
     const wrap = document.createElement('div');
     wrap.className = 'grasp-pop-body';
+
     const rows = (data.servers || []).map(s => {
-      const cls = s.sync === 'in-sync' ? 'sig' : (s.sync === 'unreachable' ? 'unreach' : 'behind');
-      const label = s.sync === 'in-sync'    ? 'signed'
-                  : s.sync === 'unreachable' ? 'unreachable'
-                  : s.sync === 'unknown'     ? 'no signed state'
-                  : 'behind signed';
-      const icon = s.sync === 'in-sync' ? '✓' : (s.sync === 'unreachable' ? '–' : '!');
-      const has = (s.sync === 'out-of-sync' && s.has)
-        ? `<span class="grasp-row-has">has <code>${escapeHtml(s.has)}</code></span>` : '';
-      return `<div class="grasp-row grasp-row-${cls}">
-        <span class="grasp-row-icon">${icon}</span>
-        <code class="grasp-row-url">${escapeHtml(s.cloneUrl)}</code>
-        ${has}
-        <span class="grasp-row-status">${label}</span>
+      const m = GRASP_META[s.sync] || GRASP_META['unknown'];
+      const detail = (s.sync === 'out-of-sync' && s.has) ? `has <code>${escapeHtml(s.has)}</code>`
+                   : s.sync === 'missing'               ? 'no git data — wrong path or 404'
+                   : s.sync === 'unreachable'           ? 'no response'
+                   : '';
+      return `<div class="grasp-row grasp-row-${m.cls}">
+        <div class="grasp-row-main">
+          <span class="grasp-row-icon">${m.icon}</span>
+          <code class="grasp-row-url">${escapeHtml(s.cloneUrl)}</code>
+          <span class="grasp-row-status">${m.label}</span>
+        </div>
+        <div class="grasp-row-sub">
+          <span class="grasp-maint">${graspMaintInner(data.signerHex)}</span>
+          ${detail ? `<span class="grasp-row-detail">${detail}</span>` : ''}
+        </div>
       </div>`;
     }).join('');
+
     const allOk = data.inSync >= data.total;
+    const other = data.otherRefsDiffer || 0;
+    const otherDetail = (data.otherRefs || []).map(r => {
+      const cells = [
+        `signed ${r.signed ? `<code>${escapeHtml(r.signed)}</code>` : '—'}`,
+        ...r.servers.map(sv => `${escapeHtml(sv.host)} ${sv.has ? `<code>${escapeHtml(sv.has)}</code>` : '—'}`),
+      ].join(' · ');
+      return `<div class="grasp-otherref"><code class="grasp-otherref-name">${escapeHtml(r.ref)}</code><span class="grasp-otherref-oids">${cells}</span></div>`;
+    }).join('');
+
     wrap.innerHTML = `
       <div class="grasp-pop-head">
         <span class="grasp-pop-title">⚡ GRASP Servers</span>
@@ -9293,8 +9331,22 @@ const ProjectsPanel = (() => {
       </div>
       <div class="grasp-pop-list">${rows || '<div class="muted">No GRASP servers in the announcement.</div>'}</div>
       ${!data.hasSignedState ? `<div class="grasp-pop-foot warn">No signed repo state (30618) found — push to publish it.</div>` : ''}
+      ${other > 0 ? `
+        <div class="grasp-otherrefs">
+          <button class="grasp-otherrefs-toggle" aria-expanded="false">⚠ ${other} other ref${other === 1 ? '' : 's'} differ${other === 1 ? 's' : ''} across servers <span class="grasp-chev">▾</span></button>
+          <div class="grasp-otherrefs-detail" hidden>${otherDetail}</div>
+        </div>` : ''}
     `;
+
     wrap.querySelector('.grasp-pop-refresh')?.addEventListener('click', onRefresh);
+    const toggle = wrap.querySelector('.grasp-otherrefs-toggle');
+    toggle?.addEventListener('click', () => {
+      const d = wrap.querySelector('.grasp-otherrefs-detail');
+      const opening = d.hidden;
+      d.hidden = !opening;
+      toggle.setAttribute('aria-expanded', String(opening));
+      toggle.querySelector('.grasp-chev').textContent = opening ? '▴' : '▾';
+    });
     return wrap;
   }
 

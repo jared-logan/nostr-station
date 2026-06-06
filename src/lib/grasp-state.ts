@@ -16,7 +16,14 @@
  * for this first cut (see the "differs" label).
  */
 
-export type GraspSync = 'in-sync' | 'out-of-sync' | 'unreachable' | 'unknown';
+export type GraspSync = 'in-sync' | 'out-of-sync' | 'missing' | 'unreachable' | 'unknown';
+
+/** A ref whose oid is not agreed across the signed state + reachable servers. */
+export interface RefDivergence {
+  ref:     string;                                  // full ref name (refs/heads/x, refs/tags/y)
+  signed:  string | null;                           // short oid the signed state pins (null = absent)
+  servers: { host: string; has: string | null }[]; // short oid each server holds (null = absent)
+}
 
 /**
  * Parse `git ls-remote <url> [<ref>]` output into a ref→oid map. Lines are
@@ -69,15 +76,81 @@ export function defaultBranchFromState(stateTags: string[][]): string | null {
 }
 
 /**
- * Classify a single GRASP git host against the signed state for a branch:
- *   - hostOid === null            → unreachable (ls-remote failed / no such ref)
- *   - signedOid === null          → unknown (repo has no signed state yet)
- *   - oids equal                  → in-sync ("signed")
- *   - oids differ                 → out-of-sync ("behind signed")
+ * Classify a single GRASP git host against the signed state for a branch,
+ * assuming the host was REACHABLE (ls-remote succeeded). Reachability and the
+ * 404/"wrong path" case are handled by the caller (→ 'unreachable' / 'missing')
+ * before this is reached.
+ *   - signedOid === null → unknown (repo has no signed state yet)
+ *   - hostOid === null   → out-of-sync (reachable, but doesn't carry the branch)
+ *   - oids equal         → in-sync ("signed")
+ *   - oids differ        → out-of-sync ("behind signed")
  * Pure.
  */
 export function compareServerRef(hostOid: string | null, signedOid: string | null): GraspSync {
-  if (hostOid === null)   return 'unreachable';
   if (signedOid === null) return 'unknown';
+  if (hostOid === null)   return 'out-of-sync';
   return hostOid.toLowerCase() === signedOid.toLowerCase() ? 'in-sync' : 'out-of-sync';
+}
+
+/**
+ * Classify why an `ls-remote` failed from git's stderr/message:
+ *   - a 404 / "repository not found" / "not found" → 'missing'
+ *     (wrong path or the repo was never pushed to this host — gitworkshop's
+ *     "no git data — wrong path or 404")
+ *   - anything else (timeout, DNS, connection refused, TLS) → 'unreachable'
+ * Pure.
+ */
+export function classifyLsRemoteFailure(message: string): 'missing' | 'unreachable' {
+  const m = (message || '').toLowerCase();
+  if (/\b404\b|not found|repository not found|does not exist|no such repos/.test(m)) {
+    return 'missing';
+  }
+  return 'unreachable';
+}
+
+/** All concrete refs (refs/heads/*, refs/tags/*) a signed 30618 pins, as a
+ *  ref→oid map. Skips the symbolic HEAD and the `d` tag. Pure. */
+export function stateRefMap(stateTags: string[][]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const t of stateTags) {
+    if (!Array.isArray(t) || typeof t[0] !== 'string' || typeof t[1] !== 'string') continue;
+    if (!t[0].startsWith('refs/')) continue;
+    if (!/^[0-9a-f]{40}$/i.test(t[1])) continue;
+    map.set(t[0], t[1].toLowerCase());
+  }
+  return map;
+}
+
+/**
+ * Refs — OTHER than the displayed branch — whose oid isn't agreed across the
+ * signed state and the reachable servers. Drives gitworkshop's "N other ref
+ * differs across servers" rollup. A ref "differs" when the distinct non-null
+ * oids among {signed} ∪ {reachable servers that carry it} number more than one.
+ * Servers that failed (`map: null`) are ignored. Pure; sorted by ref name.
+ */
+export function otherRefDivergence(
+  servers: { host: string; map: Map<string, string> | null }[],
+  signedRefs: Map<string, string>,
+  branchRef: string,
+): RefDivergence[] {
+  const refs = new Set<string>();
+  for (const k of signedRefs.keys()) refs.add(k);
+  for (const s of servers) if (s.map) for (const k of s.map.keys()) refs.add(k);
+  refs.delete(branchRef);
+  refs.delete('HEAD');
+
+  const short = (oid: string | null) => (oid ? oid.slice(0, 8) : null);
+  const out: RefDivergence[] = [];
+  for (const ref of [...refs].sort()) {
+    if (!ref.startsWith('refs/')) continue;
+    const signed = signedRefs.get(ref) ?? null;
+    const perServer = servers.map((s) => ({ host: s.host, has: s.map ? (s.map.get(ref) ?? null) : null }));
+    const distinct = new Set<string>();
+    if (signed) distinct.add(signed);
+    for (const ps of perServer) if (ps.has) distinct.add(ps.has);
+    if (distinct.size > 1) {
+      out.push({ ref, signed: short(signed), servers: perServer.map((ps) => ({ host: ps.host, has: short(ps.has) })) });
+    }
+  }
+  return out;
 }

@@ -64,7 +64,10 @@ import {
 import { resolveMaintainerSet, type MaintainerSet } from '../maintainer-set.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { selectGraspCloneUrls } from '../grasp-push.js';
-import { parseLsRemote, stateOidForRef, defaultBranchFromState, compareServerRef } from '../grasp-state.js';
+import {
+  parseLsRemote, stateOidForRef, defaultBranchFromState, compareServerRef,
+  classifyLsRemoteFailure, stateRefMap, otherRefDivergence, type GraspSync,
+} from '../grasp-state.js';
 import { readBody } from './_shared.js';
 
 const execFileAsync = promisify(execFile);
@@ -296,14 +299,14 @@ async function gitRunBuffer(cwd: string, args: string[], timeoutMs = 5000): Prom
   return stdout as unknown as Buffer;
 }
 
-/** Read-only `git ls-remote <url> <ref>` against a GRASP git host. Pinned to a
- *  single ref so the server answers fast, and `GIT_TERMINAL_PROMPT=0` so an
- *  auth-gated host fails immediately instead of hanging on a credential prompt
- *  the dashboard can't answer. */
-async function gitLsRemote(cwd: string, url: string, ref: string, timeoutMs: number): Promise<string> {
+/** Read-only `git ls-remote <url>` against a GRASP git host (all refs, so we
+ *  can also flag refs other than the displayed branch that differ across
+ *  servers). `GIT_TERMINAL_PROMPT=0` so an auth-gated host fails immediately
+ *  instead of hanging on a credential prompt the dashboard can't answer. */
+async function gitLsRemote(cwd: string, url: string, timeoutMs: number): Promise<string> {
   const gitBin = findBin('git');
   if (!gitBin) throw new Error('git not found on PATH');
-  const { stdout } = await execFileAsync(gitBin, ['ls-remote', url, ref], {
+  const { stdout } = await execFileAsync(gitBin, ['ls-remote', url], {
     cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', NO_COLOR: '1' },
   });
@@ -581,7 +584,7 @@ export async function fetchRepoMeta(
 export interface GraspServerState {
   host:     string;       // display host (git.shakespeare.diy)
   cloneUrl: string;       // full https clone URL
-  sync:     'in-sync' | 'out-of-sync' | 'unreachable' | 'unknown';
+  sync:     GraspSync;    // in-sync | out-of-sync | missing | unreachable | unknown
   has:      string | null; // short oid the host actually holds (null = no answer)
 }
 
@@ -635,31 +638,53 @@ export async function readGraspState(project: Project, refParam: string, refresh
   const cloneTags = getTags(repoEvent, 'clone')
     .flatMap((t) => t.slice(1).filter((v): v is string => typeof v === 'string'));
   const cloneUrls = selectGraspCloneUrls(cloneTags);
-  const signedOid = stateEvent ? stateOidForRef(stateEvent.tags, `refs/heads/${branch}`) : null;
+  const branchRef = `refs/heads/${branch}`;
+  const signedOid = stateEvent ? stateOidForRef(stateEvent.tags, branchRef) : null;
+  const signedRefs = stateEvent ? stateRefMap(stateEvent.tags) : new Map<string, string>();
 
-  const servers: GraspServerState[] = await Promise.all(cloneUrls.map(async (url): Promise<GraspServerState> => {
+  // Probe each host once for ALL refs: gives the branch status AND the data to
+  // flag other refs that differ across servers. Distinguish a 404/wrong-path
+  // host ('missing' — "no git data") from a network failure ('unreachable').
+  const probes = await Promise.all(cloneUrls.map(async (url) => {
     let host = url;
     try { host = new URL(url).host; } catch { /* keep raw */ }
-    let hostOid: string | null = null;
     try {
-      const out = await gitLsRemote(project.path!, url, `refs/heads/${branch}`, LS_REMOTE_TIMEOUT_MS);
-      hostOid = parseLsRemote(out).get(`refs/heads/${branch}`) ?? null;
-    } catch { hostOid = null; }
-    return { host, cloneUrl: url, sync: compareServerRef(hostOid, signedOid), has: hostOid ? hostOid.slice(0, 8) : null };
+      const map = parseLsRemote(await gitLsRemote(project.path!, url, LS_REMOTE_TIMEOUT_MS));
+      return { url, host, map, fail: null as null | 'missing' | 'unreachable' };
+    } catch (e: any) {
+      const fail = classifyLsRemoteFailure((e?.stderr ?? e?.message ?? '').toString());
+      return { url, host, map: null as Map<string, string> | null, fail };
+    }
   }));
 
+  const servers: GraspServerState[] = probes.map((p) => {
+    if (p.fail) return { host: p.host, cloneUrl: p.url, sync: p.fail, has: null };
+    const hostOid = p.map!.get(branchRef) ?? null;
+    return { host: p.host, cloneUrl: p.url, sync: compareServerRef(hostOid, signedOid), has: hostOid ? hostOid.slice(0, 8) : null };
+  });
+
+  const otherRefs = otherRefDivergence(
+    probes.map((p) => ({ host: p.host, map: p.map })),
+    signedRefs,
+    branchRef,
+  );
+
   let signer: string | null = null;
-  try { signer = nip19.npubEncode(stateEvent?.pubkey || repoEvent.pubkey); } catch { signer = null; }
+  const signerHex = stateEvent?.pubkey || repoEvent.pubkey;
+  try { signer = nip19.npubEncode(signerHex); } catch { signer = null; }
 
   const result = {
-    status:        'ok',
+    status:         'ok',
     branch,
-    signedOid:     signedOid ? signedOid.slice(0, 8) : null,
+    signedOid:      signedOid ? signedOid.slice(0, 8) : null,
     hasSignedState: !!stateEvent,
     signer,
+    signerHex,
     servers,
-    inSync: servers.filter((s) => s.sync === 'in-sync').length,
-    total:  servers.length,
+    inSync:         servers.filter((s) => s.sync === 'in-sync').length,
+    total:          servers.length,
+    otherRefs,                       // [{ ref, signed, servers:[{host,has}] }]
+    otherRefsDiffer: otherRefs.length,
   };
   setCached(cacheKey, result);
   return result;
