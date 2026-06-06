@@ -26270,6 +26270,18 @@ const AppsPanel = (() => {
   }
   function kindLabel(k) { return KIND_LABEL.get(k) || `kind ${k}`; }
 
+  // External image → an <img data-raw-src> placeholder. The global markdown
+  // image observer (startMarkdownImageObserver) batches these to
+  // /api/img-proxy/sign and fills in `src` — the CSP blocks unsigned
+  // external images, so we must NOT use a bare src here. Keeping the raw
+  // URL in data-raw-src also means the editor/republish sees the original
+  // URL, not the proxied one. Non-http(s) values render nothing.
+  function rawImg(url, cls) {
+    const s = String(url || '').trim();
+    if (!/^https?:\/\//i.test(s)) return '';
+    return `<img class="${cls}" data-raw-src="${escapeHtml(s)}" alt="" loading="lazy">`;
+  }
+
   async function onEnter() {
     if (!booted) {
       booted = true;
@@ -26350,12 +26362,10 @@ const AppsPanel = (() => {
 
   function cardHtml(app) {
     const initial = escapeHtml((app.name || app.d || '?').slice(0, 1).toUpperCase());
-    const icon = app.picture
-      ? `<img class="apps-card-icon" src="${escapeHtml(proxyImageUrl(app.picture))}" alt="" loading="lazy">`
-      : `<div class="apps-card-icon apps-card-icon-empty">${initial}</div>`;
-    const banner = app.banner
-      ? `<div class="apps-card-banner" style="background-image:linear-gradient(rgba(10,10,10,.15),rgba(10,10,10,.65)),url(&quot;${escapeHtml(proxyImageUrl(app.banner))}&quot;)"></div>`
-      : `<div class="apps-card-banner apps-card-banner-empty"></div>`;
+    const iconImg = rawImg(app.picture, 'apps-card-icon');
+    const icon = iconImg || `<div class="apps-card-icon apps-card-icon-empty">${initial}</div>`;
+    const bannerImg = rawImg(app.banner, 'apps-card-banner-img');
+    const banner = `<div class="apps-card-banner${bannerImg ? '' : ' apps-card-banner-empty'}">${bannerImg}</div>`;
     const kinds = app.kinds.slice(0, 5).map(k => `<span class="apps-chip" title="kind ${k}">${escapeHtml(kindLabel(k))}</span>`).join('')
       + (app.kinds.length > 5 ? `<span class="apps-chip apps-chip-more">+${app.kinds.length - 5}</span>` : '');
     const topics = app.topics.slice(0, 4).map(t => `<span class="apps-chip apps-chip-topic">#${escapeHtml(t)}</span>`).join('');
@@ -26469,9 +26479,7 @@ const AppsPanel = (() => {
   function imageField(field, label, recommend) {
     const tab = editing._tab[field];
     const val = editing[field];
-    const preview = val
-      ? `<img src="${escapeHtml(proxyImageUrl(val))}" alt="">`
-      : `<span class="apps-img-noimg muted">No image</span>`;
+    const preview = rawImg(val, 'apps-img-preview-img') || `<span class="apps-img-noimg muted">No image</span>`;
     return `
       <div class="apps-imgfield">
         <div class="apps-field-label">${label}</div>
@@ -26569,7 +26577,9 @@ const AppsPanel = (() => {
             ${fieldRow('App Name <span class="req">*</span>', '→ content.name', `<input class="apps-input" data-bind="name" value="${escapeHtml(editing.name)}" placeholder="My Nostr App">`)}
             ${fieldRow('Website', '→ content.website', `<input class="apps-input" data-bind="website" value="${escapeHtml(editing.website)}" placeholder="https://myapp.com">`)}
           </div>
-          ${fieldRow('App identifier (d-tag)', '→ <code>d</code> tag — the replaceable address. Keep it stable across edits; changing it creates a new app.', `<input class="apps-input" data-bind="d" value="${escapeHtml(editing.d)}" placeholder="my-nostr-app">`)}
+          ${editing.isNew
+            ? fieldRow('App identifier (d-tag)', '→ <code>d</code> tag — the replaceable address. Auto-filled from the name; customize it now, but it locks once published.', `<input class="apps-input" data-bind="d" value="${escapeHtml(editing.d)}" placeholder="my-nostr-app">`)
+            : fieldRow('App identifier (d-tag) <span class="apps-lock" title="Locked">🔒</span>', '→ <code>d</code> tag — the replaceable address. Locked: changing it would publish a <i>new</i> app and leave this one untouched.', `<input class="apps-input" value="${escapeHtml(editing.d)}" readonly disabled>`)}
           ${fieldRow('Description', '→ content.about', `<textarea class="apps-input apps-textarea" data-bind="about" placeholder="A brief description of what your app does…">${escapeHtml(editing.about)}</textarea>`)}
           <div class="apps-grid2">
             ${fieldRow('Lightning Address', '→ content.lud16', `<input class="apps-input" data-bind="lud16" value="${escapeHtml(editing.lud16)}" placeholder="app@wallet.com">`)}
