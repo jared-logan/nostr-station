@@ -10,7 +10,30 @@ const {
   classifyLsRemoteFailure,
   stateRefMap,
   otherRefDivergence,
+  graspStateCacheKey,
 } = await import('../src/lib/grasp-state.ts');
+
+// ── graspStateCacheKey ───────────────────────────────────────────────────
+
+const CACHE_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;  // the cache layer's contract
+
+test('graspStateCacheKey: always cache-safe, even for nasty branch names', () => {
+  for (const branch of [
+    'main',
+    'feature/foo',                 // slash
+    'release:1.0',                 // colon — the original 500
+    'wip/área-ñ',                  // unicode
+    'x'.repeat(300),               // very long
+    '',                            // empty
+  ]) {
+    assert.match(graspStateCacheKey(branch), CACHE_KEY_RE);
+  }
+});
+
+test('graspStateCacheKey: deterministic + distinct per branch', () => {
+  assert.equal(graspStateCacheKey('main'), graspStateCacheKey('main'));
+  assert.notEqual(graspStateCacheKey('main'), graspStateCacheKey('dev'));
+});
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
