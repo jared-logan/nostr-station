@@ -26320,13 +26320,14 @@ const AppsPanel = (() => {
     const app = editing;
     const ok = await confirmDestructive({
       title: `Delete “${app.name || app.d}”?`,
-      description: 'Publishes a NIP-09 deletion request for this app event. Relays may keep the latest replaceable copy, but most clients will hide it.',
-      typeToConfirm: app.d,
+      description: `Publishes a NIP-09 deletion request for “${app.d}”. You'll be asked to sign it. Relays may keep the latest replaceable copy, but most clients will hide it.`,
       confirmLabel: 'Publish deletion',
     });
     if (!ok) return;
     const headers = { 'Content-Type': 'application/json' };
     const useProject = editing.signWith === 'project';
+    const delBtn = editorView.querySelector('[data-act="delete-current"]');
+    if (delBtn) { delBtn.disabled = true; delBtn.textContent = 'Requesting signature…'; }
     try {
       if (!useProject && getSessionSource() === 'nip07') {
         // NIP-07 user — build + sign the kind-5 in the browser.
@@ -26348,6 +26349,7 @@ const AppsPanel = (() => {
       toast('Deletion requested', app.name || app.d, 'ok');
       closeEditor();
     } catch (e) {
+      if (delBtn) { delBtn.disabled = false; delBtn.textContent = 'Delete this app'; }
       if (e && e.message && !/\b\d{3}\b/.test(e.message)) toast('Delete failed', e.message, 'err');
     }
   }
