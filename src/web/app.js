@@ -26388,7 +26388,6 @@ const AppsPanel = (() => {
         <div class="apps-card-foot">
           <button class="apps-card-edit" data-act="edit" data-d="${escapeHtml(app.d)}">Edit</button>
           ${site}
-          <button class="apps-card-del" data-act="delete" data-d="${escapeHtml(app.d)}" title="Publish a deletion request">Delete</button>
         </div>
       </div>`;
   }
@@ -26396,22 +26395,26 @@ const AppsPanel = (() => {
   function onGridClick(e) {
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
-    const d = btn.dataset.d;
-    const app = apps.find(a => a.d === d);
+    const app = apps.find(a => a.d === btn.dataset.d);
     if (btn.dataset.act === 'edit' && app) openEditor(app);
-    else if (btn.dataset.act === 'delete' && app) deleteApp(app);
   }
 
-  async function deleteApp(app) {
+  // Delete the app currently open in the editor (Danger zone). Uses the
+  // editor's chosen signing identity; closes back to the list on success.
+  async function deleteCurrent() {
+    if (!editing || editing.isNew) return;
+    const app = editing;
     const ok = await confirmDestructive({
       title: `Delete “${app.name || app.d}”?`,
       description: 'Publishes a NIP-09 deletion request for this app event. Relays may keep the latest replaceable copy, but most clients will hide it.',
+      typeToConfirm: app.d,
       confirmLabel: 'Publish deletion',
     });
     if (!ok) return;
     const headers = { 'Content-Type': 'application/json' };
+    const useProject = editing.signWith === 'project';
     try {
-      if (author !== 'project' && getSessionSource() === 'nip07') {
+      if (!useProject && getSessionSource() === 'nip07') {
         // NIP-07 user — build + sign the kind-5 in the browser.
         if (!window.nostr) throw new Error('NIP-07 extension not found');
         const a = `31990:${signers?.owner}:${app.d}`;
@@ -26425,11 +26428,11 @@ const AppsPanel = (() => {
       } else {
         await api('/api/apps/delete', {
           method: 'POST', headers,
-          body: JSON.stringify({ d: app.d, signWith: author === 'project' ? 'project' : 'bunker' }),
+          body: JSON.stringify({ d: app.d, signWith: useProject ? 'project' : 'bunker' }),
         });
       }
       toast('Deletion requested', app.name || app.d, 'ok');
-      loadApps(true);
+      closeEditor();
     } catch (e) {
       if (e && e.message && !/\b\d{3}\b/.test(e.message)) toast('Delete failed', e.message, 'err');
     }
@@ -26640,6 +26643,13 @@ const AppsPanel = (() => {
             <button type="button" class="primary" data-act="publish">${editing.isNew ? 'Publish App' : 'Update App'}</button>
           </div>
         </div>
+
+        ${editing.isNew ? '' : `
+        <section class="apps-danger">
+          <div class="apps-danger-title">Danger zone</div>
+          <div class="muted apps-danger-sub">Publishing a deletion request asks relays to drop this app event. Most clients will hide it; a replaceable copy may linger on some relays.</div>
+          <button type="button" class="danger" data-act="delete-current">Delete this app</button>
+        </section>`}
       </div>`;
   }
 
@@ -26690,6 +26700,7 @@ const AppsPanel = (() => {
     const act = btn.dataset.act;
     if (act === 'cancel') return closeEditor();
     if (act === 'publish') return publish();
+    if (act === 'delete-current') return deleteCurrent();
     if (act === 'add-handler') { syncFromDom(); editing.handlers.push({ platform: 'web', template: 'https://myapp.com/<bech32>', entity: '' }); return renderEditor(); }
     if (act === 'remove-handler') { syncFromDom(); editing.handlers.splice(+btn.dataset.idx, 1); return renderEditor(); }
     if (act === 'add-tag') { syncFromDom(); editing.extraTags.push(['', '']); return renderEditor(); }
