@@ -69,9 +69,16 @@ test('buildAppTemplate: handlers become platform tags with optional entity', () 
   assert.deepEqual(tagsOf(r.template, 'ios'), [['ios', 'a://<bech32>']]);
 });
 
-test('buildAppTemplate: handler missing the <bech32> placeholder is rejected', () => {
-  const r = buildAppTemplate({ name: 'A', handlers: [{ platform: 'web', template: 'https://a/view' }] });
-  assert.equal(r.ok, false);
+test('buildAppTemplate: a plain-URL handler (no <bech32>) is allowed — opens the app', () => {
+  // e.g. nostrVM publishes a homepage handler with no entity placeholder.
+  const r = buildAppTemplate({ name: 'A', handlers: [{ platform: 'web', template: 'https://app.example/' }] });
+  assert.equal(r.ok, true);
+  assert.deepEqual(tagsOf(r.template, 'web'), [['web', 'https://app.example/']]);
+});
+
+test('buildAppTemplate: entity type is dropped when there is no <bech32> placeholder', () => {
+  const r = buildAppTemplate({ name: 'A', handlers: [{ platform: 'web', template: 'https://app.example/', entity: 'nevent' }] });
+  assert.deepEqual(tagsOf(r.template, 'web'), [['web', 'https://app.example/']]);
 });
 
 test('buildAppTemplate: topics become deduped, lowercased t tags', () => {

@@ -203,10 +203,12 @@ export function buildAppTemplate(body: any): TemplateBuildResult {
       if (!HANDLER_PLATFORMS.has(platform)) {
         return { ok: false, error: `unsupported handler platform: ${platform}` };
       }
-      if (!template.includes('<bech32>')) {
-        return { ok: false, error: `${platform} handler must contain the <bech32> placeholder` };
-      }
-      const entity = str(h.entity);
+      // <bech32> is OPTIONAL: a template with the placeholder opens a
+      // specific entity (nevent/naddr/…); a plain URL just opens the app
+      // (e.g. a homepage handler, as nostrVM publishes). NIP-89 allows
+      // both. The entity type is only meaningful alongside a placeholder.
+      const hasPlaceholder = template.includes('<bech32>');
+      const entity = hasPlaceholder ? str(h.entity) : '';
       tags.push(entity ? [platform, template, entity] : [platform, template]);
     }
   }
