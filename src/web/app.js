@@ -1167,10 +1167,9 @@ let __profile  = null;
 
 // ── nsite discovery cache ───────────────────────────────────────────────
 //
-// Shared between the Identity drawer NSITE section and the Status panel
-// nsite card so both render consistent state without duplicate fetches.
-// /api/nsite/discover is cheap but blocks on a nak relay query (up to 8s),
-// so we cache results for 60s per spec.
+// Backs the Status panel nsite card so it renders consistent state without
+// duplicate fetches. /api/nsite/discover is cheap but blocks on a nak relay
+// query (up to 8s), so we cache results for 60s per spec.
 let __nsite = null;     // last payload from /api/nsite/discover
 let __nsiteAt = 0;      // ms timestamp of last successful fetch
 let __nsiteInflight = null;
@@ -1407,24 +1406,15 @@ const IdentityDrawer = (() => {
     `;
     body.appendChild(signing);
 
-    // NSITE — hydrated asynchronously from /api/nsite/discover. The
-    // section slot is rendered immediately so the drawer doesn't jump
-    // when results arrive.
+    // Note: an NSITE section used to live here, showing the user's deployed
+    // sites. It was the wrong home — identity is "who am I", not "what have I
+    // deployed" — and the same discovery is already surfaced by the Status
+    // panel's nsite card. The shared getNsiteDiscover() cache below still
+    // backs that card.
     //
-    // Note: the "Mobile access" toggle used to live here too, but
-    // it was the wrong home — identity is "who am I", not "what
-    // does my dashboard expose". The toggle has moved to the nvpn
-    // panel under "Dashboard access via mesh" alongside the mesh
-    // membership controls that govern who can reach the host in
-    // the first place.
-    const nsiteSec = document.createElement('div');
-    nsiteSec.className = 'drawer-section nsite-section';
-    nsiteSec.innerHTML = `
-      <h4>NSITE</h4>
-      <div class="nsite-body"><span class="spinner"></span><span class="muted" style="margin-left:8px">Checking read relays…</span></div>
-    `;
-    body.appendChild(nsiteSec);
-    renderNsiteSection(nsiteSec, cfg.npub);
+    // The "Mobile access" toggle also used to live here; it moved to the nvpn
+    // panel under "Dashboard access via mesh" alongside the mesh membership
+    // controls that govern who can reach the host in the first place.
 
     // Session — only shown when we have an actual session (i.e. not the
     // localhost exemption path, where there's nothing to sign out of).
@@ -1588,82 +1578,6 @@ const IdentityDrawer = (() => {
     __identity = null; __profile = null; __nsite = null; __nsiteAt = 0;
     close();
     AuthScreen.show();
-  }
-
-  async function renderNsiteSection(section, npub) {
-    const bodyEl = section.querySelector('.nsite-body');
-    let d;
-    try {
-      d = await getNsiteDiscover();
-    } catch (e) {
-      bodyEl.innerHTML = `<div class="muted">Could not reach read relays.</div>`;
-      return;
-    }
-    // The endpoint returns all-null when identity isn't configured, but
-    // this function only runs when cfg.npub is set. If that ever changes
-    // (e.g. identity revoked mid-session), hide the section entirely.
-    if (!d || !d.npubUrl) { section.style.display = 'none'; return; }
-
-    const sites = Array.isArray(d.sites) ? d.sites : [];
-
-    if (sites.length > 0) {
-      section.classList.add('deployed');
-      const multiLabel = sites.length > 1 ? `${sites.length} sites deployed` : null;
-      bodyEl.innerHTML = `
-        ${multiLabel ? `<div class="muted nsite-count">${escapeHtml(multiLabel)}</div>` : ''}
-        <div class="nsite-list"></div>
-      `;
-      const listEl = bodyEl.querySelector('.nsite-list');
-      for (const site of sites) {
-        const row = document.createElement('div');
-        row.className = 'nsite-row';
-        const whenMs = site.publishedAt ? site.publishedAt * 1000 : null;
-        const when = whenMs ? fmtAgoMs(whenMs) : 'just now';
-        const labelDiffers = site.title && site.title !== site.d;
-        row.innerHTML = `
-          <div class="nsite-row-head">
-            <span class="nsite-title">${escapeHtml(site.title || site.d)}</span>
-            ${labelDiffers ? `<span class="nsite-dtag muted">d=${escapeHtml(site.d)}</span>` : ''}
-          </div>
-          <div class="nsite-url-row">
-            <a href="${escapeHtml(site.url)}" target="_blank" rel="noreferrer" class="nsite-url-primary">${escapeHtml(site.url)}</a>
-            <button class="open-nsite" title="Open in new tab">Open ↗</button>
-          </div>
-          <div class="muted nsite-meta">Deployed ${escapeHtml(when)}</div>
-          <div class="nsite-actions">
-            <button class="primary add-to-projects">Add to Projects</button>
-          </div>
-        `;
-        row.querySelector('.open-nsite').addEventListener('click', () => {
-          window.open(site.url, '_blank', 'noopener');
-        });
-        row.querySelector('.add-to-projects').addEventListener('click', () => {
-          close();
-          ProjectDrawer.openAddPrefilled(buildNsiteSeed(d, npub, site));
-        });
-        listEl.appendChild(row);
-      }
-    } else {
-      section.classList.remove('deployed');
-      bodyEl.innerHTML = `
-        <div class="nsite-url-row">
-          <code class="nsite-predicted">${escapeHtml(d.npubUrl)}</code>
-          <span class="copy-slot"></span>
-        </div>
-        <div class="muted nsite-meta">Predicted URL — no deployment detected on read relays</div>
-        <div class="nsite-actions">
-          <button class="primary add-to-projects">Add to Projects</button>
-        </div>
-        <div class="muted nsite-hint">
-          Deploy via a project's nsite tab or <code>nostr-station nsite deploy</code>.
-        </div>
-      `;
-      bodyEl.querySelector('.copy-slot').appendChild(copyBtn(d.npubUrl));
-      bodyEl.querySelector('.add-to-projects').addEventListener('click', () => {
-        close();
-        ProjectDrawer.openAddPrefilled(buildNsiteSeed(d, npub));
-      });
-    }
   }
 
   // Mobile Access toggle moved to the nvpn panel (Network tab) where
