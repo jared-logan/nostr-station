@@ -5278,6 +5278,68 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
   .project-grid { grid-template-columns: 1fr 1fr; }
 }
 
+/* List-level tab bar (Repos / nsites) — mirrors the detail view's tabs. */
+.project-list-tabs { margin-bottom: 16px; }
+
+/* ── Projects panel · nsites tab ──────────────────────────────────────── */
+
+.projects-nsites .nsite-url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.projects-nsites .nsite-url-primary {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-bright);
+  word-break: break-all;
+  text-decoration: none;
+}
+.projects-nsites .nsite-url-primary:hover { text-decoration: underline; }
+.projects-nsites .nsite-predicted {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+.projects-nsites .nsite-meta { margin-top: 2px; }
+.projects-nsites .nsite-hint { margin-top: 8px; }
+.projects-nsites .nsite-count {
+  margin-bottom: 8px;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+}
+.projects-nsites .nsite-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.projects-nsites .nsite-list .nsite-row + .nsite-row {
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.projects-nsites .nsite-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.projects-nsites .nsite-row-head .nsite-title {
+  font-weight: 600;
+  color: var(--text-bright);
+  font-size: 12px;
+}
+.projects-nsites .nsite-row-head .nsite-dtag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
 .project-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
