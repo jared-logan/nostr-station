@@ -11621,9 +11621,10 @@ a.client-mention {
 }
 .apps-card:hover { border-color: var(--border-strong); transform: translateY(-1px); }
 .apps-card-banner {
-  height: 76px; background-size: cover; background-position: center;
+  position: relative; height: 76px; overflow: hidden;
   background-color: var(--bg-elev);
 }
+.apps-card-banner-img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .apps-card-banner-empty {
   background: linear-gradient(135deg, var(--bg-elev), var(--bg-hover));
 }
@@ -11804,3 +11805,7 @@ a.client-mention {
   /* Single-column app grid on the narrowest phones. */
   .apps-grid { grid-template-columns: 1fr; }
 }
+
+/* App Center: locked d-tag (editing an existing, replaceable app). */
+.apps-input:disabled { opacity: .55; cursor: not-allowed; background: var(--bg-elev); }
+.apps-lock { font-size: 11px; vertical-align: middle; }
