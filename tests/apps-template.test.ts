@@ -39,7 +39,14 @@ test('buildAppTemplate: derives the d-tag from the name when none given', () => 
 
 test('buildAppTemplate: an explicit d-tag is slugified and wins', () => {
   const r = buildAppTemplate({ name: 'Whatever', d: 'My Slug' });
-  assert.deepEqual(tagsOf(r.template, 'd'), [['d', 'my-slug']]);
+  assert.deepEqual(tagsOf(r.template, 'd'), [['d', 'My Slug']]);
+});
+
+test('buildAppTemplate: an explicit mixed-case d-tag is preserved VERBATIM (no lowercasing)', () => {
+  // Regression: editing "nostrVM" must keep d="nostrVM" so the republish
+  // REPLACES the app instead of forking a new "nostrvm" coordinate.
+  const r = buildAppTemplate({ name: 'nostrVM', d: 'nostrVM' });
+  assert.deepEqual(tagsOf(r.template, 'd'), [['d', 'nostrVM']]);
 });
 
 test('buildAppTemplate: name is required', () => {
