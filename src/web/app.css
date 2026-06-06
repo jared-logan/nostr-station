@@ -7357,6 +7357,103 @@ body.term-expanded .term-bar-toggle .term-chevron {
   flex-wrap: wrap;
   font-size: 13px;
 }
+
+/* ── GRASP server sync badge (Code tab) ──────────────────────────────────
+   gitworkshop-style "N/M servers serving the Nostr state" pill, right-aligned
+   in the branch-selector row, opening a per-server signed/behind popover. */
+.grasp-pill-host { position: relative; display: inline-flex; margin-left: auto; }
+.grasp-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px;
+  font-size: 12px; font-weight: 600;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text);
+  cursor: pointer;
+}
+.grasp-pill:hover { border-color: var(--accent-dim); }
+.grasp-pill.loading { color: var(--text-dim); cursor: default; }
+.grasp-pill-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; }
+.grasp-pill.grasp-ok   { border-color: color-mix(in srgb, var(--success) 45%, var(--border-strong)); }
+.grasp-pill.grasp-ok   .grasp-pill-dot { background: var(--success); }
+.grasp-pill.grasp-warn { border-color: color-mix(in srgb, var(--warn) 50%, var(--border-strong)); }
+.grasp-pill.grasp-warn .grasp-pill-dot { background: var(--warn); }
+.grasp-pill.grasp-bad  { border-color: color-mix(in srgb, #E85555 50%, var(--border-strong)); }
+.grasp-pill.grasp-bad  .grasp-pill-dot { background: #E85555; }
+
+.grasp-pop-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4);
+  padding: 10px;
+  width: 420px;
+  max-width: 92vw;
+}
+.grasp-pop-body { display: flex; flex-direction: column; gap: 8px; }
+.grasp-pop-head { display: flex; align-items: center; justify-content: space-between; }
+.grasp-pop-title { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; color: var(--accent-bright); }
+.grasp-pop-refresh { font-size: 13px; line-height: 1; }
+.grasp-pop-sub { font-size: 11px; color: var(--text-dim); }
+.grasp-pop-sub.warn { color: var(--warn); }
+.grasp-pop-sub code, .grasp-pop-foot code, .grasp-row-has code { font-size: 11px; }
+.grasp-pop-list { display: flex; flex-direction: column; gap: 4px; }
+.grasp-row {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 6px 8px; border-radius: 5px;
+  background: var(--bg-hover);
+  font-size: 11px; min-width: 0;
+}
+.grasp-row-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.grasp-row-icon { flex-shrink: 0; width: 14px; text-align: center; font-weight: 700; }
+.grasp-row-url {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.grasp-row-status { flex-shrink: 0; font-weight: 600; }
+.grasp-row-sub {
+  display: flex; align-items: center; gap: 8px;
+  padding-left: 22px; min-width: 0;
+  font-size: 10px; color: var(--text-dim);
+}
+.grasp-maint { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.grasp-maint-av {
+  width: 16px; height: 16px; flex: 0 0 16px;
+  border-radius: 50%; overflow: hidden; display: inline-flex;
+}
+.grasp-maint-av img, .grasp-maint-av svg { width: 16px; height: 16px; object-fit: cover; }
+.grasp-maint-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grasp-row-detail { margin-left: auto; flex-shrink: 0; }
+.grasp-row-sig      .grasp-row-icon, .grasp-row-sig      .grasp-row-status { color: var(--success); }
+.grasp-row-behind   .grasp-row-icon, .grasp-row-behind   .grasp-row-status { color: var(--warn); }
+.grasp-row-ahead    .grasp-row-icon, .grasp-row-ahead    .grasp-row-status { color: #4A9EFF; }
+.grasp-row-diverged .grasp-row-icon, .grasp-row-diverged .grasp-row-status { color: #E85555; }
+.grasp-row-err      .grasp-row-icon, .grasp-row-err      .grasp-row-status { color: var(--text-dim); }
+.grasp-row-unreach  .grasp-row-icon, .grasp-row-unreach  .grasp-row-status { color: var(--text-dim); }
+.grasp-row-unknown  .grasp-row-icon, .grasp-row-unknown  .grasp-row-status { color: var(--text-dim); }
+.grasp-pop-foot { font-size: 11px; color: var(--text-dim); }
+.grasp-pop-foot.warn { color: var(--warn); }
+
+/* "N other ref differs across servers" — expandable detail. */
+.grasp-otherrefs { border-top: 1px solid var(--border); padding-top: 6px; }
+.grasp-otherrefs-toggle {
+  display: flex; align-items: center; gap: 6px;
+  background: none; border: none; cursor: pointer;
+  color: var(--warn); font-size: 11px; font-weight: 600; padding: 2px 0;
+}
+.grasp-chev { color: var(--text-dim); }
+.grasp-otherrefs-detail {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 0 2px 6px; font-size: 10px; color: var(--text-dim);
+}
+.grasp-otherref { display: flex; gap: 10px; min-width: 0; }
+.grasp-otherref-name { flex: 0 0 auto; color: var(--text); }
+.grasp-otherref-oids { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .code-crumb {
   background: none;
   border: none;

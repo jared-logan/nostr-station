@@ -63,6 +63,12 @@ import {
 } from '../nostr-query.js';
 import { resolveMaintainerSet, type MaintainerSet } from '../maintainer-set.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
+import { selectGraspCloneUrls } from '../grasp-push.js';
+import {
+  parseLsRemote, stateOidForRef, defaultBranchFromState, compareServerRef,
+  classifyLsRemoteFailure, stateRefMap, otherRefDivergence, classifyDrift,
+  type GraspSync, type Ancestry,
+} from '../grasp-state.js';
 import { readBody } from './_shared.js';
 
 const execFileAsync = promisify(execFile);
@@ -75,6 +81,10 @@ const DEFAULT_LOG_LIMIT = 20;
 const MAX_LOG_SKIP     = 10_000;
 const REPO_CACHE_TTL_MS = 60 * 60 * 1000;
 const RELAY_QUERY_TIMEOUT_MS = 8_000;
+// GRASP server sync probe: short cache (the Code tab re-reads on open) and a
+// tight per-host ls-remote budget so one slow/dead host can't stall the badge.
+const GRASP_STATE_TTL_MS  = 45 * 1000;
+const LS_REMOTE_TIMEOUT_MS = 8_000;
 // README candidates probed in order. Most-common modern conventions
 // first; the bare uppercase fallback covers older repos that pre-date
 // the README.md convention. Case variants matter — git is case-
@@ -288,6 +298,35 @@ async function gitRunBuffer(cwd: string, args: string[], timeoutMs = 5000): Prom
     encoding: 'buffer' as const,
   });
   return stdout as unknown as Buffer;
+}
+
+/** Read-only `git ls-remote <url>` against a GRASP git host (all refs, so we
+ *  can also flag refs other than the displayed branch that differ across
+ *  servers). `GIT_TERMINAL_PROMPT=0` so an auth-gated host fails immediately
+ *  instead of hanging on a credential prompt the dashboard can't answer. */
+async function gitLsRemote(cwd: string, url: string, timeoutMs: number): Promise<string> {
+  const gitBin = findBin('git');
+  if (!gitBin) throw new Error('git not found on PATH');
+  const { stdout } = await execFileAsync(gitBin, ['ls-remote', url], {
+    cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', NO_COLOR: '1' },
+  });
+  return stdout.toString();
+}
+
+/** Local-only `git merge-base --is-ancestor <a> <b>`: 'yes' (exit 0), 'no'
+ *  (exit 1 — both oids valid, not an ancestor), or 'unknown' (exit 128 / other
+ *  — an oid isn't a local object, so the relation can't be computed without a
+ *  network fetch we deliberately don't do here). */
+async function gitIsAncestor(cwd: string, a: string, b: string): Promise<Ancestry> {
+  const gitBin = findBin('git');
+  if (!gitBin) return 'unknown';
+  try {
+    await execFileAsync(gitBin, ['merge-base', '--is-ancestor', a, b], { cwd, timeout: 5_000 });
+    return 'yes';
+  } catch (e: any) {
+    return e?.code === 1 ? 'no' : 'unknown';
+  }
 }
 
 // ── publish-state ────────────────────────────────────────────────────────
@@ -554,6 +593,127 @@ export async function fetchRepoMeta(
   const meta = parseRepoAnnouncement(chosen);
   setCached<RepoMeta>(cacheKey, meta);
   return { repo: meta, cached: false, diagnostics: result.diagnostics };
+}
+
+// ── GRASP server sync state (gitworkshop-style "N/M signed" badge) ────────
+
+export interface GraspServerState {
+  host:     string;       // display host (git.shakespeare.diy)
+  cloneUrl: string;       // full https clone URL
+  sync:     GraspSync;    // in-sync | behind | ahead | diverged | differs | missing | unreachable | unknown
+  has:      string | null; // short oid the host actually holds (null = no answer)
+}
+
+/**
+ * Compute per-GRASP-server sync for one branch: compare the signed 30618 oid
+ * against what each GRASP git host advertises via ls-remote. Drives the Code
+ * tab's "N/M servers serving the Nostr state" badge. Cached (short TTL) and
+ * `?refresh=1`-bustable so opening the tab is cheap. `refParam === 'HEAD'`
+ * (the route default) means "auto-detect the default branch from the state".
+ */
+export async function readGraspState(project: Project, refParam: string, refresh: boolean): Promise<any> {
+  const coords = decodeNgitRemote(project);
+  if (!coords || !project.path) return { status: 'local-only', servers: [], inSync: 0, total: 0 };
+
+  const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
+  const relays = mergeRelaySet(
+    [...coords.relayHints, ...getGraspServers(), ...projRelays],
+    getEffectiveReadRelays(),
+  );
+
+  const queryOne = async (kind: number): Promise<NostrEvent | null> => {
+    try {
+      const r = await queryRelays({
+        filter: { kinds: [kind], authors: [coords.pubkey], tags: { d: coords.identifier }, limit: 1 },
+        relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: false,
+        acceptUntil: (evs) => evs.length >= 1,
+      });
+      let chosen: NostrEvent | null = null;
+      for (const ev of r.events) {
+        if (ev.kind !== kind) continue;
+        if (!chosen || ev.created_at > chosen.created_at) chosen = ev;
+      }
+      return chosen;
+    } catch { return null; }
+  };
+
+  const repoEvent = await queryOne(30617);
+  if (!repoEvent) return { status: 'unannounced', servers: [], inSync: 0, total: 0 };
+  const stateEvent = await queryOne(30618);
+
+  const branch = (refParam && refParam !== 'HEAD')
+    ? refParam
+    : (defaultBranchFromState(stateEvent?.tags || []) || 'main');
+
+  const cacheKey = { projectId: project.id, projectPath: project.path, key: `grasp-state:${branch}` };
+  if (!refresh) {
+    const cached = getCached<any>({ ...cacheKey, ttlMs: GRASP_STATE_TTL_MS });
+    if (cached) return { ...cached, cached: true };
+  }
+
+  const cloneTags = getTags(repoEvent, 'clone')
+    .flatMap((t) => t.slice(1).filter((v): v is string => typeof v === 'string'));
+  const cloneUrls = selectGraspCloneUrls(cloneTags);
+  const branchRef = `refs/heads/${branch}`;
+  const signedOid = stateEvent ? stateOidForRef(stateEvent.tags, branchRef) : null;
+  const signedRefs = stateEvent ? stateRefMap(stateEvent.tags) : new Map<string, string>();
+
+  // Probe each host once for ALL refs: gives the branch status AND the data to
+  // flag other refs that differ across servers. Distinguish a 404/wrong-path
+  // host ('missing' — "no git data") from a network failure ('unreachable').
+  const probes = await Promise.all(cloneUrls.map(async (url) => {
+    let host = url;
+    try { host = new URL(url).host; } catch { /* keep raw */ }
+    try {
+      const map = parseLsRemote(await gitLsRemote(project.path!, url, LS_REMOTE_TIMEOUT_MS));
+      return { url, host, map, fail: null as null | 'missing' | 'unreachable' };
+    } catch (e: any) {
+      const fail = classifyLsRemoteFailure((e?.stderr ?? e?.message ?? '').toString());
+      return { url, host, map: null as Map<string, string> | null, fail };
+    }
+  }));
+
+  const servers: GraspServerState[] = await Promise.all(probes.map(async (p): Promise<GraspServerState> => {
+    if (p.fail) return { host: p.host, cloneUrl: p.url, sync: p.fail, has: null };
+    const hostOid = p.map!.get(branchRef) ?? null;
+    let sync = compareServerRef(hostOid, signedOid);
+    // Refine a bare "differs" into behind/ahead/diverged via local ancestry —
+    // cheap, no network. Falls back to 'differs' when an oid isn't a local
+    // object (e.g. a host ahead with commits we never fetched).
+    if (sync === 'differs' && hostOid && signedOid) {
+      const behind = await gitIsAncestor(project.path!, hostOid, signedOid);
+      let ahead: Ancestry = 'unknown';
+      if (behind === 'no') ahead = await gitIsAncestor(project.path!, signedOid, hostOid);
+      sync = classifyDrift(behind, ahead);
+    }
+    return { host: p.host, cloneUrl: p.url, sync, has: hostOid ? hostOid.slice(0, 8) : null };
+  }));
+
+  const otherRefs = otherRefDivergence(
+    probes.map((p) => ({ host: p.host, map: p.map })),
+    signedRefs,
+    branchRef,
+  );
+
+  let signer: string | null = null;
+  const signerHex = stateEvent?.pubkey || repoEvent.pubkey;
+  try { signer = nip19.npubEncode(signerHex); } catch { signer = null; }
+
+  const result = {
+    status:         'ok',
+    branch,
+    signedOid:      signedOid ? signedOid.slice(0, 8) : null,
+    hasSignedState: !!stateEvent,
+    signer,
+    signerHex,
+    servers,
+    inSync:         servers.filter((s) => s.sync === 'in-sync').length,
+    total:          servers.length,
+    otherRefs,                       // [{ ref, signed, servers:[{host,has}] }]
+    otherRefsDiffer: otherRefs.length,
+  };
+  setCached(cacheKey, result);
+  return result;
 }
 
 // ── refs ─────────────────────────────────────────────────────────────────
@@ -1289,7 +1449,7 @@ async function handleAnnounce(
 
 // ── Dispatcher ──────────────────────────────────────────────────────────
 
-const REPO_ROUTE = /^\/api\/projects\/([a-f0-9-]{10,})\/(publish-state|repo(?:\/refs|\/tree|\/blob|\/log|\/readme)?)$/;
+const REPO_ROUTE = /^\/api\/projects\/([a-f0-9-]{10,})\/(publish-state|grasp-state|repo(?:\/refs|\/tree|\/blob|\/log|\/readme)?)$/;
 const ANNOUNCE_ROUTE = /^\/api\/projects\/([a-f0-9-]{10,})\/announce$/;
 
 export async function handleRepo(
@@ -1332,6 +1492,9 @@ export async function handleRepo(
   try {
     if (sub === 'publish-state') {
       return json(res, 200, await readPublishState(project));
+    }
+    if (sub === 'grasp-state') {
+      return json(res, 200, await readGraspState(project, ref, refresh));
     }
     if (sub === 'repo') {
       const result = await fetchRepoMeta(project, refresh);
