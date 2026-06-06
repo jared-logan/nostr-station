@@ -6348,19 +6348,19 @@ const ProjectsPanel = (() => {
     };
     const runPush = () => {
       if (hasNgit) {
-        // Terminal ngit-push preferred (live Amber prompts); falls back to
-        // the streamed exec modal when no terminal is available.
-        if (window.NSTerminal?.isAvailable?.()) {
-          window.NSTerminal.open('ngit-push', { projectId: p.id });
-          return Promise.resolve(true);
-        }
+        // Direct per-host GRASP push (like Shakespeare): publish the signed
+        // repo state to the relays, then push the pack to EVERY GRASP git
+        // host so none is left "behind signed". This supersedes the old
+        // `git push origin HEAD` via git-remote-nostr, which could deliver
+        // the pack to only one of several hosts. Your signer approves the
+        // state event (a push notification, no QR).
         return openExecModal({
-          title:    `ngit push · ${p.name}`,
-          subtitle: 'Publish your commits to the ngit remote. Amber signs on your phone.',
-          endpoint: `/api/projects/${p.id}/ngit/push`,
+          title:    `Push to GRASP servers · ${p.name}`,
+          subtitle: 'Publish the signed repo state to your relays, then push your commits to every GRASP git host. Approve the state event on your signer.',
+          endpoint: `/api/projects/${p.id}/ngit/grasp-push`,
         }).then(r => {
-          if (r.ok) toast('ngit push complete', '', 'ok');
-          else      toast('ngit push failed', `exit ${r.code}`, 'err');
+          if (r.ok) toast('Pushed to all GRASP servers', '', 'ok');
+          else      toast('GRASP push incomplete', `exit ${r.code}`, 'err');
           refreshAfter();
           return !!r.ok;
         });

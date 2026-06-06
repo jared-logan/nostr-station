@@ -21,11 +21,24 @@
  * has passed auth + CSRF + DNS-rebinding checks upstream.
  */
 import http from 'http';
-import { execFileSync, spawn } from 'child_process';
+import { execFileSync, execFile, spawn } from 'child_process';
+import { promisify } from 'util';
 import { fetchNgitProposals } from '../sync.js';
-import { isValidRelayUrl } from '../identity.js';
+import { isValidRelayUrl, getGraspServers, getEffectiveReadRelays } from '../identity.js';
+import { findBin } from '../detect.js';
+import { queryRelaysDirect, getTags, type NostrEvent } from '../nostr-query.js';
+import { signEventWithSavedBunker } from '../auth-bunker.js';
+import { decodeNgitRemote, publishEventToRelays, mergeRelaySet } from './repo.js';
+import {
+  selectGraspCloneUrls,
+  buildRepoStateTags,
+  repoStateTagsEqual,
+  readLocalRefs,
+} from '../grasp-push.js';
 import type { Project } from '../projects.js';
 import { readBody, streamExec, streamExecError } from './_shared.js';
+
+const execFileAsync = promisify(execFile);
 
 export async function handleProjectsNgit(
   req: http.IncomingMessage,
@@ -79,6 +92,14 @@ export async function handleProjectsNgit(
       res, req, project.path,
     );
     return true;
+  }
+
+  if (tail === 'ngit/grasp-push' && method === 'POST') {
+    // Direct per-host push — "land it on every GRASP server, like Shakespeare".
+    // Publishes the announcement + signed state to the relays, then pushes the
+    // pack to every clone URL itself, so no single git host is left "behind
+    // signed". See src/lib/grasp-push.ts for the why + the mirrored algorithm.
+    return handleGraspPush(req, res, project);
   }
 
   if (tail === 'ngit/sync' && method === 'POST') {
@@ -506,4 +527,202 @@ export async function handleProjectsNgit(
   }
 
   return false;
+}
+
+// ── GRASP direct per-host push ───────────────────────────────────────────
+//
+// Mirrors Shakespeare's `nostrPush` (gitlab.com/soapbox-pub/shakespeare,
+// src/lib/git.ts): publish the announcement (30617) + signed state (30618) to
+// the relays, THEN push the pack to every clone URL. The order is load-bearing
+// — a GRASP server authorizes the git push by checking the refs against a
+// signed 30618 it received from the repo's pubkey, so the state has to be out
+// before the pack lands.
+
+const GRASP_PUSH_HOST_TIMEOUT_MS = 60_000;   // per-host git push budget (Shakespeare uses 60s)
+const GRASP_SIGN_TIMEOUT_MS      = 60_000;   // Amber/bunker round-trip for the 30618
+const RELAY_QUERY_TIMEOUT_MS     = 8_000;
+
+// One push per coordinate at a time — a double-click shouldn't fan out into
+// two concurrent state signings + pack pushes racing each other.
+const graspPushInFlight = new Set<string>();
+
+/** Run git, capturing stdout/stderr without throwing. `GIT_TERMINAL_PROMPT=0`
+ *  makes an auth-required host fail fast instead of hanging on a credential
+ *  prompt the SSE stream can't answer. */
+async function runGitCapture(
+  cwd: string, args: string[], timeoutMs: number,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const gitBin = findBin('git') || 'git';
+  try {
+    const { stdout, stderr } = await execFileAsync(gitBin, args, {
+      cwd, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', NO_COLOR: '1', TERM: 'dumb' },
+    });
+    return { code: 0, stdout: stdout.toString(), stderr: stderr.toString() };
+  } catch (e: any) {
+    return {
+      code:   typeof e?.code === 'number' ? e.code : 1,
+      stdout: (e?.stdout ?? '').toString(),
+      stderr: (e?.stderr ?? e?.message ?? '').toString(),
+    };
+  }
+}
+
+const hostOf = (url: string): string => {
+  try { return new URL(url).host; } catch { return url; }
+};
+
+async function handleGraspPush(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  project: Project,
+): Promise<boolean> {
+  if (!project.path) { res.writeHead(400); res.end('project has no local path'); return true; }
+  const coords = decodeNgitRemote(project);
+  if (!coords) { res.writeHead(400); res.end('project has no ngit remote — announce it first'); return true; }
+
+  const coordKey = `${coords.pubkey}:${coords.identifier}`;
+  if (graspPushInFlight.has(coordKey)) {
+    res.writeHead(409); res.end('a GRASP push for this repository is already in progress'); return true;
+  }
+  graspPushInFlight.add(coordKey);
+
+  res.writeHead(200, {
+    'Content-Type':  'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection':    'keep-alive',
+  });
+  const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+  const log  = (line: string, stream: 'stdout' | 'stderr' = 'stdout') => emit({ line, stream });
+  const finish = (code: number, warn = false): boolean => {
+    emit({ done: true, code, warn });
+    try { res.end(); } catch {}
+    graspPushInFlight.delete(coordKey);
+    return true;
+  };
+
+  try {
+    const repoPath   = project.path;
+    const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
+    const grasp      = getGraspServers().map(s => /^wss?:\/\//i.test(s) ? s : `wss://${s}`);
+    // Same merge policy the announce/read paths use, so the state lands where
+    // the repo is read from — including each GRASP server's own relay, which
+    // is what authorizes the subsequent push to that server's git host.
+    const relays = mergeRelaySet([...coords.relayHints, ...grasp, ...projRelays], getEffectiveReadRelays());
+
+    // Fetch the raw 30617 (to republish + read its clone URLs) and the current
+    // 30618 (to preserve HEAD + skip a needless re-sign when refs are unchanged).
+    const queryOne = async (kind: number): Promise<NostrEvent | null> => {
+      try {
+        const r = await queryRelaysDirect({
+          filter: { kinds: [kind], authors: [coords.pubkey], tags: { d: coords.identifier }, limit: 1 },
+          relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: false,
+          acceptUntil: (evs) => evs.length >= 1,
+        });
+        let chosen: NostrEvent | null = null;
+        for (const ev of r.events) {
+          if (ev.kind !== kind) continue;
+          if (!chosen || ev.created_at > chosen.created_at) chosen = ev;
+        }
+        return chosen;
+      } catch { return null; }
+    };
+
+    log(`Resolving ${coords.identifier} across ${relays.length} relay(s)…`);
+    const repoEvent = await queryOne(30617);
+    if (!repoEvent) {
+      log('No repository announcement (kind 30617) found on the relays.', 'stderr');
+      log('Announce the repository first (Edit Repository → Save changes), then retry.', 'stderr');
+      return finish(1);
+    }
+    const statePrior = await queryOne(30618);
+
+    const cloneTags = getTags(repoEvent, 'clone')
+      .flatMap(t => t.slice(1).filter((v): v is string => typeof v === 'string'));
+    const cloneUrls = selectGraspCloneUrls(cloneTags);
+    if (cloneUrls.length === 0) {
+      log('The announcement lists no https:// clone URLs — nothing to push to.', 'stderr');
+      return finish(1);
+    }
+    log(`GRASP git hosts: ${cloneUrls.map(hostOf).join(', ')}`);
+
+    // Build the new state from the local checkout (preserving an existing HEAD).
+    const gitStdout = async (args: string[]): Promise<string> => {
+      const r = await runGitCapture(repoPath, args, 5_000);
+      if (r.code !== 0) throw new Error(r.stderr || `git ${args[0]} failed`);
+      return r.stdout;
+    };
+    const refs = await readLocalRefs(gitStdout);
+    if (!refs.currentBranch) {
+      log('HEAD is detached — check out a branch before pushing. Aborting.', 'stderr');
+      return finish(1);
+    }
+    const existingHeadTag = statePrior?.tags.find(t => t[0] === 'HEAD') ?? null;
+    const newStateTags = buildRepoStateTags(coords.identifier, refs, existingHeadTag);
+
+    // (a) Republish the announcement as-is (no new signature) — best effort.
+    await publishEventToRelays(repoEvent, relays).catch(() => []);
+
+    // (b) Resolve the state event: reuse the published one when refs are
+    //     unchanged (no Amber prompt), else sign a fresh 30618.
+    let stateEvent: NostrEvent;
+    if (statePrior && repoStateTagsEqual(statePrior.tags, newStateTags)) {
+      log('Local refs already match the published state — reusing the signed state event.');
+      stateEvent = statePrior;
+    } else {
+      log('Signing repo state (kind 30618) — approve on your signer if prompted…');
+      const signed = await signEventWithSavedBunker(
+        { kind: 30618, content: '', tags: newStateTags, created_at: Math.floor(Date.now() / 1000) },
+        GRASP_SIGN_TIMEOUT_MS,
+      );
+      if (!signed.ok || !signed.signedEvent) {
+        log(`Could not sign the state event: ${signed.error || (signed.tried ? 'signer rejected' : 'no paired signer')}`, 'stderr');
+        log('Without a signed state, GRASP hosts will not authorize the push. Aborting.', 'stderr');
+        return finish(1);
+      }
+      stateEvent = signed.signedEvent;
+    }
+
+    const stateResults = await publishEventToRelays(stateEvent, relays);
+    const stateAccepted = stateResults.filter(r => r.ok).length;
+    for (const r of stateResults) {
+      log(`  state → ${r.relay}: ${r.ok ? 'accepted' : `rejected${r.reason ? ` (${r.reason})` : ''}`}`,
+          r.ok ? 'stdout' : 'stderr');
+    }
+    if (stateAccepted === 0) {
+      log('No relay accepted the signed state — GRASP hosts will reject the push. Aborting.', 'stderr');
+      return finish(1);
+    }
+
+    // (c) Push the pack to every GRASP git host, in parallel.
+    const branch = refs.currentBranch;
+    log(`Pushing ${branch} (+ tags) to ${cloneUrls.length} host(s)…`);
+    const pushResults = await Promise.all(cloneUrls.map(async (url) => {
+      const host = hostOf(url);
+      const r = await runGitCapture(
+        repoPath,
+        ['push', url, '--tags', `refs/heads/${branch}:refs/heads/${branch}`],
+        GRASP_PUSH_HOST_TIMEOUT_MS,
+      );
+      const ok = r.code === 0;
+      const detail = (r.stderr || r.stdout)
+        .split('\n').map(s => s.trim()).filter(Boolean).slice(-2).join(' · ');
+      log(`  ${host}: ${ok ? 'pushed' : 'FAILED'}${detail ? ` — ${detail}` : ''}`, ok ? 'stdout' : 'stderr');
+      return { host, ok };
+    }));
+
+    const landed = pushResults.filter(r => r.ok).length;
+    log('');
+    log(`Done: ${landed}/${cloneUrls.length} GRASP host(s) up to date · state on ${stateAccepted}/${relays.length} relay(s).`,
+        landed === cloneUrls.length ? 'stdout' : 'stderr');
+    if (landed > 0 && landed < cloneUrls.length) {
+      log('Some hosts did not accept the push — re-run to retry the laggards.', 'stderr');
+    }
+    // Full success → 0; partial → 0 + warn (so the modal flags "needs action"
+    // without crying failure); total failure → 1.
+    return finish(landed === 0 ? 1 : 0, landed > 0 && landed < cloneUrls.length);
+  } catch (e: any) {
+    log(`GRASP push error: ${(e?.message || String(e)).slice(0, 240)}`, 'stderr');
+    return finish(1);
+  }
 }
