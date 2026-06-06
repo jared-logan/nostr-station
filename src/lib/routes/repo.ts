@@ -67,7 +67,7 @@ import { selectGraspCloneUrls } from '../grasp-push.js';
 import {
   parseLsRemote, stateOidForRef, defaultBranchFromState, compareServerRef,
   classifyLsRemoteFailure, stateRefMap, otherRefDivergence, classifyDrift,
-  type GraspSync, type Ancestry,
+  graspStateCacheKey, type GraspSync, type Ancestry,
 } from '../grasp-state.js';
 import { readBody } from './_shared.js';
 
@@ -645,7 +645,7 @@ export async function readGraspState(project: Project, refParam: string, refresh
     ? refParam
     : (defaultBranchFromState(stateEvent?.tags || []) || 'main');
 
-  const cacheKey = { projectId: project.id, projectPath: project.path, key: `grasp-state:${branch}` };
+  const cacheKey = { projectId: project.id, projectPath: project.path, key: graspStateCacheKey(branch) };
   if (!refresh) {
     const cached = getCached<any>({ ...cacheKey, ttlMs: GRASP_STATE_TTL_MS });
     if (cached) return { ...cached, cached: true };

@@ -16,6 +16,20 @@
  * for this first cut (see the "differs" label).
  */
 
+import { createHash } from 'crypto';
+
+/**
+ * A cache-safe key for the grasp-state cache, namespaced by branch. The cache
+ * layer requires keys to match /^[A-Za-z0-9._-]{1,64}$/, but a branch name can
+ * carry '/', ':' and be arbitrarily long — so we hash it into a bounded, safe
+ * token rather than interpolating it raw (the bug that 500'd `grasp-state:main`).
+ * Deterministic; pure.
+ */
+export function graspStateCacheKey(branch: string): string {
+  const h = createHash('sha1').update(branch || '').digest('hex').slice(0, 16);
+  return `grasp-state-${h}`;
+}
+
 export type GraspSync =
   | 'in-sync'      // host holds the signed commit ("signed")
   | 'behind'       // host's commit is an ancestor of the signed commit
