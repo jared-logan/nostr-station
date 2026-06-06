@@ -11,26 +11,26 @@ The Code tab now shows, in the branch-selector row, an **"N/M servers serving
 the Nostr state"** pill — the same at-a-glance in/out-of-sync view gitworkshop
 shows. Clicking it opens a per-server popover matching gitworkshop's states:
 **signed** (green ✓, the host holds the commit the signed `30618` points at),
-**behind signed** (amber, `has <sha>`), **error** (grey, "no git data — wrong
-path or 404"), or **unreachable** (network failure). Each row shows the state's
-signer (avatar + name), and an expandable **"N other ref differs across
-servers"** rollup flags tags/branches beyond the displayed one that disagree.
-nostr-station had no way to see any of this before — a host left behind by a
-partial push was invisible here.
+**behind signed** / **ahead of signed** / **diverged** (with the short SHA the
+host holds), **out of sync** (differs, ancestry indeterminate), **error**
+(grey, "no git data — wrong path or 404"), or **unreachable** (network). Each
+row shows the state's signer (avatar + name), and an expandable **"N other ref
+differs across servers"** rollup flags tags/branches beyond the displayed one
+that disagree. nostr-station had no way to see any of this before — a host left
+behind by a partial push was invisible here.
 
 - New `GET /api/projects/:id/grasp-state?ref=&refresh=1`: resolves the signed
   `30618` and `git ls-remote`s every GRASP clone URL in parallel, comparing
-  oids for the branch and flagging other refs that diverge. A failed probe is
-  classified as `missing` (404/wrong path) vs `unreachable` (network). Cached
-  ~45s and `?refresh=1`-bustable; the badge auto-re-probes right after a
-  Push/Sync/Publish.
+  oids for the branch and flagging other refs that diverge. A mismatch is
+  refined to behind/ahead/diverged via local `git merge-base --is-ancestor`
+  (no network; falls back to "out of sync" when an oid isn't a local object). A
+  failed probe is classified `missing` (404/wrong path) vs `unreachable`
+  (network). Cached ~45s and `?refresh=1`-bustable; the badge auto-re-probes
+  right after a Push/Sync/Publish.
 - `src/lib/grasp-state.ts` holds the pure, unit-tested logic (`parseLsRemote`,
   `stateOidForRef`, `defaultBranchFromState`, `compareServerRef`,
-  `classifyLsRemoteFailure`, `stateRefMap`, `otherRefDivergence`); 17 tests.
-- Scope: the default/selected branch for the headline pill; match-vs-differs
-  labelling (no commit-ancestry/behind-vs-ahead walk yet); cached +
-  manual/post-push refresh. Behind/ahead nuance and the branch-dropdown echo
-  remain sensible follow-ups.
+  `classifyDrift`, `classifyLsRemoteFailure`, `stateRefMap`,
+  `otherRefDivergence`); 21 tests.
 
 ### ngit: push lands on EVERY GRASP server (no more "behind signed")
 

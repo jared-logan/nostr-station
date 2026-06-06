@@ -6,6 +6,7 @@ const {
   stateOidForRef,
   defaultBranchFromState,
   compareServerRef,
+  classifyDrift,
   classifyLsRemoteFailure,
   stateRefMap,
   otherRefDivergence,
@@ -75,18 +76,37 @@ test('compareServerRef: in-sync when host oid matches the signed oid', () => {
   assert.equal(compareServerRef(A.toUpperCase(), A), 'in-sync'); // case-insensitive
 });
 
-test('compareServerRef: out-of-sync when they differ', () => {
-  assert.equal(compareServerRef(C, A), 'out-of-sync');
+test('compareServerRef: differs when oids mismatch (caller refines)', () => {
+  assert.equal(compareServerRef(C, A), 'differs');
 });
 
-test('compareServerRef: out-of-sync when reachable but missing the branch ref', () => {
+test('compareServerRef: differs when reachable but missing the branch ref', () => {
   // Reachability/missing is decided by the caller; a null oid here means the
-  // host answered but doesn't carry the branch → behind, not unreachable.
-  assert.equal(compareServerRef(null, A), 'out-of-sync');
+  // host answered but doesn't carry the branch → differs, not unreachable.
+  assert.equal(compareServerRef(null, A), 'differs');
 });
 
 test('compareServerRef: unknown when there is no signed state', () => {
   assert.equal(compareServerRef(A, null), 'unknown');
+});
+
+// ── classifyDrift ────────────────────────────────────────────────────────
+
+test('classifyDrift: host ancestor of signed → behind', () => {
+  assert.equal(classifyDrift('yes', 'no'), 'behind');
+  assert.equal(classifyDrift('yes', 'unknown'), 'behind');
+});
+
+test('classifyDrift: signed ancestor of host → ahead', () => {
+  assert.equal(classifyDrift('no', 'yes'), 'ahead');
+});
+
+test('classifyDrift: neither ancestor → diverged', () => {
+  assert.equal(classifyDrift('no', 'no'), 'diverged');
+});
+
+test('classifyDrift: unknown ancestry → differs (oid not local)', () => {
+  assert.equal(classifyDrift('unknown', 'unknown'), 'differs');
 });
 
 // ── classifyLsRemoteFailure ──────────────────────────────────────────────

@@ -66,7 +66,8 @@ import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { selectGraspCloneUrls } from '../grasp-push.js';
 import {
   parseLsRemote, stateOidForRef, defaultBranchFromState, compareServerRef,
-  classifyLsRemoteFailure, stateRefMap, otherRefDivergence, type GraspSync,
+  classifyLsRemoteFailure, stateRefMap, otherRefDivergence, classifyDrift,
+  type GraspSync, type Ancestry,
 } from '../grasp-state.js';
 import { readBody } from './_shared.js';
 
@@ -311,6 +312,21 @@ async function gitLsRemote(cwd: string, url: string, timeoutMs: number): Promise
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', NO_COLOR: '1' },
   });
   return stdout.toString();
+}
+
+/** Local-only `git merge-base --is-ancestor <a> <b>`: 'yes' (exit 0), 'no'
+ *  (exit 1 — both oids valid, not an ancestor), or 'unknown' (exit 128 / other
+ *  — an oid isn't a local object, so the relation can't be computed without a
+ *  network fetch we deliberately don't do here). */
+async function gitIsAncestor(cwd: string, a: string, b: string): Promise<Ancestry> {
+  const gitBin = findBin('git');
+  if (!gitBin) return 'unknown';
+  try {
+    await execFileAsync(gitBin, ['merge-base', '--is-ancestor', a, b], { cwd, timeout: 5_000 });
+    return 'yes';
+  } catch (e: any) {
+    return e?.code === 1 ? 'no' : 'unknown';
+  }
 }
 
 // ── publish-state ────────────────────────────────────────────────────────
@@ -657,11 +673,21 @@ export async function readGraspState(project: Project, refParam: string, refresh
     }
   }));
 
-  const servers: GraspServerState[] = probes.map((p) => {
+  const servers: GraspServerState[] = await Promise.all(probes.map(async (p): Promise<GraspServerState> => {
     if (p.fail) return { host: p.host, cloneUrl: p.url, sync: p.fail, has: null };
     const hostOid = p.map!.get(branchRef) ?? null;
-    return { host: p.host, cloneUrl: p.url, sync: compareServerRef(hostOid, signedOid), has: hostOid ? hostOid.slice(0, 8) : null };
-  });
+    let sync = compareServerRef(hostOid, signedOid);
+    // Refine a bare "differs" into behind/ahead/diverged via local ancestry —
+    // cheap, no network. Falls back to 'differs' when an oid isn't a local
+    // object (e.g. a host ahead with commits we never fetched).
+    if (sync === 'differs' && hostOid && signedOid) {
+      const behind = await gitIsAncestor(project.path!, hostOid, signedOid);
+      let ahead: Ancestry = 'unknown';
+      if (behind === 'no') ahead = await gitIsAncestor(project.path!, signedOid, hostOid);
+      sync = classifyDrift(behind, ahead);
+    }
+    return { host: p.host, cloneUrl: p.url, sync, has: hostOid ? hostOid.slice(0, 8) : null };
+  }));
 
   const otherRefs = otherRefDivergence(
     probes.map((p) => ({ host: p.host, map: p.map })),

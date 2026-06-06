@@ -7429,11 +7429,13 @@ body.term-expanded .term-bar-toggle .term-chevron {
 .grasp-maint-av img, .grasp-maint-av svg { width: 16px; height: 16px; object-fit: cover; }
 .grasp-maint-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .grasp-row-detail { margin-left: auto; flex-shrink: 0; }
-.grasp-row-sig     .grasp-row-icon, .grasp-row-sig     .grasp-row-status { color: var(--success); }
-.grasp-row-behind  .grasp-row-icon, .grasp-row-behind  .grasp-row-status { color: var(--warn); }
-.grasp-row-err     .grasp-row-icon, .grasp-row-err     .grasp-row-status { color: var(--text-dim); }
-.grasp-row-unreach .grasp-row-icon, .grasp-row-unreach .grasp-row-status { color: var(--text-dim); }
-.grasp-row-unknown .grasp-row-icon, .grasp-row-unknown .grasp-row-status { color: var(--text-dim); }
+.grasp-row-sig      .grasp-row-icon, .grasp-row-sig      .grasp-row-status { color: var(--success); }
+.grasp-row-behind   .grasp-row-icon, .grasp-row-behind   .grasp-row-status { color: var(--warn); }
+.grasp-row-ahead    .grasp-row-icon, .grasp-row-ahead    .grasp-row-status { color: #4A9EFF; }
+.grasp-row-diverged .grasp-row-icon, .grasp-row-diverged .grasp-row-status { color: #E85555; }
+.grasp-row-err      .grasp-row-icon, .grasp-row-err      .grasp-row-status { color: var(--text-dim); }
+.grasp-row-unreach  .grasp-row-icon, .grasp-row-unreach  .grasp-row-status { color: var(--text-dim); }
+.grasp-row-unknown  .grasp-row-icon, .grasp-row-unknown  .grasp-row-status { color: var(--text-dim); }
 .grasp-pop-foot { font-size: 11px; color: var(--text-dim); }
 .grasp-pop-foot.warn { color: var(--warn); }
 

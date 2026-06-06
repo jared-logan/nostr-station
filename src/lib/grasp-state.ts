@@ -16,7 +16,20 @@
  * for this first cut (see the "differs" label).
  */
 
-export type GraspSync = 'in-sync' | 'out-of-sync' | 'missing' | 'unreachable' | 'unknown';
+export type GraspSync =
+  | 'in-sync'      // host holds the signed commit ("signed")
+  | 'behind'       // host's commit is an ancestor of the signed commit
+  | 'ahead'        // signed commit is an ancestor of the host's commit
+  | 'diverged'     // neither is an ancestor of the other
+  | 'differs'      // host differs but ancestry can't be determined locally
+  | 'missing'      // ls-remote 404 / wrong path — "no git data"
+  | 'unreachable'  // ls-remote network failure
+  | 'unknown';     // repo has no signed state (30618) yet
+
+/** Ancestry of one oid relative to another, from `git merge-base --is-ancestor`:
+ *  'yes' (is an ancestor), 'no' (both valid, not an ancestor), 'unknown' (an
+ *  oid isn't a local object so the relation can't be computed). */
+export type Ancestry = 'yes' | 'no' | 'unknown';
 
 /** A ref whose oid is not agreed across the signed state + reachable servers. */
 export interface RefDivergence {
@@ -76,20 +89,35 @@ export function defaultBranchFromState(stateTags: string[][]): string | null {
 }
 
 /**
- * Classify a single GRASP git host against the signed state for a branch,
- * assuming the host was REACHABLE (ls-remote succeeded). Reachability and the
- * 404/"wrong path" case are handled by the caller (→ 'unreachable' / 'missing')
- * before this is reached.
+ * Coarse classification of a REACHABLE host against the signed state for a
+ * branch (reachability + the 404 case are handled by the caller → 'unreachable'
+ * / 'missing'):
  *   - signedOid === null → unknown (repo has no signed state yet)
- *   - hostOid === null   → out-of-sync (reachable, but doesn't carry the branch)
  *   - oids equal         → in-sync ("signed")
- *   - oids differ        → out-of-sync ("behind signed")
+ *   - otherwise          → differs (the caller refines to behind/ahead/diverged
+ *                          via ancestry when both commits are available locally)
  * Pure.
  */
 export function compareServerRef(hostOid: string | null, signedOid: string | null): GraspSync {
   if (signedOid === null) return 'unknown';
-  if (hostOid === null)   return 'out-of-sync';
-  return hostOid.toLowerCase() === signedOid.toLowerCase() ? 'in-sync' : 'out-of-sync';
+  if (hostOid === null)   return 'differs';
+  return hostOid.toLowerCase() === signedOid.toLowerCase() ? 'in-sync' : 'differs';
+}
+
+/**
+ * Refine a 'differs' host into behind / ahead / diverged using two ancestry
+ * probes against the signed commit:
+ *   - hostIsAncestorOfSigned 'yes' → behind (host older)
+ *   - signedIsAncestorOfHost 'yes' → ahead  (host newer)
+ *   - both 'no'                     → diverged
+ *   - any 'unknown' (an oid not present locally) → 'differs' (best we can say)
+ * Pure.
+ */
+export function classifyDrift(hostIsAncestorOfSigned: Ancestry, signedIsAncestorOfHost: Ancestry): GraspSync {
+  if (hostIsAncestorOfSigned === 'yes') return 'behind';
+  if (signedIsAncestorOfHost === 'yes') return 'ahead';
+  if (hostIsAncestorOfSigned === 'no' && signedIsAncestorOfHost === 'no') return 'diverged';
+  return 'differs';
 }
 
 /**

@@ -9281,12 +9281,16 @@ const ProjectsPanel = (() => {
   }
 
   const GRASP_META = {
-    'in-sync':     { cls: 'sig',     icon: '✓', label: 'signed' },
-    'out-of-sync': { cls: 'behind',  icon: '!', label: 'behind signed' },
-    'missing':     { cls: 'err',     icon: '○', label: 'error' },
-    'unreachable': { cls: 'unreach', icon: '–', label: 'unreachable' },
-    'unknown':     { cls: 'unknown', icon: '–', label: 'no signed state' },
+    'in-sync':     { cls: 'sig',      icon: '✓', label: 'signed' },
+    'behind':      { cls: 'behind',   icon: '↓', label: 'behind signed' },
+    'ahead':       { cls: 'ahead',    icon: '↑', label: 'ahead of signed' },
+    'diverged':    { cls: 'diverged', icon: '⇅', label: 'diverged' },
+    'differs':     { cls: 'behind',   icon: '!', label: 'out of sync' },
+    'missing':     { cls: 'err',      icon: '○', label: 'error' },
+    'unreachable': { cls: 'unreach',  icon: '–', label: 'unreachable' },
+    'unknown':     { cls: 'unknown',  icon: '–', label: 'no signed state' },
   };
+  const GRASP_DRIFT = new Set(['behind', 'ahead', 'diverged', 'differs']);
 
   function buildGraspPopover(p, data, onRefresh) {
     const wrap = document.createElement('div');
@@ -9294,7 +9298,7 @@ const ProjectsPanel = (() => {
 
     const rows = (data.servers || []).map(s => {
       const m = GRASP_META[s.sync] || GRASP_META['unknown'];
-      const detail = (s.sync === 'out-of-sync' && s.has) ? `has <code>${escapeHtml(s.has)}</code>`
+      const detail = (GRASP_DRIFT.has(s.sync) && s.has) ? `has <code>${escapeHtml(s.has)}</code>`
                    : s.sync === 'missing'               ? 'no git data — wrong path or 404'
                    : s.sync === 'unreachable'           ? 'no response'
                    : '';
