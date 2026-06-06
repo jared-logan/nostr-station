@@ -171,7 +171,12 @@ export function buildAppTemplate(body: any): TemplateBuildResult {
   setField('nip05',   str(body.nip05));
 
   // ── d-tag (the addressable identifier) ──
-  const dTag = slugify(str(body.d) || name);
+  // An EXPLICIT d-tag is preserved verbatim — it's the replaceable address,
+  // and re-slugifying it (which lowercases) would change the coordinate and
+  // fork a NEW app instead of replacing the existing one (e.g. editing
+  // "nostrVM" must NOT become "nostrvm"). Only DERIVE-from-name slugifies.
+  const explicitD = str(body.d);
+  const dTag = explicitD || slugify(name);
   if (!dTag) return { ok: false, error: 'could not derive a valid identifier (d-tag) — set a Name or App identifier' };
 
   const tags: string[][] = [['d', dTag]];
