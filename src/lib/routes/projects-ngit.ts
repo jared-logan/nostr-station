@@ -694,14 +694,17 @@ async function handleGraspPush(
       return finish(1);
     }
 
-    // (c) Push the pack to every GRASP git host, in parallel.
+    // (c) Push the pack to every GRASP git host, in parallel. Current branch
+    //     only, non-force — exactly what Shakespeare's nostrPush delivers
+    //     (`--tags`/`--all`/force are intentionally NOT used). A non-ff host
+    //     rejects rather than clobbers, which is the safe default.
     const branch = refs.currentBranch;
-    log(`Pushing ${branch} (+ tags) to ${cloneUrls.length} host(s)…`);
+    log(`Pushing ${branch} to ${cloneUrls.length} host(s)…`);
     const pushResults = await Promise.all(cloneUrls.map(async (url) => {
       const host = hostOf(url);
       const r = await runGitCapture(
         repoPath,
-        ['push', url, '--tags', `refs/heads/${branch}:refs/heads/${branch}`],
+        ['push', url, `refs/heads/${branch}:refs/heads/${branch}`],
         GRASP_PUSH_HOST_TIMEOUT_MS,
       );
       const ok = r.code === 0;
@@ -712,6 +715,22 @@ async function handleGraspPush(
     }));
 
     const landed = pushResults.filter(r => r.ok).length;
+
+    // Mirror `git push origin HEAD`'s side effect: advance the branch's
+    // upstream tracking ref so the dashboard's ahead/behind badge reflects the
+    // push. We pushed to the clone URLs directly (not the `origin` remote), so
+    // git won't update refs/remotes/origin/<branch> for us — and without this
+    // the card would still read "Push N commits" after a clean push. Done only
+    // when at least one host accepted (the canonical remote is now at HEAD),
+    // and best-effort: a branch with no upstream has no ab count to fix.
+    if (landed > 0 && refs.headOid) {
+      try {
+        const upstreamRef = (await gitStdout(['rev-parse', '--symbolic-full-name', `${branch}@{upstream}`])).trim();
+        if (/^refs\/remotes\//.test(upstreamRef)) {
+          await runGitCapture(repoPath, ['update-ref', upstreamRef, refs.headOid], 5_000);
+        }
+      } catch { /* no upstream tracking configured — ahead/behind isn't shown anyway */ }
+    }
     log('');
     log(`Done: ${landed}/${cloneUrls.length} GRASP host(s) up to date · state on ${stateAccepted}/${relays.length} relay(s).`,
         landed === cloneUrls.length ? 'stdout' : 'stderr');

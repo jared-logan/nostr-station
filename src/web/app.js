@@ -12662,6 +12662,23 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
     });
     if (!ok) return;
 
+    // ngit-only repos publish via the GRASP direct push so commits land on
+    // EVERY GRASP server — identical to the sync-popover Push, so both push
+    // affordances behave the same. git-only and combined git+ngit repos keep
+    // the terminal/SSE publish flow below (it must also reach GitHub), so
+    // those paths are unchanged.
+    if (p.capabilities.ngit && !p.capabilities.git) {
+      return openExecModal({
+        title:    `Push to GRASP servers · ${p.name}`,
+        subtitle: 'Publish the signed repo state to your relays, then push your commits to every GRASP git host. Approve the state event on your signer.',
+        endpoint: `/api/projects/${p.id}/ngit/grasp-push`,
+      }).then(r => {
+        if (r.ok) toast('Pushed to all GRASP servers', '', 'ok');
+        else      toast('GRASP push incomplete', `exit ${r.code}`, 'err');
+        if (state.view === 'detail' && state.projectId === p.id) render();
+      });
+    }
+
     // Prefer the terminal panel — publish is an Ink flow with colour +
     // Amber prompts that the SSE modal can only render as NO_COLOR plain
     // text. Pick the key that matches the project's capabilities (mirrors

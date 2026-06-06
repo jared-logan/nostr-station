@@ -18,15 +18,24 @@ signed" in gitworkshop while another showed "signed".
 - New `POST /api/projects/:id/ngit/grasp-push` (SSE): resolves the live 30617,
   builds the 30618 state from local refs (preserving an existing `HEAD`),
   republishes the announcement, reuses-or-signs the state event (no Amber
-  prompt when refs are unchanged), publishes to the relays, then pushes to
-  each GRASP git host in parallel with honest per-host reporting (`N/N hosts
-  up to date`). Partial delivery is surfaced as "needs action — re-run to
-  retry the laggards", not a false green.
+  prompt when refs are unchanged), publishes to the relays, then pushes the
+  **current branch** (non-force, no `--tags` — exactly what Shakespeare's
+  `nostrPush` delivers) to each GRASP git host in parallel with honest
+  per-host reporting (`N/N hosts up to date`). Partial delivery is surfaced as
+  "needs action — re-run to retry the laggards", not a false green.
 - Ordering is load-bearing: the signed state is published BEFORE the pack, so
   each GRASP server can authorize the push by checking refs against the state
   it received (the GRASP auth model — no NIP-98 handshake required). Pushes
   run with `GIT_TERMINAL_PROMPT=0` so an auth-required host fails fast instead
   of hanging.
+- After a successful push the branch's **upstream tracking ref is advanced**
+  (mirroring `git push origin HEAD`'s side effect) so the dashboard's
+  ahead/behind badge clears — without it, pushing to the clone URLs directly
+  would leave the card reading "Push N commits" after a clean push.
+- Both ngit push affordances route here — the sync-popover **Push** and the
+  pure-ngit **Publish** quick action — so they behave identically. git-only
+  and combined git+ngit repos keep their existing terminal/SSE publish flow
+  unchanged (it must also reach GitHub).
 - `src/lib/grasp-push.ts` holds the pure, unit-tested ref/tag logic
   (`selectGraspCloneUrls`, `buildRepoStateTags`, `repoStateTagsEqual`,
   `readLocalRefs`); 12 tests cover URL selection, NIP-34 state shape, HEAD
