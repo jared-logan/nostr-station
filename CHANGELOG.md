@@ -5,6 +5,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Code tab: GRASP server sync badge (gitworkshop-style)
+
+The Code tab now shows, in the branch-selector row, an **"N/M servers serving
+the Nostr state"** pill — the same at-a-glance in/out-of-sync view gitworkshop
+shows. Clicking it opens a per-server popover: each GRASP git host is **signed**
+(green ✓) when it actually holds the commit the signed `30618` state points at,
+or **behind signed** (amber, `has <sha>`) when it lags, or **unreachable**.
+nostr-station had no way to see this before — a host left behind by a partial
+push was invisible here.
+
+- New `GET /api/projects/:id/grasp-state?ref=&refresh=1`: resolves the signed
+  `30618` for the (default or selected) branch and `git ls-remote`s every GRASP
+  clone URL in parallel, comparing oids. Cached ~45s and `?refresh=1`-bustable;
+  the badge auto-re-probes right after a Push/Sync/Publish.
+- `src/lib/grasp-state.ts` holds the pure, unit-tested logic (`parseLsRemote`,
+  `stateOidForRef`, `defaultBranchFromState`, `compareServerRef`); 11 tests.
+- First cut scope: the default/selected branch, match-vs-differs labelling
+  (no commit-ancestry walk yet), and a cached + manual/post-push refresh. An
+  all-refs "N other ref differs across servers" rollup and behind/ahead nuance
+  are sensible follow-ups.
+
 ### ngit: push lands on EVERY GRASP server (no more "behind signed")
 
 The ngit **Push** action now mirrors Shakespeare's `nostrPush`: it publishes

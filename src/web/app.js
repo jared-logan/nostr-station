@@ -6305,6 +6305,7 @@ const ProjectsPanel = (() => {
           if (r.ok)        toast('ngit sync complete', 'pushed to all GRASP servers', 'ok');
           else if (r.warn) toast('Sync incomplete', 'some GRASP servers lagged — re-run to retry', 'warn');
           else             toast('ngit sync failed', `exit ${r.code}`, 'err');
+          graspRefreshPending = true;
           refreshAfter();
           return !!r.ok;
         });
@@ -6363,6 +6364,7 @@ const ProjectsPanel = (() => {
           if (r.ok)        toast('Pushed to all GRASP servers', '', 'ok');
           else if (r.warn) toast('Push incomplete', 'some GRASP servers lagged — re-run to retry', 'warn');
           else             toast('GRASP push failed', `exit ${r.code}`, 'err');
+          graspRefreshPending = true;
           refreshAfter();
           return !!r.ok;
         });
@@ -7578,6 +7580,11 @@ const ProjectsPanel = (() => {
   // Phase 1c handles published projects (state B). Local-only / un-
   // published (state A) renders a stub pointing the user at Settings;
   // Phase 1d will replace that with the publish wizard.
+  // One-shot flag: set by a just-completed push/sync/publish so the next Code
+  // tab render re-probes the GRASP servers (bypassing the 45s cache) and the
+  // sync badge reflects what was just pushed. Consumed by loadGraspPill.
+  let graspRefreshPending = false;
+
   async function renderCodeTab(container, p) {
     container.innerHTML = `<div class="code-loading muted">Loading repo…</div>`;
 
@@ -9184,6 +9191,110 @@ const ProjectsPanel = (() => {
       });
     });
 
+    // GRASP server sync badge — gitworkshop-style "N/M servers serving the
+    // Nostr state". Only for ngit-published repos; fetched async so the nav
+    // paints instantly and the pill fills in when the probe lands.
+    if (p.capabilities?.ngit && p.remotes?.ngit) {
+      const ghost = document.createElement('span');
+      ghost.className = 'grasp-pill-host';
+      const pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'grasp-pill loading';
+      pill.setAttribute('aria-haspopup', 'true');
+      pill.setAttribute('aria-expanded', 'false');
+      pill.innerHTML = `<span class="grasp-pill-dot"></span><span class="grasp-pill-count">···</span>`;
+      pill.title = 'Checking GRASP server sync…';
+      ghost.appendChild(pill);
+      wrap.querySelector('.code-nav-row').appendChild(ghost);
+      loadGraspPill(pill, ghost, p, view.ref);
+    }
+
+    return wrap;
+  }
+
+  // Fetch /grasp-state for the selected branch and fill in the pill, then wire
+  // its popover. Self-removes for local-only/unannounced/zero-server repos so
+  // the badge only appears where it's meaningful. Honours a one-shot refresh
+  // flag set by a just-completed push/sync so the badge reflects the new state.
+  async function loadGraspPill(pill, hostEl, p, ref) {
+    const force = graspRefreshPending; graspRefreshPending = false;
+    let data;
+    try {
+      const qs = new URLSearchParams({ ref: ref || 'HEAD' });
+      if (force) qs.set('refresh', '1');
+      data = await api(`/api/projects/${p.id}/grasp-state?${qs}`);
+    } catch { hostEl.remove(); return; }
+    if (!data || data.status !== 'ok' || !(data.total > 0)) { hostEl.remove(); return; }
+
+    const { inSync, total, branch } = data;
+    const level = inSync >= total ? 'ok' : (inSync === 0 ? 'bad' : 'warn');
+    pill.classList.remove('loading');
+    pill.classList.add(`grasp-${level}`);
+    pill.querySelector('.grasp-pill-count').textContent = `${inSync}/${total}`;
+    pill.title = `${inSync}/${total} GRASP servers serving the Nostr state for ${branch}`;
+    attachGraspPopover(pill, hostEl, p, data);
+  }
+
+  function attachGraspPopover(triggerEl, hostEl, p, data) {
+    let menu = null;
+    const close = () => { if (menu) { menu.remove(); menu = null; } triggerEl.setAttribute('aria-expanded', 'false'); };
+    const open = () => {
+      if (menu) return;
+      menu = document.createElement('div');
+      menu.className = 'grasp-pop-menu';
+      menu.addEventListener('click', (e) => e.stopPropagation());
+      menu.appendChild(buildGraspPopover(p, data, () => {
+        close();
+        graspRefreshPending = true;       // force a fresh ls-remote probe
+        renderTab(document.querySelector('.project-tab-content'), p);
+      }));
+      hostEl.appendChild(menu);
+      triggerEl.setAttribute('aria-expanded', 'true');
+    };
+    const toggle = (e) => { e.stopPropagation(); if (menu) close(); else open(); };
+    triggerEl.addEventListener('click', toggle);
+    triggerEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(e); }
+    });
+    document.addEventListener('click', (e) => {
+      if (!menu) return;
+      if (triggerEl.contains(e.target) || menu.contains(e.target)) return;
+      close();
+    });
+  }
+
+  function buildGraspPopover(p, data, onRefresh) {
+    const wrap = document.createElement('div');
+    wrap.className = 'grasp-pop-body';
+    const rows = (data.servers || []).map(s => {
+      const cls = s.sync === 'in-sync' ? 'sig' : (s.sync === 'unreachable' ? 'unreach' : 'behind');
+      const label = s.sync === 'in-sync'    ? 'signed'
+                  : s.sync === 'unreachable' ? 'unreachable'
+                  : s.sync === 'unknown'     ? 'no signed state'
+                  : 'behind signed';
+      const icon = s.sync === 'in-sync' ? '✓' : (s.sync === 'unreachable' ? '–' : '!');
+      const has = (s.sync === 'out-of-sync' && s.has)
+        ? `<span class="grasp-row-has">has <code>${escapeHtml(s.has)}</code></span>` : '';
+      return `<div class="grasp-row grasp-row-${cls}">
+        <span class="grasp-row-icon">${icon}</span>
+        <code class="grasp-row-url">${escapeHtml(s.cloneUrl)}</code>
+        ${has}
+        <span class="grasp-row-status">${label}</span>
+      </div>`;
+    }).join('');
+    const allOk = data.inSync >= data.total;
+    wrap.innerHTML = `
+      <div class="grasp-pop-head">
+        <span class="grasp-pop-title">⚡ GRASP Servers</span>
+        <button class="link grasp-pop-refresh" title="Re-check now">↻</button>
+      </div>
+      <div class="grasp-pop-sub ${allOk ? '' : 'warn'}">
+        ${data.inSync}/${data.total} servers serving the Nostr state for <code>${escapeHtml(data.branch)}</code>
+      </div>
+      <div class="grasp-pop-list">${rows || '<div class="muted">No GRASP servers in the announcement.</div>'}</div>
+      ${!data.hasSignedState ? `<div class="grasp-pop-foot warn">No signed repo state (30618) found — push to publish it.</div>` : ''}
+    `;
+    wrap.querySelector('.grasp-pop-refresh')?.addEventListener('click', onRefresh);
     return wrap;
   }
 
@@ -12678,6 +12789,7 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
         if (r.ok)        toast('Pushed to all GRASP servers', '', 'ok');
         else if (r.warn) toast('Push incomplete', 'some GRASP servers lagged — re-run to retry', 'warn');
         else             toast('GRASP push failed', `exit ${r.code}`, 'err');
+        graspRefreshPending = true;
         if (state.view === 'detail' && state.projectId === p.id) render();
       });
     }
