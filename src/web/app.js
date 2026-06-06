@@ -5701,7 +5701,9 @@ const ProjectsPanel = (() => {
   const subtitle   = $('projects-subtitle');
 
   // View state persists across onEnter so back/refresh keeps users in place.
-  let state = { view: 'list', projectId: null, tab: 'overview' };
+  // `listTab` toggles the list view between the project grid ('repos') and
+  // the relay-discovered nsites list ('nsites').
+  let state = { view: 'list', projectId: null, tab: 'overview', listTab: 'repos' };
   let projects = [];
   let projectStatus = null;    // cached git/status for current detail
   let projectGitLog = null;
@@ -5849,6 +5851,7 @@ const ProjectsPanel = (() => {
   }
   function pollGitStateAll() {
     if (state.view !== 'list') return;  // detail view doesn't show cards
+    if (state.listTab !== 'repos') return;  // nsites tab has no project cards
     if (document.visibilityState !== 'visible') return;
     for (const p of projects) {
       if (!p.path || p.pathMissing) continue;
@@ -5876,17 +5879,53 @@ const ProjectsPanel = (() => {
 
   function renderList() {
     title.textContent = 'Projects';
-    subtitle.textContent = 'Your Nostr development projects';
-    headActions.innerHTML = '';
-    const addBtn = document.createElement('button');
-    addBtn.className = 'primary';
-    addBtn.textContent = '+ Add project';
-    addBtn.title = 'New local, adopt existing, or import from a repository';
-    addBtn.addEventListener('click', () => openAddProjectChooserModal());
-    headActions.appendChild(addBtn);
+    subtitle.textContent = state.listTab === 'nsites'
+      ? 'Sites published under your identity'
+      : 'Your Nostr development projects';
 
+    // "+ Add project" only makes sense on the Repos tab — the nsites list is
+    // a read-only discovery view, not somewhere you register a project.
+    headActions.innerHTML = '';
+    if (state.listTab === 'repos') {
+      const addBtn = document.createElement('button');
+      addBtn.className = 'primary';
+      addBtn.textContent = '+ Add project';
+      addBtn.title = 'New local, adopt existing, or import from a repository';
+      addBtn.addEventListener('click', () => openAddProjectChooserModal());
+      headActions.appendChild(addBtn);
+    }
+
+    // Tab bar — mirrors the project detail view's `.tabs` pattern so it looks
+    // native. Repos = the project grid; nsites = relay-discovered sites.
+    body.innerHTML = '';
+    const tabsEl = document.createElement('div');
+    tabsEl.className = 'tabs project-list-tabs';
+    const listTabs = [
+      { key: 'repos',  label: 'Repos' },
+      { key: 'nsites', label: 'nsites' },
+    ];
+    tabsEl.innerHTML = listTabs.map(t =>
+      `<button class="tab ${t.key === state.listTab ? 'active' : ''}" data-list-tab="${t.key}">${escapeHtml(t.label)}</button>`
+    ).join('');
+    tabsEl.addEventListener('click', (e) => {
+      const t = e.target.closest('.tab');
+      if (!t || t.dataset.listTab === state.listTab) return;
+      state.listTab = t.dataset.listTab;
+      renderList();
+    });
+    body.appendChild(tabsEl);
+
+    const content = document.createElement('div');
+    content.className = 'project-list-content';
+    body.appendChild(content);
+
+    if (state.listTab === 'nsites') renderNsitesTab(content);
+    else                            renderReposTab(content);
+  }
+
+  function renderReposTab(content) {
     if (projects.length === 0) {
-      body.innerHTML = `
+      content.innerHTML = `
         <div class="projects-empty">
           <img class="empty-art" src="/nori.svg" alt="">
           <div class="big">No projects yet</div>
@@ -5894,7 +5933,7 @@ const ProjectsPanel = (() => {
           <button class="primary empty-add">Add project</button>
         </div>
       `;
-      body.querySelector('.empty-add').addEventListener('click', () => openAddProjectChooserModal());
+      content.querySelector('.empty-add').addEventListener('click', () => openAddProjectChooserModal());
       return;
     }
 
@@ -5909,9 +5948,90 @@ const ProjectsPanel = (() => {
            <a href="#config">Set one up in Config</a> (Claude Code or OpenCode).
          </div>`
       : '';
-    body.innerHTML = `${calloutHtml}<div class="project-grid"></div>`;
-    const grid = body.querySelector('.project-grid');
+    content.innerHTML = `${calloutHtml}<div class="project-grid"></div>`;
+    const grid = content.querySelector('.project-grid');
     for (const p of projects) grid.appendChild(renderProjectCard(p));
+  }
+
+  // nsites tab — relay-discovered sites published under the configured
+  // identity. Read-only: lists each deployment with an Open ↗ link. This is
+  // the list that used to live in the identity drawer; "Add to Projects" was
+  // dropped on the move since a discovered nsite has no ngit clone URL to
+  // seed the Add Project flow with. Backed by the shared getNsiteDiscover()
+  // cache (also used by the Status panel's nsite card).
+  async function renderNsitesTab(content) {
+    content.innerHTML = `
+      <div class="tab-section">
+        <div class="projects-nsites">
+          <span class="spinner"></span><span class="muted" style="margin-left:8px">Checking read relays…</span>
+        </div>
+      </div>
+    `;
+    const listEl = content.querySelector('.projects-nsites');
+
+    let d;
+    try {
+      d = await getNsiteDiscover();
+    } catch {
+      // Guard against a tab switch while the fetch was in flight.
+      if (state.view !== 'list' || state.listTab !== 'nsites') return;
+      listEl.innerHTML = `<div class="muted">Could not reach read relays.</div>`;
+      return;
+    }
+    if (state.view !== 'list' || state.listTab !== 'nsites') return;
+
+    // npubUrl is null when no identity is configured — the discovery endpoint
+    // needs an npub to derive the predicted host.
+    if (!d || !d.npubUrl) {
+      listEl.innerHTML = `<div class="muted">Configure your identity to discover published sites.</div>`;
+      return;
+    }
+
+    const sites = Array.isArray(d.sites) ? d.sites : [];
+
+    if (sites.length === 0) {
+      listEl.innerHTML = `
+        <div class="nsite-url-row">
+          <code class="nsite-predicted">${escapeHtml(d.npubUrl)}</code>
+          <span class="copy-slot"></span>
+        </div>
+        <div class="muted nsite-meta">Predicted URL — no deployment detected on read relays</div>
+        <div class="muted nsite-hint">
+          Deploy via a project's nsite tab or <code>nostr-station nsite deploy</code>.
+        </div>
+      `;
+      listEl.querySelector('.copy-slot').appendChild(copyBtn(d.npubUrl));
+      return;
+    }
+
+    const multiLabel = sites.length > 1 ? `${sites.length} sites deployed` : null;
+    listEl.innerHTML = `
+      ${multiLabel ? `<div class="muted nsite-count">${escapeHtml(multiLabel)}</div>` : ''}
+      <div class="nsite-list"></div>
+    `;
+    const rowsEl = listEl.querySelector('.nsite-list');
+    for (const site of sites) {
+      const row = document.createElement('div');
+      row.className = 'nsite-row';
+      const whenMs = site.publishedAt ? site.publishedAt * 1000 : null;
+      const when = whenMs ? fmtAgoMs(whenMs) : 'just now';
+      const labelDiffers = site.title && site.title !== site.d;
+      row.innerHTML = `
+        <div class="nsite-row-head">
+          <span class="nsite-title">${escapeHtml(site.title || site.d)}</span>
+          ${labelDiffers ? `<span class="nsite-dtag muted">d=${escapeHtml(site.d)}</span>` : ''}
+        </div>
+        <div class="nsite-url-row">
+          <a href="${escapeHtml(site.url)}" target="_blank" rel="noreferrer" class="nsite-url-primary">${escapeHtml(site.url)}</a>
+          <button class="open-nsite" title="Open in new tab">Open ↗</button>
+        </div>
+        <div class="muted nsite-meta">Deployed ${escapeHtml(when)}</div>
+      `;
+      row.querySelector('.open-nsite').addEventListener('click', () => {
+        window.open(site.url, '_blank', 'noopener');
+      });
+      rowsEl.appendChild(row);
+    }
   }
 
   function projectCardState(p) {
