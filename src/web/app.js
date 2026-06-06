@@ -26524,7 +26524,7 @@ const AppsPanel = (() => {
 
         <section class="apps-card-section">
           <div class="apps-section-title">Handlers</div>
-          <div class="apps-section-sub muted">How clients open content in your app → <code>web</code> / <code>ios</code> / <code>android</code> tags. Use <code>&lt;bech32&gt;</code> as the entity placeholder.</div>
+          <div class="apps-section-sub muted">How clients open content in your app → <code>web</code> / <code>ios</code> / <code>android</code> tags. Put <code>&lt;bech32&gt;</code> where a Nostr entity should go (then pick its type), or leave a plain URL to just open your app.</div>
           <div class="apps-handler-head muted"><span>Platform</span><span>URL Template</span><span>Entity Type</span><span></span></div>
           ${handlerRows || '<div class="muted">No handlers yet.</div>'}
           <button type="button" class="apps-add-btn" data-act="add-handler">+ Add Handler</button>
@@ -26729,9 +26729,6 @@ const AppsPanel = (() => {
     syncFromDom();
     const fields = collectFields();
     if (!fields.name) { toast('Name required', 'enter an app name', 'err'); return; }
-    for (const h of fields.handlers) {
-      if (!h.template.includes('<bech32>')) { toast('Handler needs <bech32>', `${h.platform} template must contain <bech32>`, 'err'); return; }
-    }
     const publishBtn = editorView.querySelector('[data-act="publish"]');
     if (publishBtn) { publishBtn.disabled = true; publishBtn.textContent = 'Publishing…'; }
     try {
