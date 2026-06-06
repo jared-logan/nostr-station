@@ -1,0 +1,134 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+const {
+  selectGraspCloneUrls,
+  buildRepoStateTags,
+  repoStateTagsEqual,
+  readLocalRefs,
+} = await import('../src/lib/grasp-push.ts');
+
+// ── selectGraspCloneUrls ─────────────────────────────────────────────────
+
+test('selectGraspCloneUrls: keeps only https URLs, order preserved', () => {
+  const out = selectGraspCloneUrls([
+    'https://git.shakespeare.diy/npub1/amon-din.git',
+    'https://relay.ngit.dev/npub1/amon-din.git',
+    'nostr://npub1/amon-din',
+    'git://example.com/x.git',
+    'ssh://git@example.com/x.git',
+  ]);
+  assert.deepEqual(out, [
+    'https://git.shakespeare.diy/npub1/amon-din.git',
+    'https://relay.ngit.dev/npub1/amon-din.git',
+  ]);
+});
+
+test('selectGraspCloneUrls: dedupes by normalized href, drops junk', () => {
+  const out = selectGraspCloneUrls([
+    'https://git.shakespeare.diy/a.git',
+    'https://git.shakespeare.diy/a.git',
+    '  ',
+    'not a url',
+    42 as unknown as string,
+  ]);
+  assert.deepEqual(out, ['https://git.shakespeare.diy/a.git']);
+});
+
+test('selectGraspCloneUrls: empty input → empty output', () => {
+  assert.deepEqual(selectGraspCloneUrls([]), []);
+});
+
+// ── buildRepoStateTags ───────────────────────────────────────────────────
+
+const refs = (over: any = {}) => ({
+  currentBranch: 'main',
+  headOid: 'a'.repeat(40),
+  branches: [['main', 'a'.repeat(40)], ['dev', 'b'.repeat(40)]] as [string, string][],
+  tags: [['v1', 'c'.repeat(40)]] as [string, string][],
+  ...over,
+});
+
+test('buildRepoStateTags: symbolic HEAD + all refs in NIP-34 shape', () => {
+  const tags = buildRepoStateTags('amon-din', refs());
+  assert.deepEqual(tags, [
+    ['d', 'amon-din'],
+    ['HEAD', 'ref: refs/heads/main'],
+    ['refs/heads/main', 'a'.repeat(40)],
+    ['refs/heads/dev', 'b'.repeat(40)],
+    ['refs/tags/v1', 'c'.repeat(40)],
+  ]);
+});
+
+test('buildRepoStateTags: preserves an existing HEAD tag verbatim', () => {
+  const tags = buildRepoStateTags('amon-din', refs({ currentBranch: 'feature' }), ['HEAD', 'ref: refs/heads/main']);
+  // HEAD stays pinned to main even though the local branch is `feature`.
+  assert.deepEqual(tags[1], ['HEAD', 'ref: refs/heads/main']);
+});
+
+test('buildRepoStateTags: detached HEAD falls back to the commit oid', () => {
+  const tags = buildRepoStateTags('r', refs({ currentBranch: '', headOid: 'f'.repeat(40) }));
+  assert.deepEqual(tags[1], ['HEAD', 'f'.repeat(40)]);
+});
+
+test('buildRepoStateTags: skips refs missing a name or oid', () => {
+  const tags = buildRepoStateTags('r', refs({
+    branches: [['main', 'a'.repeat(40)], ['', 'x'], ['broken', '']] as [string, string][],
+    tags: [],
+  }));
+  const refNames = tags.filter(t => t[0].startsWith('refs/')).map(t => t[0]);
+  assert.deepEqual(refNames, ['refs/heads/main']);
+});
+
+// ── repoStateTagsEqual ───────────────────────────────────────────────────
+
+test('repoStateTagsEqual: order-insensitive equality', () => {
+  const a = [['d', 'r'], ['refs/heads/main', 'aaa'], ['refs/heads/dev', 'bbb']];
+  const b = [['refs/heads/dev', 'bbb'], ['d', 'r'], ['refs/heads/main', 'aaa']];
+  assert.equal(repoStateTagsEqual(a, b), true);
+});
+
+test('repoStateTagsEqual: detects a changed oid', () => {
+  const a = [['d', 'r'], ['refs/heads/main', 'aaa']];
+  const b = [['d', 'r'], ['refs/heads/main', 'zzz']];
+  assert.equal(repoStateTagsEqual(a, b), false);
+});
+
+test('repoStateTagsEqual: different lengths are unequal', () => {
+  assert.equal(repoStateTagsEqual([['d', 'r']], [['d', 'r'], ['x', 'y']]), false);
+});
+
+// ── readLocalRefs ────────────────────────────────────────────────────────
+
+test('readLocalRefs: parses symbolic-ref, rev-parse and for-each-ref', async () => {
+  const run = async (args: string[]): Promise<string> => {
+    if (args[0] === 'symbolic-ref') return 'main\n';
+    if (args[0] === 'rev-parse')    return `${'a'.repeat(40)}\n`;
+    if (args[0] === 'for-each-ref' && args[2] === 'refs/heads') {
+      return `main\0${'a'.repeat(40)}\ndev\0${'b'.repeat(40)}\n`;
+    }
+    if (args[0] === 'for-each-ref' && args[2] === 'refs/tags') {
+      return `v1\0${'c'.repeat(40)}\n`;
+    }
+    return '';
+  };
+  const out = await readLocalRefs(run);
+  assert.equal(out.currentBranch, 'main');
+  assert.equal(out.headOid, 'a'.repeat(40));
+  assert.deepEqual(out.branches, [['main', 'a'.repeat(40)], ['dev', 'b'.repeat(40)]]);
+  assert.deepEqual(out.tags, [['v1', 'c'.repeat(40)]]);
+});
+
+test('readLocalRefs: detached HEAD → empty currentBranch, refs still read', async () => {
+  const run = async (args: string[]): Promise<string> => {
+    if (args[0] === 'symbolic-ref') throw new Error('not a symbolic ref');
+    if (args[0] === 'rev-parse')    return `${'d'.repeat(40)}\n`;
+    if (args[0] === 'for-each-ref' && args[2] === 'refs/heads') return `main\0${'a'.repeat(40)}\n`;
+    return '';
+  };
+  const out = await readLocalRefs(run);
+  assert.equal(out.currentBranch, '');
+  assert.equal(out.headOid, 'd'.repeat(40));
+  assert.deepEqual(out.branches, [['main', 'a'.repeat(40)]]);
+  assert.deepEqual(out.tags, []);
+});

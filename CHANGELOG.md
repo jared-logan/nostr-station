@@ -5,6 +5,45 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### ngit: push lands on EVERY GRASP server (no more "behind signed")
+
+The ngit **Push** action now mirrors Shakespeare's `nostrPush`: it publishes
+the announcement (30617) + a signed repo-state (30618) to the relays, then
+pushes the pack to **every** `https://` clone URL in the announcement —
+instead of `git push origin HEAD` via `git-remote-nostr`, which published the
+signed state to all relays but could deliver the git objects to only ONE of
+several GRASP hosts. That gap is exactly what left a server showing "behind
+signed" in gitworkshop while another showed "signed".
+
+- New `POST /api/projects/:id/ngit/grasp-push` (SSE): resolves the live 30617,
+  builds the 30618 state from local refs (preserving an existing `HEAD`),
+  republishes the announcement, reuses-or-signs the state event (no Amber
+  prompt when refs are unchanged), publishes to the relays, then pushes the
+  **current branch** (non-force, no `--tags` — exactly what Shakespeare's
+  `nostrPush` delivers) to each GRASP git host in parallel with honest
+  per-host reporting (`N/N hosts up to date`). Partial delivery is surfaced as
+  "needs action — re-run to retry the laggards", not a false green.
+- Ordering is load-bearing: the signed state is published BEFORE the pack, so
+  each GRASP server can authorize the push by checking refs against the state
+  it received (the GRASP auth model — no NIP-98 handshake required). Pushes
+  run with `GIT_TERMINAL_PROMPT=0` so an auth-required host fails fast instead
+  of hanging.
+- After a successful push the branch's **upstream tracking ref is advanced**
+  (mirroring `git push origin HEAD`'s side effect) so the dashboard's
+  ahead/behind badge clears — without it, pushing to the clone URLs directly
+  would leave the card reading "Push N commits" after a clean push.
+- Every ngit push verb now lands everywhere — the sync-popover **Push**, the
+  pure-ngit **Publish** quick action, AND the **Sync** button (its push phase
+  was `git push origin HEAD`; it now pulls ff-only then runs the same GRASP
+  delivery). The delivery core is shared (`runGraspDelivery`) so the three
+  paths can't drift. git-only and combined git+ngit repos keep their existing
+  terminal/SSE publish flow unchanged (it must also reach GitHub). Partial
+  delivery surfaces as a "re-run to retry" toast across all three.
+- `src/lib/grasp-push.ts` holds the pure, unit-tested ref/tag logic
+  (`selectGraspCloneUrls`, `buildRepoStateTags`, `repoStateTagsEqual`,
+  `readLocalRefs`); 12 tests cover URL selection, NIP-34 state shape, HEAD
+  preservation, detached HEAD, and order-insensitive state equality.
+
 ### nostr-vpn: lifecycle hardening — reliable install, uninstall & recovery
 
 Fixes the production failures the b2 acceptance test surfaced (binary

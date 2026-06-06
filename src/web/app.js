@@ -6299,11 +6299,12 @@ const ProjectsPanel = (() => {
       if (hasNgit) {
         return openExecModal({
           title:    `ngit sync · ${p.name}`,
-          subtitle: 'Pull from your relays + GRASP server, then push your commits. Amber signs.',
+          subtitle: 'Pull from your relays + GRASP servers, then push your commits to every GRASP server. Approve the state event on your signer.',
           endpoint: `/api/projects/${p.id}/ngit/sync`,
         }).then(r => {
-          if (r.ok) toast('ngit sync complete', '', 'ok');
-          else      toast('ngit sync failed', `exit ${r.code}`, 'err');
+          if (r.ok)        toast('ngit sync complete', 'pushed to all GRASP servers', 'ok');
+          else if (r.warn) toast('Sync incomplete', 'some GRASP servers lagged — re-run to retry', 'warn');
+          else             toast('ngit sync failed', `exit ${r.code}`, 'err');
           refreshAfter();
           return !!r.ok;
         });
@@ -6348,19 +6349,20 @@ const ProjectsPanel = (() => {
     };
     const runPush = () => {
       if (hasNgit) {
-        // Terminal ngit-push preferred (live Amber prompts); falls back to
-        // the streamed exec modal when no terminal is available.
-        if (window.NSTerminal?.isAvailable?.()) {
-          window.NSTerminal.open('ngit-push', { projectId: p.id });
-          return Promise.resolve(true);
-        }
+        // Direct per-host GRASP push (like Shakespeare): publish the signed
+        // repo state to the relays, then push the pack to EVERY GRASP git
+        // host so none is left "behind signed". This supersedes the old
+        // `git push origin HEAD` via git-remote-nostr, which could deliver
+        // the pack to only one of several hosts. Your signer approves the
+        // state event (a push notification, no QR).
         return openExecModal({
-          title:    `ngit push · ${p.name}`,
-          subtitle: 'Publish your commits to the ngit remote. Amber signs on your phone.',
-          endpoint: `/api/projects/${p.id}/ngit/push`,
+          title:    `Push to GRASP servers · ${p.name}`,
+          subtitle: 'Publish the signed repo state to your relays, then push your commits to every GRASP git host. Approve the state event on your signer.',
+          endpoint: `/api/projects/${p.id}/ngit/grasp-push`,
         }).then(r => {
-          if (r.ok) toast('ngit push complete', '', 'ok');
-          else      toast('ngit push failed', `exit ${r.code}`, 'err');
+          if (r.ok)        toast('Pushed to all GRASP servers', '', 'ok');
+          else if (r.warn) toast('Push incomplete', 'some GRASP servers lagged — re-run to retry', 'warn');
+          else             toast('GRASP push failed', `exit ${r.code}`, 'err');
           refreshAfter();
           return !!r.ok;
         });
@@ -12661,6 +12663,24 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
       confirmLabel: 'Publish',
     });
     if (!ok) return;
+
+    // ngit-only repos publish via the GRASP direct push so commits land on
+    // EVERY GRASP server — identical to the sync-popover Push, so both push
+    // affordances behave the same. git-only and combined git+ngit repos keep
+    // the terminal/SSE publish flow below (it must also reach GitHub), so
+    // those paths are unchanged.
+    if (p.capabilities.ngit && !p.capabilities.git) {
+      return openExecModal({
+        title:    `Push to GRASP servers · ${p.name}`,
+        subtitle: 'Publish the signed repo state to your relays, then push your commits to every GRASP git host. Approve the state event on your signer.',
+        endpoint: `/api/projects/${p.id}/ngit/grasp-push`,
+      }).then(r => {
+        if (r.ok)        toast('Pushed to all GRASP servers', '', 'ok');
+        else if (r.warn) toast('Push incomplete', 'some GRASP servers lagged — re-run to retry', 'warn');
+        else             toast('GRASP push failed', `exit ${r.code}`, 'err');
+        if (state.view === 'detail' && state.projectId === p.id) render();
+      });
+    }
 
     // Prefer the terminal panel — publish is an Ink flow with colour +
     // Amber prompts that the SSE modal can only render as NO_COLOR plain
