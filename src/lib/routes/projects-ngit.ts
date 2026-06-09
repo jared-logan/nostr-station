@@ -29,7 +29,7 @@ import { isValidRelayUrl, getGraspServers, getEffectiveReadRelays } from '../ide
 import { findBin } from '../detect.js';
 import { queryRelaysDirect, getTags, type NostrEvent } from '../nostr-query.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
-import { decodeNgitRemote, publishEventToRelays, mergeRelaySet } from './repo.js';
+import { decodeNgitRemote, publishEventToRelays, mergeRelaySet, reannounceWithClientTag } from './repo.js';
 import {
   selectGraspCloneUrls,
   buildRepoStateTags,
@@ -326,13 +326,17 @@ export async function handleProjectsNgit(
 
     // NOTE (NIP-89 client tag): `ngit init` is an external CLI and writes
     // the FIRST kind-30617 with its own tag set — it does NOT carry
-    // nostr-station's 4-element CLIENT_TAG. We can't inject a tag into the
-    // CLI's output. The canonical tag is applied on the first re-announce /
-    // Edit Repository save: buildRepoAnnounceTemplate now injects CLIENT_TAG
-    // when absent (and upgrades a stale bare one), so a single re-announce
-    // after init links the announcement to our handler. We deliberately do
-    // NOT auto-republish here — that would emit a second 30617 per init and
-    // reintroduce the duplicate-event problem (Bug 3).
+    // nostr-station's 4-element CLIENT_TAG, and we can't inject a tag into
+    // the CLI's output. So after the CLI exits 0 we fire a background
+    // re-announce (see onClose below): fetch the event ngit just published,
+    // round-trip it through buildRepoAnnounceTemplate (which injects the
+    // canonical tag), sign, republish. 30617 is addressable so the
+    // re-announce REPLACES ngit's version — this does NOT reintroduce the
+    // duplicate-event problem (Bug 3), which was about concurrent signs
+    // racing to different event ids; the sequential upgrade here is guarded
+    // by the same announceInFlight set as the Edit Repository flow. If the
+    // upgrade fails (signer declined, relays lagging), the lazy upgrade on
+    // the next Edit Repository save still applies.
     //
     // argv assembly: always pass --name. If user provided grasp
     // servers, pass each as --grasp-server <url>; otherwise
@@ -349,6 +353,25 @@ export async function handleProjectsNgit(
     streamExec(
       { bin: 'ngit', args, env: { NO_COLOR: '1', TERM: 'dumb' } },
       res, req, project.path,
+      undefined,
+      (code) => {
+        if (code !== 0) return;
+        // Surface the upcoming signer prompt in the init modal before the
+        // stream closes (onClose runs ahead of the done frame, so this line
+        // still renders). Same SSE framing as streamExec's own emit.
+        try {
+          res.write(`data: ${JSON.stringify({
+            line: 'Upgrading the announcement with the nostr-station client tag — approve the signer prompt when it appears.',
+            stream: 'stdout',
+          })}\n\n`);
+        } catch {}
+        // Fire-and-forget: onClose is synchronous and the stream ends right
+        // after it, so the upgrade runs in the background and reports to the
+        // server log only.
+        void reannounceWithClientTag(project, name)
+          .then(r => console.warn(`[ngit-init] client-tag re-announce: ${r.detail}`))
+          .catch(e => console.warn(`[ngit-init] client-tag re-announce threw: ${e?.message || e}`));
+      },
     );
     return true;
   }

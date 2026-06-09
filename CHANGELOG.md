@@ -5,6 +5,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### NIP-89 client tag: push state events + ngit init announcements
+
+Two publish paths that previously escaped the canonical 4-element
+`["client", "nostr-station", "31990:…:nostr-station", relay-hint]` tag now
+carry it, so every nostr-station-authored event links back to the kind-31990
+handler and lands in client-specific feeds (e.g. ditto.pub's `/client/:name`):
+
+- **Push (kind 30618 repo state)** — `buildRepoStateTags` now stamps the
+  canonical client tag. GRASP hosts authorize against the `d`/`HEAD`/`refs/*`
+  tags only, so the extra attribution tag is inert for push authorization.
+  `repoStateTagsEqual` excludes client tags from its comparison: a published
+  30618 that predates the tag still counts as "refs unchanged", so the
+  upgrade never costs an extra signer prompt — the tag lands on the next real
+  ref change.
+- **`ngit init` first announcement (kind 30617)** — the CLI writes the first
+  30617 itself and can't emit custom tags, so the init route now fires a
+  background re-announce after the CLI exits 0: fetch the event ngit just
+  published, round-trip it through `buildRepoAnnounceTemplate` (which injects
+  the canonical tag and preserves every other field — see
+  `announceInputFromPublishedEvent`), sign via the saved bunker pairing (one
+  extra signer prompt, announced in the init modal), republish. 30617 is
+  addressable, so the upgrade REPLACES ngit's version — no duplicate repo
+  entries. Guarded by the same in-flight set as Edit Repository; every
+  failure mode falls back to the existing lazy upgrade on the next
+  Edit Repository save.
+
 ### Code tab: GRASP server sync badge (gitworkshop-style)
 
 The Code tab now shows, in the branch-selector row, an **"N/M servers serving

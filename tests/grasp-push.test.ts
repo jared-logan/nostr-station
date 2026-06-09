@@ -7,6 +7,7 @@ const {
   repoStateTagsEqual,
   readLocalRefs,
 } = await import('../src/lib/grasp-push.ts');
+const { CLIENT_TAG } = await import('../src/lib/client-tag.ts');
 
 // ── selectGraspCloneUrls ─────────────────────────────────────────────────
 
@@ -57,7 +58,14 @@ test('buildRepoStateTags: symbolic HEAD + all refs in NIP-34 shape', () => {
     ['refs/heads/main', 'a'.repeat(40)],
     ['refs/heads/dev', 'b'.repeat(40)],
     ['refs/tags/v1', 'c'.repeat(40)],
+    [...CLIENT_TAG],
   ]);
+});
+
+test('buildRepoStateTags: stamps the canonical 4-element client tag', () => {
+  const tags = buildRepoStateTags('r', refs());
+  const clients = tags.filter(t => t[0] === 'client');
+  assert.deepEqual(clients, [[...CLIENT_TAG]]);
 });
 
 test('buildRepoStateTags: preserves an existing HEAD tag verbatim', () => {
@@ -96,6 +104,26 @@ test('repoStateTagsEqual: detects a changed oid', () => {
 
 test('repoStateTagsEqual: different lengths are unequal', () => {
   assert.equal(repoStateTagsEqual([['d', 'r']], [['d', 'r'], ['x', 'y']]), false);
+});
+
+// Client tags are attribution, not state — a published 30618 that predates the
+// client tag must still count as equal so unchanged refs never force a fresh
+// signer prompt just to stamp it.
+test('repoStateTagsEqual: ignores client tags on either side', () => {
+  const prior = [['d', 'r'], ['refs/heads/main', 'aaa']];
+  const next  = [['d', 'r'], ['refs/heads/main', 'aaa'], [...CLIENT_TAG]];
+  assert.equal(repoStateTagsEqual(prior, next), true);
+  assert.equal(repoStateTagsEqual(next, prior), true);
+  // A stale bare client tag vs the canonical one is also a non-difference.
+  assert.equal(
+    repoStateTagsEqual([...prior, ['client', 'nostr-station']], next),
+    true,
+  );
+  // But a real ref change is still detected even with matching client tags.
+  assert.equal(
+    repoStateTagsEqual(next, [['d', 'r'], ['refs/heads/main', 'zzz'], [...CLIENT_TAG]]),
+    false,
+  );
 });
 
 // ── readLocalRefs ────────────────────────────────────────────────────────

@@ -23,6 +23,7 @@ const {
   STATION_TOPIC,
   deriveLocalEuc,
   normalizeTopic,
+  announceInputFromPublishedEvent,
 } = await import('../src/lib/routes/repo.ts');
 
 const { isCanonicalClientTag, CLIENT_TAG, CLIENT_NAME } = await import('../src/lib/client-tag.ts');
@@ -514,6 +515,70 @@ test('buildRepoAnnounceTemplate: upgrades a prior BARE nostr-station client tag 
   assert.equal(clients.length, 1, 'exactly one client tag');
   assert.deepEqual(clients[0], [...CLIENT_TAG]);
   assert.equal(isCanonicalClientTag(clients[0]), true);
+});
+
+// ── announceInputFromPublishedEvent: init-time client-tag upgrade ──────────
+//
+// The post-`ngit init` re-announce rebuilds the AnnounceInput FROM the event
+// ngit just published. buildRepoAnnounceTemplate treats input as
+// authoritative (prior only contributes unknown tag types), so any field the
+// rebuild misses would be silently dropped from the upgraded announcement.
+// This round-trips a representative ngit-shaped 30617 and asserts every field
+// survives — with the canonical client tag injected.
+
+test('announceInputFromPublishedEvent: full round-trip preserves every field and gains the client tag', () => {
+  const euc = '1'.repeat(40);
+  const other = 'b'.repeat(64);
+  const prior: any = {
+    kind: 30617,
+    pubkey: ANCHOR_HEX,
+    created_at: 1_700_000_000,
+    tags: [
+      ['d', 'blip'],
+      ['r', euc, 'euc'],
+      ['name', 'Blip'],
+      ['description', 'a repo\nwith newlines'],
+      ['clone', 'https://relay.ngit.dev/npub1x/blip.git'],
+      ['web', 'https://blip.example'],
+      ['relays', 'wss://relay.ngit.dev', 'wss://relay.damus.io'],
+      ['t', 'nostr'],
+      ['maintainers', other],
+      ['alt', 'git repository: Blip'],
+      ['blossoms', 'https://blossom.example'],
+      ['x-future-thing', 'keep-me'],
+    ],
+  };
+  const input = announceInputFromPublishedEvent(prior, ANCHOR_HEX, ['wss://relay.ngit.dev']);
+  const tpl = buildRepoAnnounceTemplate(input, prior, ANCHOR_HEX);
+
+  const tag = (n: string) => tpl.tags.find(t => t[0] === n);
+  assert.deepEqual(tag('d'),           ['d', 'blip']);
+  assert.deepEqual(tag('r'),           ['r', euc, 'euc']);
+  assert.deepEqual(tag('name'),        ['name', 'Blip']);
+  assert.deepEqual(tag('description'), ['description', 'a repo\nwith newlines']);
+  assert.deepEqual(tag('clone'),       ['clone', 'https://relay.ngit.dev/npub1x/blip.git']);
+  assert.deepEqual(tag('web'),         ['web', 'https://blip.example']);
+  assert.deepEqual(tag('relays'),      ['relays', 'wss://relay.ngit.dev', 'wss://relay.damus.io']);
+  assert.deepEqual(tag('t'),           ['t', 'nostr']);
+  assert.deepEqual(tag('maintainers'), ['maintainers', other]);
+  assert.deepEqual(tag('blossoms'),    ['blossoms', 'https://blossom.example']);
+  assert.deepEqual(tag('x-future-thing'), ['x-future-thing', 'keep-me']);
+  // The whole point of the round-trip: the canonical client tag lands.
+  assert.deepEqual(tag('client'), [...CLIENT_TAG]);
+});
+
+test('announceInputFromPublishedEvent: anchor is excluded from the maintainers input', () => {
+  const other = 'c'.repeat(64);
+  const prior: any = {
+    kind: 30617,
+    pubkey: ANCHOR_HEX,
+    created_at: 1_700_000_000,
+    // parseRepoAnnouncement prepends the announcer — make sure the rebuilt
+    // input carries only the OTHERS so the template doesn't list the anchor.
+    tags: [['d', 'blip'], ['maintainers', ANCHOR_HEX, other]],
+  };
+  const input = announceInputFromPublishedEvent(prior, ANCHOR_HEX, []);
+  assert.deepEqual(input.maintainers, [other]);
 });
 
 test('buildRepoAnnounceTemplate: leaves a DIFFERENT client tag untouched (only upgrades our own)', () => {
