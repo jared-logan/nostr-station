@@ -19,8 +19,12 @@
  * The functions here are deliberately I/O-light and dependency-injected so the
  * orchestration (relay queries, signing, git spawning) stays in the route and
  * the ref/tag logic stays unit-testable. Mirrors Shakespeare's `nostrPush`
- * (src/lib/git.ts) tag-for-tag.
+ * (src/lib/git.ts) tag-for-tag, plus nostr-station's canonical NIP-89 client
+ * tag (the only divergence — GRASP hosts only read the d/HEAD/refs/* tags, so
+ * an extra attribution tag is inert for push authorization).
  */
+
+import { CLIENT_TAG } from './client-tag.js';
 
 /** A git ref as a [shortName, objectId] pair. */
 export type RefPair = [name: string, oid: string];
@@ -67,6 +71,8 @@ export function selectGraspCloneUrls(clone: string[]): string[] {
  *     else a symbolic ref to the current branch; else the detached HEAD oid.
  *   - one [refs/heads/<b>, oid] per local branch
  *   - one [refs/tags/<t>, oid] per local tag
+ *   - the canonical NIP-89 client tag (attribution; ignored by GRASP hosts,
+ *     which authorize against the d/HEAD/refs/* tags only)
  *
  * Preserving the existing HEAD matters: HEAD is the repo's "default branch"
  * pointer and is owned by the announcement, not by whoever happens to push —
@@ -94,21 +100,25 @@ export function buildRepoStateTags(
   for (const [name, oid] of refs.tags) {
     if (name && oid) tags.push([`refs/tags/${name}`, oid]);
   }
+  tags.push([...CLIENT_TAG]);
   return tags;
 }
 
 /**
  * Order-insensitive equality of two tag sets. Used to skip a fresh signing
  * round-trip (an Amber prompt) when the local refs already match the published
- * state — same optimization Shakespeare makes with `areTagsEqual`. Pure.
+ * state — same optimization Shakespeare makes with `areTagsEqual`. Client tags
+ * are excluded from the comparison: they're attribution, not state, so a
+ * published 30618 that predates (or differs only in) the client tag is still
+ * reusable — re-signing just to stamp it would cost a needless prompt. Pure.
  */
 export function repoStateTagsEqual(a: string[][], b: string[][]): boolean {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
   const norm = (tags: string[][]) =>
-    tags.map((t) => JSON.stringify(t)).sort();
+    tags.filter((t) => t[0] !== 'client').map((t) => JSON.stringify(t)).sort();
   const na = norm(a);
   const nb = norm(b);
-  return na.every((v, i) => v === nb[i]);
+  return na.length === nb.length && na.every((v, i) => v === nb[i]);
 }
 
 /**

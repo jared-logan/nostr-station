@@ -1028,7 +1028,7 @@ function extractGitError(e: any): string {
 // the user's read-relays. After a successful publish (≥1 relay OK'd)
 // we invalidate the cached repo-30617 so the next GET /repo refetches.
 
-interface AnnounceInput {
+export interface AnnounceInput {
   identifier:        string;             // d-tag — fixed for a given coordinate
   name?:             string;
   description?:      string;
@@ -1442,6 +1442,135 @@ async function handleAnnounce(
     targets:      publishTargets.length,
   });
 
+  } finally {
+    announceInFlight.delete(coordKey);
+  }
+}
+
+/**
+ * Rebuild an AnnounceInput from a PUBLISHED 30617 so a server-initiated
+ * re-announce round-trips every field. This matters because
+ * buildRepoAnnounceTemplate treats the input as authoritative — the prior
+ * event only contributes tag types we don't know about — so any field left
+ * out of the input would be silently DROPPED from the re-announce (the
+ * clobber risk that kept the init flow on ngit's bare announcement).
+ * Pure; exported for tests.
+ */
+export function announceInputFromPublishedEvent(
+  prior:          NostrEvent,
+  ownerHex:       string,
+  requiredRelays: string[],
+): AnnounceInput {
+  const meta = parseRepoAnnouncement(prior);
+  // parseRepoAnnouncement doesn't surface blossoms (the dashboard meta view
+  // has no use for them) but the template emits the tag itself, so it is NOT
+  // carried through as an unknown tag — extract it here or lose it.
+  const blossoms = getTags(prior, 'blossoms')
+    .flatMap(t => t.slice(1).filter((v): v is string => typeof v === 'string' && v.length > 0));
+  return {
+    identifier:  meta.identifier,
+    name:        meta.name,
+    description: meta.description,
+    web:         meta.web,
+    clone:       meta.clone,
+    relays:      meta.relays,
+    blossoms,
+    hashtags:    meta.hashtags,
+    // meta.maintainers is anchor-first by construction; the input wants only
+    // the OTHERS (the template re-derives the anchor from the signer).
+    maintainers: meta.maintainers.filter(p => p !== ownerHex),
+    euc:         meta.euc,
+    requiredRelays,
+  };
+}
+
+/**
+ * Background upgrade of a freshly-published 30617 to carry the canonical
+ * NIP-89 client tag. `ngit init` writes the first announcement itself and
+ * can't emit custom tags, so the init route fires this after the CLI exits 0:
+ * fetch the event ngit just published, round-trip it through
+ * buildRepoAnnounceTemplate (which injects/upgrades the client tag), sign via
+ * the saved bunker pairing (one extra signer prompt), and republish. 30617 is
+ * addressable, so the re-announce REPLACES ngit's version on relays — no
+ * duplicate repo entries.
+ *
+ * Every bail-out is soft: the lazy upgrade on the next Edit Repository save
+ * (buildRepoAnnounceTemplate step 3) still applies, so failure here only
+ * means the tag lands later.
+ */
+export async function reannounceWithClientTag(
+  project:    Project,
+  identifier: string,
+): Promise<{ ok: boolean; detail: string }> {
+  const ident = readIdentity();
+  let ownerHex = '';
+  try { ownerHex = ident.npub ? (nip19.decode(ident.npub).data as string) : ''; }
+  catch { ownerHex = ''; }
+  if (!ownerHex) return { ok: false, detail: 'no owner identity configured' };
+
+  const coordKey = `${ownerHex}:${identifier}`;
+  if (announceInFlight.has(coordKey)) {
+    return { ok: false, detail: 'an announce for this coordinate is already in progress' };
+  }
+  announceInFlight.add(coordKey);
+  try {
+    const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
+    const grasp = getGraspServers()
+      .map(s => /^wss?:\/\//i.test(s) ? s : `wss://${s}`)
+      .filter(isValidRelayUrl);
+    const relays = mergeRelaySet([...grasp, ...projRelays], getEffectiveReadRelays());
+    if (relays.length === 0) return { ok: false, detail: 'no relays to query' };
+
+    // ngit publishes the 30617 before exiting, but relay propagation can lag
+    // a beat — retry the fetch briefly before giving up.
+    let prior: NostrEvent | null = null;
+    for (let attempt = 0; attempt < 3 && !prior; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 2_000));
+      try {
+        const r = await queryRelays({
+          filter: { kinds: [30617], authors: [ownerHex], tags: { d: identifier }, limit: 1 },
+          relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: false,
+          acceptUntil: (evs) => evs.length >= 1,
+        });
+        for (const ev of r.events) {
+          if (ev.kind !== 30617) continue;
+          if (!prior || ev.created_at > prior.created_at) prior = ev;
+        }
+      } catch { /* transient — retry */ }
+    }
+    if (!prior) {
+      return { ok: false, detail: 'announcement not found on relays yet — the client tag will land on the next Edit Repository save' };
+    }
+    if (prior.tags.some(t => Array.isArray(t) && isCanonicalClientTag(t))) {
+      return { ok: true, detail: 'announcement already carries the canonical client tag' };
+    }
+
+    const input = announceInputFromPublishedEvent(prior, ownerHex, grasp);
+    if (!input.euc && project.path) input.euc = await deriveLocalEuc(project.path);
+    const template = buildRepoAnnounceTemplate(input, prior, ownerHex);
+    // A foreign client tag (another tool's attribution) is preserved, not
+    // replaced — in that case the template gains nothing and signing would
+    // burn a prompt for a no-op re-announce.
+    if (!template.tags.some(t => isCanonicalClientTag(t))) {
+      return { ok: true, detail: 'announcement carries another client\'s tag — left untouched' };
+    }
+
+    const signed = await signEventWithSavedBunker(template, 60_000);
+    if (!signed.ok || !signed.signedEvent) {
+      return { ok: false, detail: `sign failed: ${signed.error || (signed.tried ? 'signer rejected' : 'no paired signer')}` };
+    }
+
+    const publishTargets = mergeRelaySet([...(input.relays || []), ...grasp], getEffectiveReadRelays());
+    const results = publishTargets.length > 0
+      ? await publishEventToRelays(signed.signedEvent, publishTargets)
+      : [];
+    const accepted = results.filter(r => r.ok).length;
+    if (project.path) {
+      try { clearCache({ projectId: project.id, projectPath: project.path, key: 'repo-30617' }); } catch {}
+    }
+    return accepted > 0
+      ? { ok: true, detail: `re-announced with client tag (accepted by ${accepted}/${publishTargets.length} relays)` }
+      : { ok: false, detail: 'no relay accepted the re-announce' };
   } finally {
     announceInFlight.delete(coordKey);
   }
