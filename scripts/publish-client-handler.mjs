@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+// BOOTSTRAP / RECOVERY ONLY — the live kind-31990 handler is managed
+// manually through the Apps panel, and the panel-curated version is
+// RICHER than this script's hardcoded template (banner, artwork,
+// topics, client tag). kind 31990 is addressable: a --publish from
+// here REPLACES the live event wholesale. Only run this when no
+// handler exists on relays (first bootstrap) or the live one is lost.
+// To edit the live handler, use the Apps panel.
+//
 // Publish nostr-station's NIP-89 kind-31990 "client handler" event so
 // other Nostr clients can resolve the coordinate baked into the
 // 4-element client tags emitted by the station's publish paths (repo
@@ -29,7 +37,9 @@
 //
 // kind-31990 is a NIP-33 addressable event (parameterized replaceable):
 // re-publishes with the same (pubkey, kind, d-tag) replace the previous
-// version. Safe to re-run after content edits.
+// version. That replacement is exactly why this is NOT safe to re-run
+// casually once an Apps-panel-curated handler is live — see the
+// BOOTSTRAP/RECOVERY note at the top.
 
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools';
 import { hexToBytes } from 'nostr-tools/utils';

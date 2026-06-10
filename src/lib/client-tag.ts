@@ -13,9 +13,11 @@
  * The coordinate points at the kind-31990 "client handler" event
  * (NIP-89 handler information), signed by the project pubkey (291c75d…,
  * the same identity that anchors the landing-page nsite and signs ngit
- * merge events). Publish/refresh that handler with
- * `npm run publish-client-handler`; this constant MUST stay in sync with
- * the coordinate that script publishes.
+ * merge events). The LIVE handler event is managed manually through the
+ * Apps panel (it's the curated version — banner, artwork, topics);
+ * scripts/publish-client-handler.mjs is bootstrap/recovery only — a
+ * re-publish from the script REPLACES the panel-curated version. This
+ * constant MUST stay in sync with the coordinate of the live handler.
  *
  * A bare ["client", "nostr-station"] (2-element) is NOT enough — it shows
  * the name but doesn't link to the app handler. Always use this.
