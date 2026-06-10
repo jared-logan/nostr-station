@@ -142,7 +142,13 @@ export function LeftSidebar() {
   };
 
   return (
-    <aside className="hidden sidebar:flex flex-col h-screen sticky top-0 py-3 px-4 w-[300px] lg:w-1/4 lg:max-w-[300px] shrink-0">
+    // bg-background/90 gives the whole rail a panel surface — the
+    // dashboard's left nav is a solid column, and per-item pills were
+    // the only thing keeping labels legible over user background
+    // images. One surface for the rail beats per-item chips. The
+    // center column's own sidebar:border-l draws the seam, so no
+    // border-r here (avoids a 2px double line).
+    <aside className="hidden sidebar:flex flex-col h-screen sticky top-0 py-3 px-4 w-[300px] lg:w-1/4 lg:max-w-[300px] shrink-0 bg-background/90">
       {/* Logo — no pill wrapper, skin DittoLogo renders nori in real color */}
       <div className="flex items-center px-3 mb-2">
         <Link to="/" onClick={scrollToTopIfCurrent('/')} className="block">
