@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 const {
   isAuthorisedToSetStatus,
   computeEffectiveStatus,
-  buildStatusArgs,
+  parseStatusInput,
   buildStatusRelayFilters,
 } = await import('../src/lib/routes/status.ts');
 
@@ -169,48 +169,50 @@ test('computeEffectiveStatus: out-of-range kind ignored', () => {
   assert.equal(computeEffectiveStatus(ROOT_ID, ROOT_AUTHOR, new Set(), [stray]).status, 'open');
 });
 
-// ── buildStatusArgs ─────────────────────────────────────────────────────
+// ── parseStatusInput ────────────────────────────────────────────────────
+//
+// Replaced the old buildStatusArgs ngit-argv builder when status
+// changes went native (src/lib/nip34-events.ts). The validation
+// (rootId shape + kind/status allow-lists) is unchanged.
 
-// Argv shape is the spaced form ngit 2.x expects (`pr status` /
-// `issue status`, not the older `pr_status` / `issue_status`).
-test('buildStatusArgs: patch · open', () => {
+test('parseStatusInput: patch · open', () => {
   assert.deepEqual(
-    buildStatusArgs({ kind: 'patch', rootId: 'a'.repeat(64), status: 'open' }),
-    ['pr', 'status', '--open', 'a'.repeat(64)],
+    parseStatusInput({ kind: 'patch', rootId: 'a'.repeat(64), status: 'open' }),
+    { target: 'patch', rootId: 'a'.repeat(64), verb: 'open' },
   );
 });
 
-test('buildStatusArgs: patch · draft', () => {
+test('parseStatusInput: patch · draft', () => {
   assert.deepEqual(
-    buildStatusArgs({ kind: 'patch', rootId: 'a'.repeat(64), status: 'draft' }),
-    ['pr', 'status', '--draft', 'a'.repeat(64)],
+    parseStatusInput({ kind: 'patch', rootId: 'a'.repeat(64), status: 'draft' }),
+    { target: 'patch', rootId: 'a'.repeat(64), verb: 'draft' },
   );
 });
 
-test('buildStatusArgs: patch · closed', () => {
+test('parseStatusInput: patch · closed', () => {
   assert.deepEqual(
-    buildStatusArgs({ kind: 'patch', rootId: 'a'.repeat(64), status: 'closed' }),
-    ['pr', 'status', '--closed', 'a'.repeat(64)],
+    parseStatusInput({ kind: 'patch', rootId: 'a'.repeat(64), status: 'closed' }),
+    { target: 'patch', rootId: 'a'.repeat(64), verb: 'closed' },
   );
 });
 
-test('buildStatusArgs: issue · resolved', () => {
+test('parseStatusInput: issue · resolved', () => {
   assert.deepEqual(
-    buildStatusArgs({ kind: 'issue', rootId: 'a'.repeat(64), status: 'resolved' }),
-    ['issue', 'status', '--resolved', 'a'.repeat(64)],
+    parseStatusInput({ kind: 'issue', rootId: 'a'.repeat(64), status: 'resolved' }),
+    { target: 'issue', rootId: 'a'.repeat(64), verb: 'resolved' },
   );
 });
 
-test('buildStatusArgs: rejects mismatched kind/status pair', () => {
+test('parseStatusInput: rejects mismatched kind/status pair', () => {
   // Patches don't get "resolved"; issues don't get "draft".
-  assert.equal(buildStatusArgs({ kind: 'patch', rootId: 'a'.repeat(64), status: 'resolved' }), null);
-  assert.equal(buildStatusArgs({ kind: 'issue', rootId: 'a'.repeat(64), status: 'draft' }),    null);
+  assert.equal(parseStatusInput({ kind: 'patch', rootId: 'a'.repeat(64), status: 'resolved' }), null);
+  assert.equal(parseStatusInput({ kind: 'issue', rootId: 'a'.repeat(64), status: 'draft' }),    null);
 });
 
-test('buildStatusArgs: rejects invalid rootId / kind / status', () => {
-  assert.equal(buildStatusArgs({ kind: 'patch', rootId: 'not-hex', status: 'open' }),    null);
-  assert.equal(buildStatusArgs({ kind: 'other', rootId: 'a'.repeat(64), status: 'open' }), null);
-  assert.equal(buildStatusArgs({ kind: 'patch', rootId: 'a'.repeat(64), status: 'merged' }), null);
+test('parseStatusInput: rejects invalid rootId / kind / status', () => {
+  assert.equal(parseStatusInput({ kind: 'patch', rootId: 'not-hex', status: 'open' }),    null);
+  assert.equal(parseStatusInput({ kind: 'other', rootId: 'a'.repeat(64), status: 'open' }), null);
+  assert.equal(parseStatusInput({ kind: 'patch', rootId: 'a'.repeat(64), status: 'merged' }), null);
 });
 
 // ── buildStatusRelayFilters ─────────────────────────────────────────────
