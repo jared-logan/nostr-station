@@ -10,6 +10,12 @@ because:
   (`highlight.js`) or only ship them under non-`.min` filenames
   (`marked`).
 
+The corresponding npm packages (`marked`, `dompurify`, `highlight.js`)
+are deliberately **devDependencies**: nothing imports them at runtime —
+production installs serve the committed copies in this directory. The
+packages exist only so the refresh steps below have a source to copy
+from.
+
 ## Files
 
 | File                    | Source                                              | Notes |
