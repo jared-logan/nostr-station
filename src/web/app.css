@@ -2824,6 +2824,93 @@ details.config-section .cfg-summary-meta {
   font-weight: 600;
 }
 
+/* Ditto theme sync card — separate from the preset picker */
+.ditto-theme {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  margin-top: 14px;
+}
+.ditto-theme.active {
+  border-color: var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-elev));
+}
+.ditto-theme-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.ditto-theme-title {
+  font-size: 12px;
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.ditto-theme-status {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ditto-theme-status.ok { color: var(--success); }
+.ditto-theme-image {
+  position: relative;
+  display: block;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  max-height: 140px;
+}
+.ditto-theme-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: 140px;
+  object-fit: cover;
+}
+.ditto-theme-image-meta {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 8px;
+  font-size: 10px;
+  padding: 3px 7px;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text-bright);
+  border-radius: 3px;
+  letter-spacing: 0.4px;
+}
+.ditto-theme-preview {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ditto-theme-preview .swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ditto-theme-preview .swatch .chip {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+}
+.ditto-theme-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ditto-theme-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .npub-list {
   display: flex;
   flex-direction: column;

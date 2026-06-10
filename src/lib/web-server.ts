@@ -94,6 +94,7 @@ import { readProjects } from './projects.js';
 import { listAllTestPubkeys } from './test-identities.js';
 import { handleIdentity } from './routes/identity.js';
 import { handleClient } from './routes/client.js';
+import { handleDitto } from './routes/ditto.js';
 import { handleApps } from './routes/apps.js';
 import { handleNgit } from './routes/ngit.js';
 import { handleRepo } from './routes/repo.js';
@@ -1959,6 +1960,13 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // Covers /api/identity/config, /api/identity/set, /api/identity/relays/{add,remove},
       // /api/identity/profile/preview, /api/identity/profile, /api/identity/profile/sync.
       if (await handleIdentity(req, res, fullUrl, method)) return;
+
+      // ── Ditto theme sync (routes/ditto.ts) ─────────────────────────────
+      // GET /api/ditto/theme — read the owner's kind-16767 theme event
+      // from their read relays (Ditto's profile-theme spec, but the
+      // endpoint is a plain Nostr-event consumer, no embedded client).
+      // Powers the "Sync from relays" card in Config → Appearance.
+      if (await handleDitto(req, res, fullUrl, method)) return;
 
       // ── Nostr client API (routes/client.ts) ────────────────────────────
       // Native Nostr read/post surface. The live consumer is the Relay
