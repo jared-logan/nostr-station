@@ -30,9 +30,9 @@
  *
  * Secret lifetime: persisted to ~/.nostr-station/img-proxy-secret on
  * first use (0o600, atomic write). Reused across server restarts so
- * signed URLs that the dashboard cached in localStorage (Ditto theme
- * bgImage in particular — see routes/ditto.ts) keep verifying after
- * a process bounce, instead of 401-ing until the next theme sync.
+ * signed URLs the dashboard discovers at render time (profile pictures
+ * and banners in particular) keep verifying after a process bounce,
+ * instead of 401-ing until the next render.
  * Threat model unchanged: an attacker with filesystem read on this
  * host can forge proxy URLs, but they already own the bunker client,
  * AI keys, and relay DB stored next to this file — disk persistence

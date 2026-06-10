@@ -125,42 +125,6 @@ async function gitIsClean(root: string): Promise<boolean> {
   } catch { return false; }
 }
 
-// Did any file affecting the Ditto bundle change between two commits?
-// If so, the bundle on disk may differ from what's on disk and the
-// build step needs to rebuild Ditto (drop STATION_SKIP_DITTO=1).
-//
-// Files watched:
-//   - scripts/fetch-ditto.mjs       — the build script itself
-//   - src/web/ditto-overrides.css   — overlay CSS that applyBranding()
-//                                     copies into dist/ditto/
-//   - src/web/nori.svg              — logo applyBranding() copies into
-//                                     dist/ditto/ as logo.svg + favicon
-//
-// Add more paths here when applyBranding() grows new input files.
-// Returns false on error — conservative: prefers "fast update, possibly
-// stale bundle" over "slow rebuild on a transient git glitch."
-async function dittoConfigChanged(root: string, beforeSha: string, afterSha: string): Promise<boolean> {
-  if (beforeSha === afterSha) return false;
-  try {
-    const { stdout } = await execFileP(
-      'git', [
-        'diff', '--name-only', `${beforeSha}..${afterSha}`, '--',
-        'scripts/fetch-ditto.mjs',
-        'src/web/ditto-overrides.css',
-        'src/web/nori.svg',
-        // Skin layer: any change under src/web/ditto-skin/ requires a Ditto
-        // rebuild because the skin TSX files are copied INTO the clone and
-        // compiled by vite. Bake-hash sentinel in scripts/fetch-ditto.mjs
-        // also includes skin file bytes — the two checks are complementary
-        // (this one triggers the rebuild path; the sentinel forces full
-        // clone+build over the incremental "just re-apply branding" path).
-        'src/web/ditto-skin/',
-      ],
-      { cwd: root },
-    );
-    return stdout.trim().length > 0;
-  } catch { return false; }
-}
 
 // ── GitHub compare ──────────────────────────────────────────────────────────
 
@@ -405,23 +369,7 @@ export async function applyUpdate(emit: SseEmit): Promise<void> {
     }
 
     emit({ phase: 'build' });
-    // Conditional Ditto rebuild: STATION_SKIP_DITTO=1 keeps regular
-    // updates fast (~30s vs ~5min), but if the pulled commits touched
-    // `scripts/fetch-ditto.mjs` the baked ditto.json on disk no longer
-    // matches what the codebase wants — silently skipping would mean
-    // users never see ditto.json changes (fonts, theme, appName,
-    // client tag, relay defaults) until they manually `npm run
-    // update-ditto`. Detect the diff and drop the skip when needed.
-    // afterSha is non-null here (the early-return above bails if SHAs
-    // are equal, and the merge succeeded); `?? beforeSha` is just to
-    // satisfy the type-narrower — `dittoConfigChanged` returns false
-    // when the two SHAs match anyway, so the fallback is a no-op.
-    const dittoChanged = await dittoConfigChanged(root, beforeSha, afterSha ?? beforeSha);
-    if (dittoChanged) {
-      emit({ line: '[update] scripts/fetch-ditto.mjs changed — rebuilding Ditto bundle (this can take 3-5 min)', stream: 'stdout' });
-    }
-    const buildEnv: Record<string, string> = dittoChanged ? {} : { STATION_SKIP_DITTO: '1' };
-    code = await runStep({ bin: 'npm', args: ['run', 'build', '--silent'], env: buildEnv }, root, emit);
+    code = await runStep({ bin: 'npm', args: ['run', 'build', '--silent'] }, root, emit);
     if (code !== 0) {
       await rollback(root, beforeSha, emit);
       // Best-effort: re-run npm ci so the rolled-back tree has the

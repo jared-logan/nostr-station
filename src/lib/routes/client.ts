@@ -1,9 +1,12 @@
 /**
- * Nostr client routes — the read-and-post surface that powers the
- * /client (#client) panel in the dashboard. Ships feed + notifications
- * + profile lookup + reactions + reposts + replies; private DMs (NIP-17)
- * and zap sending (NIP-57 LN wallet integration) are intentionally
- * deferred to a follow-up.
+ * Native Nostr read-and-post API surface (`/api/client/*`). Independent
+ * of any embedded social client — its live dashboard consumer is the
+ * Config → Station Relays "Sync from Nostr" button (POST
+ * /api/client/sync-relays, which mirrors the owner's NIP-65 list into
+ * Your Relays). The read/publish endpoints below (feed, notifications,
+ * profile, thread, event-stats, publish) predate the removed Client
+ * panel and remain available as a host-side Nostr API; they can be
+ * audited for current usage in a separate pass.
  *
  * Read paths consult the station owner's read relays — `identity.readRelays`
  * in identity.json, which the user manages via Config → Identity. The

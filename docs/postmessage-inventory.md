@@ -11,7 +11,6 @@ landed without an origin-check review.
 | File:line | Sender | Receiver | `targetOrigin` | Payload shape |
 |-----------|--------|----------|----------------|---------------|
 | `src/lib/routes/nsite.ts:1048,1050` (injected reporter script) | nsite iframe | `window.parent` and `window.top` | `'*'` — see "Reporter `targetOrigin` posture" below. | `{ type: 'nsite-csp-violation' \| 'nsite-script-error' \| 'nsite-loaded', siteId: '<16hex>', ...details }` |
-| `src/lib/web-server-static.ts:390` (`DITTO_PREFIX_STRIP_SCRIPT`) | Ditto iframe (same-origin `/ditto/`) | dashboard parent | `location.origin` (dashboard origin, literal in the script) | `{ type: 'station:open-nsite', url: '<https://...nsite.lol/...>' }` |
 
 Scaffold assets under `src/scaffold-assets/` ship only `.mcp.json` /
 `mcp.json` / `opencode.json` — no JS templates, no postMessage
@@ -45,7 +44,6 @@ side if the embedding story changes.
 
 | File:line | Receiver context | Expected sender origin | Validation in place |
 |-----------|------------------|------------------------|---------------------|
-| `src/web/app.js` Ditto-panel listener (~19633) | dashboard parent | same-origin Ditto frame (`/ditto/`) | `event.source === frame.contentWindow` **and** `event.origin === location.origin` **and** message-shape check (`m.type === 'station:open-nsite'`) **and** URL host matched against `NSITE_GATEWAY_HOST` regex. |
 | `src/web/app.js` nsite-reporter listener (~21212) | dashboard parent | per-sid nsite frame at `http://<sid>.nsite.localhost:<port>` | siteId format gate (`/^[a-f0-9]{16}$/`) → expected origin computed from siteId → `event.origin === expectedOrigin` → tab lookup by siteId. Origin check added in the J5 follow-up; previously trusted message shape only. |
 
 ## Iframes hosted by the dashboard
@@ -54,7 +52,6 @@ side if the embedding story changes.
 |-----------|---------------|--------------|-----------|
 | `src/web/app.js:21146` + `:21131` | nsite content preview (per-sid) | `http://<sid>.nsite.localhost:<port>` (different origin from dashboard) | `allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin` — same-origin is granted **to the iframe's own per-sid origin only**, not the dashboard. SOP isolates the two. |
 | `src/web/index.html:237` (`#cp-iframe`) | Live-preview of the user's running dev server | `http://localhost:<dev-port>` (e.g. 5173) — different port = different origin from the dashboard | none |
-| `src/web/app.js` Ditto panel (`/ditto/`) | Bundled Ditto client | same-origin (dashboard) | none — required to be same-origin for the bundled-client integration |
 
 ### Live-preview posture
 

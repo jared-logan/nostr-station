@@ -13,9 +13,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc && node scripts/copy-web.mjs && node scripts/copy-scaffold-assets.mjs && node scripts/fetch-ditto.mjs",
-    "prepublishOnly": "tsc && node scripts/copy-web.mjs && node scripts/copy-scaffold-assets.mjs && node scripts/fetch-ditto.mjs",
-    "update-ditto": "rm -rf dist/ditto && node scripts/fetch-ditto.mjs",
+    "build": "tsc && node scripts/copy-web.mjs && node scripts/copy-scaffold-assets.mjs",
+    "prepublishOnly": "tsc && node scripts/copy-web.mjs && node scripts/copy-scaffold-assets.mjs",
     "publish-client-handler": "node scripts/publish-client-handler.mjs",
     "dev": "tsx src/cli.tsx serve",
     "test": "tsx --test tests/*.test.ts",

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Publish nostr-station's NIP-89 kind-31990 "client handler" event so
 // other Nostr clients can resolve the coordinate baked into the
-// 4-element client tags emitted by:
-//   - the Ditto iframe (scripts/fetch-ditto.mjs → buildDittoConfig.client)
-//   - the native /api/client publish path (src/lib/routes/client.ts:CLIENT_TAG)
+// 4-element client tags emitted by the station's publish paths (repo
+// announcements, nsite deploys, app events, GRASP push state, and the
+// native /api/client publish path — see src/lib/client-tag.ts).
 //
-// Both surfaces emit:
+// Those surfaces emit:
 //   ["client", "nostr-station",
 //    "31990:291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe:nostr-station",
 //    "wss://relay.nsite.lol"]
@@ -36,16 +36,15 @@ import { hexToBytes } from 'nostr-tools/utils';
 import WebSocket from 'ws';
 
 // ─── Constants ─────────────────────────────────────────────────────
-// Project identity — same pubkey used by CLIENT_TAG and the
-// scripts/fetch-ditto.mjs `client` naddr. Hard-coded so a wrong nsec
-// can't ship the event under a different identity.
+// Project identity — same pubkey used by CLIENT_TAG (src/lib/client-
+// tag.ts). Hard-coded so a wrong nsec can't ship the event under a
+// different identity.
 const EXPECTED_PUBKEY = '291c75d937a45f66a1209f8ea6611df7448c59b3526520c66ca2cdcd37f1bfbe';
 const D_TAG    = 'nostr-station';
 const NSITE_URL = `https://${nip19.npubEncode(EXPECTED_PUBKEY)}.nsite.lol`;
 const REPO_URL  = 'https://github.com/jared-logan/nostr-station';
 
-// Relays we publish to. Mirrors the App Relays default list in
-// scripts/fetch-ditto.mjs's buildDittoConfig() plus the nsite relay
+// Relays we publish to. A broad default set plus the nsite relay
 // (which is the relay hint baked into the client tag).
 const PUBLISH_RELAYS = [
   'wss://relay.nsite.lol',
@@ -66,7 +65,7 @@ function buildTemplate() {
   const content = JSON.stringify({
     name:         'nostr-station',
     display_name: 'nostr-station',
-    about:        'Nostr-native dev environment — one-command relay, mesh VPN, ngit, AI assistant, Stacks. Public Nostr client powered by Ditto.',
+    about:        'Nostr-native dev environment — one-command relay, mesh VPN, ngit, AI assistant, Stacks.',
     website:      NSITE_URL,
     picture:      `${NSITE_URL}/nori.svg`,
   });
