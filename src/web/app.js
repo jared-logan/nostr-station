@@ -950,6 +950,18 @@ function activatePanel(name) {
     if (group && !group.open) group.open = true;
   }
   if (name === 'logs') clearLogsBadge();
+  // Move focus to the activated panel's heading so keyboard and
+  // screen-reader users land in the new context instead of having to
+  // re-Tab all the way from the nav. Runs before onEnter so panels
+  // that focus their own primary control (Chat focuses its input)
+  // still win.
+  const head = document.querySelector(
+    `.panel[data-panel="${CSS.escape(name)}"] .panel-head .title`,
+  );
+  if (head) {
+    head.setAttribute('tabindex', '-1');
+    try { head.focus({ preventScroll: true }); } catch {}
+  }
   Panels[name]?.onEnter?.();
 }
 
@@ -3451,6 +3463,20 @@ const ChatPanel = (() => {
   async function populateProvider() {
     const list = await api('/api/ai/providers').catch(() => null);
     aiProvidersCache = list;
+
+    // Fetch failure ≠ "no providers configured" — don't send the user
+    // to Config to re-add keys they already have when the real problem
+    // is a transient server hiccup. Distinct callout with a Retry.
+    if (!list) {
+      provSel.innerHTML = '<option value="">—</option>';
+      provSel.disabled = true;
+      if (modelSel) { modelSel.innerHTML = ''; modelSel.disabled = true; }
+      hasConfiguredProvider = false;
+      showProviderLoadError();
+      updateSendDisabled();
+      return;
+    }
+
     const configured = (list?.providers || []).filter(p => p.configured && p.type === 'api');
 
     if (configured.length === 0) {
@@ -3504,19 +3530,36 @@ const ChatPanel = (() => {
   // Fallback message when zero API providers are configured. Rendered as
   // a callout inside the chat-controls row — no separate modal, no page
   // churn. Clicking takes the user to the Config panel.
-  function showNoProviderCallout() {
+  // Shared callout slot under the chat header. Re-set innerHTML on every
+  // show so the element can flip between the "not configured" and
+  // "couldn't load" variants across retries.
+  function providerCallout(html) {
     let el = document.getElementById('chat-no-provider');
     if (!el) {
       el = document.createElement('div');
       el.id = 'chat-no-provider';
       el.className = 'chat-no-provider';
-      el.innerHTML = `
-        <span>No AI provider configured for Chat.</span>
-        <a href="#config">Add one in Config →</a>
-      `;
       warnEl.parentElement.appendChild(el);
     }
+    el.innerHTML = html;
     el.style.display = '';
+    return el;
+  }
+  function showNoProviderCallout() {
+    providerCallout(`
+      <span>No AI provider configured for Chat.</span>
+      <a href="#config">Add one in Config →</a>
+    `);
+  }
+  function showProviderLoadError() {
+    const el = providerCallout(`
+      <span>Couldn't load AI providers — station server unreachable?</span>
+      <button class="chat-providers-retry">Retry</button>
+    `);
+    el.querySelector('.chat-providers-retry')?.addEventListener('click', () => {
+      hideNoProviderCallout();
+      void populateProvider();
+    });
   }
   function hideNoProviderCallout() {
     const el = document.getElementById('chat-no-provider');
@@ -5803,17 +5846,27 @@ const ProjectsPanel = (() => {
     }
   }
 
+  // First-load + failure tracking so renderReposTab can tell "still
+  // fetching" and "fetch failed" apart from "you have no projects" —
+  // a transient network error used to blank the grid into the
+  // no-projects empty state, which reads as data loss.
+  let projectsLoaded = false;
+  let projectsLoadFailed = false;
+
   async function reload() {
     try {
       // Run in parallel — both are independent + we render once at the end.
       const [ps] = await Promise.all([
-        api('/api/projects').catch(() => []),
-        loadTerminalAi(),
+        api('/api/projects'),
+        loadTerminalAi().catch(() => {}),
       ]);
       projects = Array.isArray(ps) ? ps : [];
+      projectsLoadFailed = false;
     } catch {
-      projects = [];
+      // Keep the last-known project list rather than blanking it.
+      projectsLoadFailed = true;
     }
+    projectsLoaded = true;
     // Publish the cache so other modules (ChatPanel, NavSessions, ngit
     // remote helpers) can read project metadata without a re-fetch, and
     // drop chat sessions whose project no longer exists.
@@ -5986,6 +6039,21 @@ const ProjectsPanel = (() => {
   }
 
   function renderReposTab(content) {
+    if (!projectsLoaded) {
+      content.innerHTML = `<div class="empty-state">loading…</div>`;
+      return;
+    }
+    if (projectsLoadFailed && projects.length === 0) {
+      content.innerHTML = `
+        <div class="empty-state err">Couldn't load projects — is the station server reachable?
+          <div class="hint"><button class="projects-retry">Retry</button></div>
+        </div>`;
+      content.querySelector('.projects-retry').addEventListener('click', () => {
+        content.innerHTML = `<div class="empty-state">loading…</div>`;
+        void reload();
+      });
+      return;
+    }
     if (projects.length === 0) {
       content.innerHTML = `
         <div class="projects-empty">
@@ -22765,7 +22833,19 @@ const MailPanel = (() => {
       if (activeCounter) await loadThread(activeCounter);
     } catch (e) {
       const el = $('mail-threads');
-      if (el) el.innerHTML = `<div class="mail-empty">Failed to load: ${escapeHtml(e?.message || e)}</div>`;
+      if (!el) return;
+      if (threads.length > 0 || requests.length > 0) {
+        // We have a previous (stale) list — keep it visible rather than
+        // wiping the inbox over a transient refresh failure.
+        toast('Mail refresh failed', String(e?.message || e), 'err');
+        return;
+      }
+      el.innerHTML = `<div class="mail-empty">Failed to load: ${escapeHtml(e?.message || e)}
+        <div class="hint"><button class="mail-retry">Retry</button></div></div>`;
+      el.querySelector('.mail-retry')?.addEventListener('click', () => {
+        el.innerHTML = '<div class="mail-empty">loading…</div>';
+        void load();
+      });
     }
   }
 
