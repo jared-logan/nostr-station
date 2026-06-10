@@ -58,7 +58,16 @@ import { fileURLToPath } from 'node:url';
 // field rename upstream surfaces as a loud build failure rather than a
 // silent regression.
 const DITTO_REPO = 'https://gitlab.com/soapbox-pub/ditto.git';
-const DITTO_REF  = '7a5820ca93f833b56cf368fc40c91e42c63f912f';
+// v2.21.0 release tag (2026-06-07). Bumped from 7a5820c (2026-05-24, just
+// after v2.18.0) — 63 commits, 4 patch releases + 3 minor releases. Notable
+// inheritance: v2.19.0 IndexedDB offline event cache + first-paint cache
+// reads, v2.20.0 expanded global search (articles/lists/follow packs/emoji
+// packs) + app handler /client/:name route, v2.21.0 Nostr Clients sidebar
+// widget + Android share targets. Also picks up the fontLoader URL-
+// sanitization security fix. Sticking to a release tag rather than tracking
+// main HEAD — post-v2.21.0 main is mid-merge on a large unreleased "Blobbi"
+// feature and we want a known-stable surface.
+const DITTO_REF  = '734baf513aa59b365d3181b2cf6fc9fc0f98f986';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT   = path.resolve(here, '..');
@@ -92,8 +101,74 @@ const BUILT_FROM_SENTINEL = path.join(TARGET_DIR, '.ditto-built-from');
 // (key insertion order is preserved) so no manual sort needed — explicit
 // key-order changes in source are real changes worth rebuilding for.
 function currentBuildConfigHash() {
-  const config = buildDittoConfig();
-  return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex').slice(0, 16);
+  const hash = crypto.createHash('sha256');
+  hash.update(JSON.stringify(buildDittoConfig()));
+  // Skin layer file bytes (path + content). Any change to a skin file —
+  // edit, add, delete — invalidates the sentinel so the next run does
+  // a full clone+build that re-applies the skin into the new clone and
+  // re-runs vite. We hash relative paths first so a file MOVE
+  // invalidates even if content is byte-identical.
+  const skinRoot = path.join(REPO_ROOT, 'src', 'web', 'ditto-skin');
+  if (fs.existsSync(skinRoot)) {
+    const files = listFilesRecursive(skinRoot).sort();
+    for (const f of files) {
+      hash.update(path.relative(skinRoot, f));
+      hash.update('\0');
+      try { hash.update(fs.readFileSync(f)); } catch { /* ignore */ }
+    }
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+
+function listFilesRecursive(dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...listFilesRecursive(p));
+    else if (entry.isFile()) out.push(p);
+  }
+  return out;
+}
+
+// Skin layer: copies our TSX components from src/web/ditto-skin/ INTO the
+// freshly-cloned Ditto source tree before `npm run build` runs. Files
+// mirror the clone's src/ layout — src/web/ditto-skin/components/X.tsx
+// overwrites .ditto-src/src/components/X.tsx, src/web/ditto-skin/skin/X.ts
+// adds .ditto-src/src/skin/X.ts (the adapter file lives here so skin
+// components can import upstream hooks via @/skin/adapter — a single
+// indirection that absorbs upstream module-path churn on DITTO_REF bumps).
+//
+// The path-mirror convention is intentional: anyone editing a skin file
+// can find the upstream original at the matching path under .ditto-src/src/.
+//
+// applySkin runs after ditto.json is written and before npm ci/build so
+// the copied components participate in dependency install + bundle.
+// No-op if src/web/ditto-skin/ doesn't exist yet (lets the script keep
+// working on pre-skin-layer branches).
+function applySkin() {
+  const skinRoot = path.join(REPO_ROOT, 'src', 'web', 'ditto-skin');
+  if (!fs.existsSync(skinRoot)) {
+    console.log('[ditto] no skin layer at src/web/ditto-skin/ — using upstream shell as-is');
+    return;
+  }
+  const cloneSrc = path.join(SRC_DIR, 'src');
+  const files = listFilesRecursive(skinRoot);
+  if (files.length === 0) {
+    console.log('[ditto] skin layer directory empty — nothing to apply');
+    return;
+  }
+  console.log(`[ditto] applying skin layer (${files.length} file${files.length === 1 ? '' : 's'})…`);
+  for (const src of files) {
+    const rel = path.relative(skinRoot, src);
+    const dst = path.join(cloneSrc, rel);
+    try {
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst);
+      console.log(`[ditto]   skin: src/${rel}`);
+    } catch (e) {
+      console.warn(`[ditto] WARN: skin file copy failed for ${rel} — ${e.message}`);
+    }
+  }
 }
 
 // Hash of all branding inputs. Embedded in the branding sentinel so
@@ -267,6 +342,8 @@ async function cloneAndBuild() {
     console.warn(`[ditto] WARN: ditto.json write failed — ${e.message}`);
     return false;
   }
+
+  applySkin();
 
   console.log('[ditto] running npm ci (this can take a minute)…');
   if (!run('npm', ['ci', '--no-audit', '--no-fund'], { cwd: SRC_DIR })) {

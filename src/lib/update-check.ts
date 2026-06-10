@@ -148,6 +148,13 @@ async function dittoConfigChanged(root: string, beforeSha: string, afterSha: str
         'scripts/fetch-ditto.mjs',
         'src/web/ditto-overrides.css',
         'src/web/nori.svg',
+        // Skin layer: any change under src/web/ditto-skin/ requires a Ditto
+        // rebuild because the skin TSX files are copied INTO the clone and
+        // compiled by vite. Bake-hash sentinel in scripts/fetch-ditto.mjs
+        // also includes skin file bytes — the two checks are complementary
+        // (this one triggers the rebuild path; the sentinel forces full
+        // clone+build over the incremental "just re-apply branding" path).
+        'src/web/ditto-skin/',
       ],
       { cwd: root },
     );
