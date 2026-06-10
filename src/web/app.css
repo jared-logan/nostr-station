@@ -7382,6 +7382,31 @@ body.term-expanded .term-bar-toggle .term-chevron {
 .grasp-pill.grasp-bad  { border-color: color-mix(in srgb, #E85555 50%, var(--border-strong)); }
 .grasp-pill.grasp-bad  .grasp-pill-dot { background: #E85555; }
 
+/* Default-branch marker / setter, sits just right of the branch dropdown. */
+.default-branch-host { display: inline-flex; align-items: center; }
+.default-branch-chip {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  text-transform: lowercase;
+  color: var(--text-dim);
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+}
+.default-branch-set {
+  display: inline-flex; align-items: center;
+  padding: 3px 9px;
+  font-size: 12px; font-weight: 600;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.default-branch-set:hover { border-color: var(--accent-dim); }
+.default-branch-set:disabled { color: var(--text-dim); cursor: default; }
+
 .grasp-pop-menu {
   position: absolute;
   top: calc(100% + 6px);

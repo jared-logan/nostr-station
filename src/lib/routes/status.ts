@@ -20,10 +20,13 @@
  *     Returns { status, statusEventId, lastChangedAt } per root.
  *
  *   POST /api/projects/:id/status                 (SSE)
- *     Shells out to `ngit pr status` / `ngit issue status` based on
- *     the supplied `kind` ("patch" | "issue"). Maintainer / author
- *     authority is enforced server-side: refuses if the signer can't
- *     legitimately publish the change (cheap pre-flight before
+ *     Builds the kind-163x status event NATIVELY (see
+ *     src/lib/nip34-events.ts — tag shapes verified against ngit's
+ *     pr_status.rs / issue_status.rs), signs via the saved bunker
+ *     pairing, and publishes to repo relays + GRASP + read relays so
+ *     the event carries the canonical NIP-89 client tag. Maintainer /
+ *     author authority is enforced server-side: refuses if the signer
+ *     can't legitimately publish the change (cheap pre-flight before
  *     burning an Amber prompt).
  *
  *   POST /api/projects/:id/merge                  (SSE)
@@ -41,18 +44,21 @@ import { execFile, execFileSync, spawn } from 'child_process';
 import { promisify } from 'util';
 import { nip19 } from 'nostr-tools';
 import { getProject, type Project } from '../projects.js';
-import { isValidRelayUrl, getGraspServers } from '../identity.js';
+import { isValidRelayUrl, getGraspServers, readIdentity } from '../identity.js';
 import { findBin } from '../detect.js';
 import {
   queryRelaysDirect as queryRelays,
   getCached,
   setCached,
+  clearCache,
   getTags,
   type NostrEvent,
   type RelayQueryFilter,
 } from '../nostr-query.js';
-import { readBody, streamExec, streamExecError } from './_shared.js';
+import { readBody, streamExecError } from './_shared.js';
 import { resolveMaintainerSet } from '../maintainer-set.js';
+import { buildStatusTemplate, type StatusTarget, type StatusVerb } from '../nip34-events.js';
+import { resolveRepoRefInfo, nip34PublishTargets, signAndPublishOverSse } from './issues.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -453,39 +459,35 @@ async function fetchRootAuthors(
 }
 
 /**
- * Compose `ngit pr status` / `ngit issue status` argv.
- * Accepts `kind: 'patch' | 'issue'` and `status` ∈ valid set per kind.
- * Returns null for malformed input.
+ * Validate + normalise status-change input. Returns null for
+ * malformed input. Validation is IDENTICAL to the old
+ * `buildStatusArgs` ngit-argv builder: rootId hex 16–64, and the
+ * allowed status verbs differ by kind (issues can't be "draft",
+ * patches can't be "resolved").
  *
- * ngit 2.x normalized underscore-form subcommands (`pr_status`,
- * `issue_status`) to spaced form (`pr status`, `issue status`) —
- * same shift `pr checkout` and `pr merge` already used. The old form
- * errors with `unrecognized subcommand 'pr_status'` and `tip: a
- * similar subcommand exists: 'pr'`.
+ * Verb → published event kind (verified against ngit's launch_*
+ * entry points; see STATUS_KIND_BY_VERB in src/lib/nip34-events.ts):
+ *   open → 1630, resolved → 1631, closed → 1632, draft → 1633.
  */
-export function buildStatusArgs(input: {
+export function parseStatusInput(input: {
   kind:    unknown;
   rootId:  unknown;
   status:  unknown;
   message?: unknown;
-}): string[] | null {
+}): { target: StatusTarget; rootId: string; verb: StatusVerb } | null {
   const kind   = input.kind;
   const rootId = typeof input.rootId === 'string' ? input.rootId.trim() : '';
   const status = typeof input.status === 'string' ? input.status.trim() : '';
   if (!/^[a-f0-9]{16,64}$/.test(rootId)) return null;
-  // Allowed status verbs differ by kind (issues can't be "applied",
-  // patches can't be "resolved").
   const patchAllowed = new Set(['open', 'draft', 'closed']);
   const issueAllowed = new Set(['open', 'resolved', 'closed']);
   if (kind === 'patch') {
     if (!patchAllowed.has(status)) return null;
-    const flag = '--' + status;
-    return ['pr', 'status', flag, rootId];
+    return { target: 'patch', rootId, verb: status as StatusVerb };
   }
   if (kind === 'issue') {
     if (!issueAllowed.has(status)) return null;
-    const flag = '--' + status;
-    return ['issue', 'status', flag, rootId];
+    return { target: 'issue', rootId, verb: status as StatusVerb };
   }
   return null;
 }
@@ -579,22 +581,79 @@ export async function handleStatus(
     return json(res, 200, { results, cached: statusR.cached });
   }
 
-  // ── Status change (SSE) ─────────────────────────────────────────────
+  // ── Status change (SSE — native kind 163x build + bunker sign) ──────
   if (statusMatch && method === 'POST') {
     if (!project.path) { streamExecError(res, req, 'project has no local path'); return true; }
-    if (!findBin('ngit')) { streamExecError(res, req, 'ngit not found on PATH'); return true; }
     let parsed: any = {};
     try { parsed = JSON.parse(await readBody(req)); }
     catch { res.writeHead(400); res.end('bad json'); return true; }
-    const args = buildStatusArgs(parsed);
-    if (!args) {
+    const input = parseStatusInput(parsed);
+    if (!input) {
       streamExecError(res, req,
         'invalid input: kind ∈ {patch,issue}, rootId hex, status ∈ {open,draft,closed,resolved}'); return true;
     }
-    streamExec(
-      { bin: 'ngit', args, env: { NO_COLOR: '1', TERM: 'dumb' } },
-      res, req, project.path,
-    );
+    res.writeHead(200, {
+      'Content-Type':  'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection':    'keep-alive',
+    });
+    const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+    try {
+      const eventKind = { open: 1630, resolved: 1631, closed: 1632, draft: 1633 }[input.verb];
+      emit({ line: `▸ building kind-${eventKind} status event (${input.target} → ${input.verb})`, stream: 'stdout' });
+      const repoRef = await resolveRepoRefInfo(project);
+      if (!repoRef) {
+        emit({ line: 'project has no decodable ngit remote — publish the repo first', stream: 'stderr' });
+        emit({ done: true, code: 1 });
+        return true;
+      }
+      // Root author: ngit p-tags the root event's author alongside the
+      // maintainers (pr_status.rs:129-131). fetchRootAuthors is the
+      // cached rootId → pubkey resolver the GET path already uses.
+      const rootAuthors = await fetchRootAuthors(project, [input.rootId]);
+      const rootAuthor = rootAuthors.get(input.rootId) ?? '';
+      if (!rootAuthor) {
+        emit({ line: 'note: root event author could not be resolved from relays — publishing without their p tag', stream: 'stderr' });
+      }
+      // Authority pre-flight (cheap — before burning a signer prompt):
+      // only the root author or a maintainer can legitimately set
+      // status (the same rule ngit enforces, pr_status.rs:72-75 /
+      // issue_status.rs:72-74, and computeEffectiveStatus applies on
+      // read). Only refuse on POSITIVE knowledge — when the signer is
+      // not a maintainer AND the root author resolved to someone else.
+      let ownerHex = '';
+      try {
+        const npub = readIdentity().npub;
+        ownerHex = npub ? (nip19.decode(npub).data as string) : '';
+      } catch { ownerHex = ''; }
+      if (ownerHex && rootAuthor && ownerHex !== rootAuthor
+          && !repoRef.maintainers.includes(ownerHex)) {
+        emit({ line: 'refused: only the author or a repository maintainer can change this status', stream: 'stderr' });
+        emit({ done: true, code: 1 });
+        return true;
+      }
+      const template = buildStatusTemplate(repoRef, {
+        target:     input.target,
+        verb:       input.verb,
+        rootId:     input.rootId,
+        rootAuthor,
+      });
+      const out = await signAndPublishOverSse(emit, template, nip34PublishTargets(repoRef));
+      if (!out || out.accepted === 0) {
+        if (out) emit({ line: 'no relay accepted the status event', stream: 'stderr' });
+        emit({ done: true, code: 1 });
+        return true;
+      }
+      // Bust the 163x cache so the next GET /status reflects the change.
+      try { clearCache({ projectId: project.id, projectPath: project.path, key: 'status-163x' }); } catch {}
+      emit({ line: `status updated: ${input.target} ${input.rootId.slice(0, 8)} → ${input.verb} (${out.signedEvent.id})`, stream: 'stdout' });
+      emit({ done: true, code: 0 });
+    } catch (e: any) {
+      emit({ line: `status change failed: ${(e?.message || 'unknown error').toString().slice(0, 200)}`, stream: 'stderr' });
+      emit({ done: true, code: 1 });
+    } finally {
+      try { res.end(); } catch {}
+    }
     return true;
   }
 

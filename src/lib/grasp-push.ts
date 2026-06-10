@@ -24,7 +24,7 @@
  * an extra attribution tag is inert for push authorization).
  */
 
-import { CLIENT_TAG } from './client-tag.js';
+import { CLIENT_TAG, stampClientTag } from './client-tag.js';
 
 /** A git ref as a [shortName, objectId] pair. */
 export type RefPair = [name: string, oid: string];
@@ -64,44 +64,189 @@ export function selectGraspCloneUrls(clone: string[]): string[] {
 }
 
 /**
- * Build the kind-30618 repo-state tag set from the local checkout, mirroring
- * Shakespeare's `nostrPush` exactly:
+ * Build the kind-30618 repo-state tag set, announcing exactly the refs that
+ * are — or will be, after this push — actually on the git hosts. nostr-station
+ * pushes only the CURRENT branch's pack, so the deliverable set is:
+ *
+ *   {current branch, at its local oid}  ∪  {every branch the PRIOR state
+ *   announced, kept at the prior oid}
+ *
+ * and the prior state's tags verbatim (we never deliver tags). This diverges
+ * from Shakespeare's "announce every local branch" on purpose: agentic TUIs
+ * (Claude Code, OpenCode) spin up throwaway `claude/*` branches constantly,
+ * and announcing those local-only scratch branches — which were never pushed —
+ * makes every one of them read as "differs / missing on git server" on the
+ * sync badge. Forever. Announcing only what we deliver keeps the badge honest
+ * with zero user-facing changes (Push/Sync behave identically).
+ *
+ * Why prior oids for non-current branches and NOT local oids: a contributor on
+ * a feature branch may have local `main` ahead of the host's `main` (committed
+ * locally, pushed only the feature). Announcing local `main`'s oid would pin a
+ * commit the host doesn't have → drift. The host still holds the PRIOR oid for
+ * every branch we didn't just push, so that's what we announce.
+ *
+ * Tag layout:
  *   - ['d', identifier]
- *   - HEAD: if the existing state already pins a HEAD, preserve it verbatim;
- *     else a symbolic ref to the current branch; else the detached HEAD oid.
- *   - one [refs/heads/<b>, oid] per local branch
- *   - one [refs/tags/<t>, oid] per local tag
+ *   - HEAD: the prior state's HEAD if it still resolves within the announced
+ *     branches (see validPreservedHead); else a symbolic ref to the current
+ *     branch; else the detached HEAD oid. HEAD is the repo's default-branch
+ *     pointer — owned by the announcement, not by whoever pushes — so we
+ *     preserve it across pushes rather than retarget it to the pusher's branch.
+ *   - one [refs/heads/<b>, oid] per announced branch
+ *   - one [refs/tags/<t>, oid] per announced tag
  *   - the canonical NIP-89 client tag (attribution; ignored by GRASP hosts,
  *     which authorize against the d/HEAD/refs/* tags only)
  *
- * Preserving the existing HEAD matters: HEAD is the repo's "default branch"
- * pointer and is owned by the announcement, not by whoever happens to push —
- * clobbering it on every push would let a contributor on a feature branch
- * silently retarget the repo's default. Pure.
+ * `priorStateTags` is the prior kind-30618's tags (null on the very first
+ * publish, before any state exists — then we fall back to announcing every
+ * local ref, the safe bootstrap, since nothing is yet established as scratch).
+ * Pure; exported for tests.
  */
 export function buildRepoStateTags(
   identifier: string,
   refs: LocalRefs,
-  existingHeadTag: string[] | null = null,
+  priorStateTags: string[][] | null = null,
 ): string[][] {
+  // Parse the prior state into HEAD + announced branch/tag oid maps.
+  let priorHead: string[] | null = null;
+  const priorBranches = new Map<string, string>();
+  const priorTags = new Map<string, string>();
+  for (const t of priorStateTags ?? []) {
+    if (!Array.isArray(t) || t.length < 2 || typeof t[0] !== 'string') continue;
+    if (t[0] === 'HEAD') priorHead = t;
+    else if (t[0].startsWith('refs/heads/')) priorBranches.set(t[0].slice('refs/heads/'.length), t[1]);
+    else if (t[0].startsWith('refs/tags/'))  priorTags.set(t[0].slice('refs/tags/'.length), t[1]);
+  }
+
+  // Announced branch set: prior branches (at prior oids) with the current
+  // branch upserted to its local oid. No prior state → announce every local
+  // branch (bootstrap). Insertion order: prior branches first (stable across
+  // pushes), then the current branch if it's new.
+  const announceBranches = new Map<string, string>();
+  if (priorStateTags) {
+    for (const [name, oid] of priorBranches) announceBranches.set(name, oid);
+    const localCurrent = refs.branches.find(([n]) => n === refs.currentBranch);
+    const currentOid = localCurrent ? localCurrent[1] : refs.headOid;
+    if (refs.currentBranch && currentOid) announceBranches.set(refs.currentBranch, currentOid);
+  } else {
+    for (const [name, oid] of refs.branches) if (name && oid) announceBranches.set(name, oid);
+  }
+
+  // Announced tag set: prior tags verbatim (we never deliver tags, so a local
+  // tag never pushed must not be announced). No prior → all local tags.
+  const announceTags = new Map<string, string>();
+  if (priorStateTags) {
+    for (const [name, oid] of priorTags) announceTags.set(name, oid);
+  } else {
+    for (const [name, oid] of refs.tags) if (name && oid) announceTags.set(name, oid);
+  }
+
   const tags: string[][] = [['d', identifier]];
 
-  if (existingHeadTag && existingHeadTag.length >= 2) {
-    tags.push([...existingHeadTag]);
+  const preserved = validPreservedHead(priorHead, announceBranches, announceTags);
+  if (preserved) {
+    tags.push(preserved);
   } else if (refs.currentBranch) {
     tags.push(['HEAD', `ref: refs/heads/${refs.currentBranch}`]);
   } else if (refs.headOid) {
     tags.push(['HEAD', refs.headOid]);
   }
 
-  for (const [name, oid] of refs.branches) {
-    if (name && oid) tags.push([`refs/heads/${name}`, oid]);
-  }
-  for (const [name, oid] of refs.tags) {
-    if (name && oid) tags.push([`refs/tags/${name}`, oid]);
-  }
+  for (const [name, oid] of announceBranches) if (name && oid) tags.push([`refs/heads/${name}`, oid]);
+  for (const [name, oid] of announceTags)     if (name && oid) tags.push([`refs/tags/${name}`, oid]);
   tags.push([...CLIENT_TAG]);
   return tags;
+}
+
+/**
+ * A prior state's HEAD tag is preservable only while it still points at
+ * something the new state ANNOUNCES:
+ *   - symbolic ('ref: refs/heads/X') → X must be among the announced branches
+ *     (a renamed/deleted/no-longer-announced default must not ride forever);
+ *   - detached oid → must equal an announced branch/tag tip. An ancestor
+ *     commit can't be verified without git access, and a NIP-34 repo HEAD
+ *     pinned to a non-tip is not a state ngit/gitworkshop ever produce — so
+ *     fall back to the current branch rather than risk announcing a
+ *     rebased-away commit.
+ * Returns a fresh copy of the tag when valid, null when the caller should
+ * fall back. Pure; exported for tests.
+ */
+export function validPreservedHead(
+  head: string[] | null,
+  announceBranches: Map<string, string>,
+  announceTags: Map<string, string>,
+): string[] | null {
+  if (!head || head.length < 2 || head[0] !== 'HEAD' || typeof head[1] !== 'string') return null;
+  const v = head[1];
+  const SYMBOLIC = 'ref: refs/heads/';
+  if (v.startsWith(SYMBOLIC)) {
+    return announceBranches.has(v.slice(SYMBOLIC.length)) ? [...head] : null;
+  }
+  const tipOids = new Set<string>([...announceBranches.values(), ...announceTags.values()]);
+  return tipOids.has(v) ? [...head] : null;
+}
+
+/** The default branch (HEAD pointer) a published 30618 advertises, or '' when
+ *  HEAD is detached / absent. Reads the symbolic `ref: refs/heads/<b>` form
+ *  ngit and our own push emit. Pure — used to render the "default" marker in
+ *  the branch picker. */
+export function defaultBranchOf(stateTags: string[][]): string {
+  for (const t of stateTags ?? []) {
+    if (Array.isArray(t) && t[0] === 'HEAD' && typeof t[1] === 'string') {
+      const m = t[1].match(/^ref: refs\/heads\/(.+)$/);
+      return m ? m[1] : '';
+    }
+  }
+  return '';
+}
+
+/** The branch names a published 30618 announces (its refs/heads/* tags). Pure —
+ *  the candidate set for the default-branch picker (you can only make an
+ *  ALREADY-announced branch the default; its pack is on the hosts). */
+export function announcedBranches(stateTags: string[][]): string[] {
+  const out: string[] = [];
+  for (const t of stateTags ?? []) {
+    if (Array.isArray(t) && typeof t[0] === 'string' && t[0].startsWith('refs/heads/') && t[0].length > 'refs/heads/'.length) {
+      out.push(t[0].slice('refs/heads/'.length));
+    }
+  }
+  return out;
+}
+
+/**
+ * Retarget a published 30618's HEAD to `branch` — the default-branch setter.
+ * Every other tag (branches, tags, refs) rides through verbatim; only the HEAD
+ * pointer changes, and the canonical client tag is re-stamped. `branch` MUST be
+ * among the announced refs/heads/* — you can't make a branch the default until
+ * its pack is on the hosts (otherwise the new default would dangle, the very
+ * drift the deliverable-set fix removes). Returns the new tag set, or null when
+ * `branch` isn't announced (the caller surfaces a 4xx). Pure; exported for tests.
+ */
+export function setDefaultBranchTags(
+  priorStateTags: string[][],
+  branch: string,
+): string[][] | null {
+  if (!branch || !announcedBranches(priorStateTags).includes(branch)) return null;
+  const out: string[][] = [];
+  let headWritten = false;
+  for (const t of priorStateTags) {
+    if (!Array.isArray(t)) continue;
+    if (t[0] === 'client') continue;                       // re-stamped canonical below
+    if (t[0] === 'HEAD') {
+      out.push(['HEAD', `ref: refs/heads/${branch}`]);
+      headWritten = true;
+    } else {
+      out.push(t.map(v => (typeof v === 'string' ? v : '')));
+    }
+  }
+  if (!headWritten) {
+    // Prior state had a detached / missing HEAD — insert the pointer right
+    // after the d tag so the shape matches a normal symbolic-HEAD state.
+    const dIdx = out.findIndex(t => t[0] === 'd');
+    out.splice(dIdx >= 0 ? dIdx + 1 : 0, 0, ['HEAD', `ref: refs/heads/${branch}`]);
+  }
+  stampClientTag(out);
+  return out;
 }
 
 /**

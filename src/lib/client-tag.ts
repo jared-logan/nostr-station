@@ -2,11 +2,12 @@
  * Canonical NIP-89 `client` tag for events nostr-station publishes.
  *
  * Single source of truth so every publish path — the native /api/client
- * kind-1 flow, repo announcements (kind 30617), and nsite deploys
- * (kind 35128 + the 30617 web-tag refresh) — stamps the SAME tag, and
- * therefore links back to nostr-station's NIP-89 handler event the way
- * a kind-1 from the Client panel does (the "open in / published by"
- * affordance in Ditto / nostrhub.io).
+ * kind-1/6/7 flow, repo announcements (kind 30617), repo state on push
+ * (kind 30618), nsite deploys (kind 35128 manifests; deploy never touches
+ * the 30617), and App Center handler events (kind 31990) — stamps the
+ * SAME tag, and therefore links back to nostr-station's NIP-89 handler
+ * event the way a kind-1 from the Client panel does (the "open in /
+ * published by" affordance in Ditto / nostrhub.io).
  *
  * 4-element form: ["client", <name>, <kind>:<pubkey>:<d-tag>, <relay-hint>].
  * The coordinate points at the kind-31990 "client handler" event

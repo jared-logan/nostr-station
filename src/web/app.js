@@ -9207,9 +9207,84 @@ const ProjectsPanel = (() => {
       ghost.appendChild(pill);
       wrap.querySelector('.code-nav-row').appendChild(ghost);
       loadGraspPill(pill, ghost, p, view.ref);
+
+      // Default-branch marker / setter. Contextual to the selected ref: a
+      // muted "default" chip when the current ref already IS the repo's
+      // default, or a "Set as default" button (owner only) when it's another
+      // branch. Placed right after the branch dropdown (left-aligned) so it
+      // reads as a property of the branch you're looking at. Async like the
+      // pill so the nav paints instantly.
+      const dbHost = document.createElement('span');
+      dbHost.className = 'default-branch-host';
+      const selEl = wrap.querySelector('.code-ref-select');
+      if (selEl) selEl.insertAdjacentElement('afterend', dbHost);
+      else wrap.querySelector('.code-nav-row').appendChild(dbHost);
+      loadDefaultBranchControl(dbHost, p, view, branches);
     }
 
     return wrap;
+  }
+
+  // Fetch the repo's default branch (the 30618 HEAD pointer) and render a
+  // marker/setter next to the branch picker. Tags can't be defaults, so the
+  // control only appears when the SELECTED ref is a branch. Self-empties for
+  // non-ngit / single-branch / non-owner repos so it stays out of the way.
+  async function loadDefaultBranchControl(hostEl, p, view, branches) {
+    // The selected ref must be an actual branch (not a tag) to be settable.
+    const isBranch = (branches || []).some(b => b.name === view.ref);
+    if (!isBranch) { hostEl.remove(); return; }
+
+    let data;
+    try {
+      data = await api(`/api/projects/${p.id}/ngit/default-branch`);
+    } catch { hostEl.remove(); return; }
+    if (!data || !Array.isArray(data.branches) || data.branches.length === 0) { hostEl.remove(); return; }
+
+    const isDefault = data.current && data.current === view.ref;
+    if (isDefault) {
+      // Already the default — a quiet, non-interactive marker.
+      hostEl.innerHTML = `<span class="default-branch-chip" title="This is the repository's default branch (HEAD)">default</span>`;
+      return;
+    }
+    // Another branch is the default; offer to set this one — owner only.
+    if (!data.canSet) { hostEl.remove(); return; }
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'default-branch-set';
+    btn.textContent = 'Set as default';
+    btn.title = `Make “${view.ref}” the repository's default branch (re-signs the repo state — approve on your signer)`;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Signing…';
+      try {
+        const token = getSessionToken();
+        const resp = await fetch(`/api/projects/${p.id}/ngit/default-branch`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body:    JSON.stringify({ branch: view.ref }),
+        });
+        let r = null;
+        try { r = await resp.json(); } catch { /* non-JSON */ }
+        if (resp.ok && r?.ok) {
+          toast('Default branch updated',
+            r.unchanged ? `${view.ref} is already the default`
+                        : `${view.ref} is now the default · state accepted by ${r.accepted}/${r.targets} relay(s)`,
+            'ok');
+          graspRefreshPending = true;   // HEAD changed — re-probe the sync badge
+          renderTab(document.querySelector('.project-tab-content'), p);
+        } else {
+          toast('Could not set default', r?.error || `HTTP ${resp.status}`, 'err');
+          btn.disabled = false;
+          btn.textContent = 'Set as default';
+        }
+      } catch (e) {
+        toast('Set default failed', String(e?.message || e), 'err');
+        btn.disabled = false;
+        btn.textContent = 'Set as default';
+      }
+    });
+    hostEl.appendChild(btn);
   }
 
   // Fetch /grasp-state for the selected branch and fill in the pill, then wire

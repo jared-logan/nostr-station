@@ -8,8 +8,8 @@ const {
   buildCommentTree,
   countComments,
   summariseIssue,
-  buildIssueCreateArgs,
-  buildCommentArgs,
+  parseIssueCreateInput,
+  parseCommentInput,
 } = await import('../src/lib/routes/issues.ts');
 
 const PUBKEY     = 'a'.repeat(64);
@@ -241,67 +241,69 @@ test('summariseIssue: commentCount reflects tree size', () => {
   assert.equal(s.commentCount, 1);
 });
 
-// ── buildIssueCreateArgs ────────────────────────────────────────────────
+// ── parseIssueCreateInput ───────────────────────────────────────────────
+//
+// Replaced the old buildIssueCreateArgs ngit-argv builder when issue
+// creation went native (src/lib/nip34-events.ts). Validation rules
+// are unchanged — these tests pin them.
 
-test('buildIssueCreateArgs: minimum (title only)', () => {
+test('parseIssueCreateInput: minimum (title only)', () => {
   assert.deepEqual(
-    buildIssueCreateArgs({ title: 'Fix the thing' }),
-    ['issue_create', '--title', 'Fix the thing'],
+    parseIssueCreateInput({ title: 'Fix the thing' }),
+    { title: 'Fix the thing', body: '', labels: [] },
   );
 });
 
-test('buildIssueCreateArgs: title + body + labels', () => {
+test('parseIssueCreateInput: title + body + labels', () => {
   assert.deepEqual(
-    buildIssueCreateArgs({
+    parseIssueCreateInput({
       title:  'Fix it',
       body:   'Details here',
       labels: ['bug', 'urgent'],
     }),
-    ['issue_create', '--title', 'Fix it', '--body', 'Details here',
-     '--label', 'bug', '--label', 'urgent'],
+    { title: 'Fix it', body: 'Details here', labels: ['bug', 'urgent'] },
   );
 });
 
-test('buildIssueCreateArgs: drops invalid labels (non-string, bad chars)', () => {
-  const args = buildIssueCreateArgs({
+test('parseIssueCreateInput: drops invalid labels (non-string, bad chars)', () => {
+  const parsed = parseIssueCreateInput({
     title:  'x',
     labels: ['ok', 'has space', '', 42 as any, 'also-ok'],
   });
   // Only 'ok' + 'also-ok' should make it through.
-  const labelArgs = (args || []).filter((_, i, a) => a[i - 1] === '--label');
-  assert.deepEqual(labelArgs, ['ok', 'also-ok']);
+  assert.deepEqual(parsed?.labels, ['ok', 'also-ok']);
 });
 
-test('buildIssueCreateArgs: rejects empty title', () => {
-  assert.equal(buildIssueCreateArgs({ title: '' }),     null);
-  assert.equal(buildIssueCreateArgs({ title: '   ' }),  null);
-  assert.equal(buildIssueCreateArgs({ title: null as any }), null);
+test('parseIssueCreateInput: rejects empty title', () => {
+  assert.equal(parseIssueCreateInput({ title: '' }),     null);
+  assert.equal(parseIssueCreateInput({ title: '   ' }),  null);
+  assert.equal(parseIssueCreateInput({ title: null as any }), null);
 });
 
-test('buildIssueCreateArgs: rejects overlong title / body', () => {
-  assert.equal(buildIssueCreateArgs({ title: 'a'.repeat(241) }), null);
-  assert.equal(buildIssueCreateArgs({ title: 'ok', body: 'a'.repeat(32_001) }), null);
+test('parseIssueCreateInput: rejects overlong title / body', () => {
+  assert.equal(parseIssueCreateInput({ title: 'a'.repeat(241) }), null);
+  assert.equal(parseIssueCreateInput({ title: 'ok', body: 'a'.repeat(32_001) }), null);
 });
 
-// ── buildCommentArgs ────────────────────────────────────────────────────
+// ── parseCommentInput ───────────────────────────────────────────────────
 
-test('buildCommentArgs: shape with valid input', () => {
+test('parseCommentInput: shape with valid input', () => {
   assert.deepEqual(
-    buildCommentArgs({ eventId: 'a'.repeat(64), body: 'looks good' }),
-    ['comment', '--on', 'a'.repeat(64), '--message', 'looks good'],
+    parseCommentInput({ eventId: 'a'.repeat(64), body: 'looks good' }),
+    { eventId: 'a'.repeat(64), body: 'looks good' },
   );
 });
 
-test('buildCommentArgs: rejects non-hex eventId', () => {
-  assert.equal(buildCommentArgs({ eventId: 'not-hex', body: 'x' }),       null);
-  assert.equal(buildCommentArgs({ eventId: 'a'.repeat(15), body: 'x' }),  null); // too short
-  assert.equal(buildCommentArgs({ eventId: 'a'.repeat(65), body: 'x' }),  null); // too long
-  assert.equal(buildCommentArgs({ eventId: null as any,  body: 'x' }),    null);
+test('parseCommentInput: rejects non-hex eventId', () => {
+  assert.equal(parseCommentInput({ eventId: 'not-hex', body: 'x' }),       null);
+  assert.equal(parseCommentInput({ eventId: 'a'.repeat(15), body: 'x' }),  null); // too short
+  assert.equal(parseCommentInput({ eventId: 'a'.repeat(65), body: 'x' }),  null); // too long
+  assert.equal(parseCommentInput({ eventId: null as any,  body: 'x' }),    null);
 });
 
-test('buildCommentArgs: rejects empty / overlong body', () => {
+test('parseCommentInput: rejects empty / overlong body', () => {
   const id = 'a'.repeat(64);
-  assert.equal(buildCommentArgs({ eventId: id, body: '' }),               null);
-  assert.equal(buildCommentArgs({ eventId: id, body: '  ' }),             null);
-  assert.equal(buildCommentArgs({ eventId: id, body: 'x'.repeat(16_001) }), null);
+  assert.equal(parseCommentInput({ eventId: id, body: '' }),               null);
+  assert.equal(parseCommentInput({ eventId: id, body: '  ' }),             null);
+  assert.equal(parseCommentInput({ eventId: id, body: 'x'.repeat(16_001) }), null);
 });

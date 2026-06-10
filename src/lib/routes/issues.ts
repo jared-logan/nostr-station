@@ -24,25 +24,42 @@
  * uppercase root reference (so server-side filtering by #E works)
  * and a lowercase pointer to the parent comment.
  *
- * The CLI binding (POST endpoints) shells `ngit issue_create` and
- * `ngit comment` through the existing streamExec/SSE machinery —
- * same signing path Phase 1d's publish wizard uses, so anyone with
- * Amber paired can write issues + comments without re-pairing.
+ * The POST endpoints build the NIP-34/NIP-22 events NATIVELY (see
+ * src/lib/nip34-events.ts — tag shapes verified against ngit-cli's
+ * Rust source), sign via the saved bunker pairing, and publish to the
+ * repo relays + GRASP servers + the user's read relays directly. The
+ * old path shelled `ngit issue_create` / `ngit comment`; the native
+ * path exists so every published event carries nostr-station's
+ * canonical NIP-89 client tag (the CLI can't emit custom tags). The
+ * response stays the same SSE stream of {line, stream} frames + a
+ * final {done, code} frame the exec modal renders.
  */
 import http from 'http';
 import { nip19 } from 'nostr-tools';
 import { getProject, type Project } from '../projects.js';
-import { isValidRelayUrl, getGraspServers } from '../identity.js';
-import { findBin } from '../detect.js';
+import { isValidRelayUrl, getGraspServers, getEffectiveReadRelays } from '../identity.js';
 import {
   queryRelaysDirect as queryRelays,
   getCached,
   setCached,
+  clearCache,
   getTagValue,
   getTags,
   type NostrEvent,
 } from '../nostr-query.js';
-import { readBody, streamExec, streamExecError } from './_shared.js';
+import { signEventWithSavedBunker } from '../auth-bunker.js';
+import { publishEventToRelays, fetchRepoMeta, mergeRelaySet } from './repo.js';
+import {
+  buildIssueTemplate,
+  buildCommentTemplate,
+  buildIssueCommentTemplate,
+  KIND_GIT_ISSUE,
+  KIND_GIT_COMMENT,
+  type RepoRefInfo,
+  type EventRefInfo,
+  type Nip34EventTemplate,
+} from '../nip34-events.js';
+import { readBody, streamExecError } from './_shared.js';
 
 const ISSUES_CACHE_TTL_MS    = 2 * 60 * 1000;   // 2 min — issues/comments mid-session
 const RELAY_QUERY_TIMEOUT_MS = 10_000;
@@ -346,52 +363,160 @@ async function fetchCommentsForRoot(
   return events;
 }
 
-// ── POST handlers ───────────────────────────────────────────────────────
+// ── POST input validation (pure — exported for tests) ───────────────────
 
 /**
- * Compose the ngit-CLI argv for issue creation. Returns null when
- * the input is malformed (caller responds 400 before spawning).
- *
- * The flag names mirror ngit's `issue_create` subcommand. We pass
- * --title / --body / --label flags explicitly so the spawn doesn't
- * try to open an interactive editor (no TTY in our SSE pipe).
+ * Validate + normalise issue-create input. Returns null when the
+ * input is malformed (caller streams a readable error before doing
+ * any relay/signer work). Validation is IDENTICAL to the old
+ * `buildIssueCreateArgs` ngit-argv builder: title required, 1–240
+ * chars after trim; body ≤ 32 KB; labels silently filtered to
+ * /^[A-Za-z0-9_-]{1,32}$/.
  */
-export function buildIssueCreateArgs(input: {
+export function parseIssueCreateInput(input: {
   title:  unknown;
   body?:  unknown;
   labels?: unknown;
-}): string[] | null {
+}): { title: string; body: string; labels: string[] } | null {
   const title = typeof input.title === 'string' ? input.title.trim() : '';
   if (!title || title.length > 240) return null;
   const body = typeof input.body === 'string' ? input.body : '';
   if (body.length > 32_000) return null;        // sanity cap for the SSE payload
-  const labels = Array.isArray(input.labels) ? input.labels : [];
-  const args: string[] = ['issue_create', '--title', title];
-  if (body) args.push('--body', body);
-  for (const l of labels) {
+  const rawLabels = Array.isArray(input.labels) ? input.labels : [];
+  const labels: string[] = [];
+  for (const l of rawLabels) {
     if (typeof l === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(l)) {
-      args.push('--label', l);
+      labels.push(l);
     }
   }
-  return args;
+  return { title, body, labels };
 }
 
 /**
- * Compose argv for `ngit comment`. The CLI's exact flag names may
- * differ between ngit versions; the shape here matches the upstream
- * subcommand definition (target event id + a body flag). The
- * version probe (Phase 0) can be wired up at startup to gate the
- * UI button if the installed ngit doesn't support `comment` yet.
+ * Validate + normalise comment input. Same validation as the old
+ * `buildCommentArgs`: eventId hex 16–64 chars; body required after
+ * trim, ≤ 16 KB.
  */
-export function buildCommentArgs(input: {
+export function parseCommentInput(input: {
   eventId: unknown;
   body:    unknown;
-}): string[] | null {
+}): { eventId: string; body: string } | null {
   const eventId = typeof input.eventId === 'string' ? input.eventId.trim() : '';
   if (!/^[a-f0-9]{16,64}$/.test(eventId)) return null;
   const body = typeof input.body === 'string' ? input.body.trim() : '';
   if (!body || body.length > 16_000) return null;
-  return ['comment', '--on', eventId, '--message', body];
+  return { eventId, body };
+}
+
+// ── Native publish machinery (shared with routes/status.ts) ─────────────
+
+/**
+ * Resolve the RepoRefInfo slice the nip34-events builders need:
+ * coordinate identifier, maintainer pubkeys (anchor first), the
+ * announcement's relays, and the euc. Backed by the cached 30617
+ * (fetchRepoMeta); degrades to the coordinate alone when the
+ * announcement isn't reachable — the event still references the repo
+ * (single a/p for the trust anchor) so gitworkshop can place it.
+ */
+export async function resolveRepoRefInfo(project: Project): Promise<RepoRefInfo | null> {
+  const coords = decodeNgitRemote(project);
+  if (!coords) return null;
+  let meta: { maintainers?: string[]; relays?: string[]; euc?: string | null } | null = null;
+  try { meta = (await fetchRepoMeta(project, false)).repo; } catch { /* degrade below */ }
+  return {
+    identifier:  coords.identifier,
+    maintainers: meta?.maintainers?.length ? meta.maintainers : [coords.pubkey],
+    relays:      meta?.relays?.length ? meta.relays : coords.relayHints,
+    euc:         typeof meta?.euc === 'string' ? meta.euc : '',
+  };
+}
+
+/** Relay read set for one-off event-by-id lookups — same union the
+ *  inbox queries use (remote hints + grasp + project read relays). */
+function eventLookupRelays(project: Project): string[] {
+  const coords = decodeNgitRemote(project);
+  const grasp = getGraspServers();
+  const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
+  return [...(coords?.relayHints ?? []), ...grasp, ...projRelays]
+    .filter(isValidRelayUrl)
+    .filter((r, i, a) => a.indexOf(r) === i)
+    .slice(0, 8);
+}
+
+/**
+ * Fetch one event by id from the repo's relay set. `id` may be a hex
+ * PREFIX (the route validators accept 16–64 chars) so match by
+ * startsWith. Returns null when no relay has it.
+ */
+export async function fetchEventById(project: Project, id: string): Promise<NostrEvent | null> {
+  const relays = eventLookupRelays(project);
+  if (relays.length === 0) return null;
+  try {
+    const r = await queryRelays({
+      filter:      { ids: [id] },
+      relays,
+      timeoutMs:   RELAY_QUERY_TIMEOUT_MS,
+      stream:      false,
+      acceptUntil: (evs) => evs.length >= 1,
+    });
+    return r.events.find((e) => typeof e.id === 'string' && e.id.startsWith(id)) ?? null;
+  } catch { return null; }
+}
+
+/** Publish targets: repo announcement relays + GRASP servers + the
+ *  user's effective read relays — same union (and the same
+ *  mergeRelaySet capping policy) reannounceWithClientTag uses. */
+export function nip34PublishTargets(repo: RepoRefInfo): string[] {
+  const grasp = getGraspServers()
+    .map((s) => /^wss?:\/\//i.test(s) ? s : `wss://${s}`)
+    .filter(isValidRelayUrl);
+  return mergeRelaySet([...repo.relays, ...grasp], getEffectiveReadRelays());
+}
+
+/**
+ * Sign a template via the saved bunker pairing and publish it to
+ * `targets`, narrating each step over an already-open SSE stream.
+ * Returns the accepted-relay count (>0 = success) and the signed
+ * event, or null when signing failed (error already emitted).
+ */
+export async function signAndPublishOverSse(
+  emit:     (p: object) => void,
+  template: Nip34EventTemplate,
+  targets:  string[],
+): Promise<{ accepted: number; signedEvent: any } | null> {
+  emit({ line: 'signing — approve the request on your signer…', stream: 'stdout' });
+  const signed = await signEventWithSavedBunker(template, 120_000);
+  if (!signed.ok || !signed.signedEvent) {
+    emit({
+      line: `sign failed: ${signed.error || (signed.tried ? 'signer rejected the request' : 'no paired signer — pair Amber in Setup first')}`,
+      stream: 'stderr',
+    });
+    return null;
+  }
+  emit({ line: `signed event ${signed.signedEvent.id}`, stream: 'stdout' });
+  if (targets.length === 0) {
+    emit({ line: 'no relays to publish to — configure GRASP servers or read relays', stream: 'stderr' });
+    return { accepted: 0, signedEvent: signed.signedEvent };
+  }
+  emit({ line: `publishing to ${targets.length} relay${targets.length === 1 ? '' : 's'}…`, stream: 'stdout' });
+  const results = await publishEventToRelays(signed.signedEvent, targets);
+  for (const r of results) {
+    if (r.ok) emit({ line: `✓ accepted by ${r.relay}`, stream: 'stdout' });
+    else emit({ line: `✗ rejected by ${r.relay}${r.reason ? ` (${r.reason})` : ''}`, stream: 'stderr' });
+  }
+  const accepted = results.filter((r) => r.ok).length;
+  return { accepted, signedEvent: signed.signedEvent };
+}
+
+/** Open the SSE response the exec modal expects — same headers
+ *  streamExec writes. */
+function openSse(res: http.ServerResponse): (p: object) => void {
+  res.writeHead(200, {
+    'Content-Type':  'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection':    'keep-alive',
+  });
+  return (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
 }
 
 // ── Dispatcher ──────────────────────────────────────────────────────────
@@ -450,26 +575,45 @@ export async function handleIssues(
     return json(res, 200, detail);
   }
 
-  // ── Issue create (SSE) ──────────────────────────────────────────────
+  // ── Issue create (SSE — native kind 1621 build + bunker sign) ──────
   if (listMatch && method === 'POST') {
     if (!project.path) {
       streamExecError(res, req, 'project has no local path'); return true;
     }
-    if (!findBin('ngit')) {
-      streamExecError(res, req, 'ngit not found on PATH'); return true;
-    }
     let parsed: any = {};
     try { parsed = JSON.parse(await readBody(req)); }
     catch { res.writeHead(400); res.end('bad json'); return true; }
-    const args = buildIssueCreateArgs(parsed);
-    if (!args) {
+    const input = parseIssueCreateInput(parsed);
+    if (!input) {
       streamExecError(res, req,
         'invalid issue input: title required (1–240 chars), body ≤ 32 KB, labels alphanumeric ≤ 32 chars'); return true;
     }
-    streamExec(
-      { bin: 'ngit', args, env: { NO_COLOR: '1', TERM: 'dumb' } },
-      res, req, project.path,
-    );
+    const emit = openSse(res);
+    try {
+      emit({ line: '▸ building kind-1621 issue event', stream: 'stdout' });
+      const repoRef = await resolveRepoRefInfo(project);
+      if (!repoRef) {
+        emit({ line: 'project has no decodable ngit remote — publish the repo first', stream: 'stderr' });
+        emit({ done: true, code: 1 });
+        return true;
+      }
+      const template = buildIssueTemplate(repoRef, input);
+      const out = await signAndPublishOverSse(emit, template, nip34PublishTargets(repoRef));
+      if (!out || out.accepted === 0) {
+        if (out) emit({ line: 'no relay accepted the issue event', stream: 'stderr' });
+        emit({ done: true, code: 1 });
+        return true;
+      }
+      // Bust the inbox cache so the new issue shows on the next list.
+      try { clearCache({ projectId: project.id, projectPath: project.path, key: 'issues-inbox' }); } catch {}
+      emit({ line: `issue created: ${out.signedEvent.id}`, stream: 'stdout' });
+      emit({ done: true, code: 0 });
+    } catch (e: any) {
+      emit({ line: `issue create failed: ${(e?.message || 'unknown error').toString().slice(0, 200)}`, stream: 'stderr' });
+      emit({ done: true, code: 1 });
+    } finally {
+      try { res.end(); } catch {}
+    }
     return true;
   }
 
@@ -514,26 +658,100 @@ export async function handleIssues(
     return json(res, 200, { rootId, comments: tree, cached: inbox.cached });
   }
 
-  // ── Comment create (SSE) ─────────────────────────────────────────────
+  // ── Comment create (SSE — native NIP-22 kind 1111 build + sign) ─────
+  //
+  // NIP-22 needs the ROOT event's kind + author pubkey for the K/P
+  // tags, and the PARENT's for k/p. We fetch the target event from
+  // the repo relays:
+  //   - target is an issue/patch (or anything non-comment) → it IS
+  //     the root, and the comment is top-level (parent == root —
+  //     ngit comment.rs:90-93).
+  //   - target is itself a comment (1111/1622) → it's the PARENT;
+  //     the root comes from its uppercase E tag (fetched for ground
+  //     truth, K/P-tag fallback when the root event isn't reachable).
+  // If the target can't be fetched we fail loudly rather than guess K.
   if (commentsMatch && method === 'POST') {
     if (!project.path) {
       streamExecError(res, req, 'project has no local path'); return true;
     }
-    if (!findBin('ngit')) {
-      streamExecError(res, req, 'ngit not found on PATH'); return true;
-    }
     let parsed: any = {};
     try { parsed = JSON.parse(await readBody(req)); }
     catch { res.writeHead(400); res.end('bad json'); return true; }
-    const args = buildCommentArgs(parsed);
-    if (!args) {
+    const input = parseCommentInput(parsed);
+    if (!input) {
       streamExecError(res, req,
         'invalid comment input: eventId must be hex (16–64 chars), body required (≤ 16 KB)'); return true;
     }
-    streamExec(
-      { bin: 'ngit', args, env: { NO_COLOR: '1', TERM: 'dumb' } },
-      res, req, project.path,
-    );
+    const emit = openSse(res);
+    try {
+      emit({ line: '▸ building kind-1111 comment event', stream: 'stdout' });
+      const repoRef = await resolveRepoRefInfo(project);
+      if (!repoRef) {
+        emit({ line: 'project has no decodable ngit remote — publish the repo first', stream: 'stderr' });
+        emit({ done: true, code: 1 });
+        return true;
+      }
+      const target = await fetchEventById(project, input.eventId);
+      if (!target) {
+        emit({ line: `could not fetch event ${input.eventId.slice(0, 16)}… from the repo relays — cannot build NIP-22 root tags without it`, stream: 'stderr' });
+        emit({ done: true, code: 1 });
+        return true;
+      }
+      let template: Nip34EventTemplate;
+      if (target.kind === KIND_GIT_COMMENT || target.kind === 1622) {
+        // Reply to a comment: target is the parent; root from its E tag.
+        const rootId = getRootEventId(target);
+        if (!rootId) {
+          emit({ line: 'target comment has no NIP-22 root (E) tag — cannot thread a reply', stream: 'stderr' });
+          emit({ done: true, code: 1 });
+          return true;
+        }
+        let root: EventRefInfo | null = null;
+        const rootEvent = await fetchEventById(project, rootId);
+        if (rootEvent) {
+          root = { id: rootEvent.id, kind: rootEvent.kind, pubkey: rootEvent.pubkey };
+        } else {
+          // Fall back to the parent's own K/P root tags before failing.
+          const k = getTagValue(target, 'K');
+          const p = getTagValue(target, 'P');
+          if (k && /^\d{1,5}$/.test(k) && p && /^[0-9a-f]{64}$/.test(p)) {
+            root = { id: rootId, kind: Number(k), pubkey: p };
+          }
+        }
+        if (!root) {
+          emit({ line: `could not resolve thread root ${rootId.slice(0, 16)}… (event unreachable and parent carries no K/P tags) — refusing to guess the root kind`, stream: 'stderr' });
+          emit({ done: true, code: 1 });
+          return true;
+        }
+        template = buildCommentTemplate(repoRef, {
+          root,
+          parent: { id: target.id, kind: target.kind, pubkey: target.pubkey },
+          body:   input.body,
+        });
+      } else if (target.kind === KIND_GIT_ISSUE) {
+        template = buildIssueCommentTemplate(repoRef, {
+          issueId: target.id, issuePubkey: target.pubkey, body: input.body,
+        });
+      } else {
+        // Patch root / arbitrary root — top-level comment (parent == root).
+        const root: EventRefInfo = { id: target.id, kind: target.kind, pubkey: target.pubkey };
+        template = buildCommentTemplate(repoRef, { root, parent: root, body: input.body });
+      }
+      const out = await signAndPublishOverSse(emit, template, nip34PublishTargets(repoRef));
+      if (!out || out.accepted === 0) {
+        if (out) emit({ line: 'no relay accepted the comment event', stream: 'stderr' });
+        emit({ done: true, code: 1 });
+        return true;
+      }
+      try { clearCache({ projectId: project.id, projectPath: project.path, key: 'issues-inbox' }); } catch {}
+      emit({ line: `comment posted: ${out.signedEvent.id}`, stream: 'stdout' });
+      emit({ done: true, code: 0 });
+    } catch (e: any) {
+      emit({ line: `comment failed: ${(e?.message || 'unknown error').toString().slice(0, 200)}`, stream: 'stderr' });
+      emit({ done: true, code: 1 });
+    } finally {
+      try { res.end(); } catch {}
+    }
     return true;
   }
 

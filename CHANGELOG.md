@@ -5,6 +5,44 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Code tab: set the repository's default branch
+
+The default branch (the kind-30618 HEAD pointer) can now be changed from the
+Code tab — a "Set as default" button next to the branch picker, shown only to
+the repository's trust anchor when a non-default branch is selected; the
+current default carries a quiet "default" chip. Clicking re-signs the repo
+state with the new HEAD (one signer prompt, no pack push) and re-probes the
+sync badge. Only an already-announced branch can become the default, so the
+new default can never dangle. Pairs with the deliverable-set fix below: HEAD
+is owned by the announcement and is no longer retargeted by an ordinary push,
+so this is the deliberate, owner-driven way to move it — the granular control
+beneath the Shakespeare-simple Push/Sync defaults.
+
+- New `GET/POST /api/projects/:id/ngit/default-branch` (read the announced
+  branches + current default / retarget HEAD). Pure ref logic in
+  `src/lib/grasp-push.ts` (`setDefaultBranchTags`, `announcedBranches`,
+  `defaultBranchOf`); owner-gated server-side.
+
+### Fixed: push state (kind 30618) now announces only the deliverable ref set
+
+Push delivers only the current branch's pack, but the state event announced
+*every* local branch and tag. With agentic TUIs (Claude Code, OpenCode) that
+spin up throwaway `claude/*` branches constantly, those local-only scratch
+branches leaked into the repo's permanent relay state and read as "differs /
+missing on git server" on the sync badge forever — drift by construction (the
+shape behind the Blip incident). `buildRepoStateTags` now announces exactly
+`{current branch, local oid} ∪ {prior-announced branches, prior oids}` plus
+the prior state's tags — i.e. only what is (or will be, after this push)
+actually on the git hosts. Non-current branches keep their prior (host) oid,
+never the local one, so a locally-advanced `main` can't pin a commit the host
+lacks. Entirely background: Push and Sync behave identically.
+
+Composed with this, a preserved `HEAD` is honoured only while it still
+resolves within the announced ref set (symbolic → the branch is announced;
+detached oid → it is an announced tip), falling back to the current branch
+otherwise — so a renamed-away branch or rebased-away commit can no longer ride
+the announcement forever as a phantom default-branch pointer.
+
 ### NIP-89 client tag: push state events + ngit init announcements
 
 Two publish paths that previously escaped the canonical 4-element
