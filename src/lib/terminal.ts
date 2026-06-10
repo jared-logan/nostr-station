@@ -38,6 +38,7 @@ import type { WebSocket } from 'ws';
 import { findBin } from './detect.js';
 import { projectEnvContract, type Project } from './projects.js';
 import { bindSession as bindDevServerSession, releaseSession as releaseDevServerSession } from './dev-server-registry.js';
+import { readMobileAccessConfig } from './mobile-access.js';
 
 // Bridge to require() from within an ESM module — needed to call
 // require.resolve('node-pty/package.json') without triggering the native
@@ -321,8 +322,18 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
     // allocate (e.g. bare-key invocations from the CLI).
     case 'stacks-dev': {
       const port = opts.port ?? 5173;
+      // Vite binds loopback by default — correct for local browsing, but
+      // when the dashboard itself is exposed over the mesh (Mobile
+      // Access), the preview iframe loads in a remote browser and must
+      // reach the dev server on the same interface the dashboard uses.
+      // Follow the same opt-in: loopback-only until the user enables
+      // Mobile Access, then bind all interfaces like the dashboard does.
+      // (The dev server has no auth of its own; exposure tracks the same
+      // explicit toggle, and the mesh is a WireGuard-class private net.)
+      const args = ['run', 'dev', '--', '--port', String(port)];
+      if (readMobileAccessConfig().enabled) args.push('--host', '0.0.0.0');
       return {
-        cmd: 'npm', args: ['run', 'dev', '--', '--port', String(port)], cwd,
+        cmd: 'npm', args, cwd,
         label: cwd ? `dev :${port} · ${path.basename(cwd)}` : `dev :${port}`,
       };
     }

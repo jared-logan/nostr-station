@@ -72,6 +72,7 @@ import { handleProjectsExec } from './projects-exec.js';
 import { handleProjectsNsiteDeploy } from './projects-nsite-deploy.js';
 import { handleTestIdentities } from './test-identities.js';
 import { promote } from '../promote.js';
+import { readMobileAccessConfig } from '../mobile-access.js';
 import {
   readBody, setActiveChatProjectId,
 } from './_shared.js';
@@ -315,6 +316,12 @@ export async function handleProjects(
         running:   state?.running ?? false,
         port,
         url:       `http://localhost:${port}`,
+        // Whether spawned dev servers bind beyond loopback (tracks the
+        // Mobile Access toggle — see commandFor 'stacks-dev' in
+        // terminal.ts). The preview pane uses this to explain, rather
+        // than break, when the dashboard is viewed over the mesh while
+        // the dev server is loopback-only.
+        meshAccess: readMobileAccessConfig().enabled,
         sessionId: state?.sessionId ?? null,
         startedAt: state?.startedAt ?? null,
       }));

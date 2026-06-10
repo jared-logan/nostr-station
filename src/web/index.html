@@ -215,7 +215,10 @@
       <!-- Side-by-side: chat on the left, optional live preview on the right.
            Preview pane is shown only when an active project is set in chat
            AND the project is stacks/MKStack (has stack.json + npm dev script).
-           Driven by data-preview="hidden|open|collapsed" — see PreviewPane in app.js. -->
+           Driven by data-preview="hidden|open|collapsed|full" — see
+           PreviewPane in app.js. "full" hides the chat column and the
+           preview takes the whole panel; chat docks to a left-edge
+           pull-tab (mirror of the preview's right-edge one). -->
       <div class="chat-split" id="chat-split" data-preview="hidden">
         <div class="chat">
           <div class="chat-feed" id="chat-feed">
@@ -235,14 +238,16 @@
             <span class="cp-label">Preview</span>
             <code class="cp-url" id="cp-url" title="Dev server URL">http://localhost:5173</code>
             <div class="cp-actions">
+              <button id="cp-open-ext" title="Open preview in a new browser tab" aria-label="Open preview in a new browser tab">↗</button>
+              <button id="cp-expand" title="Full view (Esc to exit)" aria-label="Toggle full view" aria-pressed="false">⛶</button>
               <button id="cp-reload" title="Reload preview" aria-label="Reload preview">↻</button>
               <button id="cp-collapse" title="Collapse preview" aria-label="Collapse preview">→</button>
             </div>
           </div>
           <div class="chat-preview-body">
             <div class="cp-empty" id="cp-empty">
-              <div class="cp-empty-title">Dev server not detected</div>
-              <div class="cp-empty-hint muted">
+              <div class="cp-empty-title" id="cp-empty-title">Dev server not detected</div>
+              <div class="cp-empty-hint muted" id="cp-empty-hint">
                 Spawns <code>npm run dev -- --port 5173</code> in the terminal panel.
               </div>
               <button class="primary" id="cp-start">Start dev server</button>
@@ -252,6 +257,9 @@
         </aside>
 
         <button class="chat-preview-show" id="cp-show" hidden title="Show preview" aria-label="Show preview">←</button>
+        <!-- Left-edge pull-tab shown only in data-preview="full" (CSS-gated,
+             no hidden attr) — brings the chat column back. -->
+        <button class="chat-show" id="cp-chat-show" title="Show chat" aria-label="Show chat">→</button>
 
         <!-- Mobile-only bottom tab strip — flips between chat + preview when
              a previewable project is active. Shown by CSS at ≤900px. Each

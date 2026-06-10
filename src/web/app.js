@@ -3231,7 +3231,9 @@ const ChatPanel = (() => {
   // it (the server registry's onExit hook flips `running` back to false).
   const PreviewPane = (() => {
     const COLLAPSE_KEY = 'ns:chat-preview:collapsed';
+    const FULL_KEY     = 'ns:chat-preview:full';
     let split, frame, empty, urlEl, startBtn, reloadBtn, collapseBtn, showBtn;
+    let expandBtn, openExtBtn, chatShowBtn, emptyTitle, emptyHint;
     let initialized = false;
     // Current per-project URL (e.g. http://localhost:5174). Re-fetched
     // from /api/projects/:id/dev-server on each sync(). Buttons read this
@@ -3254,6 +3256,11 @@ const ChatPanel = (() => {
       reloadBtn   = document.getElementById('cp-reload');
       collapseBtn = document.getElementById('cp-collapse');
       showBtn     = document.getElementById('cp-show');
+      expandBtn   = document.getElementById('cp-expand');
+      openExtBtn  = document.getElementById('cp-open-ext');
+      chatShowBtn = document.getElementById('cp-chat-show');
+      emptyTitle  = document.getElementById('cp-empty-title');
+      emptyHint   = document.getElementById('cp-empty-hint');
       if (!split) return;
       initialized = true;
 
@@ -3269,6 +3276,26 @@ const ChatPanel = (() => {
 
       collapseBtn.addEventListener('click', () => setCollapsed(true));
       showBtn.addEventListener('click',     () => setCollapsed(false));
+
+      // Full view: preview takes the whole panel, chat docks to the
+      // left-edge pull-tab. ⛶ toggles; Esc or the pull-tab exits.
+      expandBtn?.addEventListener('click',  () => setFull(split.dataset.preview !== 'full'));
+      chatShowBtn?.addEventListener('click', () => setFull(false));
+      document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (!split || split.dataset.preview !== 'full') return;
+        // Don't steal Esc from a modal layered above the panel.
+        const modalRoot = document.getElementById('modal-root');
+        if (modalRoot && modalRoot.childElementCount > 0) return;
+        setFull(false);
+      });
+
+      // Power escape hatch: the dev server in its own browser tab, with
+      // native devtools. currentUrl is hostname-relative (see sync), so
+      // this works over mesh access too once the dev server is exposed.
+      openExtBtn?.addEventListener('click', () => {
+        if (currentUrl) window.open(currentUrl, '_blank', 'noopener');
+      });
 
       // Mobile bottom tab strip — flips between chat and preview by
       // delegating to the same setCollapsed() so localStorage + the
@@ -3306,16 +3333,40 @@ const ChatPanel = (() => {
       });
     }
 
+    // Single writer for the visible (non-hidden) modes. Keeps the
+    // dataset, both pull-tabs, the ⛶ toggle, and the mobile tab strip
+    // in lockstep no matter which control drove the change.
+    function applyMode(mode) {
+      split.dataset.preview = mode;
+      showBtn.hidden = mode !== 'collapsed';
+      if (expandBtn) {
+        expandBtn.setAttribute('aria-pressed', mode === 'full' ? 'true' : 'false');
+        expandBtn.title = mode === 'full' ? 'Exit full view (Esc)' : 'Full view (Esc to exit)';
+      }
+      syncTabState(mode === 'collapsed');
+    }
+
     function setCollapsed(collapsed) {
       init();
       if (!split) return;
       // Only toggle if the pane is actually applicable for this project.
-      const state = split.dataset.preview;
-      if (state === 'hidden') return;
-      split.dataset.preview = collapsed ? 'collapsed' : 'open';
-      showBtn.hidden = !collapsed;
-      syncTabState(collapsed);
+      if (split.dataset.preview === 'hidden') return;
+      // Collapsing (or re-opening side-by-side) always leaves full view —
+      // both gestures mean "give me the chat back".
+      try { localStorage.setItem(FULL_KEY, '0'); } catch {}
       try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch {}
+      applyMode(collapsed ? 'collapsed' : 'open');
+    }
+
+    function setFull(full) {
+      init();
+      if (!split) return;
+      if (split.dataset.preview === 'hidden') return;
+      try {
+        localStorage.setItem(FULL_KEY, full ? '1' : '0');
+        if (full) localStorage.setItem(COLLAPSE_KEY, '0');
+      } catch {}
+      applyMode(full ? 'full' : 'open');
     }
 
     function syncTabState(collapsed) {
@@ -3332,6 +3383,13 @@ const ChatPanel = (() => {
 
     function isCollapsedPref() {
       try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch { return false; }
+    }
+    function modePref() {
+      try { if (localStorage.getItem(FULL_KEY) === '1') return 'full'; } catch {}
+      return isCollapsedPref() ? 'collapsed' : 'open';
+    }
+    function isLoopbackHostname(h) {
+      return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h.startsWith('127.');
     }
 
     async function sync(project) {
@@ -3362,19 +3420,48 @@ const ChatPanel = (() => {
       try { info = await api(`/api/projects/${project.id}/dev-server`); } catch {}
       if (myToken !== syncToken) return; // stale — newer sync() in flight
 
-      const nextUrl = info?.url || 'http://localhost:5173';
+      // Build the URL from the browser's own hostname rather than the
+      // server's literal "localhost" string — over mesh / Mobile Access
+      // the dashboard host IS the dev-server host, while "localhost"
+      // would point at the viewing device.
+      const port = Number.isFinite(info?.port) ? info.port : null;
+      const nextUrl = port
+        ? `http://${location.hostname}:${port}`
+        : (info?.url || `http://${location.hostname}:5173`);
       const nextRunning = !!info?.running;
       const switchedProject = currentProjectId !== project.id;
       currentUrl = nextUrl;
       currentProjectId = project.id;
       if (urlEl) urlEl.textContent = nextUrl;
 
-      const collapsed = isCollapsedPref();
-      split.dataset.preview = collapsed ? 'collapsed' : 'open';
-      showBtn.hidden = !collapsed;
-      syncTabState(collapsed);
+      applyMode(modePref());
 
-      if (switchedProject) {
+      // Browsing from a non-loopback host while Mobile Access is off
+      // means the dev server binds loopback-only inside the station —
+      // the iframe could never load. Explain instead of rendering the
+      // browser's raw connection-refused page.
+      const remoteBlocked = !isLoopbackHostname(location.hostname)
+        && !!info && info.meshAccess !== true;
+      if (emptyTitle && emptyHint) {
+        if (remoteBlocked) {
+          emptyTitle.textContent = 'Preview not reachable from this device';
+          emptyHint.innerHTML = 'The dev server binds to localhost on the station. '
+            + 'Enable <b>Mobile Access</b> (nostr-vpn → Network), then restart '
+            + 'the dev server to expose it over the mesh.';
+        } else {
+          emptyTitle.textContent = 'Dev server not detected';
+          emptyHint.innerHTML = `Spawns <code>npm run dev -- --port ${port || 5173}</code> in the terminal panel.`;
+        }
+      }
+      if (startBtn) startBtn.style.display = remoteBlocked ? 'none' : '';
+
+      if (remoteBlocked) {
+        if (frame) {
+          frame.hidden = true;
+          if (frame.src && frame.src !== 'about:blank') frame.src = 'about:blank';
+        }
+        if (empty) empty.style.display = '';
+      } else if (switchedProject) {
         // Park the previous project's iframe so the user doesn't briefly
         // see the wrong project's UI while the new src loads. Auto-reload
         // when the server reports a running dev server — saves the user a
@@ -3391,7 +3478,7 @@ const ChatPanel = (() => {
       }
     }
 
-    return { sync, setCollapsed };
+    return { sync, setCollapsed, setFull };
   })();
 
   // Permissions toggle (chat-header dropdown). Hidden when no
