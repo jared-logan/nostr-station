@@ -148,12 +148,6 @@ CLAUDE.md
 # accidentally `git add .` them into the source tree).
 projects/
 
-# Ditto source build scratch directory. scripts/fetch-ditto.mjs clones
-# soapbox-pub/ditto here, writes a baked ditto.json, runs npm ci +
-# npm run build, then copies the resulting dist out to dist/ditto/ and
-# wipes this dir. Lives only on the build machine; never committed.
-.ditto-src/
-
 # OS metadata
 .DS_Store
 

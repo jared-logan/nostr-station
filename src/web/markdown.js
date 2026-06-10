@@ -34,7 +34,7 @@
  * Two paths emit signed URLs depending on where the URL came from:
  *
  *   - **Server-emitted fields** (profile picture/banner, Ditto theme
- *     bgImage, ProfileLite in /api/profiles / /api/client/feed). The
+ *     bgImage, ProfileLite in /api/profiles). The
  *     server pre-signs at JSON-emission time and the URL arrives at
  *     the browser as `/api/img-proxy?u=…&s=…` already. `proxyImageUrl`
  *     detects the already-signed shape and passes through unchanged.

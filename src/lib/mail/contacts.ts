@@ -11,9 +11,7 @@
  * impact is bounded — at worst the next mail from a newly-followed
  * pubkey lands in Requests for one cache cycle.
  *
- * Distinct from routes/client.ts's own contacts cache: that one is
- * scoped to the social Client panel and has a 60-second TTL aimed at
- * keyboard-feel feed refreshes. Mail wants a longer lifetime + a
+ * Mail wants a longer lifetime + a
  * different cache key, so we own a separate copy.
  */
 

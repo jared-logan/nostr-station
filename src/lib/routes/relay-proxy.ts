@@ -22,9 +22,8 @@
  * MAX_WS_PAYLOAD (1 MiB) to both legs.
  *
  * Out of scope: server-side relay queries in src/lib/nostr-query.ts,
- * src/lib/routes/identity.ts, src/lib/routes/ditto.ts,
- * src/lib/mail/inbox.ts — those never run in the browser and keep
- * their direct outbound WS.
+ * src/lib/routes/identity.ts, src/lib/mail/inbox.ts — those never run
+ * in the browser and keep their direct outbound WS.
  */
 import http from 'http';
 import { WebSocket, WebSocketServer } from 'ws';

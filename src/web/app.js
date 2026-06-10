@@ -25,7 +25,7 @@ if (typeof document !== 'undefined') {
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'blossom', 'projects', 'vpn', 'logs', 'client', 'apps', 'nsite', 'mail', 'config', 'communities'];
+const PANELS = ['status', 'chat', 'relay', 'blossom', 'projects', 'vpn', 'logs', 'apps', 'nsite', 'mail', 'config', 'communities'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -215,6 +215,7 @@ function clearDittoStyleBlock() {
   const el = document.getElementById('ditto-theme-style');
   if (el) el.remove();
 }
+
 function renderThemePicker() {
   const current = getTheme();
   return `<div class="theme-picker" id="cfg-theme-picker">${
@@ -248,7 +249,8 @@ function wireThemePicker() {
   });
 }
 
-// ── Ditto theme card ─────────────────────────────────────────────────────
+// Relative-time formatter ("3m ago"). Generic date util used across
+// the dashboard.
 function fmtAgo(tsMs) {
   if (!tsMs) return '';
   const s = Math.floor((Date.now() - tsMs) / 1000);
@@ -260,6 +262,12 @@ function fmtAgo(tsMs) {
   const d = Math.floor(h / 24);
   return `${d}d ago`;
 }
+
+// ── Ditto theme card ─────────────────────────────────────────────────────
+// "Sync from relays" mirrors the owner's published kind-16767 theme event
+// into the dashboard's accent + background. The embedded Ditto client was
+// removed (see CHANGELOG); this card stays because it's a Nostr-event
+// consumer, not part of any client UI.
 function renderDittoCard() {
   const theme  = getDittoTheme();
   const active = getTheme() === 'ditto';
@@ -17368,10 +17376,8 @@ const ConfigPanel = (() => {
             The relays <b>nostr-station itself</b> uses for its behind-the-scenes Nostr
             reads — resolving profile names + avatars and repo maintainers across the
             dashboard, and as an extra source when resolving nsites. These are
-            <b>not</b> the private local relay (configured above), and they do
-            <b>not</b> control the embedded
-            <a href="#client" style="color:var(--accent-bright)">Ditto client</a> —
-            Ditto connects to its own relays, managed inside Ditto's own settings.
+            <b>not</b> the private local relay (configured above); they're the
+            outbound relays the dashboard reads from when it needs network data.
           </div>
 
           <div class="cfg-subsection" id="cfg-app-relays">
@@ -17870,7 +17876,7 @@ const ConfigPanel = (() => {
         syncBtn.disabled = true;
         syncBtn.textContent = 'syncing…';
         try {
-          const r = await api('/api/client/sync-relays', { method: 'POST' });
+          const r = await api('/api/identity/relays/sync', { method: 'POST' });
           if (r.unavailable) {
             toast('Sync skipped', r.hint || r.empty || r.reason, 'warn');
             return;
@@ -22606,118 +22612,6 @@ const SetupWizard = (() => {
 // Private DMs (NIP-17) are intentionally NOT in v1. The "DMs" tab is rendered
 // as a disabled placeholder so the IA is visible.
 
-// ── Panel: Client ────────────────────────────────────────────────────────
-//
-// Slim shell around the embedded Ditto SPA. The dashboard keeps the
-// header row (title + public chip + refresh button); everything else
-// is Ditto, served same-origin from /ditto/* by serveDitto() in
-// web-server-static.ts. Ditto handles its own auth (NIP-07 passes
-// through from any installed browser extension; NIP-46 pairs inside
-// Ditto's own settings if the user wants server-side signing here).
-//
-// When the Ditto bundle is missing — scripts/fetch-ditto.mjs failed at
-// build time, or the user has STATION_SKIP_DITTO=1 — the server's
-// /ditto/ route 404s with `{ error: 'ditto-not-bundled' }`. The panel
-// HEAD-probes that endpoint on first mount and swaps the iframe for an
-// inline instruction block in that case.
-const ClientPanel = (() => {
-  const frame      = $('client-ditto-frame');
-  const missing    = $('client-ditto-missing');
-  const refreshBtn = $('client-refresh');
-  const retryBtn   = $('client-ditto-retry');
-  const installBtn = $('client-ditto-install');
-
-  let probed = false;
-
-  async function probeDittoBundle() {
-    if (probed) return;
-    probed = true;
-    try {
-      const r = await fetch('/ditto/', { method: 'HEAD', cache: 'no-store' });
-      if (r.ok) { showFrame(); return; }   // bundle present
-      showMissing();
-    } catch {
-      // Network / aborted — leave the iframe alone (it surfaces its own
-      // error). probed=true prevents thrashing on repeated panel-enters.
-    }
-  }
-
-  function showMissing() {
-    if (frame)   frame.hidden = true;
-    if (missing) missing.hidden = false;
-  }
-  function showFrame() {
-    if (frame)   frame.hidden = false;
-    if (missing) missing.hidden = true;
-  }
-
-  // Refresh = reload the embedded SPA without leaving the dashboard.
-  // Re-setting src is cheaper than a full page reload and keeps the
-  // dashboard session intact. Brief empty-src step forces the browser
-  // to actually re-mount (some engines no-op an identical src write).
-  function reloadFrame() {
-    if (!frame) return;
-    const url = frame.getAttribute('src') || '/ditto/';
-    frame.setAttribute('src', '');
-    requestAnimationFrame(() => frame.setAttribute('src', url));
-  }
-
-  // Bounce nsite-gateway navigations from inside Ditto into our own
-  // nsite browser panel. The injected script in Ditto's <head>
-  // (web-server-static.ts:DITTO_PREFIX_STRIP_SCRIPT) catches window.open
-  // and <a> clicks targeting *.nsite.lol / *.nsite.run / *.nsite.cloud /
-  // *.nosto.re / *.nwb.tf / *.nostr.hu and postMessages the URL up here.
-  // We re-validate origin, source, and the gateway pattern before
-  // accepting, then drop the URL onto #nsite/<encoded-url>. The nsite
-  // panel's existing maybeConsumeDeepLink() flow takes it from there:
-  // address bar, resolver, iframe boot — same code path as if the user
-  // typed the URL in directly.
-  const NSITE_GATEWAY_HOST = /^[^.]+\.(?:nsite\.lol|nsite\.run|nsite\.cloud|nosto\.re|nwb\.tf|nostr\.hu)$/i;
-  window.addEventListener('message', (event) => {
-    if (!frame || event.source !== frame.contentWindow) return;
-    if (event.origin !== location.origin) return;
-    const m = event.data;
-    if (!m || typeof m !== 'object') return;
-    if (m.type !== 'station:open-nsite' || typeof m.url !== 'string') return;
-    let host;
-    try { host = new URL(m.url, location.origin).hostname; } catch { return; }
-    if (!NSITE_GATEWAY_HOST.test(host)) return;
-    location.hash = '#nsite/' + encodeURIComponent(m.url);
-  });
-
-  refreshBtn?.addEventListener('click', reloadFrame);
-  retryBtn?.addEventListener('click', () => {
-    // User just ran `npm run update-ditto` and clicked Reload — re-probe
-    // + remount in case the bundle is now present.
-    probed = false;
-    void probeDittoBundle().then(() => reloadFrame());
-  });
-  // In-dashboard fetch — spawns scripts/fetch-ditto.mjs server-side and
-  // streams the output through the existing exec modal. Saves the user
-  // from SSH'ing to the VM when the build-time fetch failed. After the
-  // exec modal closes successfully, we re-probe + reload the iframe so
-  // the freshly-bundled Ditto mounts without a page refresh.
-  installBtn?.addEventListener('click', () => {
-    openExecModal({
-      title:    'Fetch Ditto',
-      subtitle: 'Downloads + extracts Ditto into dist/ditto/ (~6 MiB from GitLab)',
-      endpoint: '/api/ditto/install',
-    }).then(r => {
-      if (r.ok) {
-        toast('Ditto installed', 'Reloading the Client panel…', 'ok');
-        probed = false;
-        void probeDittoBundle().then(() => reloadFrame());
-      } else {
-        toast('Fetch failed', `exit code ${r.code}`, 'err');
-      }
-    });
-  });
-
-  return {
-    onEnter() { void probeDittoBundle(); },
-  };
-})();
-
 // ── Panel: Mail ──────────────────────────────────────────────────────────
 //
 // Encrypted NIP-17 mail. Two-pane layout — thread list on the left,
@@ -27149,7 +27043,6 @@ const Panels = {
   projects:    ProjectsPanel,
   vpn:         VpnPanel,
   logs:        LogsPanel,
-  client:      ClientPanel,
   apps:        AppsPanel,
   nsite:       NsitePanel,
   mail:        MailPanel,
