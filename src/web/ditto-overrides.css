@@ -16,11 +16,16 @@
  *   ⑬ Badges                      — square corners
  *   ⑭ Heading scale               — text-2xl tightened
  *   ⑮ Toast elevation             — heavier shadow
- *   ⑯ Logo                        — render real SVG colors, not flat mask
- *   ⑰ Search input                — square the pill
- *   ⑱ Outer nav-item wrapper      — square the pills (follow-up to ④)
- *   ⑲ Tab arcs                    — kill curves, flat underline
- *   ⑳ Avatar shape preservation   — defense-in-depth
+ *   ⑯ Search input                — square the pill
+ *   ⑰ Outer nav-item wrapper      — square the pills (follow-up to ④)
+ *   ⑱ Tab arcs                    — kill curves, flat underline
+ *   ⑲ Avatar shape preservation   — defense-in-depth
+ *
+ * Note: the logo styling section was removed when the skin layer's
+ * DittoLogo replacement landed (src/web/ditto-skin/components/
+ * DittoLogo.tsx) — that component renders /logo.svg as an <img> with
+ * real colors, no mask hack needed. As more skin replacements ship,
+ * additional sections (④, ⑰, ⑱) will retire the same way.
  *
  * Applied via a <link> tag injected at the end of dist/ditto/index.html
  * (see applyBranding() in scripts/fetch-ditto.mjs). Loaded after Ditto's
@@ -392,38 +397,6 @@ button:focus-visible {
  */
 [role="status"][data-state="open"] {
   box-shadow: 0 8px 24px rgba(0,0,0,0.4) !important;
-}
-
-/* ───── Logo — render real SVG colors, not flat --primary mask ──
- * Ditto's DittoLogo component (src/components/DittoLogo.tsx:115-132)
- * uses the SVG as a CSS `mask-image` with a flat
- * `background-color: hsl(var(--primary))` underneath. The mask only
- * reads the SVG's alpha channel, so every colored stroke in nori.svg
- * gets flattened to one tone of orange (the --primary token).
- *
- * Override: strip the mask, drop the flat fill, and render the SVG
- * as a `background-image` instead. Preserves the size/positioning
- * the component set inline. The logo file at /logo.svg is whatever
- * applyBranding() copied there — nori.svg in our build.
- *
- * Selector targets the aria-label that the component sets from
- * config.appName, which buildDittoConfig() sets to "nostr-station".
- * If the appName ever changes, this rule needs the matching update.
- *
- * Note: the rare pixelated variant (DittoLogo.tsx:135-178, ~1-in-20
- * chance for logged-in users) sets the mask via inline JS rather
- * than the CSS-attribute API, so this rule doesn't strip it. The
- * pixelated branch stays as Ditto-flavored easter-egg behaviour;
- * killing it would need a /theme.js patch.
- */
-[role="img"][aria-label="nostr-station"] {
-  background-color: transparent !important;
-  mask-image: none !important;
-  -webkit-mask-image: none !important;
-  background-image: url(/logo.svg) !important;
-  background-size: contain !important;
-  background-repeat: no-repeat !important;
-  background-position: center !important;
 }
 
 /* ───── Search input — square the pill ──────────────────────────
