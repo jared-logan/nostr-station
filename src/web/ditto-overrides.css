@@ -3,7 +3,7 @@
  * Sections (in source order):
  *   ① Typography                  — font stack, base size, line-height
  *   ② Border-radius scale         — Tailwind rounded-* → --r-sm/--r/--r-lg
- *   ③ Layout container            — kill 1200px outer cap + 600px feed cap
+ *   ③ Layout container            — RETIRED (owned by skin MainLayout)
  *   ④ Sidebar nav                 — square the pills, accent-soft active
  *   ⑤ Dialog elevation            — heavier shadow
  *   ⑥ Buttons                     — auto height + tight padding (exc. icon)
@@ -130,26 +130,11 @@ html {
 .rounded-sm { border-radius: 3px !important; }
 .rounded-xs { border-radius: 0   !important; }
 
-/* ───── Layout container — kill desktop side margins ─────────────
- * Ditto's MainLayout wraps the three-column shell in
- *   <div class="flex justify-center mx-auto max-w-[1200px]">
- * (MainLayout.tsx:59 at DITTO_REF 7a5820c). On wide displays the
- * Client panel iframe gets the dashboard's full main width minus the
- * 224px sidebar — roughly 1696px at 1920p — and Ditto's 1200px cap
- * parks ~250px of empty space on each side. Kill the cap so the
- * three-column layout fills the panel.
- *
- * Also lift the center-column cap (MainLayout.tsx:73's
- * `sidebar:max-w-[600px]`) so the feed widens into the new space
- * rather than leaving dead gutter between the feed and the right
- * rail.
- *
- * Both caps only fire above the `sidebar:` breakpoint (900px); mobile
- * layout is untouched. CSS attribute escapes: `\[` / `\]` / `\:` are
- * literal characters in class names.
- */
-.max-w-\[1200px\] { max-width: none !important; }
-.sidebar\:max-w-\[600px\] { max-width: none !important; }
+/* Layout-container section retired: width caps are now owned natively
+ * by the skin MainLayout (src/web/ditto-skin/components/MainLayout.tsx
+ * — outer 1200px cap dropped, center column capped at 720px). The old
+ * rules here uncapped the feed entirely, which made post text lines
+ * too long to scan. */
 
 /* ───── Sidebar nav — square the pills ───────────────────────────
  * Ditto's SidebarNavItem renders nav items as `rounded-full` pills
