@@ -5,6 +5,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed: stale HEAD pins in push state events (kind 30618)
+
+A prior state's `HEAD` tag was preserved verbatim on every push (Shakespeare
+semantics — pushers don't own the default-branch pointer). But verbatim
+preservation re-announces a renamed-away branch or rebased-away commit
+forever, which NIP-34 readers (gitworkshop) surface as a permanent
+"announced commit not found on git server" warning. `buildRepoStateTags`
+now preserves a prior HEAD only while it still resolves within the state
+being announced (symbolic → the branch is announced; detached oid → it is
+an announced tip), falling back to the current branch otherwise.
+
 ### NIP-89 client tag: push state events + ngit init announcements
 
 Two publish paths that previously escaped the canonical 4-element

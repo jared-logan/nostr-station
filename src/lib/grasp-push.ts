@@ -65,10 +65,11 @@ export function selectGraspCloneUrls(clone: string[]): string[] {
 
 /**
  * Build the kind-30618 repo-state tag set from the local checkout, mirroring
- * Shakespeare's `nostrPush` exactly:
+ * Shakespeare's `nostrPush`:
  *   - ['d', identifier]
- *   - HEAD: if the existing state already pins a HEAD, preserve it verbatim;
- *     else a symbolic ref to the current branch; else the detached HEAD oid.
+ *   - HEAD: if the existing state pins a HEAD that is still VALID against the
+ *     refs being announced, preserve it verbatim; else a symbolic ref to the
+ *     current branch; else the detached HEAD oid.
  *   - one [refs/heads/<b>, oid] per local branch
  *   - one [refs/tags/<t>, oid] per local tag
  *   - the canonical NIP-89 client tag (attribution; ignored by GRASP hosts,
@@ -77,7 +78,11 @@ export function selectGraspCloneUrls(clone: string[]): string[] {
  * Preserving the existing HEAD matters: HEAD is the repo's "default branch"
  * pointer and is owned by the announcement, not by whoever happens to push —
  * clobbering it on every push would let a contributor on a feature branch
- * silently retarget the repo's default. Pure.
+ * silently retarget the repo's default. But preservation is gated on the
+ * pointer still resolving within THIS state event (see validPreservedHead):
+ * Shakespeare preserves verbatim, which re-announces a renamed-away branch or
+ * rebased-away commit forever — NIP-34 readers (gitworkshop) then warn
+ * "announced commit not found on git server" on every view. Pure.
  */
 export function buildRepoStateTags(
   identifier: string,
@@ -86,8 +91,9 @@ export function buildRepoStateTags(
 ): string[][] {
   const tags: string[][] = [['d', identifier]];
 
-  if (existingHeadTag && existingHeadTag.length >= 2) {
-    tags.push([...existingHeadTag]);
+  const preserved = validPreservedHead(existingHeadTag, refs);
+  if (preserved) {
+    tags.push(preserved);
   } else if (refs.currentBranch) {
     tags.push(['HEAD', `ref: refs/heads/${refs.currentBranch}`]);
   } else if (refs.headOid) {
@@ -102,6 +108,34 @@ export function buildRepoStateTags(
   }
   tags.push([...CLIENT_TAG]);
   return tags;
+}
+
+/**
+ * A prior state's HEAD tag is preservable only while it still points at
+ * something the new state announces:
+ *   - symbolic ('ref: refs/heads/X') → X must be among the announced branches
+ *     (a renamed/deleted default branch must not be re-announced forever);
+ *   - detached oid → must equal an announced branch/tag tip. An ancestor
+ *     commit can't be verified without git access, and a NIP-34 repo HEAD
+ *     pinned to a non-tip is not a state ngit/gitworkshop ever produce — so
+ *     fall back to the current branch rather than risk announcing a
+ *     rebased-away commit.
+ * Returns a fresh copy of the tag when valid, null when the caller should
+ * fall back. Pure; exported for tests.
+ */
+export function validPreservedHead(
+  head: string[] | null,
+  refs: LocalRefs,
+): string[] | null {
+  if (!head || head.length < 2 || head[0] !== 'HEAD' || typeof head[1] !== 'string') return null;
+  const v = head[1];
+  const SYMBOLIC = 'ref: refs/heads/';
+  if (v.startsWith(SYMBOLIC)) {
+    const branch = v.slice(SYMBOLIC.length);
+    return refs.branches.some(([name]) => name === branch) ? [...head] : null;
+  }
+  const isAnnouncedTip = [...refs.branches, ...refs.tags].some(([, oid]) => oid === v);
+  return isAnnouncedTip ? [...head] : null;
 }
 
 /**

@@ -6,6 +6,7 @@ const {
   buildRepoStateTags,
   repoStateTagsEqual,
   readLocalRefs,
+  validPreservedHead,
 } = await import('../src/lib/grasp-push.ts');
 const { CLIENT_TAG } = await import('../src/lib/client-tag.ts');
 
@@ -68,10 +69,41 @@ test('buildRepoStateTags: stamps the canonical 4-element client tag', () => {
   assert.deepEqual(clients, [[...CLIENT_TAG]]);
 });
 
-test('buildRepoStateTags: preserves an existing HEAD tag verbatim', () => {
+test('buildRepoStateTags: preserves an existing HEAD tag that still resolves', () => {
   const tags = buildRepoStateTags('amon-din', refs({ currentBranch: 'feature' }), ['HEAD', 'ref: refs/heads/main']);
-  // HEAD stays pinned to main even though the local branch is `feature`.
+  // HEAD stays pinned to main even though the local branch is `feature` —
+  // `main` is still among the announced branches, so the pin is honoured.
   assert.deepEqual(tags[1], ['HEAD', 'ref: refs/heads/main']);
+});
+
+// ── stale-HEAD guard ──────────────────────────────────────────────────────
+//
+// A preserved HEAD must still resolve within THIS state event. Re-announcing
+// a renamed-away branch or rebased-away commit forever is the "announced
+// commit not found on git server" warning gitworkshop shows on every view.
+
+test('buildRepoStateTags: a preserved HEAD to a branch we no longer announce falls back to the current branch', () => {
+  const tags = buildRepoStateTags(
+    'amon-din',
+    refs(),                                       // branches: main, dev; on main
+    ['HEAD', 'ref: refs/heads/master'],           // renamed away — not announced
+  );
+  assert.deepEqual(tags[1], ['HEAD', 'ref: refs/heads/main']);
+});
+
+test('buildRepoStateTags: a preserved detached-oid HEAD is kept only while it is an announced tip', () => {
+  // Matches the dev branch tip → preserved.
+  const kept = buildRepoStateTags('r', refs(), ['HEAD', 'b'.repeat(40)]);
+  assert.deepEqual(kept[1], ['HEAD', 'b'.repeat(40)]);
+  // Matches nothing announced (rebased away) → falls back to current branch.
+  const dropped = buildRepoStateTags('r', refs(), ['HEAD', 'e'.repeat(40)]);
+  assert.deepEqual(dropped[1], ['HEAD', 'ref: refs/heads/main']);
+});
+
+test('validPreservedHead: malformed tags are never preserved', () => {
+  assert.equal(validPreservedHead(null, refs()), null);
+  assert.equal(validPreservedHead(['HEAD'], refs()), null);
+  assert.equal(validPreservedHead(['head', 'ref: refs/heads/main'], refs()), null);
 });
 
 test('buildRepoStateTags: detached HEAD falls back to the commit oid', () => {
