@@ -129,6 +129,17 @@ input:focus, textarea:focus, select:focus {
 }
 ::placeholder { color: var(--muted); }
 
+/* Keyboard-only focus indicator for controls that otherwise have none.
+   :focus-visible keeps mouse clicks ring-free; inputs are excluded —
+   their accent border above already signals focus. */
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* ── layout ───────────────────────────────────────────────────────────── */
 
 .app {

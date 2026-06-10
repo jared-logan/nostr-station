@@ -837,8 +837,10 @@
   </div>
 </div>
 
-<!-- Reusable overlays, populated by app.js -->
-<div id="toasts"></div>
+<!-- Reusable overlays, populated by app.js. The toast host is an
+     aria-live region so screen readers announce async outcomes (saves,
+     errors) that otherwise exist only as transient visual toasts. -->
+<div id="toasts" role="status" aria-live="polite"></div>
 <div id="modal-root"></div>
 
 <!-- Identity drawer — populated + toggled by app.js -->
