@@ -1623,8 +1623,16 @@ function statusSignature(status) {
   return sig;
 }
 let __lastHealthSig = '';
+let __healthInFlight = false;
+let __healthRerun = false;
 
 async function refreshHealth() {
+  // Coalesce: if the previous tick's request is still pending (slow
+  // server, suspended laptop waking up), don't stack a concurrent
+  // /api/status call — note it and rerun once after it settles, so
+  // explicit post-mutation refreshes aren't dropped.
+  if (__healthInFlight) { __healthRerun = true; return; }
+  __healthInFlight = true;
   try {
     const status = await api('/api/status');
     const relay = status.find(s => s.id === 'relay');
@@ -1702,9 +1710,30 @@ async function refreshHealth() {
     if (currentPanel() === 'status') Panels.status.render(status);
     window.__lastStatus = status;
   } catch {}
+  finally {
+    __healthInFlight = false;
+    if (__healthRerun) { __healthRerun = false; void refreshHealth(); }
+  }
 }
 
-setInterval(refreshHealth, 5000);
+// Health polling pauses while the tab is hidden — a backgrounded
+// dashboard was hitting /api/status every 5s indefinitely for data
+// nobody was looking at. On re-focus, refresh immediately so the
+// sidebar is current the moment the user returns, then resume.
+let __healthTimer = null;
+function startHealthPoll() {
+  if (__healthTimer || document.hidden) return;
+  __healthTimer = setInterval(refreshHealth, 5000);
+}
+function stopHealthPoll() {
+  if (__healthTimer) { clearInterval(__healthTimer); __healthTimer = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { stopHealthPoll(); return; }
+  void refreshHealth();
+  startHealthPoll();
+});
+startHealthPoll();
 
 // ── Panel: Status ────────────────────────────────────────────────────────
 
@@ -4179,7 +4208,7 @@ const RelayPanel = (() => {
     $('relay-pubkeys').textContent = pubkeys.size;
     const inline = $('relay-events-inline-count');
     if (inline) inline.textContent = events.length;
-    renderKinds(); renderEvents();
+    renderKinds(); prependEvent(ev);
   }
   function renderKinds() {
     const el = $('relay-kinds');
@@ -4192,6 +4221,46 @@ const RelayPanel = (() => {
       el.appendChild(b);
     }
   }
+  // Resolved profile name when the cache has one (populated by
+  // resolveProfiles); falls back to the historical 12-char hex
+  // truncation. profileNameOf returns its own npub-truncated form
+  // when no profile is on file, so detect that and prefer the
+  // tighter hex slice for stream rows where space is tight.
+  function pkLabelFor(pubkey) {
+    const resolved = (typeof profileNameOf === 'function' && pubkey)
+      ? profileNameOf(pubkey) : '';
+    const isNpubFallback = /^npub1[0-9a-z]{4,}…[0-9a-z]{4,}$/.test(resolved);
+    return resolved && !isNpubFallback
+      ? resolved
+      : `${(pubkey || '').slice(0, 12)}…`;
+  }
+  function buildEventRow(ev) {
+    const row = document.createElement('div');
+    row.className = 'event';
+    const ts = new Date((ev.created_at || 0) * 1000);
+    row.innerHTML = `
+      <div class="k-tag">${escapeHtml(kindLabel(ev.kind))}</div>
+      <div class="pk" title="${escapeHtml(ev.pubkey || '')}">${escapeHtml(pkLabelFor(ev.pubkey))}</div>
+      <div class="content">${escapeHtml(ev.content || '')}</div>
+      <div class="ts">${escapeHtml(isNaN(ts.getTime()) ? '' : ts.toLocaleTimeString())}</div>
+    `;
+    return row;
+  }
+  // Live-stream path: insert just the new row instead of rebuilding the
+  // whole list (which reset scroll position on every incoming event).
+  // If the user has scrolled down to read older events, offset the
+  // scroll by the new row's height so their reading position holds.
+  function prependEvent(ev) {
+    const el = $('relay-events');
+    if (!el) return;
+    if (el.querySelector('.empty-state')) el.innerHTML = '';
+    const row = buildEventRow(ev);
+    el.insertBefore(row, el.firstChild);
+    while (el.children.length > events.length) el.removeChild(el.lastChild);
+    if (el.scrollTop > 0) el.scrollTop += row.offsetHeight;
+    resolveAndPatch(ev.pubkey ? [ev.pubkey] : []);
+  }
+  // Full repaint — initial render, wipe/restart, panel re-entry.
   function renderEvents() {
     const el = $('relay-events');
     if (events.length === 0) {
@@ -4200,50 +4269,35 @@ const RelayPanel = (() => {
       return;
     }
     el.innerHTML = '';
-    for (const ev of events) {
-      const row = document.createElement('div');
-      row.className = 'event';
-      const ts = new Date((ev.created_at || 0) * 1000);
-      // Resolved profile name when the cache has one (populated below
-      // by resolveProfiles); falls back to the historical 12-char hex
-      // truncation. profileNameOf returns its own npub-truncated form
-      // when no profile is on file, so detect that and prefer the
-      // tighter hex slice for stream rows where space is tight.
-      const resolved = (typeof profileNameOf === 'function' && ev.pubkey)
-        ? profileNameOf(ev.pubkey) : '';
-      const isNpubFallback = /^npub1[0-9a-z]{4,}…[0-9a-z]{4,}$/.test(resolved);
-      const pkLabel = resolved && !isNpubFallback
-        ? resolved
-        : `${(ev.pubkey || '').slice(0, 12)}…`;
-      row.innerHTML = `
-        <div class="k-tag">${escapeHtml(kindLabel(ev.kind))}</div>
-        <div class="pk" title="${escapeHtml(ev.pubkey || '')}">${escapeHtml(pkLabel)}</div>
-        <div class="content">${escapeHtml(ev.content || '')}</div>
-        <div class="ts">${escapeHtml(isNaN(ts.getTime()) ? '' : ts.toLocaleTimeString())}</div>
-      `;
-      el.appendChild(row);
-    }
-    // Kick off profile resolution for unresolved authors in view, then
-    // re-paint to upgrade truncated hex to names. Cheap when the local
-    // store already has the profile (no network), and the cache dedupes
-    // repeated lookups across events sharing an author.
+    for (const ev of events) el.appendChild(buildEventRow(ev));
+    resolveAndPatch(events.map(ev => ev.pubkey));
+  }
+  // Kick off profile resolution for unresolved authors, then patch the
+  // affected .pk cells in place (matched via their title attribute,
+  // which carries the full pubkey) — upgrading truncated hex to names
+  // without rebuilding rows. Cheap when the local store already has the
+  // profile (no network), and the cache dedupes repeated lookups across
+  // events sharing an author.
+  function resolveAndPatch(candidatePubkeys) {
     try {
-      if (typeof resolveProfiles === 'function') {
-        const unresolved = [];
-        for (const ev of events) {
-          if (!ev.pubkey || !/^[0-9a-f]{64}$/.test(ev.pubkey)) continue;
-          if (typeof hasResolvedProfileName === 'function' && hasResolvedProfileName(ev.pubkey)) continue;
-          unresolved.push(ev.pubkey);
-        }
-        if (unresolved.length > 0) {
-          resolveProfiles(unresolved).then(() => {
-            // Only repaint if the relay panel is still mounted with the
-            // same event set — avoid stomping on a tab switch.
-            if (!$('relay-events')) return;
-            renderEvents();
-          }).catch(() => {});
-        }
+      if (typeof resolveProfiles !== 'function') return;
+      const unresolved = [];
+      for (const pk of candidatePubkeys) {
+        if (!pk || !/^[0-9a-f]{64}$/.test(pk)) continue;
+        if (typeof hasResolvedProfileName === 'function' && hasResolvedProfileName(pk)) continue;
+        unresolved.push(pk);
       }
+      if (unresolved.length === 0) return;
+      resolveProfiles(unresolved).then(() => {
+        const el = $('relay-events');
+        if (!el) return;
+        for (const cell of el.querySelectorAll('.pk')) {
+          const pk = cell.getAttribute('title');
+          if (!pk) continue;
+          const label = pkLabelFor(pk);
+          if (cell.textContent !== label) cell.textContent = label;
+        }
+      }).catch(() => {});
     } catch {}
   }
 
