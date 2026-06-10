@@ -6332,6 +6332,21 @@ body.term-expanded .term-bar-toggle .term-chevron {
   text-overflow: ellipsis;
   min-width: 0;
 }
+/* Connection state, set by setConnState in terminal.js: the label pulses
+   amber while the WS backoff is retrying, settles to red once retries
+   exhaust (typing into an offline tab restarts the loop). */
+.term-tab.reconnecting .term-tab-label {
+  color: var(--warn);
+  animation: term-tab-pulse 1.2s ease-in-out infinite;
+}
+.term-tab.offline .term-tab-label { color: var(--error); }
+@keyframes term-tab-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .term-tab.reconnecting .term-tab-label { animation: none; }
+}
 .term-tab-close {
   display: inline-flex;
   align-items: center;

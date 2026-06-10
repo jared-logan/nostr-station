@@ -178,7 +178,20 @@
 
   function refreshBarLabel() {
     const active = tabs[activeIdx];
-    setBarLabel('Terminal', active ? active.label : '');
+    let sub = active ? active.label : '';
+    if (active && active.connState === 'reconnecting') sub += ' · reconnecting…';
+    if (active && active.connState === 'offline')      sub += ' · offline';
+    setBarLabel('Terminal', sub);
+  }
+
+  // Reflect a tab's connection state (open / reconnecting / offline) in the
+  // strip + bar label. Backoff used to run silently — a dropped session was
+  // indistinguishable from a hung shell until retries exhausted.
+  function setConnState(tab, state) {
+    if (tab.connState === state) return;
+    tab.connState = state;
+    renderStrip();
+    refreshBarLabel();
   }
 
   function isExpanded() {
@@ -325,6 +338,13 @@
       tab.ws.send(JSON.stringify({ type: 'input', data }));
     } else {
       tab.pendingInput.push(data);
+      // Typing into an offline tab (backoff exhausted) restarts the
+      // reconnect loop — the keystroke is queued in pendingInput and
+      // flushes on open, so the input isn't lost, it's the wake-up call.
+      if (tab.connState === 'offline' && !tab.closing && !tab.exited) {
+        tab.reconnectAttempts = 0;
+        scheduleReconnect(tab);
+      }
     }
   }
 
@@ -513,6 +533,8 @@
       closing: false,          // true once the user/server is tearing this tab down
       reconnectAttempts: 0,    // resets to 0 on a successful open
       reconnectTimer: null,    // pending backoff timer, if any
+      connState: 'open',       // 'open' | 'reconnecting' | 'offline' — strip/bar UI
+      reconnectNotified: false, // one "connection lost" line per drop, not per retry
       // True for a brief window right after (re)connect while the server
       // replays scrollback — see the open handler in connectWs.
       suppressTx: false,
@@ -621,10 +643,10 @@
     const strip = $('term-tabs');
     if (!strip) return;
     const parts = tabs.map((t, i) => `
-      <button class="term-tab ${i === activeIdx ? 'active' : ''}"
+      <button class="term-tab ${i === activeIdx ? 'active' : ''}${t.connState === 'reconnecting' ? ' reconnecting' : ''}${t.connState === 'offline' ? ' offline' : ''}"
               role="tab"
               data-idx="${i}"
-              title="${escapeHtml(t.label)}">
+              title="${escapeHtml(t.label)}${t.connState === 'reconnecting' ? ' (reconnecting…)' : ''}${t.connState === 'offline' ? ' (offline)' : ''}">
         <span class="term-tab-label">${escapeHtml(t.label)}</span>
         <span class="term-tab-close" data-close="${i}" aria-label="Close tab">×</span>
       </button>
@@ -758,6 +780,8 @@
       // A clean open means any prior drop is resolved — reset the backoff so
       // the next genuine drop starts its retry schedule fresh.
       tab.reconnectAttempts = 0;
+      tab.reconnectNotified = false;
+      setConnState(tab, 'open');
       // Open the replay-suppression window: the server replays scrollback as
       // the first frame(s) after attach, and xterm will auto-reply to any
       // device/cursor queries inside it. Drop those replies (see onData) for a
@@ -838,8 +862,14 @@
     if (tab.ws && tab.ws.readyState === 1) return;  // already back
     const attempt = tab.reconnectAttempts || 0;
     if (attempt >= RECONNECT_MAX_ATTEMPTS) {
-      tab.term.writeln('\r\n\x1b[33m[terminal] disconnected — refresh to reconnect\x1b[0m');
+      setConnState(tab, 'offline');
+      tab.term.writeln('\r\n\x1b[33m[terminal] disconnected — press any key to retry\x1b[0m');
       return;
+    }
+    setConnState(tab, 'reconnecting');
+    if (!tab.reconnectNotified) {
+      tab.reconnectNotified = true;
+      tab.term.writeln('\r\n\x1b[2m[terminal] connection lost — reconnecting…\x1b[0m');
     }
     const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt), 15000);
     tab.reconnectAttempts = attempt + 1;
