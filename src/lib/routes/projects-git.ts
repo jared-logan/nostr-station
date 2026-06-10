@@ -13,6 +13,11 @@
  *   PUT    /api/projects/:id/git-identity       — set repo-local override
  *   DELETE /api/projects/:id/git-identity       — clear repo-local override
  *   GET    /api/projects/:id/git-state          — sync.getProjectGitState
+ *                                                 (?fetch=1 forces a fresh remote fetch first;
+ *                                                 default fire-and-forgets a TTL'd background one)
+ *   POST   /api/projects/:id/git/merge-remote   — JSON: sync.mergeRemote (diverged recovery)
+ *   POST   /api/projects/:id/git/rescue-branch  — SSE: sync.rescueBranch (park work on a branch)
+ *   POST   /api/projects/:id/git/checkout       — JSON: sync.checkoutBranch (guarded switch)
  *   POST   /api/projects/:id/git-init           — SSE: init + seed identity + add -A + commit
  *
  * Contract identical to handleProjects: returns true iff a response was
@@ -31,7 +36,10 @@ import {
   seedRepoGitIdentityIfMissing,
 } from '../git-identity.js';
 import { readIdentity } from '../identity.js';
-import { getProjectGitState } from '../sync.js';
+import {
+  getProjectGitState, refreshRemoteState,
+  mergeRemote, rescueBranch, checkoutBranch, BRANCH_NAME_RE,
+} from '../sync.js';
 import {
   readBody, streamExec, streamExecError,
   CLI_BIN, type CmdSpec,
@@ -162,9 +170,91 @@ export async function handleProjectsGit(
       res.end(JSON.stringify({ error: (e as Error).message }));
       return true;
     }
+    // The badge-truthfulness hook. Default: fire-and-forget a TTL'd
+    // background fetch so the NEXT poll carries fresh ahead/behind —
+    // zero added latency on the 30 s polling hot path. `?fetch=1`
+    // (popover open, pre-push check) blocks on a forced fetch so the
+    // response is truthful at the moment the user is about to act.
+    const url = new URL(req.url ?? '', 'http://internal');
+    if (url.searchParams.get('fetch') === '1') {
+      await refreshRemoteState(project, { force: true }).catch(() => {});
+    } else {
+      void refreshRemoteState(project).catch(() => {});
+    }
     const state = await getProjectGitState(project);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(state));
+    return true;
+  }
+
+  // ── Diverged recovery + branch awareness (never-dead-end sync) ─────
+  if (tail === 'git/merge-remote' && method === 'POST') {
+    if (!project.path) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'project has no local path' }));
+      return true;
+    }
+    try { validateProjectPath(project.path); }
+    catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: (e as Error).message }));
+      return true;
+    }
+    // 200 even on ok:false — the body is the actionable signal (incl.
+    // conflict:true), mirroring the /sync endpoint's contract.
+    const result = await mergeRemote(project);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+
+  if (tail === 'git/rescue-branch' && method === 'POST') {
+    if (!project.path) { streamExecError(res, req, 'project has no local path'); return true; }
+    try { validateProjectPath(project.path); }
+    catch (e) { streamExecError(res, req, (e as Error).message); return true; }
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+    const branchName = typeof parsed.branchName === 'string' ? parsed.branchName.trim() : '';
+    if (!BRANCH_NAME_RE.test(branchName)) {
+      streamExecError(res, req, 'branch name must be 1-64 chars starting with a letter: alphanumerics + . _ -');
+      return true;
+    }
+    // SSE so the exec modal shows each git step as it runs, matching
+    // every other multi-phase write flow.
+    res.writeHead(200, {
+      'Content-Type':  'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection':    'keep-alive',
+    });
+    const emit = (p: object) => { try { res.write(`data: ${JSON.stringify(p)}\n\n`); } catch {} };
+    const r = await rescueBranch(project, branchName, (line, stream) => emit({ line, stream }));
+    if (!r.ok) emit({ line: r.message, stream: 'stderr' });
+    else       emit({ line: r.message, stream: 'stdout' });
+    emit({ done: true, code: r.ok ? 0 : 1 });
+    try { res.end(); } catch {}
+    return true;
+  }
+
+  if (tail === 'git/checkout' && method === 'POST') {
+    if (!project.path) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'project has no local path' }));
+      return true;
+    }
+    try { validateProjectPath(project.path); }
+    catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: (e as Error).message }));
+      return true;
+    }
+    let parsed: any = {};
+    try { parsed = JSON.parse(await readBody(req)); }
+    catch { res.writeHead(400); res.end('bad json'); return true; }
+    const branch = typeof parsed.branch === 'string' ? parsed.branch.trim() : '';
+    const result = await checkoutBranch(project, branch);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
     return true;
   }
 

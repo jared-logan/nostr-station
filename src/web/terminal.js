@@ -1022,9 +1022,14 @@
       const code = ctrl.exitCode == null ? '?' : ctrl.exitCode;
       tab.term.writeln(`\r\n\x1b[2m[process exited — code ${code}]\x1b[0m`);
       tab.exited = true;
+      // A project-bound session (Claude Code, project shell) may have
+      // committed / switched branches; nudge the dashboard's git-state
+      // immediately instead of waiting for the next 30 s poll tick.
+      if (tab.projectId) window.__nsProjectGitRefresh?.(tab.projectId);
     } else if (ctrl.type === 'closed') {
       tab.term.writeln(`\r\n\x1b[2m[session closed — ${ctrl.reason || 'unknown'}]\x1b[0m`);
       tab.exited = true;
+      if (tab.projectId) window.__nsProjectGitRefresh?.(tab.projectId);
       // Remove the tab from state — the server has already destroyed
       // it. Skip the DELETE call via fromServerClose so we don't get a
       // 404 back into the console.
@@ -1059,6 +1064,10 @@
     }
 
     const tab = createTab({ id: r.id, label: r.label || key });
+    // Remember the binding so session exit can trigger a git-state
+    // refresh for the right project (best-effort — lost on page reload,
+    // where the 30 s poll covers freshness anyway).
+    tab.projectId = opts.projectId || null;
     activeIdx = tabs.length - 1;
     persistTabs();
     renderStrip();

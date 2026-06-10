@@ -24,7 +24,7 @@
 import http from 'http';
 import { execFileSync, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
-import { fetchNgitProposals } from '../sync.js';
+import { fetchNgitProposals, invalidateDefaultBranchCache } from '../sync.js';
 import { isValidRelayUrl, getGraspServers, getEffectiveReadRelays, readIdentity } from '../identity.js';
 import { findBin } from '../detect.js';
 import { nip19 } from 'nostr-tools';
@@ -962,6 +962,9 @@ async function handleSetDefaultBranch(
     }
     const results = await publishEventToRelays(signed.signedEvent, relays);
     const accepted = results.filter(r => r.ok).length;
+    // The git-state poll caches origin/HEAD for 10 min; the default just
+    // changed, so drop the cached value for an immediate badge update.
+    if (accepted > 0 && project.path) invalidateDefaultBranchCache(project.path);
     return jsonReply(res, accepted > 0 ? 200 : 502, {
       ok: accepted > 0, current: branch, accepted, targets: relays.length, publish: results,
     });

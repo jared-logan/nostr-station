@@ -37,6 +37,7 @@ import { execa } from 'execa';
 import type { WebSocket } from 'ws';
 import { findBin } from './detect.js';
 import { projectEnvContract, type Project } from './projects.js';
+import { setActiveSessionProbe } from './sync.js';
 import { bindSession as bindDevServerSession, releaseSession as releaseDevServerSession } from './dev-server-registry.js';
 import { readMobileAccessConfig } from './mobile-access.js';
 
@@ -405,6 +406,11 @@ interface Session {
   id:        string;
   pty:       IPty;
   spec:      CmdSpec;
+  // The project this PTY is bound to, when created via the dashboard's
+  // "open terminal in project X" path. Drives hasActiveSessionForProject,
+  // which the sync module's auto-pull consults so it never moves HEAD
+  // under a live TUI agent.
+  projectId: string | null;
   cols:      number;
   rows:      number;
   createdAt: number;
@@ -495,6 +501,7 @@ export async function createSession(
   const id = crypto.randomBytes(12).toString('hex');
   const sess: Session = {
     id, pty: child, spec,
+    projectId: opts.project?.id ?? null,
     cols: DEFAULT_COLS, rows: DEFAULT_ROWS,
     createdAt: Date.now(),
     exited: false, exitCode: null,
@@ -619,6 +626,21 @@ export function listSessions(): Array<{ id: string; label: string; exited: boole
     id: s.id, label: s.spec.label, exited: s.exited, createdAt: s.createdAt,
   }));
 }
+
+// True while any live (non-exited) PTY is bound to the given project.
+// Consulted by sync.ts's auto-pull via the probe registered below.
+export function hasActiveSessionForProject(projectId: string): boolean {
+  for (const s of sessions.values()) {
+    if (!s.exited && s.projectId === projectId) return true;
+  }
+  return false;
+}
+
+// Register the probe at module load: the sync module deliberately doesn't
+// import this (node-pty flavored) module, so auto-pull defaults to "no
+// sessions" until the terminal layer is loaded — which the web server
+// always does via routes/terminal.
+setActiveSessionProbe(hasActiveSessionForProject);
 
 // Full teardown — used when the server itself is shutting down.
 export function destroyAllSessions(): void {
