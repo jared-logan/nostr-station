@@ -73,6 +73,61 @@ export { ExternalContentSidebarItem } from '@/components/ExternalContentSidebarI
 
 // ── Utilities ────────────────────────────────────────────────────────
 export { cn } from '@/lib/utils';
+export { getAvatarShape } from '@/lib/avatarShape';
+export { isItemActive } from '@/lib/sidebarItems';
+
+// ── Additional hooks ────────────────────────────────────────────────
+// Drives the LeftSidebar shell (account switching, feed settings,
+// unread indicator, NIP-38 status editor, login flows, toast). When
+// adding a new skin component that uses one of these hooks directly,
+// re-export it here rather than importing from @/hooks/* in the
+// component — single seam to absorb upstream churn.
+export { useOnboarding }              from '@/hooks/useOnboarding';
+export { useLoggedInAccounts }        from '@/hooks/useLoggedInAccounts';
+export type { Account }               from '@/hooks/useLoggedInAccounts';
+export { useLoginActions }            from '@/hooks/useLoginActions';
+export { useFeedSettings }            from '@/hooks/useFeedSettings';
+export { useHasUnreadNotifications }  from '@/hooks/useHasUnreadNotifications';
+export { useProfileUrl }              from '@/hooks/useProfileUrl';
+export { useUserStatus }              from '@/hooks/useUserStatus';
+export { usePublishStatus }           from '@/hooks/usePublishStatus';
+export { useToast }                   from '@/hooks/useToast';
+
+// ── UI primitives (shadcn) ──────────────────────────────────────────
+// These are the most stable surface in the upstream codebase — shadcn
+// primitives barely change across releases. Re-exported through the
+// adapter anyway for consistency: skin components never reach into
+// @/components/ui/* directly, so a future upstream restructure of the
+// UI library is a single-file fix.
+export { Skeleton } from '@/components/ui/skeleton';
+export { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
+export { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+export { Input } from '@/components/ui/input';
+
+// ── Upstream feature components consumed by the skin ─────────────────
+// EmojifiedText / VerifiedNip05Text / ProfileSearchDropdown /
+// SidebarMoreMenu / LoginDialog / FollowQRDialog: not (yet) replaced
+// by the skin, but consumed by skin shell components. The CSS overlay
+// continues to style them. LoginDialog uses a default export upstream;
+// re-export it as a named export here so skin components can import
+// it consistently via `import { LoginDialog }`.
+export { EmojifiedText }          from '@/components/CustomEmoji';
+export { VerifiedNip05Text }      from '@/components/Nip05Badge';
+export { ProfileSearchDropdown }  from '@/components/ProfileSearchDropdown';
+export { SidebarMoreMenu }        from '@/components/SidebarMoreMenu';
+export { FollowQRDialog }         from '@/components/FollowQRDialog';
+export { default as LoginDialog } from '@/components/auth/LoginDialog';
+
+// ── Skin-replaced components, re-exported for symmetry ──────────────
+// DittoLogo and SidebarNavList are replaced by the skin layer
+// (applySkin overwrites the upstream paths before vite resolves these
+// modules). Re-exported here so other skin components import via the
+// adapter — anyone reading the adapter sees the full surface in one
+// place, and the import path doesn't change if a component leaves or
+// joins the skin set later.
+export { DittoLogo }                       from '@/components/DittoLogo';
+export { SidebarNavList }                  from '@/components/SidebarNavItem';
+export type { SidebarNavListProps, SidebarNavItemProps } from '@/components/SidebarNavItem';
 
 // ── Skin-owned helpers ───────────────────────────────────────────────
 
