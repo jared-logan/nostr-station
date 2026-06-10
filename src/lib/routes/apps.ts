@@ -440,7 +440,7 @@ export async function handleApps(
 
   // ── POST /api/apps/publish ───────────────────────────────────────────────
   //
-  // Two body shapes (mirrors /api/client/publish):
+  // Two body shapes:
   //   1. { ...formFields, signWith?: 'bunker'|'project' } — server signs.
   //   2. { event: SignedEvent } — pre-signed via NIP-07; server broadcasts.
   if (path === '/api/apps/publish' && method === 'POST') {

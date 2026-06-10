@@ -17876,7 +17876,7 @@ const ConfigPanel = (() => {
         syncBtn.disabled = true;
         syncBtn.textContent = 'syncing…';
         try {
-          const r = await api('/api/client/sync-relays', { method: 'POST' });
+          const r = await api('/api/identity/relays/sync', { method: 'POST' });
           if (r.unavailable) {
             toast('Sync skipped', r.hint || r.empty || r.reason, 'warn');
             return;

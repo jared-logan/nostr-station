@@ -93,7 +93,6 @@ import type { BlossomServer } from '../blossom/index.js';
 import { readProjects } from './projects.js';
 import { listAllTestPubkeys } from './test-identities.js';
 import { handleIdentity } from './routes/identity.js';
-import { handleClient } from './routes/client.js';
 import { handleDitto } from './routes/ditto.js';
 import { handleApps } from './routes/apps.js';
 import { handleNgit } from './routes/ngit.js';
@@ -1967,14 +1966,6 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // endpoint is a plain Nostr-event consumer, no embedded client).
       // Powers the "Sync from relays" card in Config → Appearance.
       if (await handleDitto(req, res, fullUrl, method)) return;
-
-      // ── Nostr client API (routes/client.ts) ────────────────────────────
-      // Native Nostr read/post surface. The live consumer is the Relay
-      // config panel's "Sync from Nostr" button (POST /api/client/sync-
-      // relays — mirrors the owner's NIP-65 list into Your Relays). Reads
-      // from identity.readRelays; signs via the persisted bunker pairing.
-      // Auto-stamps ["client","nostr-station"].
-      if (await handleClient(req, res, fullUrl, method)) return;
 
       // ── App Center (routes/apps.ts) ────────────────────────────────────
       // Manage the owner's NIP-89 handler events (kind 31990): list, build,

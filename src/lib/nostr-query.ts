@@ -472,8 +472,8 @@ export async function getCachedOrFetch<T>(
 // with no API change.
 //
 // Why it exists alongside the nak version:
-//   1. The Nostr Client panel (routes/client.ts) issues 7+ relay queries
-//      per panel mount. Each nak spawn is a process fork + binary load +
+//   1. Identity sync and other multi-query flows issue 7+ relay queries
+//      per operation. Each nak spawn is a process fork + binary load +
 //      stdin/stdout pipe orchestration; under a developer-laptop load
 //      this stacks up enough to surface as "feed is empty" when the
 //      probes time out (project memory: project_nak_stdin_hang has bit

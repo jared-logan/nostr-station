@@ -10,6 +10,7 @@
  *   POST   /api/identity/set                   — npub | setupComplete
  *   POST   /api/identity/relays/add            — append a read relay
  *   POST   /api/identity/relays/remove         — remove a read relay
+ *   POST   /api/identity/relays/sync           — NIP-65 outbox sync of read relays
  *   POST   /api/identity/grasp/add             — append a grasp server
  *   POST   /api/identity/grasp/remove          — remove a grasp server
  *   GET    /api/git-identity/global            — current global git identity + presets
@@ -31,7 +32,9 @@ import { readIdentity, addReadRelay, removeReadRelay,
   DEFAULT_READ_RELAYS, hexToNpub, npubToHex,
   getGraspServers, addGraspServer, removeGraspServer,
   setAppRelaysEnabled,
+  setReadRelays, isValidRelayUrl,
 } from '../identity.js';
+import { queryRelaysDirect as queryRelays, type NostrEvent } from '../nostr-query.js';
 import {
   readGlobalGitIdentity, writeGlobalGitIdentity,
   deriveGitIdentity,
@@ -75,6 +78,24 @@ interface Profile {
 
 const PROFILE_CACHE = new Map<string, Profile>();
 const PROFILE_TTL_MS = 5 * 60 * 1000;
+
+// NIP-65 outbox-discovery bootstrap set — relays that aggregate kind-10002
+// events across the network. The relays/sync endpoint queries these IN
+// ADDITION to the user's configured Station Relays so a fresh user whose
+// only Station Relays don't happen to mirror their kind-10002 can still
+// bootstrap. purplepag.es is the canonical profile + relay-list indexer;
+// the rest are wide general-purpose indexers + relay.ditto.pub (where
+// many @user@happytavern.co / Ditto-instance users actually have their
+// kind-10002 published).
+const NIP65_BOOTSTRAP_RELAYS: string[] = [
+  'wss://purplepag.es',
+  'wss://relay.nostr.band',
+  'wss://relay.damus.io',
+  'wss://relay.primal.net',
+  'wss://nos.lol',
+  'wss://relay.ditto.pub',
+];
+const RELAYS_SYNC_TIMEOUT_MS = 8_000;
 
 async function fetchNip05(name: string, domain: string, expectedHex: string): Promise<boolean> {
   try {
@@ -448,12 +469,12 @@ export async function handleIdentity(
       // touched the list, so the dashboard can render the section
       // without an empty-state branch.
       graspServers: getGraspServers(),
-      // App Relays (Ditto-style "default relays that ship with the app")
-      // and the toggle controlling whether they participate in /client
-      // reads. New users default to enabled so the feed works out of the
-      // box. The list itself is fixed in code (DEFAULT_READ_RELAYS) so we
-      // expose it here rather than as a separate /api/client/relay-config
-      // GET — both flows want the same data.
+      // App Relays — default relays that ship with the app — and the
+      // toggle controlling whether they participate in read flows. New
+      // users default to enabled so identity/profile/etc. fetches work
+      // out of the box. The list itself is fixed in code
+      // (DEFAULT_READ_RELAYS); exposed here as part of /api/identity/
+      // config so the Config UI doesn't need a second round-trip.
       appRelays:        DEFAULT_READ_RELAYS.slice(),
       appRelaysEnabled: ident.appRelaysEnabled !== false,
       hasProfile:       !!ident.npub,
@@ -552,6 +573,127 @@ export async function handleIdentity(
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(r));
     return true;
+  }
+
+  // ── POST /api/identity/relays/sync ─────────────────────────────────
+  //
+  // NIP-65 outbox sync: fetches the owner's kind-10002 relay list event
+  // from their relays (configured Station Relays ∪ bootstrap aggregators)
+  // and mirrors identity.readRelays to match it exactly — adding URLs that
+  // are new and removing local URLs that aren't in the published list.
+  // Returns both additions and removals so the UI can render an accurate
+  // toast. Powers the Config -> Station Relays "Sync from Nostr" button.
+  //
+  // "Mirror" means Your Relays ends up equal to your kind-10002 list, so
+  // manually-added relays not present in NIP-65 are dropped. The empty /
+  // not-found / no-r-tags cases below all return without wiping the list,
+  // so a missing or malformed event never destroys local state.
+  //
+  // (Was POST /api/client/sync-relays before the embedded client was
+  // removed; the implementation lives here now because it mutates
+  // identity.readRelays.)
+  if (url === '/api/identity/relays/sync' && method === 'POST') {
+    const ident = readIdentity();
+    if (!ident.npub) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'no station owner configured' }));
+      return true;
+    }
+    let me: string;
+    try { me = npubToHex(ident.npub).toLowerCase(); }
+    catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'bad npub' }));
+      return true;
+    }
+    // Union of configured read relays + NIP-65 bootstrap aggregators,
+    // capped at 12 to bound fan-out (queryRelays opens one WebSocket per
+    // entry).
+    const configured = (ident.readRelays || []).filter(Boolean);
+    const merged = [...new Set([...configured, ...NIP65_BOOTSTRAP_RELAYS])];
+    const relays = merged.slice(0, 12);
+    if (relays.length === 0) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ added: [], unavailable: true, reason: 'no-read-relays' }));
+      return true;
+    }
+    try {
+      const r = await queryRelays({
+        filter: { kinds: [10002], authors: [me], limit: 1 },
+        relays,
+        timeoutMs: RELAYS_SYNC_TIMEOUT_MS,
+        stream: false,
+        acceptUntil: (evs) => evs.length >= 1,
+      });
+      // Pick the freshest kind-10002 (replaceable — relays should already
+      // return one, but de-dup defensively).
+      let newest: NostrEvent | null = null;
+      for (const ev of r.events) {
+        if (ev.kind !== 10002) continue;
+        if (!newest || ev.created_at > newest.created_at) newest = ev;
+      }
+      if (!newest) {
+        // Neither the user's configured relays nor the NIP-65 bootstrap
+        // aggregators have a kind-10002 for this npub — the user almost
+        // certainly hasn't published one. Surface the actionable hint
+        // instead of a vague "not found".
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          added: [],
+          empty: `No NIP-65 relay list (kind 10002) found for your npub on ${relays.length} relays (your configured ${configured.length} + ${NIP65_BOOTSTRAP_RELAYS.length} bootstrap aggregators). Some clients don't publish kind-10002 by default — try publishing one from Damus / Amethyst / nostr.guru first, then re-sync.`,
+          queriedRelays: relays,
+        }));
+        return true;
+      }
+      const before = (readIdentity().readRelays || []).slice();
+      const beforeKeys = new Set(before.map(s => s.toLowerCase()));
+      // NIP-65 r-tag shapes:
+      //   ["r", "wss://relay.example.com"]            — read+write
+      //   ["r", "wss://relay.example.com", "read"]    — read only
+      //   ["r", "wss://relay.example.com", "write"]   — write only
+      // Import all of them — the read/write distinction is a per-author
+      // routing hint, not a "should this be in my own list" filter.
+      const desired: string[] = [];
+      const desiredKeys = new Set<string>();
+      for (const t of newest.tags) {
+        if (!Array.isArray(t) || t[0] !== 'r') continue;
+        const url = typeof t[1] === 'string' ? t[1].trim() : '';
+        if (!url || !isValidRelayUrl(url)) continue;
+        const key = url.toLowerCase();
+        if (desiredKeys.has(key)) continue;
+        desiredKeys.add(key);
+        desired.push(url);
+      }
+      // Guard: a kind-10002 with no usable `r` tags must not wipe the
+      // list. Treat it as "nothing to mirror" and leave readRelays alone.
+      if (desired.length === 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          added: [],
+          removed: [],
+          empty: 'Your NIP-65 list (kind 10002) had no usable relay entries — nothing to mirror.',
+          sourceCreatedAt: newest.created_at,
+          yourRelays:      before,
+        }));
+        return true;
+      }
+      const added   = desired.filter(u => !beforeKeys.has(u.toLowerCase()));
+      const removed = before.filter(u => !desiredKeys.has(u.toLowerCase()));
+      const set = setReadRelays(desired);
+      bustProfileCache();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        added,
+        removed,
+        sourceCreatedAt: newest.created_at,
+        yourRelays:      set.relays.slice(),
+      }));
+      return true;
+    } catch (e: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e?.message || e) }));
+      return true;
+    }
   }
 
   // Grasp server list — same shape as the read-relay endpoints above
