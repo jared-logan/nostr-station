@@ -58,7 +58,16 @@ import { fileURLToPath } from 'node:url';
 // field rename upstream surfaces as a loud build failure rather than a
 // silent regression.
 const DITTO_REPO = 'https://gitlab.com/soapbox-pub/ditto.git';
-const DITTO_REF  = '7a5820ca93f833b56cf368fc40c91e42c63f912f';
+// v2.21.0 release tag (2026-06-07). Bumped from 7a5820c (2026-05-24, just
+// after v2.18.0) — 63 commits, 4 patch releases + 3 minor releases. Notable
+// inheritance: v2.19.0 IndexedDB offline event cache + first-paint cache
+// reads, v2.20.0 expanded global search (articles/lists/follow packs/emoji
+// packs) + app handler /client/:name route, v2.21.0 Nostr Clients sidebar
+// widget + Android share targets. Also picks up the fontLoader URL-
+// sanitization security fix. Sticking to a release tag rather than tracking
+// main HEAD — post-v2.21.0 main is mid-merge on a large unreleased "Blobbi"
+// feature and we want a known-stable surface.
+const DITTO_REF  = '734baf513aa59b365d3181b2cf6fc9fc0f98f986';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT   = path.resolve(here, '..');
