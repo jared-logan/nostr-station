@@ -24,7 +24,7 @@
  * an extra attribution tag is inert for push authorization).
  */
 
-import { CLIENT_TAG } from './client-tag.js';
+import { CLIENT_TAG, stampClientTag } from './client-tag.js';
 
 /** A git ref as a [shortName, objectId] pair. */
 export type RefPair = [name: string, oid: string];
@@ -184,6 +184,69 @@ export function validPreservedHead(
   }
   const tipOids = new Set<string>([...announceBranches.values(), ...announceTags.values()]);
   return tipOids.has(v) ? [...head] : null;
+}
+
+/** The default branch (HEAD pointer) a published 30618 advertises, or '' when
+ *  HEAD is detached / absent. Reads the symbolic `ref: refs/heads/<b>` form
+ *  ngit and our own push emit. Pure — used to render the "default" marker in
+ *  the branch picker. */
+export function defaultBranchOf(stateTags: string[][]): string {
+  for (const t of stateTags ?? []) {
+    if (Array.isArray(t) && t[0] === 'HEAD' && typeof t[1] === 'string') {
+      const m = t[1].match(/^ref: refs\/heads\/(.+)$/);
+      return m ? m[1] : '';
+    }
+  }
+  return '';
+}
+
+/** The branch names a published 30618 announces (its refs/heads/* tags). Pure —
+ *  the candidate set for the default-branch picker (you can only make an
+ *  ALREADY-announced branch the default; its pack is on the hosts). */
+export function announcedBranches(stateTags: string[][]): string[] {
+  const out: string[] = [];
+  for (const t of stateTags ?? []) {
+    if (Array.isArray(t) && typeof t[0] === 'string' && t[0].startsWith('refs/heads/') && t[0].length > 'refs/heads/'.length) {
+      out.push(t[0].slice('refs/heads/'.length));
+    }
+  }
+  return out;
+}
+
+/**
+ * Retarget a published 30618's HEAD to `branch` — the default-branch setter.
+ * Every other tag (branches, tags, refs) rides through verbatim; only the HEAD
+ * pointer changes, and the canonical client tag is re-stamped. `branch` MUST be
+ * among the announced refs/heads/* — you can't make a branch the default until
+ * its pack is on the hosts (otherwise the new default would dangle, the very
+ * drift the deliverable-set fix removes). Returns the new tag set, or null when
+ * `branch` isn't announced (the caller surfaces a 4xx). Pure; exported for tests.
+ */
+export function setDefaultBranchTags(
+  priorStateTags: string[][],
+  branch: string,
+): string[][] | null {
+  if (!branch || !announcedBranches(priorStateTags).includes(branch)) return null;
+  const out: string[][] = [];
+  let headWritten = false;
+  for (const t of priorStateTags) {
+    if (!Array.isArray(t)) continue;
+    if (t[0] === 'client') continue;                       // re-stamped canonical below
+    if (t[0] === 'HEAD') {
+      out.push(['HEAD', `ref: refs/heads/${branch}`]);
+      headWritten = true;
+    } else {
+      out.push(t.map(v => (typeof v === 'string' ? v : '')));
+    }
+  }
+  if (!headWritten) {
+    // Prior state had a detached / missing HEAD — insert the pointer right
+    // after the d tag so the shape matches a normal symbolic-HEAD state.
+    const dIdx = out.findIndex(t => t[0] === 'd');
+    out.splice(dIdx >= 0 ? dIdx + 1 : 0, 0, ['HEAD', `ref: refs/heads/${branch}`]);
+  }
+  stampClientTag(out);
+  return out;
 }
 
 /**

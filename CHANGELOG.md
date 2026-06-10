@@ -5,6 +5,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Code tab: set the repository's default branch
+
+The default branch (the kind-30618 HEAD pointer) can now be changed from the
+Code tab — a "Set as default" button next to the branch picker, shown only to
+the repository's trust anchor when a non-default branch is selected; the
+current default carries a quiet "default" chip. Clicking re-signs the repo
+state with the new HEAD (one signer prompt, no pack push) and re-probes the
+sync badge. Only an already-announced branch can become the default, so the
+new default can never dangle. Pairs with the deliverable-set fix below: HEAD
+is owned by the announcement and is no longer retargeted by an ordinary push,
+so this is the deliberate, owner-driven way to move it — the granular control
+beneath the Shakespeare-simple Push/Sync defaults.
+
+- New `GET/POST /api/projects/:id/ngit/default-branch` (read the announced
+  branches + current default / retarget HEAD). Pure ref logic in
+  `src/lib/grasp-push.ts` (`setDefaultBranchTags`, `announcedBranches`,
+  `defaultBranchOf`); owner-gated server-side.
+
 ### Fixed: push state (kind 30618) now announces only the deliverable ref set
 
 Push delivers only the current branch's pack, but the state event announced

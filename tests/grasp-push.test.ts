@@ -7,6 +7,9 @@ const {
   repoStateTagsEqual,
   readLocalRefs,
   validPreservedHead,
+  setDefaultBranchTags,
+  announcedBranches,
+  defaultBranchOf,
 } = await import('../src/lib/grasp-push.ts');
 const { CLIENT_TAG } = await import('../src/lib/client-tag.ts');
 
@@ -196,6 +199,74 @@ test('buildRepoStateTags: skips refs missing a name or oid', () => {
   }));
   const refNames = tags.filter(t => t[0].startsWith('refs/')).map(t => t[0]);
   assert.deepEqual(refNames, ['refs/heads/main']);
+});
+
+// ── default-branch reads (announcedBranches / defaultBranchOf) ─────────────
+
+const publishedState = (head: string) => ([
+  ['d', 'amon-din'],
+  ['HEAD', head],
+  ['refs/heads/main', 'a'.repeat(40)],
+  ['refs/heads/dev', 'b'.repeat(40)],
+  ['refs/tags/v1', 'c'.repeat(40)],
+  [...CLIENT_TAG],
+] as string[][]);
+
+test('announcedBranches: lists refs/heads/* branch names only', () => {
+  assert.deepEqual(announcedBranches(publishedState('ref: refs/heads/main')), ['main', 'dev']);
+});
+
+test('defaultBranchOf: reads the symbolic HEAD; empty when detached/absent', () => {
+  assert.equal(defaultBranchOf(publishedState('ref: refs/heads/dev')), 'dev');
+  assert.equal(defaultBranchOf(publishedState('f'.repeat(40))), '');           // detached oid
+  assert.equal(defaultBranchOf([['d', 'r'], [...CLIENT_TAG]]), '');             // no HEAD tag
+});
+
+// ── setDefaultBranchTags (the default-branch setter) ──────────────────────
+
+test('setDefaultBranchTags: retargets HEAD, leaves every other ref intact', () => {
+  const out = setDefaultBranchTags(publishedState('ref: refs/heads/main'), 'dev');
+  assert.ok(out);
+  assert.deepEqual(out!.find(t => t[0] === 'HEAD'), ['HEAD', 'ref: refs/heads/dev']);
+  // branches + tags ride through unchanged
+  assert.deepEqual(out!.find(t => t[0] === 'refs/heads/main'), ['refs/heads/main', 'a'.repeat(40)]);
+  assert.deepEqual(out!.find(t => t[0] === 'refs/heads/dev'),  ['refs/heads/dev', 'b'.repeat(40)]);
+  assert.deepEqual(out!.find(t => t[0] === 'refs/tags/v1'),    ['refs/tags/v1', 'c'.repeat(40)]);
+  // exactly one canonical client tag
+  const clients = out!.filter(t => t[0] === 'client');
+  assert.equal(clients.length, 1);
+  assert.deepEqual(clients[0], [...CLIENT_TAG]);
+});
+
+test('setDefaultBranchTags: refuses a branch that is not announced (would dangle)', () => {
+  assert.equal(setDefaultBranchTags(publishedState('ref: refs/heads/main'), 'nope'), null);
+  assert.equal(setDefaultBranchTags(publishedState('ref: refs/heads/main'), ''), null);
+});
+
+test('setDefaultBranchTags: inserts a HEAD after d when the prior state was detached', () => {
+  const detached: string[][] = [
+    ['d', 'amon-din'],
+    ['refs/heads/main', 'a'.repeat(40)],
+    [...CLIENT_TAG],
+  ];
+  const out = setDefaultBranchTags(detached, 'main');
+  assert.ok(out);
+  assert.deepEqual(out![0], ['d', 'amon-din']);
+  assert.deepEqual(out![1], ['HEAD', 'ref: refs/heads/main']);
+});
+
+test('setDefaultBranchTags: upgrades a stale bare client tag to canonical', () => {
+  const stale = [
+    ['d', 'amon-din'],
+    ['HEAD', 'ref: refs/heads/main'],
+    ['refs/heads/main', 'a'.repeat(40)],
+    ['refs/heads/dev', 'b'.repeat(40)],
+    ['client', 'nostr-station'],
+  ] as string[][];
+  const out = setDefaultBranchTags(stale, 'dev');
+  const clients = out!.filter(t => t[0] === 'client');
+  assert.equal(clients.length, 1);
+  assert.deepEqual(clients[0], [...CLIENT_TAG]);
 });
 
 // ── repoStateTagsEqual ───────────────────────────────────────────────────

@@ -25,8 +25,9 @@ import http from 'http';
 import { execFileSync, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { fetchNgitProposals } from '../sync.js';
-import { isValidRelayUrl, getGraspServers, getEffectiveReadRelays } from '../identity.js';
+import { isValidRelayUrl, getGraspServers, getEffectiveReadRelays, readIdentity } from '../identity.js';
 import { findBin } from '../detect.js';
+import { nip19 } from 'nostr-tools';
 import { queryRelaysDirect, getTags, type NostrEvent } from '../nostr-query.js';
 import { signEventWithSavedBunker } from '../auth-bunker.js';
 import { decodeNgitRemote, publishEventToRelays, mergeRelaySet, reannounceWithClientTag } from './repo.js';
@@ -35,6 +36,9 @@ import {
   buildRepoStateTags,
   repoStateTagsEqual,
   readLocalRefs,
+  setDefaultBranchTags,
+  announcedBranches,
+  defaultBranchOf,
 } from '../grasp-push.js';
 import type { Project } from '../projects.js';
 import { readBody, streamExec, streamExecError } from './_shared.js';
@@ -101,6 +105,19 @@ export async function handleProjectsNgit(
     // pack to every clone URL itself, so no single git host is left "behind
     // signed". See src/lib/grasp-push.ts for the why + the mirrored algorithm.
     return handleGraspPush(req, res, project);
+  }
+
+  if (tail === 'ngit/default-branch' && method === 'GET') {
+    // Branch-picker support: the announced branches + which one is the current
+    // default (HEAD). Read-only; drives the "set as default" affordance.
+    return handleDefaultBranchInfo(res, project);
+  }
+
+  if (tail === 'ngit/default-branch' && method === 'POST') {
+    // Set the repo's default branch: re-sign the 30618 with HEAD retargeted to
+    // the chosen branch (one signer prompt; no pack push). The branch must
+    // already be announced — see setDefaultBranchTags.
+    return handleSetDefaultBranch(req, res, project);
   }
 
   if (tail === 'ngit/sync' && method === 'POST') {
@@ -826,4 +843,129 @@ async function handleGraspPush(
     graspPushInFlight.delete(coordKey);
   }
   return true;
+}
+
+// ── Default-branch (HEAD) get/set ──────────────────────────────────────────
+//
+// The repo's default branch lives in the kind-30618 state's HEAD pointer
+// (`ref: refs/heads/<b>`), owned by the announcement — not retargeted by an
+// ordinary push (see buildRepoStateTags). The branch picker reads it here and
+// lets the trust anchor retarget it: re-sign the state with a new HEAD, one
+// signer prompt, no pack push. Only an ALREADY-announced branch can become the
+// default (its pack is on the hosts), so the new default can never dangle.
+
+const jsonReply = (res: http.ServerResponse, status: number, body: any): boolean => {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+  return true;
+};
+
+/** Resolve the in-scope read relays + coordinate, then fetch the newest 30618
+ *  for this repo. Shared by the get/set default-branch handlers. */
+async function fetchRepoState(
+  coords: { pubkey: string; identifier: string; relayHints: string[] },
+  project: Project,
+): Promise<{ relays: string[]; state: NostrEvent | null }> {
+  const projRelays = (project.readRelays || []).filter((r): r is string => typeof r === 'string');
+  const grasp = getGraspServers().map(s => /^wss?:\/\//i.test(s) ? s : `wss://${s}`);
+  const relays = mergeRelaySet([...coords.relayHints, ...grasp, ...projRelays], getEffectiveReadRelays());
+  let state: NostrEvent | null = null;
+  if (relays.length > 0) {
+    try {
+      const r = await queryRelaysDirect({
+        filter: { kinds: [30618], authors: [coords.pubkey], tags: { d: coords.identifier }, limit: 1 },
+        relays, timeoutMs: RELAY_QUERY_TIMEOUT_MS, stream: false,
+        acceptUntil: (evs) => evs.length >= 1,
+      });
+      for (const ev of r.events) {
+        if (ev.kind !== 30618) continue;
+        if (!state || ev.created_at > state.created_at) state = ev;
+      }
+    } catch { /* no state reachable — handlers treat as empty */ }
+  }
+  return { relays, state };
+}
+
+async function handleDefaultBranchInfo(res: http.ServerResponse, project: Project): Promise<boolean> {
+  const coords = decodeNgitRemote(project);
+  if (!coords) return jsonReply(res, 400, { error: 'project has no ngit remote' });
+  const { state } = await fetchRepoState(coords, project);
+  if (!state) return jsonReply(res, 200, { branches: [], current: '', canSet: false });
+  const branches = announcedBranches(state.tags);
+  return jsonReply(res, 200, {
+    branches,
+    current: defaultBranchOf(state.tags),
+    // Only the trust anchor can re-sign the state; reflect that so the UI can
+    // disable the control for non-owners instead of letting a doomed sign fire.
+    canSet: ownerHexMatches(coords.pubkey) && branches.length > 1,
+  });
+}
+
+/** True when the signed-in identity is the repo's trust anchor (the only
+ *  pubkey whose re-signed 30618 the GRASP maintainer set will honour). */
+function ownerHexMatches(coordPubkey: string): boolean {
+  try {
+    const npub = readIdentity().npub;
+    const hex = npub ? (nip19.decode(npub).data as string) : '';
+    return !!hex && hex === coordPubkey;
+  } catch { return false; }
+}
+
+async function handleSetDefaultBranch(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  project: Project,
+): Promise<boolean> {
+  const coords = decodeNgitRemote(project);
+  if (!coords) return jsonReply(res, 400, { error: 'project has no ngit remote' });
+
+  let parsed: any = {};
+  try { parsed = JSON.parse(await readBody(req)); }
+  catch { return jsonReply(res, 400, { error: 'bad json' }); }
+  const branch = typeof parsed.branch === 'string' ? parsed.branch.trim() : '';
+  if (!branch) return jsonReply(res, 400, { error: 'branch required' });
+
+  // Owner gate: a non-anchor re-sign would be ignored by the GRASP maintainer
+  // set, so refuse up front rather than burn a signer prompt on a no-op.
+  if (!ownerHexMatches(coords.pubkey)) {
+    return jsonReply(res, 403, { error: 'only the repository trust anchor can change the default branch' });
+  }
+
+  const coordKey = `${coords.pubkey}:${coords.identifier}`;
+  if (graspPushInFlight.has(coordKey)) {
+    return jsonReply(res, 409, { error: 'a state update for this repository is already in progress' });
+  }
+  graspPushInFlight.add(coordKey);
+  try {
+    const { relays, state } = await fetchRepoState(coords, project);
+    if (!state) {
+      return jsonReply(res, 404, { error: 'no published repo state (kind 30618) found — push the repository first' });
+    }
+    if (defaultBranchOf(state.tags) === branch) {
+      return jsonReply(res, 200, { ok: true, unchanged: true, current: branch });
+    }
+    const newTags = setDefaultBranchTags(state.tags, branch);
+    if (!newTags) {
+      return jsonReply(res, 400, {
+        error: `'${branch}' is not an announced branch — push it first, then set it as the default`,
+        branches: announcedBranches(state.tags),
+      });
+    }
+    const signed = await signEventWithSavedBunker(
+      { kind: 30618, content: '', tags: newTags, created_at: Math.floor(Date.now() / 1000) },
+      GRASP_SIGN_TIMEOUT_MS,
+    );
+    if (!signed.ok || !signed.signedEvent) {
+      return jsonReply(res, signed.tried ? 502 : 400, {
+        error: signed.error || 'signing failed', tried: signed.tried,
+      });
+    }
+    const results = await publishEventToRelays(signed.signedEvent, relays);
+    const accepted = results.filter(r => r.ok).length;
+    return jsonReply(res, accepted > 0 ? 200 : 502, {
+      ok: accepted > 0, current: branch, accepted, targets: relays.length, publish: results,
+    });
+  } finally {
+    graspPushInFlight.delete(coordKey);
+  }
 }
