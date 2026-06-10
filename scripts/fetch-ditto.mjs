@@ -428,9 +428,10 @@ function buildDittoConfig() {
     // The naddr1 below decodes to the kind-31990 client handler
     // coordinate for nostr-station (pubkey 291c75d… — same project
     // identity that anchors the landing-page nsite and signs ngit
-    // merge events). The handler event itself is published via
-    // `npm run publish-client-handler` (see scripts/publish-client-handler.mjs);
-    // re-publishes are idempotent (NIP-33 addressable event).
+    // merge events). The LIVE handler event is managed manually through
+    // the Apps panel; scripts/publish-client-handler.mjs is
+    // bootstrap/recovery only — re-publishing from it REPLACES the
+    // panel-curated version (banner, artwork, topics).
     appName: 'nostr-station',
     client: 'naddr1qvzqqqru7cpzq2guwhvn0fzlv6sjp8uw5es3ma6y33vmx5n9yrrxegkde5mlr0a7qy2hwumn8ghj7un9d3shjtnwwd5hgefwd3hkcqqddehhxarj94ehgct5d9hkuy7cpf4',
     homePage: 'feed',
