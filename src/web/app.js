@@ -1635,16 +1635,26 @@ function statusSignature(status) {
   return sig;
 }
 let __lastHealthSig = '';
-let __healthInFlight = false;
+let __healthCycle = null;   // Promise while a fetch cycle (incl. queued rerun) runs
 let __healthRerun = false;
 
-async function refreshHealth() {
-  // Coalesce: if the previous tick's request is still pending (slow
-  // server, suspended laptop waking up), don't stack a concurrent
-  // /api/status call — note it and rerun once after it settles, so
-  // explicit post-mutation refreshes aren't dropped.
-  if (__healthInFlight) { __healthRerun = true; return; }
-  __healthInFlight = true;
+// Coalesces concurrent callers onto one fetch cycle. If a request lands
+// while a /api/status call is in flight (slow server, poll tick racing a
+// post-mutation refresh), the cycle runs one more pass after it settles —
+// and every caller's promise resolves only after that pass, so
+// `await refreshHealth()` after a mutation always observes post-mutation
+// status instead of returning early against the stale in-flight response.
+function refreshHealth() {
+  if (__healthCycle) { __healthRerun = true; return __healthCycle; }
+  __healthCycle = (async () => {
+    try {
+      do { __healthRerun = false; await refreshHealthOnce(); } while (__healthRerun);
+    } finally { __healthCycle = null; }
+  })();
+  return __healthCycle;
+}
+
+async function refreshHealthOnce() {
   try {
     const status = await api('/api/status');
     const relay = status.find(s => s.id === 'relay');
@@ -1722,10 +1732,6 @@ async function refreshHealth() {
     if (currentPanel() === 'status') Panels.status.render(status);
     window.__lastStatus = status;
   } catch {}
-  finally {
-    __healthInFlight = false;
-    if (__healthRerun) { __healthRerun = false; void refreshHealth(); }
-  }
 }
 
 // Health polling pauses while the tab is hidden — a backgrounded
@@ -3282,11 +3288,15 @@ const ChatPanel = (() => {
       expandBtn?.addEventListener('click',  () => setFull(split.dataset.preview !== 'full'));
       chatShowBtn?.addEventListener('click', () => setFull(false));
       document.addEventListener('keydown', (e) => {
-        if (e.key !== 'Escape') return;
+        if (e.key !== 'Escape' || e.defaultPrevented) return;
         if (!split || split.dataset.preview !== 'full') return;
-        // Don't steal Esc from a modal layered above the panel.
+        // Don't steal Esc from an overlay layered above the panel —
+        // modals, the identity drawer, or the mobile sidebar (which has
+        // its own Esc-to-close).
         const modalRoot = document.getElementById('modal-root');
         if (modalRoot && modalRoot.childElementCount > 0) return;
+        if (document.querySelector('.drawer-scrim.open')) return;
+        if (document.body.classList.contains('sidebar-open')) return;
         setFull(false);
       });
 

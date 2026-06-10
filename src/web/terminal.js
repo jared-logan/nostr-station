@@ -258,12 +258,22 @@
     if (tab.activity !== 'attention' && now - tab.workStartAt >= WORKING_MIN_MS) {
       setActivity(tab, 'working');
     }
-    if (tab.quietTimer) clearTimeout(tab.quietTimer);
+    if (!tab.quietTimer) armQuietTimer(tab, ACTIVITY_QUIET_MS);
+  }
+
+  // One live timer per burst instead of clear+set per WS frame — a
+  // high-rate stream (cat of a big file) delivers hundreds of frames a
+  // second and the per-chunk timer churn adds up. At fire time, if
+  // output kept flowing, re-arm for whatever remains of the quiet
+  // window measured from the last chunk.
+  function armQuietTimer(tab, delay) {
     tab.quietTimer = setTimeout(() => {
       tab.quietTimer = null;
+      const remaining = ACTIVITY_QUIET_MS - (Date.now() - tab.lastOutputAt);
+      if (remaining > 25) { armQuietTimer(tab, remaining); return; }
       if (tab.activity !== 'working') return;
       setActivity(tab, isForeground(tab) ? 'idle' : 'attention');
-    }, ACTIVITY_QUIET_MS);
+    }, delay);
   }
 
   function isExpanded() {

@@ -680,7 +680,12 @@ Every outbound network call is initiated by an explicit user action:
   from your LAN or the internet — only programs running on your
   machine can talk to it. The optional **Mobile access** toggle (nvpn
   panel → Settings) extends the bind to the mesh tunnel IP, which
-  exposes the dashboard *only* to peers on your nvpn network.
+  exposes the dashboard *only* to peers on your nvpn network. The same
+  toggle governs project **dev servers** spawned from the dashboard
+  (`npm run dev`): loopback-only by default, bound to all interfaces
+  when Mobile access is on so the chat preview pane works from mesh
+  devices. Dev servers started before flipping the toggle keep their
+  old binding until restarted.
 - **Loopback-Host check** on every request rejects DNS-rebinding
   attacks (a malicious website tricking your browser into making
   cross-origin requests to localhost).
