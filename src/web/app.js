@@ -25,7 +25,7 @@ if (typeof document !== 'undefined') {
 const $  = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-const PANELS = ['status', 'chat', 'relay', 'blossom', 'projects', 'vpn', 'logs', 'client', 'apps', 'nsite', 'mail', 'config', 'communities'];
+const PANELS = ['status', 'chat', 'relay', 'blossom', 'projects', 'vpn', 'logs', 'apps', 'nsite', 'mail', 'config', 'communities'];
 
 // ── Shared utilities (toast, modal, copy, api) ───────────────────────────
 
@@ -55,11 +55,9 @@ const THEMES = [
   { id: 'blue',   label: 'Blue',   swatch: '#4A9EFF' },
   { id: 'white',  label: 'White',  swatch: '#FFFFFF' },
 ];
-const THEME_STORAGE_KEY       = 'nostr-station:theme';
-const DITTO_THEME_STORAGE_KEY = 'nostr-station:ditto-theme';
-// Theme ids that are valid in localStorage. "ditto" is dynamic — its
-// colors come from a separately-stored JSON blob (see DITTO_THEME_*).
-const VALID_THEME_IDS = new Set([...THEMES.map(t => t.id), 'ditto']);
+const THEME_STORAGE_KEY = 'nostr-station:theme';
+// Theme ids that are valid in localStorage.
+const VALID_THEME_IDS = new Set(THEMES.map(t => t.id));
 
 function getTheme() {
   try {
@@ -75,146 +73,9 @@ function setTheme(id) {
   } else {
     document.documentElement.setAttribute('data-theme', id);
   }
-  if (id === 'ditto') applyDittoStyleBlock(getDittoTheme());
-  else                clearDittoStyleBlock();
   try { localStorage.setItem(THEME_STORAGE_KEY, id); } catch (_) { /* ignore */ }
 }
 
-// ── Ditto theme storage + dynamic style injection ───────────────────────
-// Ditto themes carry user-published colors (kind 16767), so they can't
-// live as static :root[data-theme="..."] blocks in app.css. Instead we
-// inject a <style id="ditto-theme-style"> at runtime whose contents are
-// derived from the stored { primary, background } pair.
-function getDittoTheme() {
-  try {
-    const raw = localStorage.getItem(DITTO_THEME_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return parsed;
-  } catch (_) { /* ignore */ }
-  return null;
-}
-function saveDittoTheme(theme) {
-  try { localStorage.setItem(DITTO_THEME_STORAGE_KEY, JSON.stringify(theme)); } catch (_) {}
-}
-function clearDittoTheme() {
-  try { localStorage.removeItem(DITTO_THEME_STORAGE_KEY); } catch (_) {}
-}
-// CSS hex color literal — `#` + 3/4/6/8 hex digits. Mirrors the server-side
-// regex so we don't trust whatever survived the API boundary.
-const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
-// `url("…")` is the only place the user's string lands inside CSS, and
-// safeHttpUrl already enforced an http(s) URL — we just need to escape
-// the two characters that can break out of a double-quoted CSS string.
-function escCssUrl(u) { return String(u).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
-function isSafeImageUrl(u) {
-  if (typeof u !== 'string' || !u) return false;
-  // Server-emitted signed proxy URLs are relative paths. Accept the
-  // exact /api/img-proxy?… shape (the server vetted the upstream URL
-  // before signing; the signature gate refuses anything else).
-  if (u.startsWith('/api/img-proxy?')) return true;
-  try {
-    const p = new URL(u);
-    return p.protocol === 'http:' || p.protocol === 'https:';
-  } catch { return false; }
-}
-function applyDittoStyleBlock(theme) {
-  if (!theme || (!theme.primary && !theme.background && !theme.bgImage)) {
-    clearDittoStyleBlock();
-    return;
-  }
-  // Sanitize. The server already validated, but localStorage is
-  // attacker-writable from any same-origin XSS, so re-check before we
-  // shove user-provided strings into a <style> tag.
-  const primary    = HEX_RE.test(theme.primary || '')    ? theme.primary    : '';
-  const background = HEX_RE.test(theme.background || '') ? theme.background : '';
-  const bgImage    = theme.bgImage && isSafeImageUrl(theme.bgImage) ? theme.bgImage : '';
-  const bgMode     = (theme.bgMode === 'contain' || theme.bgMode === 'tile') ? theme.bgMode : 'cover';
-
-  const rootDecls = [];
-  // Text ramp — matches Ditto's neutral-grey foreground scheme
-  // (foreground 100% / muted-foreground 70%). Applies in both Ditto
-  // sub-modes; the slightly purple-tinted defaults from :root were
-  // dropping below readable contrast over either a user-chosen --bg
-  // color or the dimmed image overlay.
-  rootDecls.push(`--text-bright: #ffffff;`);
-  rootDecls.push(`--text:        #e8e8e8;`);
-  rootDecls.push(`--text-dim:    #b3b3b3;`);
-  rootDecls.push(`--muted:       #7a7a7a;`);
-  if (primary) {
-    rootDecls.push(`--accent: ${primary};`);
-    rootDecls.push(`--accent-bright: color-mix(in srgb, ${primary} 65%, #ffffff);`);
-    rootDecls.push(`--accent-dim:    color-mix(in srgb, ${primary} 65%, #000000);`);
-    rootDecls.push(`--info:          color-mix(in srgb, ${primary} 70%, #ffffff);`);
-  }
-
-  let css = '';
-  if (bgImage) {
-    // Image mode: the user's image becomes the body background, and the
-    // card surfaces switch to translucent dark overlays so text stays
-    // legible (mirrors what Ditto does in their own client). A
-    // linear-gradient is layered above the image to dim high-contrast
-    // photos uniformly — without it, bright spots (clouds, sky, etc.)
-    // bleed through cards and chat text.
-    const size   = bgMode === 'tile' ? 'auto' : bgMode;        // cover | contain | auto
-    const repeat = bgMode === 'tile' ? 'repeat' : 'no-repeat';
-    const fallback = background || '#0a0a0a';
-    rootDecls.push(`--bg: ${fallback};`);
-    rootDecls.push(`--bg-elev:       rgba(0, 0, 0, 0.85);`);
-    rootDecls.push(`--bg-card:       rgba(0, 0, 0, 0.78);`);
-    rootDecls.push(`--bg-hover:      rgba(255, 255, 255, 0.08);`);
-    rootDecls.push(`--border:        rgba(255, 255, 255, 0.16);`);
-    rootDecls.push(`--border-strong: rgba(255, 255, 255, 0.28);`);
-    const bodyCss =
-      `:root[data-theme="ditto"] body {` +
-      // First layer: a flat 72% black tint that sits *above* the image
-      // and dims it uniformly. Second layer: the user's image. Tuned
-      // to match Ditto's own "image as faint backdrop" feel — without
-      // a strong overlay, high-contrast photos make chat text (which
-      // renders directly on body, no card) illegible. The URL is
-      // routed through the image proxy so CSP img-src 'self' data:
-      // accepts the same-origin background fetch.
-      `  background-image: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.72)), url("${escCssUrl(proxyImageUrl(bgImage))}");` +
-      `  background-color: ${fallback};` +
-      `  background-size: 100% 100%, ${size};` +
-      `  background-position: center center, center center;` +
-      `  background-repeat: no-repeat, ${repeat};` +
-      `  background-attachment: fixed, fixed;` +
-      `}`;
-    // The header has a hardcoded dark gradient in app.css that would
-    // hide the image strip under it. Replace with a translucent gradient
-    // in image mode so the photo bleeds through (matches the card recipe).
-    const headerCss =
-      `:root[data-theme="ditto"] .header {` +
-      `  background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.45) 100%);` +
-      `}`;
-    css = `:root[data-theme="ditto"] { ${rootDecls.join(' ')} } ${bodyCss} ${headerCss}`;
-  } else if (background) {
-    // Color-only mode: derive the elevation ramp lighter than --bg so
-    // cards still stand out (standard dark-UI layering).
-    rootDecls.push(`--bg: ${background};`);
-    rootDecls.push(`--bg-elev:       color-mix(in srgb, ${background} 95%, #ffffff);`);
-    rootDecls.push(`--bg-card:       color-mix(in srgb, ${background} 92%, #ffffff);`);
-    rootDecls.push(`--bg-hover:      color-mix(in srgb, ${background} 88%, #ffffff);`);
-    rootDecls.push(`--border:        color-mix(in srgb, ${background} 88%, #ffffff);`);
-    rootDecls.push(`--border-strong: color-mix(in srgb, ${background} 80%, #ffffff);`);
-    css = `:root[data-theme="ditto"] { ${rootDecls.join(' ')} }`;
-  } else {
-    css = `:root[data-theme="ditto"] { ${rootDecls.join(' ')} }`;
-  }
-
-  let el = document.getElementById('ditto-theme-style');
-  if (!el) {
-    el = document.createElement('style');
-    el.id = 'ditto-theme-style';
-    document.head.appendChild(el);
-  }
-  el.textContent = css;
-}
-function clearDittoStyleBlock() {
-  const el = document.getElementById('ditto-theme-style');
-  if (el) el.remove();
-}
 function renderThemePicker() {
   const current = getTheme();
   return `<div class="theme-picker" id="cfg-theme-picker">${
@@ -240,15 +101,14 @@ function wireThemePicker() {
     if (!id || id === getTheme()) return;
     setTheme(id);
     // Re-render swatches in place — cheaper than reloading the whole
-    // panel and keeps focus state on the picker. Also re-render the
-    // Ditto card since its "active" badge depends on getTheme().
+    // panel and keeps focus state on the picker.
     root.outerHTML = renderThemePicker();
     wireThemePicker();
-    refreshDittoCard();
   });
 }
 
-// ── Ditto theme card ─────────────────────────────────────────────────────
+// Relative-time formatter ("3m ago"). Generic date util used across
+// the dashboard.
 function fmtAgo(tsMs) {
   if (!tsMs) return '';
   const s = Math.floor((Date.now() - tsMs) / 1000);
@@ -259,129 +119,6 @@ function fmtAgo(tsMs) {
   if (h < 24) return `${h}h ago`;
   const d = Math.floor(h / 24);
   return `${d}d ago`;
-}
-function renderDittoCard() {
-  const theme  = getDittoTheme();
-  const active = getTheme() === 'ditto';
-  if (!theme) {
-    return `
-      <div class="ditto-theme" id="cfg-ditto-card">
-        <div class="ditto-theme-head">
-          <div class="ditto-theme-title">Ditto theme sync</div>
-        </div>
-        <div class="ditto-theme-empty">
-          Pull your published Ditto profile theme (kind 16767) from your read relays
-          and apply its primary color + background. No theme synced yet.
-        </div>
-        <div class="ditto-theme-actions">
-          <button class="primary" id="cfg-ditto-sync">Sync from relays</button>
-        </div>
-      </div>
-    `;
-  }
-  const swatches = [];
-  if (theme.primary)    swatches.push({ role: 'primary',    hex: theme.primary });
-  if (theme.background) swatches.push({ role: 'background', hex: theme.background });
-  const safeBgImage = theme.bgImage && isSafeImageUrl(theme.bgImage) ? theme.bgImage : '';
-  const imagePreview = safeBgImage
-    ? `<div class="ditto-theme-image">
-         <img src="${escapeHtml(proxyImageUrl(safeBgImage))}" alt="" loading="lazy">
-         <div class="ditto-theme-image-meta">
-           <span style="color:var(--muted)">bg image</span>
-           <span>${escapeHtml(theme.bgMode || 'cover')}</span>
-         </div>
-       </div>`
-    : '';
-  return `
-    <div class="ditto-theme ${active ? 'active' : ''}" id="cfg-ditto-card">
-      <div class="ditto-theme-head">
-        <div class="ditto-theme-title">${escapeHtml(theme.title || 'Ditto theme')}</div>
-        <div class="ditto-theme-status ${active ? 'ok' : ''}">
-          ${active ? '● applied' : 'synced ' + escapeHtml(fmtAgo(theme.syncedAt))}
-        </div>
-      </div>
-      ${imagePreview}
-      <div class="ditto-theme-preview">
-        ${swatches.map(s => `
-          <span class="swatch">
-            <span class="chip" style="background:${escapeHtml(s.hex)}"></span>
-            <code>${escapeHtml(s.hex)}</code>
-            <span style="color:var(--muted)">${escapeHtml(s.role)}</span>
-          </span>
-        `).join('')}
-      </div>
-      <div class="ditto-theme-actions">
-        ${active
-          ? `<button id="cfg-ditto-resync">Re-sync</button>`
-          : `<button class="primary" id="cfg-ditto-apply">Apply</button>
-             <button id="cfg-ditto-resync">Re-sync</button>`
-        }
-        <button class="danger" id="cfg-ditto-clear">Clear</button>
-      </div>
-    </div>
-  `;
-}
-function refreshDittoCard() {
-  const root = $('cfg-ditto-card');
-  if (!root) return;
-  root.outerHTML = renderDittoCard();
-  wireDittoCard();
-}
-async function syncDittoTheme() {
-  const btns = $$('#cfg-ditto-card button');
-  btns.forEach(b => b.disabled = true);
-  try {
-    const r = await api('/api/ditto/theme');
-    if (!r || !r.found) {
-      const reason = r?.reason === 'no-npub'   ? 'No npub configured.'
-                  : r?.reason === 'no-relays'  ? 'Add a read relay first.'
-                  : r?.reason === 'no-event'   ? 'No kind-16767 theme on your relays. Publish one in Ditto first.'
-                  : r?.reason === 'no-colors'  ? 'Found a theme event but it had no usable colors.'
-                  :                              'Could not find a Ditto theme.';
-      toast('No Ditto theme', reason, 'warn');
-      btns.forEach(b => b.disabled = false);
-      return;
-    }
-    const theme = {
-      title:      r.title || 'Ditto theme',
-      primary:    r.primary    || '',
-      background: r.background || '',
-      bgImage:    r.bgImage    || '',
-      bgMode:     r.bgMode     || '',
-      syncedAt:   Date.now(),
-    };
-    saveDittoTheme(theme);
-    setTheme('ditto');
-    toast('Ditto theme applied', theme.title, 'ok');
-    refreshDittoCard();
-    // Picker swatches need to drop their "active" highlight too.
-    const picker = $('cfg-theme-picker');
-    if (picker) {
-      picker.outerHTML = renderThemePicker();
-      wireThemePicker();
-    }
-  } catch (e) {
-    toast('Sync failed', String(e.message || e), 'err');
-    btns.forEach(b => b.disabled = false);
-  }
-}
-function wireDittoCard() {
-  $('cfg-ditto-sync')?.addEventListener('click', syncDittoTheme);
-  $('cfg-ditto-resync')?.addEventListener('click', syncDittoTheme);
-  $('cfg-ditto-apply')?.addEventListener('click', () => {
-    setTheme('ditto');
-    refreshDittoCard();
-    const picker = $('cfg-theme-picker');
-    if (picker) { picker.outerHTML = renderThemePicker(); wireThemePicker(); }
-  });
-  $('cfg-ditto-clear')?.addEventListener('click', () => {
-    clearDittoTheme();
-    if (getTheme() === 'ditto') setTheme('purple');
-    refreshDittoCard();
-    const picker = $('cfg-theme-picker');
-    if (picker) { picker.outerHTML = renderThemePicker(); wireThemePicker(); }
-    toast('Ditto theme cleared', '', 'ok');
-  });
 }
 
 const toast = (() => {
@@ -17368,10 +17105,8 @@ const ConfigPanel = (() => {
             The relays <b>nostr-station itself</b> uses for its behind-the-scenes Nostr
             reads — resolving profile names + avatars and repo maintainers across the
             dashboard, and as an extra source when resolving nsites. These are
-            <b>not</b> the private local relay (configured above), and they do
-            <b>not</b> control the embedded
-            <a href="#client" style="color:var(--accent-bright)">Ditto client</a> —
-            Ditto connects to its own relays, managed inside Ditto's own settings.
+            <b>not</b> the private local relay (configured above); they're the
+            outbound relays the dashboard reads from when it needs network data.
           </div>
 
           <div class="cfg-subsection" id="cfg-app-relays">
@@ -17713,7 +17448,6 @@ const ConfigPanel = (() => {
               </div>
             </div>
           </div>
-          ${renderDittoCard()}
         </div>
       </details>
 
@@ -17739,9 +17473,8 @@ const ConfigPanel = (() => {
       </details>
     `;
 
-    // Appearance — accent theme picker + Ditto sync card
+    // Appearance — accent theme picker
     wireThemePicker();
-    wireDittoCard();
 
     // About — manual update check. Forces a server-side re-poll
     // (so we don't have to wait for the 30-min background tick),
@@ -19105,14 +18838,9 @@ const ConfigPanel = (() => {
   }
 
   // Current accent theme — shown collapsed so users see at-a-glance which
-  // colorway is active without expanding Appearance. "ditto" reflects a
-  // user-published kind-16767 theme so we surface its title when known.
+  // colorway is active without expanding Appearance.
   function summarizeTheme() {
     const id = getTheme();
-    if (id === 'ditto') {
-      const t = getDittoTheme();
-      return t?.title ? `Ditto · ${t.title}` : 'Ditto';
-    }
     const t = THEMES.find(x => x.id === id);
     return t ? t.label : id;
   }
@@ -22605,118 +22333,6 @@ const SetupWizard = (() => {
 //
 // Private DMs (NIP-17) are intentionally NOT in v1. The "DMs" tab is rendered
 // as a disabled placeholder so the IA is visible.
-
-// ── Panel: Client ────────────────────────────────────────────────────────
-//
-// Slim shell around the embedded Ditto SPA. The dashboard keeps the
-// header row (title + public chip + refresh button); everything else
-// is Ditto, served same-origin from /ditto/* by serveDitto() in
-// web-server-static.ts. Ditto handles its own auth (NIP-07 passes
-// through from any installed browser extension; NIP-46 pairs inside
-// Ditto's own settings if the user wants server-side signing here).
-//
-// When the Ditto bundle is missing — scripts/fetch-ditto.mjs failed at
-// build time, or the user has STATION_SKIP_DITTO=1 — the server's
-// /ditto/ route 404s with `{ error: 'ditto-not-bundled' }`. The panel
-// HEAD-probes that endpoint on first mount and swaps the iframe for an
-// inline instruction block in that case.
-const ClientPanel = (() => {
-  const frame      = $('client-ditto-frame');
-  const missing    = $('client-ditto-missing');
-  const refreshBtn = $('client-refresh');
-  const retryBtn   = $('client-ditto-retry');
-  const installBtn = $('client-ditto-install');
-
-  let probed = false;
-
-  async function probeDittoBundle() {
-    if (probed) return;
-    probed = true;
-    try {
-      const r = await fetch('/ditto/', { method: 'HEAD', cache: 'no-store' });
-      if (r.ok) { showFrame(); return; }   // bundle present
-      showMissing();
-    } catch {
-      // Network / aborted — leave the iframe alone (it surfaces its own
-      // error). probed=true prevents thrashing on repeated panel-enters.
-    }
-  }
-
-  function showMissing() {
-    if (frame)   frame.hidden = true;
-    if (missing) missing.hidden = false;
-  }
-  function showFrame() {
-    if (frame)   frame.hidden = false;
-    if (missing) missing.hidden = true;
-  }
-
-  // Refresh = reload the embedded SPA without leaving the dashboard.
-  // Re-setting src is cheaper than a full page reload and keeps the
-  // dashboard session intact. Brief empty-src step forces the browser
-  // to actually re-mount (some engines no-op an identical src write).
-  function reloadFrame() {
-    if (!frame) return;
-    const url = frame.getAttribute('src') || '/ditto/';
-    frame.setAttribute('src', '');
-    requestAnimationFrame(() => frame.setAttribute('src', url));
-  }
-
-  // Bounce nsite-gateway navigations from inside Ditto into our own
-  // nsite browser panel. The injected script in Ditto's <head>
-  // (web-server-static.ts:DITTO_PREFIX_STRIP_SCRIPT) catches window.open
-  // and <a> clicks targeting *.nsite.lol / *.nsite.run / *.nsite.cloud /
-  // *.nosto.re / *.nwb.tf / *.nostr.hu and postMessages the URL up here.
-  // We re-validate origin, source, and the gateway pattern before
-  // accepting, then drop the URL onto #nsite/<encoded-url>. The nsite
-  // panel's existing maybeConsumeDeepLink() flow takes it from there:
-  // address bar, resolver, iframe boot — same code path as if the user
-  // typed the URL in directly.
-  const NSITE_GATEWAY_HOST = /^[^.]+\.(?:nsite\.lol|nsite\.run|nsite\.cloud|nosto\.re|nwb\.tf|nostr\.hu)$/i;
-  window.addEventListener('message', (event) => {
-    if (!frame || event.source !== frame.contentWindow) return;
-    if (event.origin !== location.origin) return;
-    const m = event.data;
-    if (!m || typeof m !== 'object') return;
-    if (m.type !== 'station:open-nsite' || typeof m.url !== 'string') return;
-    let host;
-    try { host = new URL(m.url, location.origin).hostname; } catch { return; }
-    if (!NSITE_GATEWAY_HOST.test(host)) return;
-    location.hash = '#nsite/' + encodeURIComponent(m.url);
-  });
-
-  refreshBtn?.addEventListener('click', reloadFrame);
-  retryBtn?.addEventListener('click', () => {
-    // User just ran `npm run update-ditto` and clicked Reload — re-probe
-    // + remount in case the bundle is now present.
-    probed = false;
-    void probeDittoBundle().then(() => reloadFrame());
-  });
-  // In-dashboard fetch — spawns scripts/fetch-ditto.mjs server-side and
-  // streams the output through the existing exec modal. Saves the user
-  // from SSH'ing to the VM when the build-time fetch failed. After the
-  // exec modal closes successfully, we re-probe + reload the iframe so
-  // the freshly-bundled Ditto mounts without a page refresh.
-  installBtn?.addEventListener('click', () => {
-    openExecModal({
-      title:    'Fetch Ditto',
-      subtitle: 'Downloads + extracts Ditto into dist/ditto/ (~6 MiB from GitLab)',
-      endpoint: '/api/ditto/install',
-    }).then(r => {
-      if (r.ok) {
-        toast('Ditto installed', 'Reloading the Client panel…', 'ok');
-        probed = false;
-        void probeDittoBundle().then(() => reloadFrame());
-      } else {
-        toast('Fetch failed', `exit code ${r.code}`, 'err');
-      }
-    });
-  });
-
-  return {
-    onEnter() { void probeDittoBundle(); },
-  };
-})();
 
 // ── Panel: Mail ──────────────────────────────────────────────────────────
 //
@@ -27149,7 +26765,6 @@ const Panels = {
   projects:    ProjectsPanel,
   vpn:         VpnPanel,
   logs:        LogsPanel,
-  client:      ClientPanel,
   apps:        AppsPanel,
   nsite:       NsitePanel,
   mail:        MailPanel,

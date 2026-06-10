@@ -18,7 +18,7 @@ import { nip19 } from 'nostr-tools';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { getKeychain } from './keychain.js';
 import {
-  serveStatic, serveVendorXterm, serveDitto, WEB_DIR, HTML_SECURITY_HEADERS,
+  serveStatic, serveVendorXterm, WEB_DIR, HTML_SECURITY_HEADERS,
 } from './web-server-static.js';
 import { runSetupVerify } from './setup-verify.js';
 // Most terminal helpers moved alongside their HTTP routes + the WS
@@ -93,7 +93,6 @@ import type { BlossomServer } from '../blossom/index.js';
 import { readProjects } from './projects.js';
 import { listAllTestPubkeys } from './test-identities.js';
 import { handleIdentity } from './routes/identity.js';
-import { handleDitto } from './routes/ditto.js';
 import { handleClient } from './routes/client.js';
 import { handleApps } from './routes/apps.js';
 import { handleNgit } from './routes/ngit.js';
@@ -1109,7 +1108,7 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // discovers at render time — primarily markdown image hrefs
       // extracted from kind-30023 articles, README files, comment
       // bodies, etc. The dashboard pre-signs profile pictures /
-      // banners / Ditto theme background at JSON-emission time, so
+      // banners at JSON-emission time, so
       // this endpoint exists for the residual surface where the URL
       // isn't known until the browser parses content. Session-gated
       // because the auth middleware ran above (`/api/img-proxy/sign`
@@ -1961,14 +1960,12 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // /api/identity/profile/preview, /api/identity/profile, /api/identity/profile/sync.
       if (await handleIdentity(req, res, fullUrl, method)) return;
 
-      // ── Ditto theme sync (routes/ditto.ts) ─────────────────────────────
-      // GET /api/ditto/theme — fetch latest kind 16767 from owner's relays.
-      if (await handleDitto(req, res, fullUrl, method)) return;
-
-      // ── Nostr client (routes/client.ts) ────────────────────────────────
-      // Powers the /client (#client) panel — feed + notifications + profile
-      // lookup + kind-1 publish. Reads from identity.readRelays; signs via
-      // the persisted bunker pairing. Auto-stamps ["client","nostr-station"].
+      // ── Nostr client API (routes/client.ts) ────────────────────────────
+      // Native Nostr read/post surface. The live consumer is the Relay
+      // config panel's "Sync from Nostr" button (POST /api/client/sync-
+      // relays — mirrors the owner's NIP-65 list into Your Relays). Reads
+      // from identity.readRelays; signs via the persisted bunker pairing.
+      // Auto-stamps ["client","nostr-station"].
       if (await handleClient(req, res, fullUrl, method)) return;
 
       // ── App Center (routes/apps.ts) ────────────────────────────────────
@@ -2353,49 +2350,9 @@ export async function startWebServer(port: number): Promise<http.Server> {
       // request handler's allowedHosts / isLoopbackUrl primitives.
       if (await handleTerminal(req, res, fullUrl, method)) return;
 
-      // ── POST /api/ditto/install — dashboard-mediated Ditto fetch ────
-      //
-      // The bundle is normally pulled by scripts/fetch-ditto.mjs during
-      // `npm run build`. If that download failed (network flake on the
-      // install box, CI artifact rotation, etc.) the Client panel ends
-      // up with no Ditto and shows a missing-bundle empty state. This
-      // endpoint lets the user retry from inside the dashboard — spawns
-      // the same fetch script, streams its stdout via SSE into the
-      // existing exec modal. After it completes the panel's HEAD probe
-      // picks up the freshly-bundled SPA on the next reload.
-      if (url === '/api/ditto/install' && method === 'POST') {
-        const here = path.dirname(fileURLToPath(import.meta.url));
-        const root = path.resolve(here, '..', '..');
-        const script = path.join(root, 'scripts', 'fetch-ditto.mjs');
-        // Wipe any stale partial extraction so fetch-ditto takes the
-        // full-fetch path (rather than the "already present, skipping"
-        // short-circuit — which would no-op if the user has a broken
-        // dist/ditto/ from a prior failed run).
-        try {
-          fs.rmSync(path.join(root, 'dist', 'ditto'), { recursive: true, force: true });
-        } catch {}
-        streamExec(
-          {
-            bin:  process.execPath,
-            args: [script],
-            // Source build = git clone + npm ci + npm run build, which
-            // typically takes 2–5 minutes on a warm box and longer on
-            // cold/slow networks. 10 min covers the slow case.
-            timeoutMs: 600_000,
-          },
-          res, req, root,
-          { line: '$ node scripts/fetch-ditto.mjs', stream: 'stdout' },
-        );
-        return;
-      }
-
       // Static fallback — vendor libs first (fast path, strict whitelist),
-      // then the bundled Ditto SPA, then the regular src/web tree.
-      // serveDitto matches /ditto/* and falls through to serveStatic on
-      // miss (returns false), so the dashboard's own assets still win.
-      // Allow HEAD on Ditto for the panel's bundle-presence probe.
+      // then the regular src/web tree.
       if (method === 'GET' && serveVendorXterm(req, res)) return;
-      if ((method === 'GET' || method === 'HEAD') && serveDitto(req, res)) return;
       if (method === 'GET' && serveStatic(req, res)) return;
 
       // SPA routes — served from index.html. The client router picks up

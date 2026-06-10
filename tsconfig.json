@@ -13,9 +13,5 @@
     "declaration": true
   },
   "include": ["src/**/*"],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "src/web/ditto-skin"
-  ]
+  "exclude": ["node_modules", "dist"]
 }

@@ -5,6 +5,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Removed: embedded Ditto client + Client panel
+
+nostr-station is a Nostr **dev** station; bundling a full social client
+worked against that. The embedded Ditto SPA (a complete React app served
+in an iframe) was heavy enough to pin a browser renderer core, so it has
+been removed entirely — there is no longer a Client panel, no `/ditto/*`
+route, and no Ditto build step. The dashboard is leaner and the build is
+faster and lighter (the source build cloned `soapbox-pub/ditto` and ran a
+~1,000-package `npm ci` + vite build, producing a ~15 MB / 500-file
+bundle — all gone).
+
+- **Build:** `scripts/fetch-ditto.mjs`, the `update-ditto` npm script, the
+  `DITTO_REF` pin, and `STATION_SKIP_DITTO` handling are deleted. `npm run
+  build` no longer clones or compiles anything from upstream Ditto.
+- **Serving:** the `/ditto/*` + `/assets/*` static mount (`serveDitto`),
+  the `/api/ditto/theme` and `/api/ditto/install` routes, and the iframe
+  postMessage bridge are removed.
+- **UI:** the Client nav entry + panel, the Ditto theme-sync card in
+  Config → Appearance, the skin layer (`src/web/ditto-skin/`), and
+  `src/web/ditto-overrides.css` are removed. The accent-theme picker
+  (purple / green / red / blue / white) is unchanged.
+- **Migration:** a normal `git pull` + update removes any previously-built
+  `dist/ditto/` (and `.ditto-src/` scratch) on the next build.
+- **Kept (shared infra, unchanged):** the native `/api/client/*` API
+  (notably `sync-relays`, used by Config → Station Relays), the NIP-89
+  client tag stamped on repo / nsite / app / push events
+  (`src/lib/client-tag.ts` + `npm run publish-client-handler`), and the
+  `relay.ditto.pub` / `blossom.ditto.pub` default relays/servers (public
+  infra, not the embedded client).
+
 ### Code tab: set the repository's default branch
 
 The default branch (the kind-30618 HEAD pointer) can now be changed from the

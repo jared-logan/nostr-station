@@ -35,13 +35,6 @@ service files, no `sudo`. If Node 22+, `git`, or the build toolchain is
 missing, the installer prints the exact one-line fix and exits — it never
 auto-installs system packages.
 
-The build also compiles a bundled [Ditto](https://about.ditto.pub/)
-client from source (pinned upstream SHA, baked with nostr-station theme
-+ NIP-89 attribution) so the dashboard's **Client** panel works out of
-the box. Skip with `STATION_SKIP_DITTO=1` for air-gapped installs or
-CI; the dashboard still boots and the Client panel surfaces a clear
-"Build Ditto now" button.
-
 Re-running the same one-liner upgrades an existing install (fast-forward
 pull, rebuild, relaunch). The prerequisites above (Node 22+, `git`, a C
 build toolchain) are the only requirements — the installer detects each
@@ -280,20 +273,6 @@ tools). Each tab renders inside a strict sandbox at a per-site origin
 the dashboard and from each other. See [docs/nsite-isolation.md](docs/nsite-isolation.md)
 for the isolation model. Use `nostr-station nsite publish` to publish
 a project's static build (separate from the browser side of this panel).
-
-### Client
-
-Embedded public Nostr client — a source-compiled [Ditto](https://about.ditto.pub/)
-SPA bundled into nostr-station, served from `/ditto/`. Read your feed,
-post notes, browse profiles inside the dashboard without leaving for
-another app. The bundle is built at install time with a baked
-`ditto.json` (theme colors matched to nostr-station's palette, the
-nori logo as favicon, and `appName: "nostr-station"` so every kind-1
-/ 6 / 7 / 1111 published from here carries the full NIP-89 client
-tag pointing at our kind-31990 handler). When Ditto isn't bundled
-(STATION_SKIP_DITTO=1 at install, or an offline machine that
-couldn't clone), the panel shows a one-click "Build Ditto now"
-button. To force a rebuild: `npm run update-ditto`.
 
 ### Communities — experimental (beta)
 
@@ -797,7 +776,6 @@ installed) inherit the lifecycle and tear down with the parent. Data:
 └── secrets                      Encrypted keychain (Linux fallback)
 
 ~/nostr-station/                 Source clone (when installed via curl)
-├── dist/ditto/                  Source-built Ditto bundle (Client panel)
 └── projects/                    Default projects directory
 ```
 
@@ -826,26 +804,6 @@ Tests:
 npm test             # node:test via tsx
 npm run typecheck    # type-check without emit
 ```
-
-Bundled Ditto client:
-
-```bash
-npm run update-ditto     # wipe dist/ditto/ and force a fresh source build
-STATION_SKIP_DITTO=1 npm run build   # skip the Ditto build (faster
-                                     # inner-loop iteration; the Client
-                                     # panel surfaces an in-app
-                                     # "Build Ditto now" button)
-```
-
-The bundled Ditto build lives in `scripts/fetch-ditto.mjs` — clones
-`soapbox-pub/ditto` at a pinned SHA, bakes our `ditto.json` (theme,
-relays, `appName=nostr-station` for NIP-89 attribution), runs
-`npm ci && npm run build`, then copies `dist/` into `dist/ditto/`.
-Smart-rebuild detection re-fires the build when the pin, the baked
-config, our overlay CSS (`src/web/ditto-overrides.css`), or the
-fetch script itself changes — so a `git pull` that bumps the upstream
-pin or our theme produces the right output without needing
-`npm run update-ditto` manually.
 
 For the Communities subsystem (GRAIN supervisor, NIP-86 admin client,
 per-community state model), see

@@ -16,7 +16,7 @@
  * Applies to both directions:
  *   - Relay WSS (in-process, listens on :7777): accepts up to MAX_WS_PAYLOAD
  *     per frame from any client.
- *   - Inbox + nostr-query + ditto + identity + repo + promote + seed +
+ *   - Inbox + nostr-query + identity + repo + promote + seed +
  *     setup-verify + test-identities: outbound connections to external
  *     relays should reject oversized server-to-client frames before
  *     they're parsed.

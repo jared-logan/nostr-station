@@ -6,8 +6,8 @@
  * (kind 30618), nsite deploys (kind 35128 manifests; deploy never touches
  * the 30617), and App Center handler events (kind 31990) — stamps the
  * SAME tag, and therefore links back to nostr-station's NIP-89 handler
- * event the way a kind-1 from the Client panel does (the "open in /
- * published by" affordance in Ditto / nostrhub.io).
+ * event (the "open in / published by" affordance in NIP-89-aware
+ * clients like nostrhub.io).
  *
  * 4-element form: ["client", <name>, <kind>:<pubkey>:<d-tag>, <relay-hint>].
  * The coordinate points at the kind-31990 "client handler" event
@@ -15,8 +15,7 @@
  * the same identity that anchors the landing-page nsite and signs ngit
  * merge events). Publish/refresh that handler with
  * `npm run publish-client-handler`; this constant MUST stay in sync with
- * the `client` naddr baked into scripts/fetch-ditto.mjs so the iframe
- * (Ditto) and native publish paths emit an identical tag.
+ * the coordinate that script publishes.
  *
  * A bare ["client", "nostr-station"] (2-element) is NOT enough — it shows
  * the name but doesn't link to the app handler. Always use this.
