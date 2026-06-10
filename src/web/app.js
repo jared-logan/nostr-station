@@ -6016,6 +6016,14 @@ const ProjectsPanel = (() => {
   // anyone would care about; the dedup keeps a slow `git fetch` from
   // stacking calls.
   const inFlightGitState = new Set();
+  // Latest successful /git-state payload per project. The branch chip and
+  // diverged-rescue popovers build their contents at open time from this
+  // instead of re-probing, so a click is instant.
+  const latestGitState = new Map();
+  // autoPulled.at values already announced, so each background auto-pull
+  // produces exactly one quiet notice (banner on the card, toast in the
+  // detail view) instead of one per poll tick.
+  const lastSeenAutoPull = new Map();
   let gitStateInterval = null;
   let visibilityHookInstalled = false;
   const stateClassFor = (gs) => {
@@ -6030,6 +6038,38 @@ const ProjectsPanel = (() => {
     if (gs.ahead || gs.behind) return 'pcs-ahead-behind';
     return 'pcs-up-to-date';
   };
+  // Paint the off-default branch chip ("⎇ feature-x"). Hidden whenever the
+  // project is home (on the default branch) — branches stay invisible
+  // until one actually exists, shakespeare-style.
+  function paintBranchChip(chipEl, gs) {
+    if (!chipEl) return;
+    if (!gs || (!gs.offDefault && !gs.detached)) {
+      chipEl.hidden = true;
+      chipEl.textContent = '';
+      return;
+    }
+    const home = gs.defaultBranch || 'main';
+    chipEl.hidden = false;
+    chipEl.textContent = gs.detached ? '⎇ detached' : `⎇ ${gs.branch}`;
+    chipEl.title = gs.detached
+      ? `You're viewing an old version. ${home} is home.`
+      : `You're on a side branch. ${home} is home.`;
+  }
+
+  // One quiet notice per background auto-pull. Returns the pulled commit
+  // count when this poll is the first to observe a fresh auto-pull, else 0.
+  function noteAutoPull(projectId, gs) {
+    const ap = gs.autoPulled;
+    if (!ap || !ap.at) return 0;
+    const seen = lastSeenAutoPull.get(projectId);
+    lastSeenAutoPull.set(projectId, ap.at);
+    if (seen === ap.at) return 0;
+    // First sighting this page load: only announce if it just happened —
+    // a mark from an hour ago isn't news, it's history.
+    if (seen === undefined && Date.now() - ap.at > 90_000) return 0;
+    return ap.commits || 0;
+  }
+
   async function pollGitStateOne(projectId) {
     if (inFlightGitState.has(projectId)) return;
     inFlightGitState.add(projectId);
@@ -6042,8 +6082,11 @@ const ProjectsPanel = (() => {
       // momentarily repaint a dirty repo as "up to date" until the next
       // tick. Leave the badge alone instead.
       if (gs.error) return;
-      const cardEl = body.querySelector(`.project-card[data-id="${projectId}"] .pc-state`);
-      if (!cardEl) return;  // user navigated away mid-fetch
+      latestGitState.set(projectId, gs);
+      const card = body.querySelector(`.project-card[data-id="${projectId}"]`);
+      if (!card) return;  // user navigated away mid-fetch
+      const cardEl = card.querySelector('.pc-state');
+      if (!cardEl) return;
       if (gs.backend === 'local-only') {
         cardEl.hidden = true;
         cardEl.textContent = '';
@@ -6053,6 +6096,14 @@ const ProjectsPanel = (() => {
       cardEl.textContent = gs.label;
       cardEl.title = `${gs.branch || 'no branch'} · ${gs.label}`;
       cardEl.className = `pc-state ${stateClassFor(gs)}`;
+      paintBranchChip(card.querySelector('.pc-branch'), gs);
+      const pulled = noteAutoPull(projectId, gs);
+      if (pulled > 0) {
+        setCardBanner(card,
+          `<span class="pcb-msg">Updated from remote — pulled ${pulled} commit${pulled === 1 ? '' : 's'}</span>`,
+          { kind: 'ok' });
+        clearCardBannerLater(card, 6000);
+      }
     } catch {
       // Endpoint failed — silent. The badge stays in whatever state
       // the previous successful poll left it in. A persistent failure
@@ -6061,15 +6112,62 @@ const ProjectsPanel = (() => {
       inFlightGitState.delete(projectId);
     }
   }
+
+  // Detail-view sibling of pollGitStateOne: keeps the header branch chip
+  // fresh and re-renders content tabs after a background auto-pull so the
+  // file tree / log never show a HEAD that no longer exists.
+  async function pollGitStateDetail(projectId) {
+    const key = `detail:${projectId}`;
+    if (inFlightGitState.has(key)) return;
+    inFlightGitState.add(key);
+    try {
+      const gs = await api(`/api/projects/${projectId}/git-state`);
+      if (!gs || gs.error) return;
+      latestGitState.set(projectId, gs);
+      if (state.view !== 'detail' || state.projectId !== projectId) return;
+      paintBranchChip(headActions.querySelector('.pc-branch'), gs);
+      const pulled = noteAutoPull(projectId, gs);
+      if (pulled > 0) {
+        toast('Updated from remote', `pulled ${pulled} commit${pulled === 1 ? '' : 's'}`, 'ok');
+        if (state.tab === 'code' || state.tab === 'overview') {
+          const tabRoot = document.querySelector('.project-tab-content');
+          const p = projects.find(x => x.id === projectId);
+          if (tabRoot && p) renderTab(tabRoot, p);
+        }
+      }
+    } catch {
+      // Silent — same contract as pollGitStateOne.
+    } finally {
+      inFlightGitState.delete(key);
+    }
+  }
+
   function pollGitStateAll() {
-    if (state.view !== 'list') return;  // detail view doesn't show cards
-    if (state.listTab !== 'repos') return;  // nsites tab has no project cards
     if (document.visibilityState !== 'visible') return;
+    if (state.view === 'detail') {
+      const p = projects.find(x => x.id === state.projectId);
+      if (p && p.path && !p.pathMissing && (p.capabilities.git || p.capabilities.ngit)) {
+        pollGitStateDetail(p.id);
+      }
+      return;
+    }
+    if (state.view !== 'list') return;
+    if (state.listTab !== 'repos') return;  // nsites tab has no project cards
     for (const p of projects) {
       if (!p.path || p.pathMissing) continue;
       pollGitStateOne(p.id);
     }
   }
+
+  // Best-effort freshness hook for the terminal layer: when a
+  // project-bound PTY (Claude Code, a bare shell in the project) exits,
+  // terminal.js calls this so branch/dirty changes the agent made show
+  // up immediately instead of on the next 30 s tick.
+  window.__nsProjectGitRefresh = (projectId) => {
+    if (!projectId) return;
+    if (state.view === 'detail' && state.projectId === projectId) pollGitStateDetail(projectId);
+    else pollGitStateOne(projectId);
+  };
   function startGitStatePolling() {
     // First fire happens after render; wait one tick so the card DOM
     // exists by the time the fetch resolves and we go to write into it.
@@ -6291,7 +6389,7 @@ const ProjectsPanel = (() => {
         <div class="pc-actions"><span class="sync-pop-host pc-sync-host"></span></div>
       </div>
       <div class="pc-path">${p.path ? `<code>${escapeHtml(p.path)}</code>` : '<em class="muted">no local path</em>'}</div>
-      <div class="pc-badges">${projectCapBadges(p.capabilities, p.remotes)}${projectEnvBadge(p)}<span class="pc-state-host"><span class="pc-state" hidden></span></span><a class="pc-prop-badge" hidden></a></div>
+      <div class="pc-badges">${projectCapBadges(p.capabilities, p.remotes)}${projectEnvBadge(p)}<span class="pc-state-host"><span class="pc-state" hidden></span></span><span class="sync-pop-host pc-branch-host"><button class="pc-branch" type="button" hidden></button></span><a class="pc-prop-badge" hidden></a></div>
       <div class="pc-meta">
         <div class="pc-meta-row"><span class="k">identity</span><span class="v">${escapeHtml(projectIdentityLabel(p))}</span></div>
         <div class="pc-meta-row"><span class="k">last activity</span><span class="v pc-last-activity">${lastAct}</span></div>
@@ -6312,6 +6410,15 @@ const ProjectsPanel = (() => {
       syncBtn.title = 'Commit / sync / pull / push';
       attachSyncPopover(syncBtn, p);
       syncHost.appendChild(syncBtn);
+    }
+
+    // Off-default branch chip — hidden until a poll reports the project
+    // isn't on its default branch (e.g. a TUI agent checked out a feature
+    // branch). Clicking opens the branch popover ("main is home").
+    const branchBtn = card.querySelector('.pc-branch');
+    if (branchBtn && p.path && (p.capabilities.git || p.capabilities.ngit)) {
+      attachSyncPopover(branchBtn, p,
+        (proj) => buildBranchPopoverContents(proj, latestGitState.get(proj.id)));
     }
 
     // WORK / session cluster — bottom-right of the card. New chat, the
@@ -6575,7 +6682,7 @@ const ProjectsPanel = (() => {
         return !!r.ok;
       });
     };
-    const runPush = () => {
+    const runPushInner = () => {
       if (hasNgit) {
         // Direct per-host GRASP push (like Shakespeare): publish the signed
         // repo state to the relays, then push the pack to EVERY GRASP git
@@ -6606,6 +6713,26 @@ const ProjectsPanel = (() => {
         refreshAfter();
         return !!r.ok;
       });
+    };
+
+    // Push pre-flight: fetch the truth first. Pushing against a stale
+    // base dies with a cryptic non-fast-forward rejection — the exact
+    // incident the never-dead-end work exists to prevent. If the remote
+    // moved, repaint (which routes a diverged repo into the merge flow)
+    // instead of letting the push fail.
+    const runPush = async () => {
+      try {
+        const fresh = await api(`/api/projects/${p.id}/git-state?fetch=1`);
+        if (fresh && !fresh.error) {
+          latestGitState.set(p.id, fresh);
+          if (fresh.behind > 0) {
+            paint(fresh);
+            toast('The remote has new commits', 'sync first — a push now would be rejected', 'warn');
+            return false;
+          }
+        }
+      } catch { /* best-effort — let the push surface its own error */ }
+      return runPushInner();
     };
 
     const pull = wrap.querySelector('.sync-pop-pull');
@@ -6663,19 +6790,107 @@ const ProjectsPanel = (() => {
       }
     };
 
+    // Diverged recovery: a real merge instead of the old dead-end
+    // "manual merge required" refusal. Clean merge → push; conflicts →
+    // the rescue panel (park the work on a new branch, never lose it).
+    const runMergeSync = async () => {
+      primaryEl.disabled = true;
+      let r = null;
+      try {
+        r = await api(`/api/projects/${p.id}/git/merge-remote`, { method: 'POST' });
+      } catch (e) {
+        primaryEl.disabled = false;
+        toast('Sync failed', e?.message || '', 'err');
+        return false;
+      }
+      primaryEl.disabled = false;
+      if (r && r.ok) {
+        toast('Combined with remote changes', r.message || '', 'ok');
+        const pushed = await runPush();
+        refreshAfter();
+        repaint();
+        return pushed;
+      }
+      if (r && r.conflict) { showRescuePanel(); return false; }
+      toast('Sync failed', r?.message || '', 'err');
+      repaint();
+      return false;
+    };
+
+    // Conflict exit — swaps the popover body for a one-decision panel:
+    // keep the local commits on a fresh branch and snap the tracking
+    // branch back to its upstream. Nothing is ever lost.
+    const showRescuePanel = () => {
+      const home = (latestGitState.get(p.id) || {}).defaultBranch || 'main';
+      commitEl.hidden = true;
+      removeSecondary();
+      if (halfEl) halfEl.hidden = true;
+      primaryEl.hidden = true;
+      statusEl.textContent = "Your changes conflict with what's on the remote.";
+      statusEl.classList.remove('muted');
+
+      let panel = wrap.querySelector('.sync-pop-rescue');
+      if (!panel) {
+        panel = document.createElement('div');
+        panel.className = 'sync-pop-rescue';
+        primaryEl.insertAdjacentElement('afterend', panel);
+      }
+      panel.innerHTML = `
+        <div class="sync-pop-rescue-note">Keep your work safe on a new branch and bring <code>${escapeHtml(home)}</code> up to date — nothing is lost.</div>
+        <input type="text" class="sync-pop-rescue-name" maxlength="64" autocomplete="off">
+        <div class="sync-pop-rescue-actions">
+          <button class="primary sync-pop-rescue-go">Keep my work on a branch</button>
+          <button class="sync-pop-rescue-cancel">Cancel</button>
+        </div>
+      `;
+      panel.querySelector('.sync-pop-rescue-name').value =
+        `my-changes-${new Date().toISOString().slice(0, 10)}`;
+      const leave = () => { panel.remove(); primaryEl.hidden = false; };
+      panel.querySelector('.sync-pop-rescue-cancel').onclick = () => { leave(); repaint(); };
+      panel.querySelector('.sync-pop-rescue-go').onclick = () => {
+        const name = panel.querySelector('.sync-pop-rescue-name').value.trim();
+        if (!/^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(name)) {
+          toast('Invalid branch name', '1-64 chars, starts with a letter; letters, digits, . _ -', 'warn');
+          return;
+        }
+        openExecModal({
+          title:    `Keep my work on a branch · ${p.name}`,
+          subtitle: `Park your commits on '${name}', then bring ${home} up to date with the remote.`,
+          endpoint: `/api/projects/${p.id}/git/rescue-branch`,
+          body:     { branchName: name },
+        }).then(r => {
+          if (r.ok) toast('Your work is safe', `branch '${name}' created — ${home} is up to date`, 'ok');
+          else      toast('Could not create the branch', `exit ${r.code}`, 'err');
+          leave();
+          refreshAfter();
+          repaint();
+        });
+      };
+    };
+
     const paint = (s) => {
       const ahead  = Number(s?.ahead  || 0);
       const behind = Number(s?.behind || 0);
       const dirty  = !!s?.dirty;
+      // Leaving the rescue panel behind on a repaint would pin the popover
+      // to a decision the fresh state may no longer ask for.
+      wrap.querySelector('.sync-pop-rescue')?.remove();
+      primaryEl.hidden = false;
       // Status line.
       let line;
       if (dirty)                    line = 'Uncommitted changes';
       else if (local)               line = 'No remote configured';
-      else if (ahead && behind)     line = `${ahead} ahead · ${behind} behind`;
+      else if (ahead && behind)     line = 'You and the remote both have new commits.';
       else if (ahead)               line = `${ahead} ahead`;
       else if (behind)              line = `${behind} behind`;
       else if (s)                   line = 'In sync';
       else                          line = 'checking…';
+      // Freshness suffix — honest because the popover probes with
+      // ?fetch=1 on open, so "checked just now" means a real fetch.
+      if (s && !local && s.fetchedAt && !dirty && !(ahead && behind)) {
+        const min = Math.round((Date.now() - s.fetchedAt) / 60_000);
+        line += ` · checked ${min <= 0 ? 'just now' : `${min}m ago`}`;
+      }
       statusEl.textContent = line;
       statusEl.classList.toggle('muted', !dirty && !ahead && !behind);
 
@@ -6726,8 +6941,10 @@ const ProjectsPanel = (() => {
         primaryEl.textContent = 'Up to date';
         primaryEl.disabled = true;
       } else if (ahead && behind) {
+        // Diverged — the old runSync would refuse server-side with
+        // "manual merge required". Route into the merge/rescue flow.
         primaryEl.innerHTML = `Sync (${ahead}↑${behind}↓)${hasNgit ? ' ' + amberSignMarker() : ''}`;
-        primaryEl.onclick = () => runSync();
+        primaryEl.onclick = () => runMergeSync();
       } else if (ahead) {
         primaryEl.innerHTML = `Push ${ahead} commit${ahead === 1 ? '' : 's'}${hasNgit ? ' ' + amberSignMarker() : ''}`;
         primaryEl.onclick = () => runPush();
@@ -6762,17 +6979,85 @@ const ProjectsPanel = (() => {
 
     // Re-probe /git-state and repaint. Used after commit/sync so the
     // popover reflects the new ahead/behind/dirty without a full render.
-    const repaint = async () => {
+    // `fetch:true` blocks on a forced remote fetch — used on open so the
+    // status line tells the truth at the moment the user is deciding.
+    const repaint = async (opts = {}) => {
       let s = null;
-      try { s = await api(`/api/projects/${p.id}/git-state`); } catch {}
+      try {
+        s = await api(`/api/projects/${p.id}/git-state${opts.fetch ? '?fetch=1' : ''}`);
+      } catch {}
+      if (s && !s.error) latestGitState.set(p.id, s);
       paint(s && !s.error ? s : null);
     };
 
-    if (gs) paint(gs);
-    else {
-      paint(null);
-      repaint();
-    }
+    // Paint whatever we know instantly, then refresh against the real
+    // remote — the popover is exactly the moment staleness matters.
+    paint(gs || latestGitState.get(p.id) || null);
+    repaint({ fetch: true });
+
+    return wrap;
+  }
+
+  // Build the inner controls for the branch popover — the off-default
+  // chip's "main is home" hub. At most two exits + one sentence:
+  //   Back to <default>  — guarded checkout (disabled while dirty)
+  //   Submit as PR       — ngit only, only when ahead of origin/<default>
+  // Deliberately no merge/rebase/delete verbs: branches stay a one-concept
+  // surface ("you're not home; here's how to get back").
+  function buildBranchPopoverContents(p, gs) {
+    const wrap = document.createElement('div');
+    wrap.className = 'sync-pop-body branch-pop-body';
+    const home     = (gs && gs.defaultBranch) || 'main';
+    const branch   = (gs && gs.branch) || '';
+    const detached = !!(gs && gs.detached);
+    const dirty    = !!(gs && gs.dirty);
+    const canPr    = !detached && !!(p.capabilities.ngit && p.remotes.ngit)
+                  && !!(gs && gs.aheadOfDefault > 0);
+
+    const sentence = detached
+      ? `You're viewing an old version of the project. <code>${escapeHtml(home)}</code> is this project's home.`
+      : `Your work here lives on branch <code>${escapeHtml(branch)}</code>. <code>${escapeHtml(home)}</code> is this project's home.`;
+    const hint = dirty
+      ? 'Commit your changes first'
+      : (detached ? '' : `Your work stays on ${escapeHtml(branch)} — you can come back.`);
+
+    wrap.innerHTML = `
+      <div class="branch-pop-note">${sentence}</div>
+      <button class="primary branch-pop-home" ${dirty ? 'disabled' : ''}>Back to ${escapeHtml(home)}</button>
+      ${hint ? `<div class="muted branch-pop-hint">${hint}</div>` : ''}
+      ${canPr ? `<button class="branch-pop-pr">Submit as PR ${amberSignMarker()}</button>` : ''}
+    `;
+
+    wrap.querySelector('.branch-pop-home')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const r = await api(`/api/projects/${p.id}/git/checkout`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ branch: home }),
+        });
+        if (r && r.ok) toast(`Back on ${home}`, '', 'ok');
+        else           toast('Could not switch branch', r?.message || '', 'err');
+      } catch (e2) {
+        toast('Could not switch branch', e2?.message || '', 'err');
+      }
+      btn.disabled = false;
+      window.__nsProjectGitRefresh?.(p.id);
+      if (state.view === 'detail' && state.projectId === p.id) render();
+    });
+
+    wrap.querySelector('.branch-pop-pr')?.addEventListener('click', () => {
+      openExecModal({
+        title:    `ngit send · ${p.name}`,
+        subtitle: `Submit branch '${branch}' as a pull request. Approve on your signer.`,
+        endpoint: `/api/projects/${p.id}/ngit/send`,
+      }).then(r => {
+        if (r.ok) toast('PR submitted', '', 'ok');
+        else      toast('PR submit failed', `exit ${r.code}`, 'err');
+        window.__nsProjectGitRefresh?.(p.id);
+      });
+    });
 
     return wrap;
   }
@@ -6782,7 +7067,9 @@ const ProjectsPanel = (() => {
   // trigger's positioned parent (`.sync-pop-host`) so it anchors to the
   // trigger and isn't clipped. Works on both the card and the detail
   // header — the only requirement is a positioned parent wrapper.
-  function attachSyncPopover(triggerEl, p) {
+  // `build` swaps the popover contents (the branch chip reuses the same
+  // open/close/anchor plumbing with its own body).
+  function attachSyncPopover(triggerEl, p, build = (proj) => buildSyncPopoverContents(proj)) {
     triggerEl.setAttribute('aria-haspopup', 'true');
     triggerEl.setAttribute('aria-expanded', 'false');
 
@@ -6799,7 +7086,7 @@ const ProjectsPanel = (() => {
       // openDetail handler — every Pull/Push/Commit would otherwise also
       // navigate into the detail view.
       menu.addEventListener('click', (e) => e.stopPropagation());
-      menu.appendChild(buildSyncPopoverContents(p));
+      menu.appendChild(build(p));
       // Host inside the trigger's positioned wrapper so it anchors to the
       // trigger and isn't clipped by the card / header.
       (triggerEl.closest('.sync-pop-host') || triggerEl.parentElement).appendChild(menu);
@@ -7001,6 +7288,20 @@ const ProjectsPanel = (() => {
     // Push). "Open in <terminal AI>" moved off the header into the Overview
     // tab's actions row, next to "Open in chat".
     if (p.path && (p.capabilities.git || p.capabilities.ngit)) {
+      // Off-default branch chip — same affordance as the card's, kept to
+      // the left of Sync so "you're not home" reads before the actions.
+      const branchHost = document.createElement('span');
+      branchHost.className = 'sync-pop-host pc-branch-host';
+      const branchBtn = document.createElement('button');
+      branchBtn.className = 'pc-branch';
+      branchBtn.type = 'button';
+      branchBtn.hidden = true;
+      attachSyncPopover(branchBtn, p,
+        (proj) => buildBranchPopoverContents(proj, latestGitState.get(proj.id)));
+      branchHost.appendChild(branchBtn);
+      headActions.appendChild(branchHost);
+      paintBranchChip(branchBtn, latestGitState.get(p.id));
+
       const host = document.createElement('span');
       host.className = 'sync-pop-host';
       const syncBtn = document.createElement('button');
@@ -7011,6 +7312,10 @@ const ProjectsPanel = (() => {
       attachSyncPopover(syncBtn, p);
       host.appendChild(syncBtn);
       headActions.appendChild(host);
+
+      // Kick a detail-view poll so the chip + auto-pull notices stay
+      // fresh without waiting for the next 30 s tick.
+      setTimeout(() => pollGitStateDetail(p.id), 0);
     }
     if (p.capabilities.nsite) {
       const deployBtn = document.createElement('button');
@@ -12147,6 +12452,20 @@ const ProjectsPanel = (() => {
         <div class="step-actions"><button class="primary save-caps">save capabilities</button></div>
       </div>
 
+      ${(p.capabilities.git || p.capabilities.ngit) ? `
+      <div class="tab-section">
+        <h3>Sync</h3>
+        <label class="checkbox-row">
+          <input type="checkbox" class="s-auto-pull" ${p.autoPull === false ? '' : 'checked'}>
+          Keep this project up to date automatically
+        </label>
+        <div class="muted">
+          Pulls remote changes in the background whenever your copy has no
+          local edits. Pushing always stays manual${p.capabilities.ngit ? ' (it needs your signer)' : ''}.
+        </div>
+        <div class="step-actions"><button class="primary save-sync">save sync</button></div>
+      </div>` : ''}
+
       <div class="tab-section" id="git-identity-section">
         <h3>Git Identity</h3>
         <div class="muted" style="margin-bottom:8px">
@@ -12279,6 +12598,9 @@ const ProjectsPanel = (() => {
       const v = container.querySelector('.s-name').value.trim();
       if (!v) return toast('Name required', '', 'warn');
       await patchAndReload(p.id, { name: v });
+    });
+    container.querySelector('.save-sync')?.addEventListener('click', async () => {
+      await patchAndReload(p.id, { autoPull: container.querySelector('.s-auto-pull').checked });
     });
     container.querySelector('.save-path').addEventListener('click', async () => {
       const v = container.querySelector('.s-path').value.trim();

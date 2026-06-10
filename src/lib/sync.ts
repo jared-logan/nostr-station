@@ -1,27 +1,43 @@
 /**
  * Sync helper module.
  *
- * Three primitives that turn the Projects panel from a launcher into a
+ * The primitives that turn the Projects panel from a launcher into a
  * dashboard:
  *
  *   - getProjectGitState(project) — read-only `git status --porcelain=v2
  *     --branch` parse. Surfaces ahead/behind/dirty/diverged and a label
- *     the dashboard renders as a per-card badge.
+ *     the dashboard renders as a per-card badge, plus fetch freshness,
+ *     auto-pull marks, and branch-awareness fields (defaultBranch /
+ *     offDefault / detached / aheadOfDefault).
+ *
+ *   - refreshRemoteState(project) — the background `git fetch` (TTL'd,
+ *     backoff on failure) that keeps the badge truthful, chained with
+ *     an auto-pull (`merge --ff-only @{u}`) when the project is clean,
+ *     strictly behind, opted in, and no project-bound PTY is alive.
  *
  *   - syncProject(project) — per-backend dispatch:
  *       local-only → no-op (it's a git repo with no remote).
  *       git        → `git fetch` then a strict ff-only merge if clean.
  *                    Diverged / dirty repos refuse silently with an
  *                    actionable message; we never force-push or rebase.
- *       ngit       → `ngit fetch` plus a proposals (kind-1617) query
- *                    against the user's read relays. Proposals come
- *                    back as a first-class array on SyncResult so the
- *                    dashboard can surface them as a count badge.
+ *       ngit       → stock git pull via git-remote-nostr plus a
+ *                    proposals (kind-1617) query against the user's
+ *                    read relays. Proposals come back as a first-class
+ *                    array on SyncResult for the count badge.
  *
- *   - snapshotProject(project, message) — the new "save snapshot"
+ *   - mergeRemote / rescueBranch / checkoutBranch — the never-dead-end
+ *     recovery set: real merge for diverged repos, park-my-work-on-a-
+ *     branch when the merge conflicts, and the guarded "Back to main"
+ *     switch behind the off-default branch chip.
+ *
+ *   - snapshotProject(project, message) — the "save snapshot"
  *     primitive: `git add -A` then `git commit -m <message>` with an
  *     ISO-timestamp fallback when message is empty. Works against all
  *     three backends (every project is locally a git repo).
+ *
+ * Every mutating flow above runs inside a per-project promise-chain
+ * mutex (withRepoLock) so background work and user actions can't
+ * interleave on the same repo.
  *
  * Hard constraints from the spec:
  *   - All git invocations go through `execFile` with a fixed argv —
@@ -32,6 +48,8 @@
  */
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
+import fs from 'fs';
+import path from 'path';
 import { nip19 } from 'nostr-tools';
 import { findBin } from './detect.js';
 import type { Project } from './projects.js';
@@ -66,6 +84,27 @@ export interface GitState {
   // a "dirty -> up to date -> dirty" flicker every time a poll raced an
   // ngit fetch.
   error?:   string;
+  // Epoch ms of the last successful background `git fetch` for this
+  // project (see refreshRemoteState). Absent until the first fetch
+  // succeeds. Lets the dashboard render "checked Xm ago" honestly.
+  fetchedAt?:  number;
+  // Last background-fetch failure, if the most recent attempt failed.
+  // Informational only — the ahead/behind counts still reflect the last
+  // successful fetch's remote-tracking refs.
+  fetchError?: string;
+  // Set when the background loop fast-forwarded this repo (auto-pull).
+  // The poll carries it to the dashboard so a quiet "pulled N commits"
+  // notice can fire without a dedicated endpoint or push channel.
+  autoPulled?: { at: number; commits: number };
+  // Branch-awareness extras (git/ngit backends only). `defaultBranch`
+  // resolves origin/HEAD (fallback "main"); `offDefault` means HEAD is
+  // on a real branch that isn't the default; `detached` mirrors the
+  // literal `(detached)` token from git status. `aheadOfDefault` is
+  // computed only when offDefault — it gates the "Submit as PR" exit.
+  defaultBranch?:  string;
+  offDefault?:     boolean;
+  detached?:       boolean;
+  aheadOfDefault?: number;
 }
 
 export interface NgitProposal {
@@ -171,6 +210,253 @@ export function parseGitState(stdout: string, backend: SyncBackend): GitState {
   return { ahead, behind, dirty, diverged, branch, label, backend };
 }
 
+// ── Per-project repo lock ─────────────────────────────────────────────────
+//
+// Serializes every mutating git operation per project: background fetch,
+// auto-pull, sync, merge-remote, rescue-branch, checkout, snapshot. The
+// OS-level .git/index.lock only protects the index file — two of our own
+// flows interleaving (a background auto-pull racing the user's Sync click)
+// would still produce confusing half-results. A simple promise chain is
+// enough: this is a single-user local server, fairness/starvation aren't
+// concerns, and the chain self-cleans once drained.
+
+const repoLocks = new Map<string, Promise<unknown>>();
+
+export function isRepoLocked(projectId: string): boolean {
+  return repoLocks.has(projectId);
+}
+
+export async function withRepoLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = repoLocks.get(projectId) ?? Promise.resolve();
+  const run  = prev.catch(() => {}).then(fn);
+  // The stored tail swallows rejections so a failed op can't wedge every
+  // subsequent waiter; callers still see `run`'s own rejection.
+  const tail = run.catch(() => {});
+  repoLocks.set(projectId, tail);
+  void tail.then(() => {
+    if (repoLocks.get(projectId) === tail) repoLocks.delete(projectId);
+  });
+  return run;
+}
+
+// ── Active terminal-session probe ─────────────────────────────────────────
+//
+// Auto-pull must never move HEAD/working tree under a live TUI agent
+// (Claude Code mid-rebase in a PTY). The terminal module knows which
+// sessions are project-bound; it injects its predicate at load time via
+// setActiveSessionProbe so sync.ts never has to import the (node-pty
+// flavored) terminal module — which also keeps this trivially stubbable
+// in tests. Default: no sessions, auto-pull allowed.
+
+let activeSessionProbe: (projectId: string) => boolean = () => false;
+
+export function setActiveSessionProbe(fn: (projectId: string) => boolean): void {
+  activeSessionProbe = fn;
+}
+
+// ── Background remote refresh (fetch + optional auto-pull) ────────────────
+//
+// THE fix for the "In sync (a lie)" badge: getProjectGitState only reads
+// `git status`, whose ahead/behind counts compare against the LAST-FETCHED
+// remote-tracking refs. Nothing fetched in the background, so a push from
+// another client (Shakespeare, another machine) was invisible until the
+// user manually clicked Sync — by which point they'd often committed on a
+// stale base and pushed into a non-fast-forward rejection.
+//
+// refreshRemoteState piggybacks on the dashboard's existing 30 s git-state
+// poll (the route fire-and-forgets it): no standalone scheduler, no relay
+// traffic while no dashboard is open, and the first page load naturally
+// triggers a fetch. A per-project TTL (with exponential backoff on
+// failure, so offline relays don't get hammered) bounds the cost; `force`
+// bypasses the TTL for moments that must be truthful right now (popover
+// open, pre-push check).
+//
+// For ngit remotes the fetch goes through the git-remote-nostr helper —
+// read-only relay queries, NO Amber signing prompt (same property the
+// pull path above has always relied on).
+
+interface RemoteRefreshEntry {
+  lastFetchAt:  number;  // last attempt (success or failure) — TTL anchor
+  lastOkAt:     number;  // last success — surfaced as GitState.fetchedAt
+  failures:     number;  // consecutive failures — drives backoff
+  inFlight:     boolean;
+  lastError?:   string;
+  lastAutoPull?: { at: number; commits: number };
+}
+
+const remoteRefresh = new Map<string, RemoteRefreshEntry>();
+
+export const REMOTE_FETCH_TTL_MS = 120_000;
+const REMOTE_FETCH_BACKOFF_CAP = 4; // 120s * 2^4 = 32 min worst case
+
+function refreshEntry(projectId: string): RemoteRefreshEntry {
+  let e = remoteRefresh.get(projectId);
+  if (!e) {
+    e = { lastFetchAt: 0, lastOkAt: 0, failures: 0, inFlight: false };
+    remoteRefresh.set(projectId, e);
+  }
+  return e;
+}
+
+// Lets explicit user flows (Sync button, merge-remote) that just ran their
+// own successful `git fetch` mark the project fresh, so the background
+// loop doesn't redundantly re-fetch seconds later.
+export function noteRemoteFetched(projectId: string): void {
+  const e = refreshEntry(projectId);
+  e.lastFetchAt = Date.now();
+  e.lastOkAt    = Date.now();
+  e.failures    = 0;
+  e.lastError   = undefined;
+}
+
+// Test seam: drop all cached refresh state (TTL anchors, auto-pull marks).
+export function resetRemoteRefreshState(): void {
+  remoteRefresh.clear();
+  defaultBranchCache.clear();
+}
+
+export interface RefreshResult {
+  fetched: boolean;
+  error?:  string;
+  autoPulled?: { at: number; commits: number };
+}
+
+export async function refreshRemoteState(
+  project: Project,
+  opts: { force?: boolean } = {},
+): Promise<RefreshResult> {
+  const backend = detectBackend(project);
+  if (backend === 'local-only' || !project.path) return { fetched: false };
+  const gitBin = findBin('git');
+  if (!gitBin) return { fetched: false };
+  if (!fs.existsSync(path.join(project.path, '.git'))) return { fetched: false };
+
+  const entry = refreshEntry(project.id);
+  if (!opts.force) {
+    if (entry.inFlight) return { fetched: false };
+    const ttl = REMOTE_FETCH_TTL_MS * Math.pow(2, Math.min(entry.failures, REMOTE_FETCH_BACKOFF_CAP));
+    if (Date.now() - entry.lastFetchAt < ttl) return { fetched: false };
+    // Background work yields to anything already holding the repo —
+    // the next poll tick will retry. Forced refreshes queue instead.
+    if (isRepoLocked(project.id)) return { fetched: false };
+  }
+
+  // No `origin` remote → nothing to fetch against. Treated as a quiet
+  // no-op with a TTL stamp (the remote config rarely appears between
+  // polls; no reason to re-probe every 30 s).
+  try {
+    await execFileAsync(gitBin, ['remote', 'get-url', 'origin'],
+      { cwd: project.path, timeout: 5_000 });
+  } catch {
+    entry.lastFetchAt = Date.now();
+    return { fetched: false };
+  }
+
+  // ngit remotes need the git-remote-nostr helper (ships with ngit);
+  // without it `git fetch` dies with "protocol 'nostr' is not supported".
+  if (backend === 'ngit' && !findBin('ngit')) {
+    entry.lastFetchAt = Date.now();
+    entry.lastError = 'ngit not found on PATH (provides git-remote-nostr helper)';
+    return { fetched: false, error: entry.lastError };
+  }
+
+  entry.inFlight = true;
+  entry.lastFetchAt = Date.now();
+  try {
+    return await withRepoLock(project.id, async () => {
+      try {
+        await execFileAsync(gitBin, ['fetch', '--prune', 'origin'], {
+          cwd: project.path!,
+          // Relay-backed remotes are slower than https ones.
+          timeout: backend === 'ngit' ? 30_000 : 20_000,
+        });
+      } catch (e: any) {
+        entry.failures += 1;
+        entry.lastError = (e?.stderr || e?.message || 'git fetch failed').toString().slice(0, 200);
+        return { fetched: false, error: entry.lastError };
+      }
+      entry.failures  = 0;
+      entry.lastOkAt  = Date.now();
+      entry.lastError = undefined;
+
+      // Auto-pull: fast-forward while it's provably safe. Still inside
+      // the same lock acquisition so nothing can dirty the tree between
+      // the re-check and the merge (from our own flows; a terminal agent
+      // is excluded via the probe, and a racing manual commit just makes
+      // the ff-only merge fail harmlessly).
+      const autoPulled = await autoFastForwardLocked(project, gitBin, entry);
+      return { fetched: true, autoPulled: autoPulled ?? undefined };
+    });
+  } finally {
+    entry.inFlight = false;
+  }
+}
+
+// Pre-conditions for the shakespeare-style auto-pull, checked on a FRESH
+// status read inside the lock:
+//   - project hasn't opted out (autoPull !== false; absent = on),
+//   - no live project-bound PTY (a TUI agent may be mid-rebase),
+//   - clean tree, strictly behind (0 ahead), on a real branch with an
+//     upstream (`# branch.ab` implies upstream; behind>0 implies both).
+// `merge --ff-only` cannot destroy commits, so the worst a lost race can
+// do is fail — which we swallow, because by definition nothing was touched.
+async function autoFastForwardLocked(
+  project: Project,
+  gitBin: string,
+  entry: RemoteRefreshEntry,
+): Promise<{ at: number; commits: number } | null> {
+  if (project.autoPull === false) return null;
+  if (activeSessionProbe(project.id)) return null;
+
+  let state: GitState;
+  try {
+    const { stdout } = await execFileAsync(gitBin, ['status', '--porcelain=v2', '--branch'],
+      { cwd: project.path!, timeout: 5_000 });
+    state = parseGitState(stdout, detectBackend(project));
+  } catch {
+    return null;
+  }
+  if (state.dirty || state.diverged) return null;
+  if (state.ahead > 0 || state.behind === 0) return null;
+  if (!state.branch || state.branch === '(detached)') return null;
+
+  try {
+    await execFileAsync(gitBin, ['merge', '--ff-only', '@{u}'],
+      { cwd: project.path!, timeout: 15_000 });
+  } catch {
+    return null; // lost a race to a fresh local commit — nothing touched
+  }
+  entry.lastAutoPull = { at: Date.now(), commits: state.behind };
+  return entry.lastAutoPull;
+}
+
+// ── Default-branch resolution (branch awareness) ──────────────────────────
+//
+// origin/HEAD almost never changes, so a long TTL keeps the 30 s poll
+// cheap. The ngit set-default-branch route invalidates explicitly.
+
+const defaultBranchCache = new Map<string, { value: string; at: number }>();
+const DEFAULT_BRANCH_TTL_MS = 10 * 60_000;
+
+export function invalidateDefaultBranchCache(repoPath: string): void {
+  defaultBranchCache.delete(repoPath);
+}
+
+async function resolveDefaultBranch(gitBin: string, repoPath: string): Promise<string> {
+  const hit = defaultBranchCache.get(repoPath);
+  if (hit && Date.now() - hit.at < DEFAULT_BRANCH_TTL_MS) return hit.value;
+  let value = 'main';
+  try {
+    const { stdout } = await execFileAsync(gitBin,
+      ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+      { cwd: repoPath, timeout: 5_000 });
+    const out = stdout.trim();
+    if (out.startsWith('origin/')) value = out.slice('origin/'.length);
+  } catch { /* keep "main" fallback — same convention as routes/projects-ngit.ts */ }
+  defaultBranchCache.set(repoPath, { value, at: Date.now() });
+  return value;
+}
+
 // ── getProjectGitState ────────────────────────────────────────────────────
 
 const NOT_A_REPO: GitState = {
@@ -210,7 +496,9 @@ export async function getProjectGitState(project: Project): Promise<GitState> {
       ['status', '--porcelain=v2', '--branch'],
       { cwd: project.path, timeout: 5000 },
     );
-    return parseGitState(stdout, backend);
+    const state = parseGitState(stdout, backend);
+    await attachStateExtras(state, project, gitBin);
+    return state;
   } catch (e: any) {
     // Transient: timeout (5 s), index.lock held by a concurrent git op
     // (the user clicking Publish in another tab, an editor's own git
@@ -221,6 +509,36 @@ export async function getProjectGitState(project: Project): Promise<GitState> {
     const msg = (e?.stderr || e?.message || 'git status failed').toString().slice(0, 200);
     return { ...NOT_A_REPO, backend, error: msg };
   }
+}
+
+// Best-effort enrichment of a successful status read: fetch freshness +
+// auto-pull mark (from the refresh cache, no extra git calls) and the
+// branch-awareness fields. Failures here must never fail the state — the
+// badge with slightly fewer fields beats no badge.
+async function attachStateExtras(state: GitState, project: Project, gitBin: string): Promise<void> {
+  const entry = remoteRefresh.get(project.id);
+  if (entry) {
+    if (entry.lastOkAt)     state.fetchedAt  = entry.lastOkAt;
+    if (entry.lastError)    state.fetchError = entry.lastError;
+    if (entry.lastAutoPull) state.autoPulled = entry.lastAutoPull;
+  }
+
+  // Branch awareness only makes sense against a remote — a local-only
+  // repo on "master" has no origin/HEAD and no "home" to go back to.
+  if (state.backend === 'local-only' || !project.path) return;
+  try {
+    state.detached      = state.branch === '(detached)';
+    state.defaultBranch = await resolveDefaultBranch(gitBin, project.path);
+    state.offDefault    = !!state.branch && !state.detached && state.branch !== state.defaultBranch;
+    if (state.offDefault) {
+      // Gates the branch popover's "Submit as PR" exit: only offer it
+      // when the side branch actually has commits the default lacks.
+      const { stdout } = await execFileAsync(gitBin,
+        ['rev-list', '--count', `origin/${state.defaultBranch}..HEAD`],
+        { cwd: project.path, timeout: 5_000 });
+      state.aheadOfDefault = parseInt(stdout.trim(), 10) || 0;
+    }
+  } catch { /* leave the extras absent */ }
 }
 
 // ── syncProject ───────────────────────────────────────────────────────────
@@ -237,6 +555,15 @@ export interface SyncOptions {
 }
 
 export async function syncProject(
+  project: Project,
+  opts: SyncOptions = {},
+): Promise<SyncResult> {
+  // Serialized with the background fetch/auto-pull loop and every other
+  // mutating flow — see withRepoLock.
+  return withRepoLock(project.id, () => syncProjectUnlocked(project, opts));
+}
+
+async function syncProjectUnlocked(
   project: Project,
   opts: SyncOptions = {},
 ): Promise<SyncResult> {
@@ -275,6 +602,8 @@ export async function syncProject(
         ahead: 0, behind: 0,
       };
     }
+
+    noteRemoteFetched(project.id);
 
     // 2. read state to decide whether ff-only is safe.
     const state = await getProjectGitState(project);
@@ -395,6 +724,7 @@ export async function syncProject(
       message: `git pull --ff-only failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}`,
     };
   }
+  noteRemoteFetched(project.id);
 
   // Push phase — opt-in (see SyncOptions.push). Runs only when the
   // caller explicitly asked for bidirectional sync. The dashboard's
@@ -552,21 +882,28 @@ export async function snapshotProject(
   if (!gitBin) {
     return { ok: false, error: 'git not found on PATH' };
   }
+  return withRepoLock(project.id, () => snapshotLocked(project, message, gitBin));
+}
 
+async function snapshotLocked(
+  project: Project,
+  message: string,
+  gitBin: string,
+): Promise<SnapshotResult> {
   const finalMessage = (typeof message === 'string' && message.trim())
     ? message.trim()
     : `snapshot ${new Date().toISOString()}`;
 
   try {
     await execFileAsync(gitBin, ['add', '-A'],
-      { cwd: project.path, timeout: 15_000 });
+      { cwd: project.path!, timeout: 15_000 });
   } catch (e: any) {
     return { ok: false, error: `git add failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}` };
   }
 
   try {
     await execFileAsync(gitBin, ['commit', '-m', finalMessage],
-      { cwd: project.path, timeout: 15_000 });
+      { cwd: project.path!, timeout: 15_000 });
   } catch (e: any) {
     // `git commit` exits 1 when there's nothing to commit — surface
     // that as a non-error to keep the dashboard's "save" UX sane: the
@@ -582,9 +919,229 @@ export async function snapshotProject(
   // Resolve the new HEAD sha so the client can render it.
   try {
     const { stdout } = await execFileAsync(gitBin, ['rev-parse', '--short', 'HEAD'],
-      { cwd: project.path, timeout: 5000 });
+      { cwd: project.path!, timeout: 5000 });
     return { ok: true, sha: stdout.trim() };
   } catch {
     return { ok: true };
   }
+}
+
+// ── mergeRemote (diverged recovery, phase 1) ──────────────────────────────
+//
+// The Sync popover's answer to "you committed on a stale base" — the exact
+// incident syncProject's strict ff-only refusal used to dead-end on. Runs
+// a REAL merge (merge commit allowed):
+//
+//   self-heal stale MERGE_HEAD → fetch → refuse dirty → ff when possible
+//   → `git merge --no-edit @{u}` → on conflict, abort cleanly and report
+//   conflict:true so the UI can offer the rescue-branch flow.
+//
+// Identical for git and ngit backends: the merge itself is purely local,
+// and the fetch is read-only on both (no Amber prompt for nostr remotes).
+
+export interface MergeRemoteResult {
+  ok:        boolean;
+  // True when the merge was attempted and hit conflicts (aborted cleanly,
+  // tree restored). The UI keys the rescue-branch panel off this.
+  conflict?: boolean;
+  message:   string;
+}
+
+export async function mergeRemote(project: Project): Promise<MergeRemoteResult> {
+  if (!project.path) return { ok: false, message: 'project has no local path' };
+  const gitBin = findBin('git');
+  if (!gitBin) return { ok: false, message: 'git not found on PATH' };
+  const backend = detectBackend(project);
+  if (backend === 'local-only') return { ok: false, message: 'no remote configured' };
+  if (backend === 'ngit' && !findBin('ngit')) {
+    return { ok: false, message: 'ngit not found on PATH (provides git-remote-nostr helper)' };
+  }
+
+  return withRepoLock(project.id, async () => {
+    const cwd = project.path!;
+    const run = (args: string[], timeout: number) =>
+      execFileAsync(gitBin, args, { cwd, timeout });
+
+    // Self-heal: a crash mid-merge leaves MERGE_HEAD behind and every
+    // subsequent merge refuses with "you have not concluded your merge".
+    if (fs.existsSync(path.join(cwd, '.git', 'MERGE_HEAD'))) {
+      try { await run(['merge', '--abort'], 15_000); } catch { /* best-effort */ }
+    }
+
+    try {
+      await run(['fetch', '--prune', 'origin'], backend === 'ngit' ? 30_000 : 20_000);
+      noteRemoteFetched(project.id);
+    } catch (e: any) {
+      return { ok: false, message: `fetch failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}` };
+    }
+
+    let state: GitState;
+    try {
+      const { stdout } = await run(['status', '--porcelain=v2', '--branch'], 5_000);
+      state = parseGitState(stdout, backend);
+    } catch (e: any) {
+      return { ok: false, message: `git status failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}` };
+    }
+    if (state.dirty) {
+      return { ok: false, message: 'working tree has uncommitted changes — commit them first' };
+    }
+    if (state.behind === 0) {
+      return { ok: true, message: 'already up to date with the remote' };
+    }
+    if (!state.diverged) {
+      // Plain behind — a fast-forward is all that's needed.
+      try {
+        await run(['merge', '--ff-only', '@{u}'], 15_000);
+        return { ok: true, message: `fast-forwarded ${state.behind} commit${state.behind === 1 ? '' : 's'}` };
+      } catch (e: any) {
+        return { ok: false, message: `fast-forward failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}` };
+      }
+    }
+
+    // Diverged — attempt the real merge.
+    try {
+      await run(['merge', '--no-edit', '@{u}'], 30_000);
+      return {
+        ok: true,
+        message: `combined your ${state.ahead} commit${state.ahead === 1 ? '' : 's'} with ${state.behind} from the remote`,
+      };
+    } catch {
+      // Conflict (or any merge failure): abort so the tree is exactly as
+      // before. `merge --abort` only errors when there's no merge to
+      // abort — e.g. the merge failed before starting — which leaves the
+      // tree untouched anyway.
+      try { await run(['merge', '--abort'], 15_000); } catch { /* nothing to abort */ }
+      return { ok: false, conflict: true, message: 'your changes conflict with what\'s on the remote' };
+    }
+  });
+}
+
+// ── rescueBranch (diverged recovery, phase 2) ─────────────────────────────
+//
+// The never-dead-end exit when mergeRemote reports conflicts: park the
+// user's local commits on a new branch and bring the tracking branch back
+// in line with its upstream. Proven step order from the Submit-PR flow
+// (routes/projects-ngit.ts), generalized to both backends and to whatever
+// branch diverged (reset target is `@{u}`, not origin/<default>):
+//
+//   git branch <name>        (pointer at HEAD — keeps the commits)
+//   git reset --hard @{u}    (current branch snaps to its upstream)
+//   git checkout <name>      (user lands ON their work; the off-default
+//                             chip then shows the way home)
+//
+// `onLine` streams progress so the route can SSE it into the exec modal.
+
+export const BRANCH_NAME_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+
+export interface RescueResult {
+  ok:       boolean;
+  message:  string;
+  branch?:  string;
+}
+
+export async function rescueBranch(
+  project: Project,
+  branchName: string,
+  onLine: (line: string, stream: 'stdout' | 'stderr') => void = () => {},
+): Promise<RescueResult> {
+  if (!project.path) return { ok: false, message: 'project has no local path' };
+  const gitBin = findBin('git');
+  if (!gitBin) return { ok: false, message: 'git not found on PATH' };
+  if (!BRANCH_NAME_RE.test(branchName)) {
+    return { ok: false, message: 'branch name must be 1-64 chars starting with a letter: alphanumerics + . _ -' };
+  }
+
+  return withRepoLock(project.id, async () => {
+    const cwd = project.path!;
+    const run = async (args: string[], timeout = 15_000) => {
+      onLine(`$ git ${args.join(' ')}`, 'stdout');
+      const { stdout, stderr } = await execFileAsync(gitBin, args, { cwd, timeout });
+      for (const l of `${stdout}\n${stderr}`.split('\n')) if (l.trim()) onLine(l, 'stdout');
+    };
+
+    // Preconditions, checked inside the lock so nothing shifts under us.
+    let state: GitState;
+    try {
+      const { stdout } = await execFileAsync(gitBin, ['status', '--porcelain=v2', '--branch'],
+        { cwd, timeout: 5_000 });
+      state = parseGitState(stdout, detectBackend(project));
+    } catch (e: any) {
+      return { ok: false, message: `git status failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}` };
+    }
+    if (state.dirty) {
+      return { ok: false, message: 'working tree has uncommitted changes — commit them first' };
+    }
+    if (!state.branch || state.branch === '(detached)') {
+      return { ok: false, message: 'not on a branch — check out a branch first' };
+    }
+    try {
+      await execFileAsync(gitBin, ['rev-parse', '--abbrev-ref', '@{u}'], { cwd, timeout: 5_000 });
+    } catch {
+      return { ok: false, message: `branch '${state.branch}' has no upstream — nothing to reset to` };
+    }
+    try {
+      await execFileAsync(gitBin, ['rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`],
+        { cwd, timeout: 5_000 });
+      // Exit 0 → ref exists.
+      return { ok: false, message: `branch '${branchName}' already exists — pick another name` };
+    } catch { /* does not exist — good */ }
+
+    try {
+      await run(['branch', branchName]);
+      await run(['reset', '--hard', '@{u}']);
+      await run(['checkout', branchName]);
+    } catch (e: any) {
+      const msg = (e?.stderr || e?.message || 'unknown').toString().slice(0, 200);
+      onLine(msg, 'stderr');
+      return { ok: false, message: `rescue failed: ${msg}` };
+    }
+    return {
+      ok: true,
+      branch: branchName,
+      message: `your work is safe on '${branchName}' — '${state.branch}' now matches the remote`,
+    };
+  });
+}
+
+// ── checkoutBranch (branch awareness: "Back to <default>") ───────────────
+//
+// Guarded branch switch for the off-default chip. Refuses on a dirty tree
+// (switching with edits in flight is exactly the kind of surprise the
+// chip exists to prevent) and only targets existing local branches.
+
+export async function checkoutBranch(
+  project: Project,
+  branch: string,
+): Promise<{ ok: boolean; message: string }> {
+  if (!project.path) return { ok: false, message: 'project has no local path' };
+  const gitBin = findBin('git');
+  if (!gitBin) return { ok: false, message: 'git not found on PATH' };
+  if (!BRANCH_NAME_RE.test(branch)) {
+    return { ok: false, message: 'invalid branch name' };
+  }
+
+  return withRepoLock(project.id, async () => {
+    const cwd = project.path!;
+    try {
+      const { stdout } = await execFileAsync(gitBin, ['status', '--porcelain=v2', '--branch'],
+        { cwd, timeout: 5_000 });
+      if (parseGitState(stdout, detectBackend(project)).dirty) {
+        return { ok: false, message: 'working tree has uncommitted changes — commit them first' };
+      }
+    } catch (e: any) {
+      return { ok: false, message: `git status failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}` };
+    }
+    try {
+      await execFileAsync(gitBin, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`],
+        { cwd, timeout: 5_000 });
+    } catch {
+      return { ok: false, message: `no local branch named '${branch}'` };
+    }
+    try {
+      await execFileAsync(gitBin, ['checkout', branch], { cwd, timeout: 15_000 });
+    } catch (e: any) {
+      return { ok: false, message: `checkout failed: ${(e?.stderr || e?.message || 'unknown').toString().slice(0, 160)}` };
+    }
+    return { ok: true, message: `switched to '${branch}'` };
+  });
 }

@@ -5,6 +5,45 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Never-dead-end git sync: truthful badges, auto-pull, diverged recovery
+
+- **The badge now tells the truth.** The per-card git-state badge was
+  computed from `git status` alone — it never fetched, so a push from
+  another client (shakespeare.diy, a second machine) was invisible
+  until a push failed non-fast-forward. The 30 s git-state poll now
+  fire-and-forgets a TTL'd background `git fetch` (2 min per project,
+  exponential backoff up to ~32 min when the remote is unreachable),
+  and the Sync popover opens with a forced fresh fetch (`?fetch=1`)
+  plus an honest "checked just now / Nm ago" freshness suffix. ngit
+  fetches go through git-remote-nostr read-only — no signer prompt.
+- **Auto-pull when provably safe.** After a successful background
+  fetch, a clean repo that's strictly behind fast-forwards
+  automatically (`merge --ff-only @{u}`) with a quiet "Updated from
+  remote — pulled N commits" notice. Never runs while the tree is
+  dirty, local commits exist, HEAD is detached, or a project-bound
+  terminal session (e.g. Claude Code) is alive. Per-project opt-out:
+  Settings → Sync → "Keep this project up to date automatically".
+- **Diverged is no longer a dead end.** The popover's Sync on a
+  diverged repo used to error with "manual merge required". It now
+  runs a real merge; clean merges chain straight into push. Conflicts
+  abort cleanly and offer the rescue flow — "Keep my work on a branch"
+  parks your commits on a new branch and snaps the tracking branch
+  back to the remote. Nothing is ever lost, no terminal required.
+- **Push pre-flight.** Push buttons fetch first; if the remote moved,
+  the popover reroutes into the sync/merge flow instead of letting the
+  push die with a cryptic rejection.
+- **Branch awareness, zero new concepts.** Nothing shows while you're
+  on the default branch. Off it (or detached), an amber `⎇ branch`
+  chip appears on the card and detail header; clicking it offers at
+  most two exits: "Back to main" (guarded while dirty) and, for ngit
+  projects with commits ahead of the default, "Submit as PR". Agent
+  context (the projects-dir CLAUDE.md seed) now tells TUI agents to
+  work on the default branch unless asked otherwise.
+- **Safety plumbing.** Every mutating git flow (background fetch,
+  auto-pull, sync, merge, rescue, checkout, snapshot) is serialized
+  through a per-project mutex; project-bound terminal exits nudge an
+  immediate git-state refresh.
+
 ### Chat preview: full view, open-in-new-tab, and mesh reachability
 
 - **Full view (⛶):** the preview pane can now take over the whole Chat

@@ -78,6 +78,11 @@ export interface Project {
   // promote (Phase E) flow ships.
   readRelays:   string[] | null;
   environment?: ProjectEnvironment;
+  // Background auto-pull opt-out (see sync.refreshRemoteState). Absent or
+  // true = the station fast-forwards the repo automatically when the
+  // remote is ahead and the local tree is clean (the shakespeare-style
+  // "keep me up to date" behavior). false = badge only, manual Pull.
+  autoPull?:    boolean;
   createdAt:    string;
   updatedAt:    string;
 }
@@ -614,6 +619,7 @@ export function updateProject(id: string, patch: UpdateInput): { ok: true; proje
     // an environment block is present, OR carries over from `current`
     // for projects that never adopted the environment block.
     readRelays:   current.readRelays,
+    autoPull:     patch.autoPull     !== undefined ? patch.autoPull : current.autoPull,
     updatedAt:    new Date().toISOString(),
   };
   if (nextEnvironment) {

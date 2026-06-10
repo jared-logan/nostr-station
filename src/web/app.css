@@ -5654,6 +5654,51 @@ body.setup-term-hoist .term-shell { z-index: 1100; }
 }
 .sync-pop-footer .link:hover { text-decoration: underline; }
 
+/* Off-default branch chip — "⎇ feature-x", painted by the git-state
+   poller whenever HEAD isn't the project's default branch (or is
+   detached). A real button: clicking opens the branch popover ("main is
+   home" + Back-to-main / Submit-as-PR exits). Amber like the dirty pill —
+   it flags a state the user should know about, not an error. */
+.pc-branch-host { position: relative; display: inline-flex; }
+.pc-branch[hidden] { display: none; }
+.pc-branch {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: inherit;
+  background: rgba(255, 184, 0, 0.10);
+  color: var(--warn);
+  border: 1px solid rgba(255, 184, 0, 0.32);
+  max-width: 160px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pc-branch:hover { filter: brightness(1.15); }
+
+/* Branch popover body — one sentence, at most two exits. */
+.branch-pop-note { font-size: 12px; line-height: 1.5; }
+.branch-pop-note code { background: var(--bg-hover); padding: 1px 5px; border-radius: 4px; }
+.branch-pop-hint { font-size: 11px; margin-top: -4px; }
+.branch-pop-home, .branch-pop-pr { width: 100%; }
+
+/* Rescue panel — swapped into the Sync popover when a diverged merge
+   hits conflicts. One decision: park the work on a new branch. */
+.sync-pop-rescue { display: flex; flex-direction: column; gap: 8px; }
+.sync-pop-rescue-note { font-size: 12px; line-height: 1.5; }
+.sync-pop-rescue-note code { background: var(--bg-hover); padding: 1px 5px; border-radius: 4px; }
+.sync-pop-rescue-name {
+  width: 100%;
+  font-size: 12px;
+  padding: 5px 8px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+.sync-pop-rescue-actions { display: flex; gap: 6px; }
+.sync-pop-rescue-actions > button { flex: 1; }
+
 /* Open-proposals badge (Phase 6) — persistent chip on the .pc-badges row,
    links to the proposals view. Hidden until a sync/fetch reports N>0. */
 .pc-prop-badge {
