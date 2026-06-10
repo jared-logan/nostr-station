@@ -699,8 +699,11 @@ async function runGraspDelivery(
       log('HEAD is detached — check out a branch before pushing. Aborting.', 'stderr');
       return fail();
     }
-    const existingHeadTag = statePrior?.tags.find(t => t[0] === 'HEAD') ?? null;
-    const newStateTags = buildRepoStateTags(coords.identifier, refs, existingHeadTag);
+    // Pass the WHOLE prior state so buildRepoStateTags can announce only the
+    // deliverable ref set — the current branch plus whatever the prior state
+    // already had on the hosts — instead of every local branch (which would
+    // leak throwaway `claude/*` scratch branches onto relays as phantom drift).
+    const newStateTags = buildRepoStateTags(coords.identifier, refs, statePrior?.tags ?? null);
 
     // (a) Republish the announcement as-is (no new signature) — best effort.
     await publishEventToRelays(repoEvent, relays).catch(() => []);

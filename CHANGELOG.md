@@ -5,16 +5,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Fixed: stale HEAD pins in push state events (kind 30618)
+### Fixed: push state (kind 30618) now announces only the deliverable ref set
 
-A prior state's `HEAD` tag was preserved verbatim on every push (Shakespeare
-semantics — pushers don't own the default-branch pointer). But verbatim
-preservation re-announces a renamed-away branch or rebased-away commit
-forever, which NIP-34 readers (gitworkshop) surface as a permanent
-"announced commit not found on git server" warning. `buildRepoStateTags`
-now preserves a prior HEAD only while it still resolves within the state
-being announced (symbolic → the branch is announced; detached oid → it is
-an announced tip), falling back to the current branch otherwise.
+Push delivers only the current branch's pack, but the state event announced
+*every* local branch and tag. With agentic TUIs (Claude Code, OpenCode) that
+spin up throwaway `claude/*` branches constantly, those local-only scratch
+branches leaked into the repo's permanent relay state and read as "differs /
+missing on git server" on the sync badge forever — drift by construction (the
+shape behind the Blip incident). `buildRepoStateTags` now announces exactly
+`{current branch, local oid} ∪ {prior-announced branches, prior oids}` plus
+the prior state's tags — i.e. only what is (or will be, after this push)
+actually on the git hosts. Non-current branches keep their prior (host) oid,
+never the local one, so a locally-advanced `main` can't pin a commit the host
+lacks. Entirely background: Push and Sync behave identically.
+
+Composed with this, a preserved `HEAD` is honoured only while it still
+resolves within the announced ref set (symbolic → the branch is announced;
+detached oid → it is an announced tip), falling back to the current branch
+otherwise — so a renamed-away branch or rebased-away commit can no longer ride
+the announcement forever as a phantom default-branch pointer.
 
 ### NIP-89 client tag: push state events + ngit init announcements
 

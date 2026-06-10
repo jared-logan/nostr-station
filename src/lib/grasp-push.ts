@@ -64,34 +64,86 @@ export function selectGraspCloneUrls(clone: string[]): string[] {
 }
 
 /**
- * Build the kind-30618 repo-state tag set from the local checkout, mirroring
- * Shakespeare's `nostrPush`:
+ * Build the kind-30618 repo-state tag set, announcing exactly the refs that
+ * are — or will be, after this push — actually on the git hosts. nostr-station
+ * pushes only the CURRENT branch's pack, so the deliverable set is:
+ *
+ *   {current branch, at its local oid}  ∪  {every branch the PRIOR state
+ *   announced, kept at the prior oid}
+ *
+ * and the prior state's tags verbatim (we never deliver tags). This diverges
+ * from Shakespeare's "announce every local branch" on purpose: agentic TUIs
+ * (Claude Code, OpenCode) spin up throwaway `claude/*` branches constantly,
+ * and announcing those local-only scratch branches — which were never pushed —
+ * makes every one of them read as "differs / missing on git server" on the
+ * sync badge. Forever. Announcing only what we deliver keeps the badge honest
+ * with zero user-facing changes (Push/Sync behave identically).
+ *
+ * Why prior oids for non-current branches and NOT local oids: a contributor on
+ * a feature branch may have local `main` ahead of the host's `main` (committed
+ * locally, pushed only the feature). Announcing local `main`'s oid would pin a
+ * commit the host doesn't have → drift. The host still holds the PRIOR oid for
+ * every branch we didn't just push, so that's what we announce.
+ *
+ * Tag layout:
  *   - ['d', identifier]
- *   - HEAD: if the existing state pins a HEAD that is still VALID against the
- *     refs being announced, preserve it verbatim; else a symbolic ref to the
- *     current branch; else the detached HEAD oid.
- *   - one [refs/heads/<b>, oid] per local branch
- *   - one [refs/tags/<t>, oid] per local tag
+ *   - HEAD: the prior state's HEAD if it still resolves within the announced
+ *     branches (see validPreservedHead); else a symbolic ref to the current
+ *     branch; else the detached HEAD oid. HEAD is the repo's default-branch
+ *     pointer — owned by the announcement, not by whoever pushes — so we
+ *     preserve it across pushes rather than retarget it to the pusher's branch.
+ *   - one [refs/heads/<b>, oid] per announced branch
+ *   - one [refs/tags/<t>, oid] per announced tag
  *   - the canonical NIP-89 client tag (attribution; ignored by GRASP hosts,
  *     which authorize against the d/HEAD/refs/* tags only)
  *
- * Preserving the existing HEAD matters: HEAD is the repo's "default branch"
- * pointer and is owned by the announcement, not by whoever happens to push —
- * clobbering it on every push would let a contributor on a feature branch
- * silently retarget the repo's default. But preservation is gated on the
- * pointer still resolving within THIS state event (see validPreservedHead):
- * Shakespeare preserves verbatim, which re-announces a renamed-away branch or
- * rebased-away commit forever — NIP-34 readers (gitworkshop) then warn
- * "announced commit not found on git server" on every view. Pure.
+ * `priorStateTags` is the prior kind-30618's tags (null on the very first
+ * publish, before any state exists — then we fall back to announcing every
+ * local ref, the safe bootstrap, since nothing is yet established as scratch).
+ * Pure; exported for tests.
  */
 export function buildRepoStateTags(
   identifier: string,
   refs: LocalRefs,
-  existingHeadTag: string[] | null = null,
+  priorStateTags: string[][] | null = null,
 ): string[][] {
+  // Parse the prior state into HEAD + announced branch/tag oid maps.
+  let priorHead: string[] | null = null;
+  const priorBranches = new Map<string, string>();
+  const priorTags = new Map<string, string>();
+  for (const t of priorStateTags ?? []) {
+    if (!Array.isArray(t) || t.length < 2 || typeof t[0] !== 'string') continue;
+    if (t[0] === 'HEAD') priorHead = t;
+    else if (t[0].startsWith('refs/heads/')) priorBranches.set(t[0].slice('refs/heads/'.length), t[1]);
+    else if (t[0].startsWith('refs/tags/'))  priorTags.set(t[0].slice('refs/tags/'.length), t[1]);
+  }
+
+  // Announced branch set: prior branches (at prior oids) with the current
+  // branch upserted to its local oid. No prior state → announce every local
+  // branch (bootstrap). Insertion order: prior branches first (stable across
+  // pushes), then the current branch if it's new.
+  const announceBranches = new Map<string, string>();
+  if (priorStateTags) {
+    for (const [name, oid] of priorBranches) announceBranches.set(name, oid);
+    const localCurrent = refs.branches.find(([n]) => n === refs.currentBranch);
+    const currentOid = localCurrent ? localCurrent[1] : refs.headOid;
+    if (refs.currentBranch && currentOid) announceBranches.set(refs.currentBranch, currentOid);
+  } else {
+    for (const [name, oid] of refs.branches) if (name && oid) announceBranches.set(name, oid);
+  }
+
+  // Announced tag set: prior tags verbatim (we never deliver tags, so a local
+  // tag never pushed must not be announced). No prior → all local tags.
+  const announceTags = new Map<string, string>();
+  if (priorStateTags) {
+    for (const [name, oid] of priorTags) announceTags.set(name, oid);
+  } else {
+    for (const [name, oid] of refs.tags) if (name && oid) announceTags.set(name, oid);
+  }
+
   const tags: string[][] = [['d', identifier]];
 
-  const preserved = validPreservedHead(existingHeadTag, refs);
+  const preserved = validPreservedHead(priorHead, announceBranches, announceTags);
   if (preserved) {
     tags.push(preserved);
   } else if (refs.currentBranch) {
@@ -100,21 +152,17 @@ export function buildRepoStateTags(
     tags.push(['HEAD', refs.headOid]);
   }
 
-  for (const [name, oid] of refs.branches) {
-    if (name && oid) tags.push([`refs/heads/${name}`, oid]);
-  }
-  for (const [name, oid] of refs.tags) {
-    if (name && oid) tags.push([`refs/tags/${name}`, oid]);
-  }
+  for (const [name, oid] of announceBranches) if (name && oid) tags.push([`refs/heads/${name}`, oid]);
+  for (const [name, oid] of announceTags)     if (name && oid) tags.push([`refs/tags/${name}`, oid]);
   tags.push([...CLIENT_TAG]);
   return tags;
 }
 
 /**
  * A prior state's HEAD tag is preservable only while it still points at
- * something the new state announces:
+ * something the new state ANNOUNCES:
  *   - symbolic ('ref: refs/heads/X') → X must be among the announced branches
- *     (a renamed/deleted default branch must not be re-announced forever);
+ *     (a renamed/deleted/no-longer-announced default must not ride forever);
  *   - detached oid → must equal an announced branch/tag tip. An ancestor
  *     commit can't be verified without git access, and a NIP-34 repo HEAD
  *     pinned to a non-tip is not a state ngit/gitworkshop ever produce — so
@@ -125,17 +173,17 @@ export function buildRepoStateTags(
  */
 export function validPreservedHead(
   head: string[] | null,
-  refs: LocalRefs,
+  announceBranches: Map<string, string>,
+  announceTags: Map<string, string>,
 ): string[] | null {
   if (!head || head.length < 2 || head[0] !== 'HEAD' || typeof head[1] !== 'string') return null;
   const v = head[1];
   const SYMBOLIC = 'ref: refs/heads/';
   if (v.startsWith(SYMBOLIC)) {
-    const branch = v.slice(SYMBOLIC.length);
-    return refs.branches.some(([name]) => name === branch) ? [...head] : null;
+    return announceBranches.has(v.slice(SYMBOLIC.length)) ? [...head] : null;
   }
-  const isAnnouncedTip = [...refs.branches, ...refs.tags].some(([, oid]) => oid === v);
-  return isAnnouncedTip ? [...head] : null;
+  const tipOids = new Set<string>([...announceBranches.values(), ...announceTags.values()]);
+  return tipOids.has(v) ? [...head] : null;
 }
 
 /**

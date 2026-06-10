@@ -69,44 +69,122 @@ test('buildRepoStateTags: stamps the canonical 4-element client tag', () => {
   assert.deepEqual(clients, [[...CLIENT_TAG]]);
 });
 
+// A prior published state, in 30618 tag shape. Announces main + dev + v1.
+const priorState = (over: string[][] = []) => ([
+  ['d', 'amon-din'],
+  ['HEAD', 'ref: refs/heads/main'],
+  ['refs/heads/main', 'a'.repeat(40)],
+  ['refs/heads/dev', 'b'.repeat(40)],
+  ['refs/tags/v1', 'c'.repeat(40)],
+  [...CLIENT_TAG],
+  ...over,
+] as string[][]);
+
 test('buildRepoStateTags: preserves an existing HEAD tag that still resolves', () => {
-  const tags = buildRepoStateTags('amon-din', refs({ currentBranch: 'feature' }), ['HEAD', 'ref: refs/heads/main']);
+  const tags = buildRepoStateTags('amon-din', refs({ currentBranch: 'feature' }), priorState());
   // HEAD stays pinned to main even though the local branch is `feature` —
   // `main` is still among the announced branches, so the pin is honoured.
   assert.deepEqual(tags[1], ['HEAD', 'ref: refs/heads/main']);
 });
 
+// ── deliverable-set narrowing (the TUI scratch-branch fix) ─────────────────
+//
+// We push only the current branch, so the announced ref set is
+// {current branch, local oid} ∪ {prior-announced branches, prior oids}. Local-
+// only scratch branches that were never pushed must NOT be announced — else
+// every throwaway claude/* branch reads as "differs on git server" forever.
+
+test('buildRepoStateTags: drops local-only scratch branches never in the prior state', () => {
+  const local = refs({
+    currentBranch: 'claude/feature',
+    branches: [
+      ['main', 'a'.repeat(40)],
+      ['claude/feature', 'd'.repeat(40)],   // current → announced
+      ['claude/scratch', 'e'.repeat(40)],   // local-only, not current → DROPPED
+    ] as [string, string][],
+    tags: [] as [string, string][],
+  });
+  const tags = buildRepoStateTags('amon-din', local, priorState());
+  const branches = tags.filter(t => t[0].startsWith('refs/heads/')).map(t => t[0]);
+  assert.deepEqual(branches.sort(), ['refs/heads/claude/feature', 'refs/heads/dev', 'refs/heads/main']);
+  assert.equal(branches.includes('refs/heads/claude/scratch'), false);
+});
+
+test('buildRepoStateTags: non-current branches keep the PRIOR oid, not the local one', () => {
+  // Local main is AHEAD of the host (committed locally, only pushed the
+  // feature branch). Announcing the local oid would pin a commit the host
+  // lacks → drift. We must re-announce main at its prior (host) oid.
+  const local = refs({
+    currentBranch: 'claude/feature',
+    branches: [
+      ['main', 'f'.repeat(40)],                  // local main moved ahead
+      ['claude/feature', 'd'.repeat(40)],
+    ] as [string, string][],
+    tags: [] as [string, string][],
+  });
+  const tags = buildRepoStateTags('amon-din', local, priorState());
+  assert.deepEqual(tags.find(t => t[0] === 'refs/heads/main'), ['refs/heads/main', 'a'.repeat(40)]);
+  assert.deepEqual(tags.find(t => t[0] === 'refs/heads/claude/feature'), ['refs/heads/claude/feature', 'd'.repeat(40)]);
+});
+
+test('buildRepoStateTags: the current branch IS upserted to its local oid', () => {
+  // On main, local main advanced — the branch we push gets the new oid.
+  const local = refs({ currentBranch: 'main', branches: [['main', 'f'.repeat(40)], ['dev', 'b'.repeat(40)]] as [string, string][], tags: [] as [string, string][] });
+  const tags = buildRepoStateTags('amon-din', local, priorState());
+  assert.deepEqual(tags.find(t => t[0] === 'refs/heads/main'), ['refs/heads/main', 'f'.repeat(40)]);
+});
+
+test('buildRepoStateTags: tags are preserved from the prior state, local-only tags dropped', () => {
+  // We never deliver tags, so a local tag that was never pushed must not be
+  // announced; the prior state's tags ride through unchanged.
+  const local = refs({ tags: [['v1', 'c'.repeat(40)], ['v2-local', '9'.repeat(40)]] as [string, string][] });
+  const tags = buildRepoStateTags('amon-din', local, priorState());
+  const tagRefs = tags.filter(t => t[0].startsWith('refs/tags/')).map(t => t[0]);
+  assert.deepEqual(tagRefs, ['refs/tags/v1']);
+});
+
 // ── stale-HEAD guard ──────────────────────────────────────────────────────
 //
-// A preserved HEAD must still resolve within THIS state event. Re-announcing
-// a renamed-away branch or rebased-away commit forever is the "announced
-// commit not found on git server" warning gitworkshop shows on every view.
+// A preserved HEAD must still resolve within the ANNOUNCED ref set. Re-
+// announcing a rebased-away commit or a branch outside (current ∪ prior) is
+// the "announced commit not found on git server" warning gitworkshop shows.
 
-test('buildRepoStateTags: a preserved HEAD to a branch we no longer announce falls back to the current branch', () => {
+test('buildRepoStateTags: a preserved HEAD to a branch outside (current ∪ prior) falls back', () => {
+  // Prior carries a HEAD→master pointer but NO refs/heads/master tag (the
+  // branch was deleted), and master isn't the current branch → not announced.
   const tags = buildRepoStateTags(
     'amon-din',
-    refs(),                                       // branches: main, dev; on main
-    ['HEAD', 'ref: refs/heads/master'],           // renamed away — not announced
+    refs(),                                              // on main
+    [['d', 'amon-din'], ['HEAD', 'ref: refs/heads/master'], ['refs/heads/dev', 'b'.repeat(40)], [...CLIENT_TAG]],
   );
   assert.deepEqual(tags[1], ['HEAD', 'ref: refs/heads/main']);
 });
 
 test('buildRepoStateTags: a preserved detached-oid HEAD is kept only while it is an announced tip', () => {
-  // Matches the dev branch tip → preserved.
-  const kept = buildRepoStateTags('r', refs(), ['HEAD', 'b'.repeat(40)]);
+  // Prior pins HEAD to the dev tip (an announced branch oid) → preserved.
+  const kept = buildRepoStateTags('amon-din', refs(), [
+    ['d', 'amon-din'],
+    ['HEAD', 'b'.repeat(40)],                // detached, == the dev tip below
+    ['refs/heads/main', 'a'.repeat(40)],
+    ['refs/heads/dev', 'b'.repeat(40)],
+    [...CLIENT_TAG],
+  ]);
   assert.deepEqual(kept[1], ['HEAD', 'b'.repeat(40)]);
-  // Matches nothing announced (rebased away) → falls back to current branch.
-  const dropped = buildRepoStateTags('r', refs(), ['HEAD', 'e'.repeat(40)]);
+  // Prior pins HEAD to a commit matching no announced tip (rebased away) →
+  // falls back to the current branch.
+  const dropped = buildRepoStateTags('amon-din', refs(), [['d', 'amon-din'], ['HEAD', 'e'.repeat(40)], ['refs/heads/main', 'a'.repeat(40)], [...CLIENT_TAG]]);
   assert.deepEqual(dropped[1], ['HEAD', 'ref: refs/heads/main']);
 });
 
 test('validPreservedHead: malformed tags are never preserved', () => {
-  assert.equal(validPreservedHead(null, refs()), null);
-  assert.equal(validPreservedHead(['HEAD'], refs()), null);
-  assert.equal(validPreservedHead(['head', 'ref: refs/heads/main'], refs()), null);
+  const branches = new Map([['main', 'a'.repeat(40)]]);
+  const tags = new Map<string, string>();
+  assert.equal(validPreservedHead(null, branches, tags), null);
+  assert.equal(validPreservedHead(['HEAD'], branches, tags), null);
+  assert.equal(validPreservedHead(['head', 'ref: refs/heads/main'], branches, tags), null);
 });
 
-test('buildRepoStateTags: detached HEAD falls back to the commit oid', () => {
+test('buildRepoStateTags: detached HEAD falls back to the commit oid (bootstrap, no prior)', () => {
   const tags = buildRepoStateTags('r', refs({ currentBranch: '', headOid: 'f'.repeat(40) }));
   assert.deepEqual(tags[1], ['HEAD', 'f'.repeat(40)]);
 });
