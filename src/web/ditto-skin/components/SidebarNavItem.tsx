@@ -116,7 +116,11 @@ export function SidebarNavItem({
             <span className="absolute -top-1 right-0 size-2.5 bg-primary rounded-full" />
           )}
         </span>
-        <span className="truncate" style={{ fontFamily: 'var(--title-font-family, inherit)' }}>{label}</span>
+        {/* No --title-font-family here (upstream had it): Ditto's theme
+            engine sets that var per-context, which made nav labels swap
+            typefaces while navigating between sections. Station nav is
+            unconditionally the app font (mono). */}
+        <span className="truncate">{label}</span>
       </Link>
 
       {editing && (

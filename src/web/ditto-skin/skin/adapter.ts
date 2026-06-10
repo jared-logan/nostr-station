@@ -103,6 +103,14 @@ export { Skeleton } from '@/components/ui/skeleton';
 export { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 export { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 export { Input } from '@/components/ui/input';
+export { ScrollArea } from '@/components/ui/scroll-area';
+
+// ── Widget system types ──────────────────────────────────────────────
+// Consumed by the skin WidgetCard. WidgetDefinition describes a widget
+// (icon, label, height bounds, optional href); WidgetConfig is the
+// user's per-widget settings persisted in app config.
+export type { WidgetDefinition } from '@/lib/sidebarWidgets';
+export type { WidgetConfig } from '@/contexts/AppContext';
 
 // ── Upstream feature components consumed by the skin ─────────────────
 // EmojifiedText / VerifiedNip05Text / ProfileSearchDropdown /
