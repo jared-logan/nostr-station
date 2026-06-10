@@ -6355,8 +6355,29 @@ body.term-expanded .term-bar-toggle .term-chevron {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.45; }
 }
+/* Activity state, set by noteOutput in terminal.js: a dim pulsing dot
+   while the tab's process streams output, solid accent once a
+   background tab goes quiet — i.e. the long task finished and is
+   waiting for input. The bar dot mirrors the aggregate across tabs so
+   it reads through a collapsed drawer. */
+.term-tab-dot, .term-bar-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.term-tab-dot.working, .term-bar-dot.working {
+  background: var(--text-dim);
+  animation: term-tab-pulse 1.2s ease-in-out infinite;
+}
+.term-tab-dot.attention, .term-bar-dot.attention {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
 @media (prefers-reduced-motion: reduce) {
-  .term-tab.reconnecting .term-tab-label { animation: none; }
+  .term-tab.reconnecting .term-tab-label,
+  .term-tab-dot.working,
+  .term-bar-dot.working { animation: none; }
 }
 .term-tab-close {
   display: inline-flex;

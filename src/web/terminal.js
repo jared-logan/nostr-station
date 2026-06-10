@@ -41,6 +41,16 @@
   const RECONNECT_BASE_MS     = 500;
   const RECONNECT_MAX_ATTEMPTS = 8;
 
+  // Activity-state heuristics (see noteOutput). A tab is "working" while
+  // the PTY produces a sustained output burst — WORKING_MIN_MS filters
+  // out keystroke echo and prompt redraws, which are single sub-50ms
+  // chunks. ACTIVITY_QUIET_MS of silence ends the burst: a foreground
+  // tab just returns to idle (the user watched it finish), a background
+  // one flips to "attention" so the strip + bar show that the long task
+  // (Claude Code turn, build, test run) is now waiting on the user.
+  const ACTIVITY_QUIET_MS = 1200;
+  const WORKING_MIN_MS    = 400;
+
   // True on phones — a coarse pointer at a narrow width. Gates the full-screen
   // terminal sheet's companion JS: the keyboard-input bridge and the
   // render-robustness kicks below. Desktop (any width, mouse) never matches, so
@@ -194,6 +204,68 @@
     refreshBarLabel();
   }
 
+  // ── Per-tab activity state ─────────────────────────────────────────────
+  // 'idle' | 'working' | 'attention' — dot in the tab strip plus an
+  // aggregate dot on the collapsed bar, so "the agent finished and is
+  // waiting for me" is visible without expanding the drawer.
+
+  const isForeground = (tab) =>
+    isExpanded() && tabs[activeIdx] === tab && !document.hidden;
+
+  function setActivity(tab, state) {
+    if (tab.activity === state) return;
+    tab.activity = state;
+    renderStrip();
+    updateBarActivity();
+  }
+
+  function updateBarActivity() {
+    const dot = $('term-bar-dot');
+    if (!dot) return;
+    const agg = tabs.some(t => t.activity === 'attention') ? 'attention'
+              : tabs.some(t => t.activity === 'working')   ? 'working'
+              : '';
+    dot.hidden = !agg;
+    dot.className = 'term-bar-dot' + (agg ? ` ${agg}` : '');
+    dot.title = agg === 'attention' ? 'A terminal is waiting for input'
+              : agg === 'working'   ? 'A terminal is working'
+              : '';
+  }
+
+  function clearAttention(tab) {
+    if (tab && tab.activity === 'attention') setActivity(tab, 'idle');
+  }
+
+  // Classify a PTY output chunk. Called from the WS message handler for
+  // every data frame; cheap on purpose.
+  function noteOutput(tab, data) {
+    // Scrollback replay after (re)connect is history, not fresh work —
+    // same suppression window the TX side uses, plus a grace period of
+    // our own: the replay burst can outlast suppressTx's 300ms on big
+    // buffers, and without this every restored background tab would
+    // flash working → attention on page load.
+    const now = Date.now();
+    if (tab.suppressTx || now - (tab.connectedAt || 0) < 1000) return;
+    // BEL is an explicit attention request (Claude Code rings it when a
+    // turn ends or an approval is pending). Honor it immediately unless
+    // the user is already looking at this tab.
+    if (data.includes('\x07') && !isForeground(tab)) {
+      setActivity(tab, 'attention');
+    }
+    // New burst if the previous output is older than the quiet window.
+    if (now - tab.lastOutputAt > ACTIVITY_QUIET_MS) tab.workStartAt = now;
+    tab.lastOutputAt = now;
+    if (tab.activity !== 'attention' && now - tab.workStartAt >= WORKING_MIN_MS) {
+      setActivity(tab, 'working');
+    }
+    if (tab.quietTimer) clearTimeout(tab.quietTimer);
+    tab.quietTimer = setTimeout(() => {
+      tab.quietTimer = null;
+      if (tab.activity !== 'working') return;
+      setActivity(tab, isForeground(tab) ? 'idle' : 'attention');
+    }, ACTIVITY_QUIET_MS);
+  }
+
   function isExpanded() {
     return document.body.classList.contains('term-expanded');
   }
@@ -212,7 +284,10 @@
     requestAnimationFrame(() => requestAnimationFrame(() => {
       scheduleFit();
       const active = tabs[activeIdx];
-      if (active) { try { active.term.focus(); } catch {} }
+      if (active) {
+        clearAttention(active);
+        try { active.term.focus(); } catch {}
+      }
       // On phones the sheet snaps to full-screen and the keyboard animates in
       // over a few hundred ms; the host's final height (and the visible rows
       // above the keyboard) only settle after that. Re-fit on a couple of
@@ -334,6 +409,9 @@
   function sendInputBytes(tab, data) {
     if (!data) return;
     if (tab.suppressTx) return;
+    // Typing is the strongest "I've seen it" signal — drop the
+    // needs-input dot for this tab.
+    clearAttention(tab);
     if (tab.ws && tab.ws.readyState === 1) {
       tab.ws.send(JSON.stringify({ type: 'input', data }));
     } else {
@@ -535,6 +613,13 @@
       reconnectTimer: null,    // pending backoff timer, if any
       connState: 'open',       // 'open' | 'reconnecting' | 'offline' — strip/bar UI
       reconnectNotified: false, // one "connection lost" line per drop, not per retry
+      // Activity tracking (see noteOutput): output-burst bookkeeping
+      // behind the working / needs-input dot in the strip + bar.
+      activity: 'idle',        // 'idle' | 'working' | 'attention'
+      lastOutputAt: 0,
+      workStartAt: 0,
+      quietTimer: null,
+      connectedAt: 0,          // set on WS open; gates the replay grace period
       // True for a brief window right after (re)connect while the server
       // replays scrollback — see the open handler in connectWs.
       suppressTx: false,
@@ -577,6 +662,7 @@
     // handler doesn't mistake this for a transient drop and try to reconnect.
     tab.closing = true;
     if (tab.reconnectTimer) { clearTimeout(tab.reconnectTimer); tab.reconnectTimer = null; }
+    if (tab.quietTimer)     { clearTimeout(tab.quietTimer);     tab.quietTimer = null; }
     if (!fromServerClose) {
       // Fire-and-forget the DELETE — the server's destroySession also
       // fires a 'closed' control frame that would otherwise race our WS
@@ -602,6 +688,7 @@
     persistTabs();
     renderStrip();
     refreshActive();
+    updateBarActivity();
   }
 
   function refreshActive() {
@@ -615,6 +702,7 @@
 
     const active = tabs[activeIdx];
     if (active) {
+      if (isForeground(active)) clearAttention(active);
       // Give xterm a tick to notice its host is now visible before fitting.
       requestAnimationFrame(() => {
         scheduleFit();
@@ -642,15 +730,23 @@
   function renderStrip() {
     const strip = $('term-tabs');
     if (!strip) return;
-    const parts = tabs.map((t, i) => `
+    const parts = tabs.map((t, i) => {
+      const connSuffix = t.connState === 'reconnecting' ? ' (reconnecting…)'
+                       : t.connState === 'offline'      ? ' (offline)' : '';
+      const actSuffix  = t.activity === 'working'   ? ' (working)'
+                       : t.activity === 'attention' ? ' (waiting for input)' : '';
+      const dot = t.activity !== 'idle'
+        ? `<span class="term-tab-dot ${t.activity}" aria-hidden="true"></span>` : '';
+      return `
       <button class="term-tab ${i === activeIdx ? 'active' : ''}${t.connState === 'reconnecting' ? ' reconnecting' : ''}${t.connState === 'offline' ? ' offline' : ''}"
               role="tab"
               data-idx="${i}"
-              title="${escapeHtml(t.label)}${t.connState === 'reconnecting' ? ' (reconnecting…)' : ''}${t.connState === 'offline' ? ' (offline)' : ''}">
-        <span class="term-tab-label">${escapeHtml(t.label)}</span>
+              title="${escapeHtml(t.label)}${connSuffix}${actSuffix}">
+        ${dot}<span class="term-tab-label">${escapeHtml(t.label)}</span>
         <span class="term-tab-close" data-close="${i}" aria-label="Close tab">×</span>
       </button>
-    `).join('');
+    `;
+    }).join('');
     strip.innerHTML = parts +
       `<button class="term-tab-new" id="term-tab-new" title="New shell" aria-label="New shell">+</button>`;
   }
@@ -762,7 +858,12 @@
   }
   window.addEventListener('online', reconnectDroppedTabs);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) reconnectDroppedTabs();
+    if (!document.hidden) {
+      reconnectDroppedTabs();
+      // Coming back to a visible drawer counts as seeing the active tab.
+      const active = tabs[activeIdx];
+      if (active && isForeground(active)) clearAttention(active);
+    }
   });
 
   // ── WebSocket wiring ─────────────────────────────────────────────────────
@@ -781,6 +882,7 @@
       // the next genuine drop starts its retry schedule fresh.
       tab.reconnectAttempts = 0;
       tab.reconnectNotified = false;
+      tab.connectedAt = Date.now();
       setConnState(tab, 'open');
       // Open the replay-suppression window: the server replays scrollback as
       // the first frame(s) after attach, and xterm will auto-reply to any
@@ -825,6 +927,7 @@
         return;
       }
       if (tab.exited) return;
+      noteOutput(tab, data);
       pending += data;
       if (!pendingHandle) pendingHandle = requestAnimationFrame(flushPending);
     });
