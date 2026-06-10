@@ -950,6 +950,18 @@ function activatePanel(name) {
     if (group && !group.open) group.open = true;
   }
   if (name === 'logs') clearLogsBadge();
+  // Move focus to the activated panel's heading so keyboard and
+  // screen-reader users land in the new context instead of having to
+  // re-Tab all the way from the nav. Runs before onEnter so panels
+  // that focus their own primary control (Chat focuses its input)
+  // still win.
+  const head = document.querySelector(
+    `.panel[data-panel="${CSS.escape(name)}"] .panel-head .title`,
+  );
+  if (head) {
+    head.setAttribute('tabindex', '-1');
+    try { head.focus({ preventScroll: true }); } catch {}
+  }
   Panels[name]?.onEnter?.();
 }
 
@@ -1623,8 +1635,26 @@ function statusSignature(status) {
   return sig;
 }
 let __lastHealthSig = '';
+let __healthCycle = null;   // Promise while a fetch cycle (incl. queued rerun) runs
+let __healthRerun = false;
 
-async function refreshHealth() {
+// Coalesces concurrent callers onto one fetch cycle. If a request lands
+// while a /api/status call is in flight (slow server, poll tick racing a
+// post-mutation refresh), the cycle runs one more pass after it settles —
+// and every caller's promise resolves only after that pass, so
+// `await refreshHealth()` after a mutation always observes post-mutation
+// status instead of returning early against the stale in-flight response.
+function refreshHealth() {
+  if (__healthCycle) { __healthRerun = true; return __healthCycle; }
+  __healthCycle = (async () => {
+    try {
+      do { __healthRerun = false; await refreshHealthOnce(); } while (__healthRerun);
+    } finally { __healthCycle = null; }
+  })();
+  return __healthCycle;
+}
+
+async function refreshHealthOnce() {
   try {
     const status = await api('/api/status');
     const relay = status.find(s => s.id === 'relay');
@@ -1704,7 +1734,24 @@ async function refreshHealth() {
   } catch {}
 }
 
-setInterval(refreshHealth, 5000);
+// Health polling pauses while the tab is hidden — a backgrounded
+// dashboard was hitting /api/status every 5s indefinitely for data
+// nobody was looking at. On re-focus, refresh immediately so the
+// sidebar is current the moment the user returns, then resume.
+let __healthTimer = null;
+function startHealthPoll() {
+  if (__healthTimer || document.hidden) return;
+  __healthTimer = setInterval(refreshHealth, 5000);
+}
+function stopHealthPoll() {
+  if (__healthTimer) { clearInterval(__healthTimer); __healthTimer = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { stopHealthPoll(); return; }
+  void refreshHealth();
+  startHealthPoll();
+});
+startHealthPoll();
 
 // ── Panel: Status ────────────────────────────────────────────────────────
 
@@ -3190,7 +3237,9 @@ const ChatPanel = (() => {
   // it (the server registry's onExit hook flips `running` back to false).
   const PreviewPane = (() => {
     const COLLAPSE_KEY = 'ns:chat-preview:collapsed';
+    const FULL_KEY     = 'ns:chat-preview:full';
     let split, frame, empty, urlEl, startBtn, reloadBtn, collapseBtn, showBtn;
+    let expandBtn, openExtBtn, chatShowBtn, emptyTitle, emptyHint;
     let initialized = false;
     // Current per-project URL (e.g. http://localhost:5174). Re-fetched
     // from /api/projects/:id/dev-server on each sync(). Buttons read this
@@ -3213,6 +3262,11 @@ const ChatPanel = (() => {
       reloadBtn   = document.getElementById('cp-reload');
       collapseBtn = document.getElementById('cp-collapse');
       showBtn     = document.getElementById('cp-show');
+      expandBtn   = document.getElementById('cp-expand');
+      openExtBtn  = document.getElementById('cp-open-ext');
+      chatShowBtn = document.getElementById('cp-chat-show');
+      emptyTitle  = document.getElementById('cp-empty-title');
+      emptyHint   = document.getElementById('cp-empty-hint');
       if (!split) return;
       initialized = true;
 
@@ -3228,6 +3282,30 @@ const ChatPanel = (() => {
 
       collapseBtn.addEventListener('click', () => setCollapsed(true));
       showBtn.addEventListener('click',     () => setCollapsed(false));
+
+      // Full view: preview takes the whole panel, chat docks to the
+      // left-edge pull-tab. ⛶ toggles; Esc or the pull-tab exits.
+      expandBtn?.addEventListener('click',  () => setFull(split.dataset.preview !== 'full'));
+      chatShowBtn?.addEventListener('click', () => setFull(false));
+      document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape' || e.defaultPrevented) return;
+        if (!split || split.dataset.preview !== 'full') return;
+        // Don't steal Esc from an overlay layered above the panel —
+        // modals, the identity drawer, or the mobile sidebar (which has
+        // its own Esc-to-close).
+        const modalRoot = document.getElementById('modal-root');
+        if (modalRoot && modalRoot.childElementCount > 0) return;
+        if (document.querySelector('.drawer-scrim.open')) return;
+        if (document.body.classList.contains('sidebar-open')) return;
+        setFull(false);
+      });
+
+      // Power escape hatch: the dev server in its own browser tab, with
+      // native devtools. currentUrl is hostname-relative (see sync), so
+      // this works over mesh access too once the dev server is exposed.
+      openExtBtn?.addEventListener('click', () => {
+        if (currentUrl) window.open(currentUrl, '_blank', 'noopener');
+      });
 
       // Mobile bottom tab strip — flips between chat and preview by
       // delegating to the same setCollapsed() so localStorage + the
@@ -3265,16 +3343,40 @@ const ChatPanel = (() => {
       });
     }
 
+    // Single writer for the visible (non-hidden) modes. Keeps the
+    // dataset, both pull-tabs, the ⛶ toggle, and the mobile tab strip
+    // in lockstep no matter which control drove the change.
+    function applyMode(mode) {
+      split.dataset.preview = mode;
+      showBtn.hidden = mode !== 'collapsed';
+      if (expandBtn) {
+        expandBtn.setAttribute('aria-pressed', mode === 'full' ? 'true' : 'false');
+        expandBtn.title = mode === 'full' ? 'Exit full view (Esc)' : 'Full view (Esc to exit)';
+      }
+      syncTabState(mode === 'collapsed');
+    }
+
     function setCollapsed(collapsed) {
       init();
       if (!split) return;
       // Only toggle if the pane is actually applicable for this project.
-      const state = split.dataset.preview;
-      if (state === 'hidden') return;
-      split.dataset.preview = collapsed ? 'collapsed' : 'open';
-      showBtn.hidden = !collapsed;
-      syncTabState(collapsed);
+      if (split.dataset.preview === 'hidden') return;
+      // Collapsing (or re-opening side-by-side) always leaves full view —
+      // both gestures mean "give me the chat back".
+      try { localStorage.setItem(FULL_KEY, '0'); } catch {}
       try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch {}
+      applyMode(collapsed ? 'collapsed' : 'open');
+    }
+
+    function setFull(full) {
+      init();
+      if (!split) return;
+      if (split.dataset.preview === 'hidden') return;
+      try {
+        localStorage.setItem(FULL_KEY, full ? '1' : '0');
+        if (full) localStorage.setItem(COLLAPSE_KEY, '0');
+      } catch {}
+      applyMode(full ? 'full' : 'open');
     }
 
     function syncTabState(collapsed) {
@@ -3291,6 +3393,13 @@ const ChatPanel = (() => {
 
     function isCollapsedPref() {
       try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch { return false; }
+    }
+    function modePref() {
+      try { if (localStorage.getItem(FULL_KEY) === '1') return 'full'; } catch {}
+      return isCollapsedPref() ? 'collapsed' : 'open';
+    }
+    function isLoopbackHostname(h) {
+      return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h.startsWith('127.');
     }
 
     async function sync(project) {
@@ -3321,19 +3430,48 @@ const ChatPanel = (() => {
       try { info = await api(`/api/projects/${project.id}/dev-server`); } catch {}
       if (myToken !== syncToken) return; // stale — newer sync() in flight
 
-      const nextUrl = info?.url || 'http://localhost:5173';
+      // Build the URL from the browser's own hostname rather than the
+      // server's literal "localhost" string — over mesh / Mobile Access
+      // the dashboard host IS the dev-server host, while "localhost"
+      // would point at the viewing device.
+      const port = Number.isFinite(info?.port) ? info.port : null;
+      const nextUrl = port
+        ? `http://${location.hostname}:${port}`
+        : (info?.url || `http://${location.hostname}:5173`);
       const nextRunning = !!info?.running;
       const switchedProject = currentProjectId !== project.id;
       currentUrl = nextUrl;
       currentProjectId = project.id;
       if (urlEl) urlEl.textContent = nextUrl;
 
-      const collapsed = isCollapsedPref();
-      split.dataset.preview = collapsed ? 'collapsed' : 'open';
-      showBtn.hidden = !collapsed;
-      syncTabState(collapsed);
+      applyMode(modePref());
 
-      if (switchedProject) {
+      // Browsing from a non-loopback host while Mobile Access is off
+      // means the dev server binds loopback-only inside the station —
+      // the iframe could never load. Explain instead of rendering the
+      // browser's raw connection-refused page.
+      const remoteBlocked = !isLoopbackHostname(location.hostname)
+        && !!info && info.meshAccess !== true;
+      if (emptyTitle && emptyHint) {
+        if (remoteBlocked) {
+          emptyTitle.textContent = 'Preview not reachable from this device';
+          emptyHint.innerHTML = 'The dev server binds to localhost on the station. '
+            + 'Enable <b>Mobile Access</b> (nostr-vpn → Network), then restart '
+            + 'the dev server to expose it over the mesh.';
+        } else {
+          emptyTitle.textContent = 'Dev server not detected';
+          emptyHint.innerHTML = `Spawns <code>npm run dev -- --port ${port || 5173}</code> in the terminal panel.`;
+        }
+      }
+      if (startBtn) startBtn.style.display = remoteBlocked ? 'none' : '';
+
+      if (remoteBlocked) {
+        if (frame) {
+          frame.hidden = true;
+          if (frame.src && frame.src !== 'about:blank') frame.src = 'about:blank';
+        }
+        if (empty) empty.style.display = '';
+      } else if (switchedProject) {
         // Park the previous project's iframe so the user doesn't briefly
         // see the wrong project's UI while the new src loads. Auto-reload
         // when the server reports a running dev server — saves the user a
@@ -3350,7 +3488,7 @@ const ChatPanel = (() => {
       }
     }
 
-    return { sync, setCollapsed };
+    return { sync, setCollapsed, setFull };
   })();
 
   // Permissions toggle (chat-header dropdown). Hidden when no
@@ -3422,6 +3560,20 @@ const ChatPanel = (() => {
   async function populateProvider() {
     const list = await api('/api/ai/providers').catch(() => null);
     aiProvidersCache = list;
+
+    // Fetch failure ≠ "no providers configured" — don't send the user
+    // to Config to re-add keys they already have when the real problem
+    // is a transient server hiccup. Distinct callout with a Retry.
+    if (!list) {
+      provSel.innerHTML = '<option value="">—</option>';
+      provSel.disabled = true;
+      if (modelSel) { modelSel.innerHTML = ''; modelSel.disabled = true; }
+      hasConfiguredProvider = false;
+      showProviderLoadError();
+      updateSendDisabled();
+      return;
+    }
+
     const configured = (list?.providers || []).filter(p => p.configured && p.type === 'api');
 
     if (configured.length === 0) {
@@ -3475,19 +3627,36 @@ const ChatPanel = (() => {
   // Fallback message when zero API providers are configured. Rendered as
   // a callout inside the chat-controls row — no separate modal, no page
   // churn. Clicking takes the user to the Config panel.
-  function showNoProviderCallout() {
+  // Shared callout slot under the chat header. Re-set innerHTML on every
+  // show so the element can flip between the "not configured" and
+  // "couldn't load" variants across retries.
+  function providerCallout(html) {
     let el = document.getElementById('chat-no-provider');
     if (!el) {
       el = document.createElement('div');
       el.id = 'chat-no-provider';
       el.className = 'chat-no-provider';
-      el.innerHTML = `
-        <span>No AI provider configured for Chat.</span>
-        <a href="#config">Add one in Config →</a>
-      `;
       warnEl.parentElement.appendChild(el);
     }
+    el.innerHTML = html;
     el.style.display = '';
+    return el;
+  }
+  function showNoProviderCallout() {
+    providerCallout(`
+      <span>No AI provider configured for Chat.</span>
+      <a href="#config">Add one in Config →</a>
+    `);
+  }
+  function showProviderLoadError() {
+    const el = providerCallout(`
+      <span>Couldn't load AI providers — station server unreachable?</span>
+      <button class="chat-providers-retry">Retry</button>
+    `);
+    el.querySelector('.chat-providers-retry')?.addEventListener('click', () => {
+      hideNoProviderCallout();
+      void populateProvider();
+    });
   }
   function hideNoProviderCallout() {
     const el = document.getElementById('chat-no-provider');
@@ -4179,7 +4348,7 @@ const RelayPanel = (() => {
     $('relay-pubkeys').textContent = pubkeys.size;
     const inline = $('relay-events-inline-count');
     if (inline) inline.textContent = events.length;
-    renderKinds(); renderEvents();
+    renderKinds(); prependEvent(ev);
   }
   function renderKinds() {
     const el = $('relay-kinds');
@@ -4192,6 +4361,46 @@ const RelayPanel = (() => {
       el.appendChild(b);
     }
   }
+  // Resolved profile name when the cache has one (populated by
+  // resolveProfiles); falls back to the historical 12-char hex
+  // truncation. profileNameOf returns its own npub-truncated form
+  // when no profile is on file, so detect that and prefer the
+  // tighter hex slice for stream rows where space is tight.
+  function pkLabelFor(pubkey) {
+    const resolved = (typeof profileNameOf === 'function' && pubkey)
+      ? profileNameOf(pubkey) : '';
+    const isNpubFallback = /^npub1[0-9a-z]{4,}…[0-9a-z]{4,}$/.test(resolved);
+    return resolved && !isNpubFallback
+      ? resolved
+      : `${(pubkey || '').slice(0, 12)}…`;
+  }
+  function buildEventRow(ev) {
+    const row = document.createElement('div');
+    row.className = 'event';
+    const ts = new Date((ev.created_at || 0) * 1000);
+    row.innerHTML = `
+      <div class="k-tag">${escapeHtml(kindLabel(ev.kind))}</div>
+      <div class="pk" title="${escapeHtml(ev.pubkey || '')}">${escapeHtml(pkLabelFor(ev.pubkey))}</div>
+      <div class="content">${escapeHtml(ev.content || '')}</div>
+      <div class="ts">${escapeHtml(isNaN(ts.getTime()) ? '' : ts.toLocaleTimeString())}</div>
+    `;
+    return row;
+  }
+  // Live-stream path: insert just the new row instead of rebuilding the
+  // whole list (which reset scroll position on every incoming event).
+  // If the user has scrolled down to read older events, offset the
+  // scroll by the new row's height so their reading position holds.
+  function prependEvent(ev) {
+    const el = $('relay-events');
+    if (!el) return;
+    if (el.querySelector('.empty-state')) el.innerHTML = '';
+    const row = buildEventRow(ev);
+    el.insertBefore(row, el.firstChild);
+    while (el.children.length > events.length) el.removeChild(el.lastChild);
+    if (el.scrollTop > 0) el.scrollTop += row.offsetHeight;
+    resolveAndPatch(ev.pubkey ? [ev.pubkey] : []);
+  }
+  // Full repaint — initial render, wipe/restart, panel re-entry.
   function renderEvents() {
     const el = $('relay-events');
     if (events.length === 0) {
@@ -4200,50 +4409,35 @@ const RelayPanel = (() => {
       return;
     }
     el.innerHTML = '';
-    for (const ev of events) {
-      const row = document.createElement('div');
-      row.className = 'event';
-      const ts = new Date((ev.created_at || 0) * 1000);
-      // Resolved profile name when the cache has one (populated below
-      // by resolveProfiles); falls back to the historical 12-char hex
-      // truncation. profileNameOf returns its own npub-truncated form
-      // when no profile is on file, so detect that and prefer the
-      // tighter hex slice for stream rows where space is tight.
-      const resolved = (typeof profileNameOf === 'function' && ev.pubkey)
-        ? profileNameOf(ev.pubkey) : '';
-      const isNpubFallback = /^npub1[0-9a-z]{4,}…[0-9a-z]{4,}$/.test(resolved);
-      const pkLabel = resolved && !isNpubFallback
-        ? resolved
-        : `${(ev.pubkey || '').slice(0, 12)}…`;
-      row.innerHTML = `
-        <div class="k-tag">${escapeHtml(kindLabel(ev.kind))}</div>
-        <div class="pk" title="${escapeHtml(ev.pubkey || '')}">${escapeHtml(pkLabel)}</div>
-        <div class="content">${escapeHtml(ev.content || '')}</div>
-        <div class="ts">${escapeHtml(isNaN(ts.getTime()) ? '' : ts.toLocaleTimeString())}</div>
-      `;
-      el.appendChild(row);
-    }
-    // Kick off profile resolution for unresolved authors in view, then
-    // re-paint to upgrade truncated hex to names. Cheap when the local
-    // store already has the profile (no network), and the cache dedupes
-    // repeated lookups across events sharing an author.
+    for (const ev of events) el.appendChild(buildEventRow(ev));
+    resolveAndPatch(events.map(ev => ev.pubkey));
+  }
+  // Kick off profile resolution for unresolved authors, then patch the
+  // affected .pk cells in place (matched via their title attribute,
+  // which carries the full pubkey) — upgrading truncated hex to names
+  // without rebuilding rows. Cheap when the local store already has the
+  // profile (no network), and the cache dedupes repeated lookups across
+  // events sharing an author.
+  function resolveAndPatch(candidatePubkeys) {
     try {
-      if (typeof resolveProfiles === 'function') {
-        const unresolved = [];
-        for (const ev of events) {
-          if (!ev.pubkey || !/^[0-9a-f]{64}$/.test(ev.pubkey)) continue;
-          if (typeof hasResolvedProfileName === 'function' && hasResolvedProfileName(ev.pubkey)) continue;
-          unresolved.push(ev.pubkey);
-        }
-        if (unresolved.length > 0) {
-          resolveProfiles(unresolved).then(() => {
-            // Only repaint if the relay panel is still mounted with the
-            // same event set — avoid stomping on a tab switch.
-            if (!$('relay-events')) return;
-            renderEvents();
-          }).catch(() => {});
-        }
+      if (typeof resolveProfiles !== 'function') return;
+      const unresolved = [];
+      for (const pk of candidatePubkeys) {
+        if (!pk || !/^[0-9a-f]{64}$/.test(pk)) continue;
+        if (typeof hasResolvedProfileName === 'function' && hasResolvedProfileName(pk)) continue;
+        unresolved.push(pk);
       }
+      if (unresolved.length === 0) return;
+      resolveProfiles(unresolved).then(() => {
+        const el = $('relay-events');
+        if (!el) return;
+        for (const cell of el.querySelectorAll('.pk')) {
+          const pk = cell.getAttribute('title');
+          if (!pk) continue;
+          const label = pkLabelFor(pk);
+          if (cell.textContent !== label) cell.textContent = label;
+        }
+      }).catch(() => {});
     } catch {}
   }
 
@@ -5749,17 +5943,27 @@ const ProjectsPanel = (() => {
     }
   }
 
+  // First-load + failure tracking so renderReposTab can tell "still
+  // fetching" and "fetch failed" apart from "you have no projects" —
+  // a transient network error used to blank the grid into the
+  // no-projects empty state, which reads as data loss.
+  let projectsLoaded = false;
+  let projectsLoadFailed = false;
+
   async function reload() {
     try {
       // Run in parallel — both are independent + we render once at the end.
       const [ps] = await Promise.all([
-        api('/api/projects').catch(() => []),
-        loadTerminalAi(),
+        api('/api/projects'),
+        loadTerminalAi().catch(() => {}),
       ]);
       projects = Array.isArray(ps) ? ps : [];
+      projectsLoadFailed = false;
     } catch {
-      projects = [];
+      // Keep the last-known project list rather than blanking it.
+      projectsLoadFailed = true;
     }
+    projectsLoaded = true;
     // Publish the cache so other modules (ChatPanel, NavSessions, ngit
     // remote helpers) can read project metadata without a re-fetch, and
     // drop chat sessions whose project no longer exists.
@@ -5932,6 +6136,21 @@ const ProjectsPanel = (() => {
   }
 
   function renderReposTab(content) {
+    if (!projectsLoaded) {
+      content.innerHTML = `<div class="empty-state">loading…</div>`;
+      return;
+    }
+    if (projectsLoadFailed && projects.length === 0) {
+      content.innerHTML = `
+        <div class="empty-state err">Couldn't load projects — is the station server reachable?
+          <div class="hint"><button class="projects-retry">Retry</button></div>
+        </div>`;
+      content.querySelector('.projects-retry').addEventListener('click', () => {
+        content.innerHTML = `<div class="empty-state">loading…</div>`;
+        void reload();
+      });
+      return;
+    }
     if (projects.length === 0) {
       content.innerHTML = `
         <div class="projects-empty">
@@ -22711,7 +22930,19 @@ const MailPanel = (() => {
       if (activeCounter) await loadThread(activeCounter);
     } catch (e) {
       const el = $('mail-threads');
-      if (el) el.innerHTML = `<div class="mail-empty">Failed to load: ${escapeHtml(e?.message || e)}</div>`;
+      if (!el) return;
+      if (threads.length > 0 || requests.length > 0) {
+        // We have a previous (stale) list — keep it visible rather than
+        // wiping the inbox over a transient refresh failure.
+        toast('Mail refresh failed', String(e?.message || e), 'err');
+        return;
+      }
+      el.innerHTML = `<div class="mail-empty">Failed to load: ${escapeHtml(e?.message || e)}
+        <div class="hint"><button class="mail-retry">Retry</button></div></div>`;
+      el.querySelector('.mail-retry')?.addEventListener('click', () => {
+        el.innerHTML = '<div class="mail-empty">loading…</div>';
+        void load();
+      });
     }
   }
 

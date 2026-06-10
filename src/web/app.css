@@ -129,6 +129,17 @@ input:focus, textarea:focus, select:focus {
 }
 ::placeholder { color: var(--muted); }
 
+/* Keyboard-only focus indicator for controls that otherwise have none.
+   :focus-visible keeps mouse clicks ring-free; inputs are excluded —
+   their accent border above already signals focus. */
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* ── layout ───────────────────────────────────────────────────────────── */
 
 .app {
@@ -1109,7 +1120,8 @@ details.dashboard-health .dashboard-health-sub {
 /* Wraps chat + preview iframe. Drives visibility through data-preview:
      hidden    — no project / non-stacks project; chat is full width
      open      — preview pane visible
-     collapsed — preview pane hidden but a small re-open chevron is shown */
+     collapsed — preview pane hidden but a small re-open chevron is shown
+     full      — preview fills the panel; chat docks to a left pull-tab */
 .chat-split {
   flex: 1;
   display: flex;
@@ -1122,6 +1134,33 @@ details.dashboard-health .dashboard-health-sub {
 .chat-split[data-preview="hidden"] .chat-preview,
 .chat-split[data-preview="hidden"] .chat-preview-show,
 .chat-split[data-preview="collapsed"] .chat-preview { display: none; }
+.chat-split[data-preview="full"] > .chat { display: none; }
+
+/* Left-edge pull-tab — mirror of .chat-preview-show. CSS-gated on the
+   full state rather than a JS-managed hidden attr: one source of truth. */
+.chat-show { display: none; }
+.chat-split[data-preview="full"] .chat-show {
+  display: block;
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 56px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  border: 1px solid var(--border-strong);
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+  background: var(--bg-card);
+  color: var(--muted);
+  cursor: pointer;
+}
+.chat-split[data-preview="full"] .chat-show:hover {
+  color: var(--text-bright);
+  background: var(--bg-hover);
+}
 
 .chat-preview {
   flex: 1;
@@ -1241,6 +1280,14 @@ details.dashboard-health .dashboard-health-sub {
     border-bottom: 0;
     border-radius: 6px 6px 0 0;
   }
+  .chat-split[data-preview="full"] .chat-show {
+    top: auto; bottom: 0; left: 12px;
+    transform: none;
+    width: 56px; height: 22px;
+    border: 1px solid var(--border-strong);
+    border-bottom: 0;
+    border-radius: 6px 6px 0 0;
+  }
 }
 
 /* ── chat-split: mobile bottom tabs ────────────────────────────────────
@@ -1283,9 +1330,12 @@ details.dashboard-health .dashboard-health-sub {
 
 @media (max-width: 900px) {
   /* Show the tab strip + collapse the split to a single visible pane
-     whenever a previewable project is active. */
+     whenever a previewable project is active. "full" degrades to plain
+     "open" here — single-pane already, and the tab strip is the way
+     back to chat, so the desktop-only full mode has nothing to add. */
   .chat-split[data-preview="open"],
-  .chat-split[data-preview="collapsed"] {
+  .chat-split[data-preview="collapsed"],
+  .chat-split[data-preview="full"] {
     display: grid;
     grid-template-rows: 1fr auto;
     gap: 0;
@@ -1293,25 +1343,31 @@ details.dashboard-health .dashboard-health-sub {
   .chat-split[data-preview="open"] > .chat,
   .chat-split[data-preview="open"] > .chat-preview,
   .chat-split[data-preview="collapsed"] > .chat,
-  .chat-split[data-preview="collapsed"] > .chat-preview {
+  .chat-split[data-preview="collapsed"] > .chat-preview,
+  .chat-split[data-preview="full"] > .chat,
+  .chat-split[data-preview="full"] > .chat-preview {
     min-height: 0;
     min-width: 0;
     grid-row: 1;
     grid-column: 1;
   }
-  /* Hide whichever pane isn't selected. The floating ←/→ pull-tab also
-     disappears — the tab bar replaces it on mobile. */
+  /* Hide whichever pane isn't selected. The floating ←/→ pull-tabs also
+     disappear — the tab bar replaces them on mobile. */
   .chat-split[data-preview="open"]      > .chat,
+  .chat-split[data-preview="full"]      > .chat,
   .chat-split[data-preview="collapsed"] > .chat-preview { display: none; }
-  .chat-split[data-preview="open"]      > .chat-preview { display: flex; }
+  .chat-split[data-preview="open"]      > .chat-preview,
+  .chat-split[data-preview="full"]      > .chat-preview { display: flex; }
   .chat-split[data-preview="collapsed"] > .chat         { display: flex; }
   .chat-split[data-preview="open"]      .chat-preview-show,
-  .chat-split[data-preview="collapsed"] .chat-preview-show { display: none; }
+  .chat-split[data-preview="collapsed"] .chat-preview-show,
+  .chat-split[data-preview="full"]      .chat-show { display: none; }
 
   /* Tab strip lives in row 2. Only render it when a preview pane is
      actually available — hidden state keeps chat full-bleed. */
   .chat-split[data-preview="open"]      .chat-split-tabs,
-  .chat-split[data-preview="collapsed"] .chat-split-tabs {
+  .chat-split[data-preview="collapsed"] .chat-split-tabs,
+  .chat-split[data-preview="full"]      .chat-split-tabs {
     display: flex;
     grid-row: 2;
     grid-column: 1;
@@ -6331,6 +6387,42 @@ body.term-expanded .term-bar-toggle .term-chevron {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+/* Connection state, set by setConnState in terminal.js: the label pulses
+   amber while the WS backoff is retrying, settles to red once retries
+   exhaust (typing into an offline tab restarts the loop). */
+.term-tab.reconnecting .term-tab-label {
+  color: var(--warn);
+  animation: term-tab-pulse 1.2s ease-in-out infinite;
+}
+.term-tab.offline .term-tab-label { color: var(--error); }
+@keyframes term-tab-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+/* Activity state, set by noteOutput in terminal.js: a dim pulsing dot
+   while the tab's process streams output, solid accent once a
+   background tab goes quiet — i.e. the long task finished and is
+   waiting for input. The bar dot mirrors the aggregate across tabs so
+   it reads through a collapsed drawer. */
+.term-tab-dot, .term-bar-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.term-tab-dot.working, .term-bar-dot.working {
+  background: var(--text-dim);
+  animation: term-tab-pulse 1.2s ease-in-out infinite;
+}
+.term-tab-dot.attention, .term-bar-dot.attention {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .term-tab.reconnecting .term-tab-label,
+  .term-tab-dot.working,
+  .term-bar-dot.working { animation: none; }
 }
 .term-tab-close {
   display: inline-flex;

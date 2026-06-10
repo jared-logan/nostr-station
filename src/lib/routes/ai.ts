@@ -38,6 +38,7 @@ import { isNsec } from '../identity.js';
 import {
   streamAnthropicWithTools, streamOpenAICompatWithTools,
 } from '../ai-tools/tool-loop.js';
+import { makeIdleGuard, rethrowIdleAware } from '../ai-tools/idle-guard.js';
 import {
   createSession, destroySession, resolveApproval,
   type ApprovalDecision,
@@ -145,46 +146,56 @@ export async function streamAnthropic(
   // the requested model, not a blank.
   res.write(`data: ${JSON.stringify({ model: cfg.model })}\n\n`);
 
-  const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key':         cfg.apiKey,
-      'anthropic-version': '2023-06-01',
-      'content-type':      'application/json',
-      'accept':            'text/event-stream',
-    },
-    body: JSON.stringify({
-      model: cfg.model, max_tokens: 8192, system, messages, stream: true,
-    }),
-  });
+  // Abort if the provider goes silent mid-stream — see idle-guard.ts.
+  const guard = makeIdleGuard();
+  try {
+    const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key':         cfg.apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type':      'application/json',
+        'accept':            'text/event-stream',
+      },
+      body: JSON.stringify({
+        model: cfg.model, max_tokens: 8192, system, messages, stream: true,
+      }),
+      signal: guard.signal,
+    });
 
-  if (!apiRes.ok) {
-    const text = await apiRes.text().catch(() => '');
-    throw new Error(`Anthropic ${apiRes.status}: ${text.slice(0, 200)}`);
-  }
-
-  const reader  = apiRes.body!.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split('\n'); buf = lines.pop()!;
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6).trim();
-      if (!data) continue;
-      try {
-        const parsed = JSON.parse(data);
-        if (parsed.type === 'message_start' && parsed.message?.model) {
-          res.write(`data: ${JSON.stringify({ model: parsed.message.model })}\n\n`);
-        }
-        if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta') {
-          res.write(`data: ${JSON.stringify({ content: parsed.delta.text })}\n\n`);
-        }
-      } catch {}
+    if (!apiRes.ok) {
+      const text = await apiRes.text().catch(() => '');
+      throw new Error(`Anthropic ${apiRes.status}: ${text.slice(0, 200)}`);
     }
+
+    const reader  = apiRes.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      guard.touch();
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n'); buf = lines.pop()!;
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (!data) continue;
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.type === 'message_start' && parsed.message?.model) {
+            res.write(`data: ${JSON.stringify({ model: parsed.message.model })}\n\n`);
+          }
+          if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta') {
+            res.write(`data: ${JSON.stringify({ content: parsed.delta.text })}\n\n`);
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    rethrowIdleAware(e, guard, 'Anthropic');
+  } finally {
+    guard.clear();
   }
 }
 
@@ -210,40 +221,50 @@ export async function streamOpenAICompat(
   // to (each OpenAI-compat chunk carries `model` at the top level).
   res.write(`data: ${JSON.stringify({ model: cfg.model })}\n\n`);
 
-  const apiRes = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ model: cfg.model, messages: allMessages, stream: true }),
-  });
+  // Abort if the provider goes silent mid-stream — see idle-guard.ts.
+  const guard = makeIdleGuard();
+  try {
+    const apiRes = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model: cfg.model, messages: allMessages, stream: true }),
+      signal: guard.signal,
+    });
 
-  if (!apiRes.ok) {
-    const text = await apiRes.text().catch(() => '');
-    throw new Error(`${cfg.providerName} ${apiRes.status}: ${text.slice(0, 200)}`);
-  }
-
-  const reader  = apiRes.body!.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  let modelForwarded = false;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split('\n'); buf = lines.pop()!;
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6).trim();
-      if (data === '[DONE]') return;
-      try {
-        const parsed  = JSON.parse(data);
-        if (!modelForwarded && typeof parsed.model === 'string' && parsed.model) {
-          res.write(`data: ${JSON.stringify({ model: parsed.model })}\n\n`);
-          modelForwarded = true;
-        }
-        const content = parsed.choices?.[0]?.delta?.content;
-        if (content) res.write(`data: ${JSON.stringify({ content })}\n\n`);
-      } catch {}
+    if (!apiRes.ok) {
+      const text = await apiRes.text().catch(() => '');
+      throw new Error(`${cfg.providerName} ${apiRes.status}: ${text.slice(0, 200)}`);
     }
+
+    const reader  = apiRes.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let modelForwarded = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      guard.touch();
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n'); buf = lines.pop()!;
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') return;
+        try {
+          const parsed  = JSON.parse(data);
+          if (!modelForwarded && typeof parsed.model === 'string' && parsed.model) {
+            res.write(`data: ${JSON.stringify({ model: parsed.model })}\n\n`);
+            modelForwarded = true;
+          }
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (content) res.write(`data: ${JSON.stringify({ content })}\n\n`);
+        } catch {}
+      }
+    }
+  } catch (e) {
+    rethrowIdleAware(e, guard, cfg.providerName);
+  } finally {
+    guard.clear();
   }
 }
 

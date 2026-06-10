@@ -43,6 +43,7 @@ import {
   type ToolContext, type ToolResult,
 } from './index.js';
 import { awaitApproval, type ApprovalDecision } from './approval-gate.js';
+import { makeIdleGuard, rethrowIdleAware } from './idle-guard.js';
 import type { Msg, ProviderConfig } from '../routes/ai.js';
 
 const MAX_ROUNDS = 25;
@@ -187,6 +188,18 @@ export async function streamAnthropicWithTools(
     };
     if (toolCtx) body.tools = toolsForAnthropic();
 
+    // Per-block accumulators. Anthropic streams blocks one at a time
+    // by `index`; multiple text blocks may interleave with tool_use
+    // blocks across a single turn.
+    const blocks: Map<number, AnthropicContentBlock> = new Map();
+    const toolJsonBuf: Map<number, string> = new Map();
+    let stopReason: string | null = null;
+
+    // Abort the round if the provider goes silent mid-stream — see
+    // idle-guard.ts. One guard per round; tool dispatch between rounds
+    // isn't on its clock.
+    const guard = makeIdleGuard();
+    try {
     const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -196,6 +209,7 @@ export async function streamAnthropicWithTools(
         'accept':            'text/event-stream',
       },
       body: JSON.stringify(body),
+      signal: guard.signal,
     });
 
     if (!apiRes.ok) {
@@ -207,16 +221,10 @@ export async function streamAnthropicWithTools(
     const decoder = new TextDecoder();
     let buf = '';
 
-    // Per-block accumulators. Anthropic streams blocks one at a time
-    // by `index`; multiple text blocks may interleave with tool_use
-    // blocks across a single turn.
-    const blocks: Map<number, AnthropicContentBlock> = new Map();
-    const toolJsonBuf: Map<number, string> = new Map();
-    let stopReason: string | null = null;
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      guard.touch();
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n'); buf = lines.pop()!;
       for (const line of lines) {
@@ -266,6 +274,11 @@ export async function streamAnthropicWithTools(
           }
         } catch { /* ignore non-JSON SSE control lines */ }
       }
+    }
+    } catch (e) {
+      rethrowIdleAware(e, guard, 'Anthropic');
+    } finally {
+      guard.clear();
     }
 
     // Compose the assistant turn's content array in index order.
@@ -369,10 +382,22 @@ export async function streamOpenAICompatWithTools(
     };
     if (toolCtx) body.tools = toolsForOpenAI();
 
+    let textOut = '';
+    // Tool calls accumulate by index. Each chunk's delta.tool_calls[i]
+    // appends to its arguments string.
+    const tcs: Map<number, { id: string; name: string; args: string }> = new Map();
+    let finishReason: string | null = null;
+
+    // Abort the round if the provider goes silent mid-stream — see
+    // idle-guard.ts. One guard per round; tool dispatch between rounds
+    // isn't on its clock.
+    const guard = makeIdleGuard();
+    try {
     const apiRes = await fetch(url, {
       method: 'POST',
       headers,
       body:   JSON.stringify(body),
+      signal: guard.signal,
     });
     if (!apiRes.ok) {
       const text = await apiRes.text().catch(() => '');
@@ -383,15 +408,10 @@ export async function streamOpenAICompatWithTools(
     const decoder = new TextDecoder();
     let buf = '';
 
-    let textOut = '';
-    // Tool calls accumulate by index. Each chunk's delta.tool_calls[i]
-    // appends to its arguments string.
-    const tcs: Map<number, { id: string; name: string; args: string }> = new Map();
-    let finishReason: string | null = null;
-
     outer: while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      guard.touch();
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n'); buf = lines.pop()!;
       for (const line of lines) {
@@ -426,6 +446,11 @@ export async function streamOpenAICompatWithTools(
           if (choice.finish_reason) finishReason = choice.finish_reason;
         } catch { /* tolerate malformed lines */ }
       }
+    }
+    } catch (e) {
+      rethrowIdleAware(e, guard, cfg.providerName);
+    } finally {
+      guard.clear();
     }
 
     // Build the assistant message that should appear in the thread.

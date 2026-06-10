@@ -5,6 +5,74 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Chat preview: full view, open-in-new-tab, and mesh reachability
+
+- **Full view (⛶):** the preview pane can now take over the whole Chat
+  panel. The chat column docks to a left-edge pull-tab (mirror of the
+  preview's right-edge one); Esc or the pull-tab returns to
+  side-by-side. The mode persists alongside the collapse preference.
+  On phone-sized viewports full view degrades to the existing
+  single-pane Chat/Preview tab strip.
+- **Open in new tab (↗):** header button loads the dev server directly
+  in a browser tab — full viewport, native devtools.
+- **Mesh reachability (fix):** the preview iframe never worked when the
+  dashboard was viewed over the mesh — the URL was the server's literal
+  `http://localhost:<port>` (which points at the *viewing* device) and
+  Vite bound loopback-only inside the station. URLs are now built from
+  the browser's own hostname, and `stacks-dev` spawns add
+  `--host 0.0.0.0` **when Mobile Access is enabled** — the same opt-in
+  the dashboard's own non-loopback binding uses; loopback-only default
+  unchanged. Browsing remotely with Mobile Access off now shows an
+  explanatory empty state instead of the browser's raw
+  connection-refused page. Dev servers started before enabling the
+  toggle keep their loopback binding until restarted.
+
+### Terminal: connection + activity indicators
+
+- **Working / needs-input dots:** each tab infers activity from PTY
+  output — a sustained burst (>400 ms, filtering keystroke echo) shows
+  a dim pulsing dot; 1.2 s of silence on a *background* tab flips it to
+  a solid accent dot ("the long task finished and is waiting for you").
+  BEL — which Claude Code rings when it needs input — triggers the
+  attention dot immediately. Clears on focus, expand, or typing. The
+  collapsed bar shows the aggregate dot so state reads without opening
+  the drawer.
+- **Visible reconnect state:** WebSocket backoff used to run silently.
+  The tab label now pulses amber while retrying and settles red once
+  retries exhaust; one dim `[terminal] connection lost — reconnecting…`
+  line per drop; typing into an offline tab restarts the reconnect loop
+  (the keystroke is queued and flushes on open).
+
+### Dashboard polish: polling, rendering, error states, a11y
+
+- **Health polling pauses in hidden tabs.** The 5 s `/api/status` poll
+  ran unconditionally for the page's lifetime. It now stops while the
+  tab is hidden, refreshes immediately on re-focus, and coalesces
+  concurrent calls onto one fetch cycle — `await refreshHealth()` after
+  a mutation always resolves against post-mutation status.
+- **Relay event stream renders incrementally:** new events prepend one
+  row (scroll position preserved via offset compensation) instead of
+  rebuilding all 100 rows per event; profile resolution patches name
+  cells in place instead of a full repaint.
+- **Fetch failures no longer masquerade as empty states.** Projects no
+  longer blanks into "No projects yet" on a network error (loading
+  placeholder, error + Retry, or last-known list kept); Chat shows a
+  distinct "couldn't load AI providers" callout with Retry instead of
+  the misleading not-configured one; Mail keeps the visible inbox on a
+  failed refresh (toast) rather than wiping it.
+- **AI streaming idle-timeout:** all four provider stream paths abort
+  with a clear "stream stalled" error after 60 s of silence instead of
+  spinning forever on a hung provider.
+- **Accessibility:** toasts are an `aria-live` region; panel switches
+  move focus to the new panel's heading; keyboard-only `:focus-visible`
+  outline for buttons/links/tabs/summaries.
+
+### CI
+
+- Explicit `npm run typecheck` gate; stale `STATION_SKIP_DITTO`
+  references removed (dead since the Ditto client removal); vendored
+  devDependencies arrangement documented in `src/web/vendor/README.md`.
+
 ### Removed: embedded Ditto client + Client panel
 
 nostr-station is a Nostr **dev** station; bundling a full social client
