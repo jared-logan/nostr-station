@@ -88,17 +88,6 @@ export const TOOLS: Record<string, Tool> = {
   // installNgit when slug==='nak' / 'ngit'; everything else flows
   // through this registry.
 
-  stacks: {
-    id:          'stacks',
-    name:        'Stacks',
-    description: 'Soapbox Stacks — scaffold Nostr apps with `stacks mkstack`.',
-    binary:      'stacks',
-    detect:      ['stacks', '--version'],
-    installSteps: [
-      { kind: 'npm-global', display: 'npm install -g @getstacks/stacks', argv: ['npm', 'install', '-g', '@getstacks/stacks'] },
-    ],
-  },
-
   // Claude Code + OpenCode — terminal-native AI agents. Both ship an
   // official curl|bash bootstrap; we pipe through bash -c so the
   // existing spawn-based runStep streams progress line-by-line into

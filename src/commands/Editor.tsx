@@ -49,10 +49,10 @@ export const Editor: React.FC<EditorProps> = () => {
             </Text>
             <Box marginTop={1}>
               <Text color={P.muted}>
-                {'  AGENTS.md is the target for Codex and Stacks Dork — it gives those\n'
-                + '  tools environmental awareness (relay URL, signer status, NIPs available)\n'
-                + '  without touching their identity. Pick `codex` for Codex; `other` is the\n'
-                + '  generic fallback that any AGENTS.md-aware agent will read.'}
+                {'  AGENTS.md is the target for Codex and other AGENTS.md-aware agents —\n'
+                + '  it gives them environmental awareness (relay URL, signer status, NIPs\n'
+                + '  available) without touching their identity. Pick `codex` for Codex;\n'
+                + '  `other` is the generic fallback that any AGENTS.md-aware agent will read.'}
               </Text>
             </Box>
           </Box>

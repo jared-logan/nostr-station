@@ -389,7 +389,7 @@ async function readPublishState(project: Project): Promise<any> {
   const isGitRepo = !!pPath && fs.existsSync(path.join(pPath, '.git'));
   const ngitRemote = project.remotes?.ngit ?? null;
   // Detected defaults for the first-publish form. `package.json` is the
-  // dominant convention in shakespeare/stacks projects, so we lean on
+  // dominant convention in shakespeare/mkstack projects, so we lean on
   // its `name`, `description`, and `keywords` fields when present.
   let detectedName        = project.name;
   let detectedDescription = '';

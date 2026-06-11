@@ -8,7 +8,6 @@
  *   GET    /api/projects                       — annotated registry
  *   POST   /api/projects                       — createProject
  *   POST   /api/projects/detect                — detectPath
- *   GET    /api/stacks/config                  — sanitized Stacks config
  *   POST   /api/projects/new/check             — collision pre-flight
  *   POST   /api/projects/new                   — scaffold new project (SSE)
  *   GET    /api/projects/:id                   — single project
@@ -19,7 +18,6 @@
  *   GET    /api/projects/:id/git/log
  *   POST   /api/projects/:id/git/pull          — SSE
  *   POST   /api/projects/:id/git/push          — SSE
- *   POST   /api/projects/:id/stacks/deploy     — SSE
  *   GET    /api/projects/:id/ngit/status
  *   GET    /api/projects/:id/ngit/proposals    — kind-1617 list
  *   POST   /api/projects/:id/ngit/push         — SSE
@@ -43,13 +41,11 @@
  * `false` lets the orchestrator continue trying its remaining route groups.
  */
 import http from 'http';
-import os from 'os';
 import fs from 'fs';
-import path from 'path';
 import {
   readProjects, getProject, createProject, updateProject, deleteProject,
   detectPath, resolveProjectContext,
-  isStacksProject, hasDevScript, validateProjectPath,
+  hasDevScript, validateProjectPath,
 } from '../projects.js';
 import { checkCollision, scaffoldProject } from '../project-scaffold.js';
 import { getTemplate } from '../templates.js';
@@ -94,12 +90,9 @@ export async function handleProjects(
   // ── Projects ───────────────────────────────────────────────────────
   if (url === '/api/projects' && method === 'GET') {
     // Annotate each project with derived flags:
-    //   - stacksProject — has stack.json (gates Dork/dev/deploy).
     //   - previewable   — has package.json with a `dev` script. Gates
-    //                     the chat panel's live-preview pane. Wider
-    //                     net than stacksProject so shakespeare.diy
-    //                     clones (vite.config.ts + package.json, no
-    //                     stack.json) get the iframe too.
+    //                     the chat panel's live-preview pane and the
+    //                     project card's dev-server button.
     //   - pathMissing   — path was recorded but the dir no longer
     //                     exists on disk (user deleted the folder
     //                     outside nostr-station, or scaffold
@@ -110,7 +103,6 @@ export async function handleProjects(
     // we've seen.
     const annotated = readProjects().map(p => ({
       ...p,
-      stacksProject: isStacksProject(p),
       previewable:   hasDevScript(p),
       pathMissing:   !!p.path && !fs.existsSync(p.path),
     }));
@@ -148,41 +140,6 @@ export async function handleProjects(
   // proceed to the streaming scaffold. /new itself runs long (npm
   // install inside mkstack) so it emits SSE in the same frame shape
   // as /api/exec/install/* — openExecModal can render it directly.
-  // Sanitized read of Stacks's config — exposes which providers
-  // have a configured key (id only — never the key itself) so the
-  // Config panel's Stacks AI section can show "configured" status
-  // without the user needing to leave the dashboard. Stacks stores
-  // its config at ~/Library/Preferences/stacks/config.json on macOS;
-  // path differs on linux but stacks resolves it itself when the
-  // user runs stacks configure.
-  if (url === '/api/stacks/config' && method === 'GET') {
-    const candidates = [
-      path.join(os.homedir(), 'Library', 'Preferences', 'stacks', 'config.json'),
-      path.join(os.homedir(), '.config', 'stacks', 'config.json'),
-    ];
-    let cfg: any = null;
-    let foundAt: string | null = null;
-    for (const p of candidates) {
-      try {
-        const raw = fs.readFileSync(p, 'utf8');
-        cfg = JSON.parse(raw);
-        foundAt = p;
-        break;
-      } catch { /* try next */ }
-    }
-    const providers = cfg && cfg.providers && typeof cfg.providers === 'object'
-      ? Object.keys(cfg.providers)
-      : [];
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      configured: providers.length > 0,
-      providers,                  // ids only — no keys, no baseURLs
-      configPath: foundAt,
-      recentModels: Array.isArray(cfg?.recentModels) ? cfg.recentModels : [],
-    }));
-    return true;
-  }
-
   if (url === '/api/projects/new/check' && method === 'POST') {
     let parsed: any = {};
     try { parsed = JSON.parse(await readBody(req)); }
@@ -266,7 +223,6 @@ export async function handleProjects(
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         ...project,
-        stacksProject: isStacksProject(project),
         previewable:   hasDevScript(project),
       }));
       return true;
@@ -317,7 +273,7 @@ export async function handleProjects(
         port,
         url:       `http://localhost:${port}`,
         // Whether spawned dev servers bind beyond loopback (tracks the
-        // Mobile Access toggle — see commandFor 'stacks-dev' in
+        // Mobile Access toggle — see commandFor 'dev-server' in
         // terminal.ts). The preview pane uses this to explain, rather
         // than break, when the dashboard is viewed over the mesh while
         // the dev server is loopback-only.
@@ -385,7 +341,7 @@ export async function handleProjects(
       if (await handleProjectsNsiteDeploy(req, res, project, tail, method)) return true;
     }
 
-    if (tail === 'stacks/deploy' || tail === 'exec') {
+    if (tail === 'exec') {
       if (await handleProjectsExec(req, res, project, tail, method)) return true;
     }
 

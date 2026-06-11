@@ -1,7 +1,7 @@
 {
   "name": "nostr-station",
   "version": "0.0.6-0",
-  "description": "One-command Nostr dev environment — relay, mesh VPN, ngit, Claude Code, Stacks",
+  "description": "One-command Nostr dev environment — relay, mesh VPN, ngit, Claude Code",
   "type": "module",
   "bin": {
     "nostr-station": "bin/nostr-station.sh"
@@ -60,7 +60,6 @@
     "relay",
     "ngit",
     "claude-code",
-    "stacks",
     "dev-environment"
   ],
   "license": "MIT"

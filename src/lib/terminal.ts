@@ -189,7 +189,7 @@ export interface CreateOpts {
   // Set for project-bound terminals (the dashboard's "open terminal in
   // project X" path) and unset for the bare shell tab.
   project?: Project;
-  // When the key is `stacks-dev`, callers pass the port allocated by
+  // When the key is `dev-server`, callers pass the port allocated by
   // dev-server-registry so the vite command line matches the iframe URL
   // the chat preview pane will load. Falls back to 5173 (the dashboard's
   // historical default) when absent.
@@ -307,21 +307,14 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
         label: cwd ? `opencode · ${path.basename(cwd)}` : 'opencode',
       };
 
-    // Stacks Dork agent — the AI coding loop that ships with mkstack.
-    // Run inside the project dir (cwd is required). Uses Stacks' own
-    // AI provider config at ~/Library/Preferences/stacks/config.json
-    // (configure via `stacks configure` or the dashboard's Stacks AI
-    // section in Config).
-    case 'stacks-agent':
-      return { cmd: 'stacks', args: ['agent'], cwd, label: cwd ? `dork · ${path.basename(cwd)}` : 'dork' };
-
-    // Vite dev server for mkstack projects. The leading -- separates npm
-    // script args from npm's own args. Port comes from dev-server-registry
-    // when the caller is project-bound (each project gets a sticky port so
-    // multi-project preview iframes can render simultaneously); the 5173
-    // fallback preserves the historical default for callers that didn't
-    // allocate (e.g. bare-key invocations from the CLI).
-    case 'stacks-dev': {
+    // Vite/`npm run dev` server for any project with a dev script. The
+    // leading -- separates npm script args from npm's own args. Port comes
+    // from dev-server-registry when the caller is project-bound (each
+    // project gets a sticky port so multi-project preview iframes can
+    // render simultaneously); the 5173 fallback preserves the historical
+    // default for callers that didn't allocate (e.g. bare-key invocations
+    // from the CLI).
+    case 'dev-server': {
       const port = opts.port ?? 5173;
       // Vite binds loopback by default — correct for local browsing, but
       // when the dashboard itself is exposed over the mesh (Mobile
@@ -338,14 +331,6 @@ export function resolveCmd(opts: CreateOpts, cli: CliSpawn): CmdSpec | null {
         label: cwd ? `dev :${port} · ${path.basename(cwd)}` : `dev :${port}`,
       };
     }
-
-    // Stacks's own AI provider config flow — interactive picker for
-    // OpenRouter / Routstr / PayPerQ + key/Cashu/Lightning setup. Writes
-    // to ~/Library/Preferences/stacks/config.json. Distinct from
-    // nostr-station's ai-config; the Config panel surfaces this as the
-    // "Stacks AI" section's Configure button.
-    case 'stacks-configure':
-      return { cmd: 'stacks', args: ['configure'], cwd, label: 'stacks configure' };
 
     // ngit login — the canonical first-wire trigger. --interactive forces
     // the nostrconnect QR flow (vs. the `--nsec` / `--bunker-url` shortcuts),
@@ -471,7 +456,7 @@ export async function createSession(
   // server had (node, npm) still wins over shell rc overrides when there's
   // a duplicate, but user-installed bins in ~/.cargo/bin etc. are findable.
   // When the PTY is bound to a project, splice the NOSTR_STATION_* env
-  // contract in too so spawned dev servers (vite, npm run dev, dork) see
+  // contract in too so spawned dev servers (vite, npm run dev) see
   // the right relay/blossom URLs for the project's active environment.
   const env: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined)) as Record<string, string>,
@@ -512,10 +497,10 @@ export async function createSession(
 
   // Bind project-scoped dev servers into the registry so the chat
   // preview pane can find the right port and "running" flag for each
-  // project. Limited to stacks-dev (the dashboard's npm-run-dev launcher)
+  // project. Limited to dev-server (the dashboard's npm-run-dev launcher)
   // because that's the one preview is wired to surface; other recipes
   // run-and-exit and don't have a long-lived URL worth tracking.
-  if (opts.key === 'stacks-dev' && opts.project) {
+  if (opts.key === 'dev-server' && opts.project) {
     bindDevServerSession(opts.project.id, id);
   }
 

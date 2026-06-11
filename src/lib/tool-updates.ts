@@ -11,7 +11,6 @@
  *
  *   - claude-code / opencode / nsyte ship as `curl | bash` bootstrappers;
  *     we don't pin a version and can't cheaply check upstream's latest.
- *   - stacks ships via `npm install -g`; same story.
  *   - The relay, watchdog, blossom-server live in-process and ship with
  *     nostr-station itself — updated by the existing self-update path.
  *

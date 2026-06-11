@@ -1,27 +1,24 @@
 /**
  * Projects/exec sub-routes — extracted from routes/projects.ts as part of
- * the D12 split. Owns the three "spawn a long-running process and stream
- * its output" verbs:
+ * the D12 split. Owns the "spawn a long-running process and stream its
+ * output" verb:
  *
- *   POST /api/projects/:id/stacks/deploy — SSE: npm run deploy (mkstack)
- *   POST /api/projects/:id/exec          — SSE: whitelisted read-only commands
+ *   POST /api/projects/:id/exec — SSE: whitelisted read-only commands
  *
  * (nsite/deploy moved to projects-nsite-deploy.ts — the native in-process
  * pipeline replaced the old `nostr-station nsite deploy --yes` shell-out.)
  *
- * Both verbs here use the shared streamExec helper to wrap a child process
- * in the dashboard's SSE exec-modal protocol. The `exec` route is the only
- * one that takes a JSON body (`{ cmd }`); stacks/deploy reads project
- * context directly.
+ * Uses the shared streamExec helper to wrap a child process in the
+ * dashboard's SSE exec-modal protocol.
  *
  * Contract identical to handleProjects: returns true iff a response was
  * written; false lets the parent fall through.
  */
 import http from 'http';
-import { isStacksProject, projectEnvContract } from '../projects.js';
+import { projectEnvContract } from '../projects.js';
 import type { Project } from '../projects.js';
 import {
-  readBody, streamExec, streamExecError,
+  readBody, streamExec,
   type CmdSpec,
 } from './_shared.js';
 
@@ -32,29 +29,6 @@ export async function handleProjectsExec(
   tail: string,
   method: string,
 ): Promise<boolean> {
-  if (tail === 'stacks/deploy' && method === 'POST') {
-    if (!project.path) {
-      streamExecError(res, req, 'project has no local path');
-      return true;
-    }
-    if (!isStacksProject(project)) {
-      streamExecError(res, req, 'not a Stacks project (no stack.json found)');
-      return true;
-    }
-    // `npm run deploy` is mkstack's deploy script — bundles, uploads
-    // to Blossom, publishes Nostr metadata, returns a NostrDeploy
-    // URL. We stream the output as-is; URL parsing + persisting to
-    // project.nsite.url is deferred to a follow-up once we've seen
-    // the exact stdout format on a real deploy. For now, the user
-    // sees the live URL in the exec modal output.
-    streamExec(
-      { bin: 'npm', args: ['run', 'deploy'], env: projectEnvContract(project), timeoutMs: 0 },
-      res, req, project.path,
-      { line: `$ npm run deploy  (cwd: ${project.path})`, stream: 'stdout' },
-    );
-    return true;
-  }
-
   if (tail === 'exec' && method === 'POST') {
     // Whitelisted read-only commands scoped to the project's cwd.
     // Extend the switch below — NEVER interpolate body.cmd into argv.

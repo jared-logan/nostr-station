@@ -337,7 +337,7 @@ function printHelp() {
     chat                             Web dashboard at localhost:3000
     keychain                         Store, rotate, and inspect credentials in the OS keychain
     ai                               Manage AI providers — add, remove, list, set defaults
-    add [tool]                       Install an optional tool (ngit, nak, stacks, nsyte) — bare lists them
+    add [tool]                       Install an optional tool (ngit, nak, nsyte) — bare lists them
     list                             Same as bare 'add' — list optional tools + install state
     seed                             Publish test events to your relay
     relay                            Export / import the relay event database as JSONL
@@ -390,7 +390,7 @@ function printHelp() {
     add                              List available tools with install state
     add <tool>                       Install (interactive y/N confirm)
     add <tool> --yes                 Install without prompting
-    Available tools: ngit, nak, stacks, nsyte
+    Available tools: ngit, nak, nsyte
 
   FLAGS
     chat       --port <n>

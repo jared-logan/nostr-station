@@ -66,8 +66,8 @@ file (`~/.config/nostr-station/secrets`, mode `0600`). Run
 `npm install -g`, or for `nsyte` an instruction to run the upstream
 installer manually). The user sees the literal command before
 confirming; nothing pipes a remote script into a shell behind their
-back. The opt-in surface is intentionally small (4 tools today: ngit,
-nak, stacks, nsyte) — adding more is a one-record diff in
+back. The opt-in surface is intentionally small (3 tools today: ngit,
+nak, nsyte) — adding more is a one-record diff in
 `src/lib/tools.ts`.
 
 ### Bunker-persistence trade-off

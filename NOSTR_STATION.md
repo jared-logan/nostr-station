@@ -38,7 +38,7 @@ verification (sign + publish + read-back), then drops to the dashboard.
 | Bootstrap | `install.sh` — installs Node via nvm, then `npm install -g nostr-station`, then `exec nostr-station` |
 
 No Docker, no Rust toolchain, no Apple Developer cert, no LaunchAgent /
-systemd. Optional tools (ngit, nak, stacks, nsyte) are user-installed
+systemd. Optional tools (ngit, nak, nsyte) are user-installed
 post-onboard via `nostr-station add <tool>`.
 
 ## File structure
@@ -168,7 +168,7 @@ publish/deploy flows use `signEventWithSavedBunker(template)` from
 `auth-bunker.ts` — same primitive.
 
 **Optional tools are post-onboard.** Wizard never asks about ngit /
-nak / nsyte / stacks. Users install via `nostr-station add <tool>`.
+nak / nsyte. Users install via `nostr-station add <tool>`.
 Registry at `src/lib/tools.ts` is data: `id`, `binary`, `detect` argv,
 `prereqs`, `installSteps[{ kind, display, argv }]`. Adding a new tool
 is a one-record diff. Step kinds: `cargo-install`, `npm-global`,
@@ -354,7 +354,7 @@ derives from there.
    subsystem are deliberately separate code paths so a Communities
    change can never accidentally regress the dev relay.
 7. **Optional tools stay in `nostr-station add`.** Wizard never asks
-   about ngit / nak / nsyte / stacks. Auto-installing them on a fresh
+   about ngit / nak / nsyte. Auto-installing them on a fresh
    machine is exactly what the simplification deleted.
 8. **`install.sh` stays one curl command.** No `sudo`, no `apt-get`,
    no Docker, no Rust prereq checks. Inner loop: install Node via nvm

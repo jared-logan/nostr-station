@@ -345,29 +345,15 @@ export function readProjects(): Project[] {
   }
 }
 
-// Derived check — Stacks projects have a `stack.json` at their root
-// (created by `stacks mkstack` and `stacks init`). Returns false for
-// projects with no local path or whose path is missing/inaccessible.
-// Cheap (one statSync per call) and intentionally NOT cached: users
-// can convert a non-Stacks dir into one with `stacks init` between
-// dashboard refreshes, and we want the next /api/projects GET to
-// reflect that without a server restart.
-export function isStacksProject(p: Project): boolean {
-  if (!p.path) return false;
-  try { return fs.statSync(`${p.path}/stack.json`).isFile(); }
-  catch { return false; }
-}
-
 // Derived check — does this project ship an `npm run dev` script? This is
-// the gate for the chat panel's live-preview pane: any Vite/Next/etc.
-// project with a `dev` script can be iframed once it's running, even if
-// it's not a stacks/MKStack project (e.g. a shakespeare.diy clone has
-// vite.config.ts + package.json but no stack.json).
+// the gate for the chat panel's live-preview pane and the project card's
+// dev-server button: any Vite/Next/etc. project with a `dev` script can
+// be iframed once it's running (e.g. mkstack or shakespeare.diy clones).
 //
 // Read package.json synchronously and parse the bare minimum. Returns
 // false for any I/O or parse failure — preview pane just stays hidden,
-// no error surfaced. Same not-cached rationale as isStacksProject:
-// users can `npm init` a directory between dashboard polls.
+// no error surfaced. Intentionally NOT cached: users can `npm init` a
+// directory between dashboard polls and the next GET should see it.
 export function hasDevScript(p: Project): boolean {
   if (!p.path) return false;
   try {

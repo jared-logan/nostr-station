@@ -34,7 +34,7 @@ _nostr_station() {
     'seed:Seed relay with dummy events for testing'
     'keychain:Manage credentials in the OS keychain'
     'ai:Manage AI provider configuration'
-    'add:Install an optional tool (ngit, nak, stacks, nsyte)'
+    'add:Install an optional tool (ngit, nak, nsyte)'
     'list:List optional tools (alias of: add)'
     'publish:Publish to all configured remotes (git + ngit)'
     'nsite:Manage nsite publishing (nsyte)'

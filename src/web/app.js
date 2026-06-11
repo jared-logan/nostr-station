@@ -41,7 +41,7 @@ function escapeHtml(s) {
 // proxyImageUrl moved to markdown.js so both the inline-img sites here
 // and the marked image renderer share one definition.
 
-function stateClass(s) { return s === 'ok' ? 'ok' : s === 'warn' ? 'warn' : 'err'; }
+function stateClass(s) { return s === 'ok' ? 'ok' : s === 'warn' ? 'warn' : s === 'off' ? 'off' : 'err'; }
 
 // ── Accent theme ────────────────────────────────────────────────────────
 // The accent color (purple by default) is themable via [data-theme] on
@@ -1611,6 +1611,7 @@ const IdentityDrawer = (() => {
 })();
 
 function healthTooltip(s) {
+  if (s.state === 'off') return `${s.label} not installed (optional)`;
   if (s.state === 'err') return `${s.label} not installed`;
   if (s.state === 'warn') {
     if (s.id === 'relay')   return 'Relay installed but not running — start it in the Relay panel';
@@ -1689,16 +1690,17 @@ async function refreshHealthOnce() {
     };
     const addRow = (s) => {
       const row = document.createElement('div');
-      const interactive = s.state === 'warn' || s.state === 'err';
+      const interactive = s.state === 'warn' || s.state === 'err' || s.state === 'off';
       row.className = 'row' + (interactive ? ' interactive' : '');
       row.dataset.service = s.id;
       row.title = healthTooltip(s);
       // Sidebar uses the same indicator convention as the Status panel:
-      // dots for services, ✓/✗/! glyphs for binaries. Keeps the grammar
+      // dots for services, ✓/✗/!/· glyphs for binaries ('·' = optional
+      // tool not installed — neutral, not a failure). Keeps the grammar
       // consistent across the two lists.
       const indicator = s.kind === 'binary'
         ? `<span class="bin-indicator bin-indicator-${stateClass(s.state)}">${
-            s.state === 'ok' ? '✓' : s.state === 'warn' ? '!' : '✗'
+            s.state === 'ok' ? '✓' : s.state === 'warn' ? '!' : s.state === 'off' ? '·' : '✗'
           }</span>`
         : `<span class="dot ${stateClass(s.state)}"></span>`;
       row.innerHTML = `${indicator}<span class="name">${escapeHtml(s.label)}</span>`;
@@ -1761,7 +1763,7 @@ startHealthPoll();
 
 // installSlug points at a /api/exec/install/<slug> handler that runs
 // installTool() from src/lib/tools.ts. Only the optional CLI tools
-// have one (ngit / nak / stacks). Built-in services (relay / watchdog),
+// have one (ngit / nak). Built-in services (relay / watchdog),
 // the nvpn installer (lives at /api/setup/nvpn/install, wizard-only),
 // and externally-installed tools (claude) get a configHint instead —
 // surfaced as a "run: …" line in warn state. err state with no slug
@@ -1776,14 +1778,13 @@ const SERVICE_CTAS = {
   'ngit':      { installSlug: 'ngit',  configHint: null /* inline-form handled below */ },
   // claude-code + opencode have official curl|bash bootstraps wired
   // through installTool() (src/lib/tools.ts) — the Install button fires
-  // the SSE modal like ngit/nak/stacks. We keep the upstream one-liner
+  // the SSE modal like ngit/nak. We keep the upstream one-liner
   // in configHint too so the row shows "or run: <curl>" underneath the
   // button: gives users who'd rather paste into a real terminal a
   // copy-able command without forcing them to click through the modal.
   'claude':    { installSlug: 'claude-code', configHint: 'curl -fsSL https://claude.ai/install.sh | bash' },
   'opencode':  { installSlug: 'opencode',    configHint: 'curl -fsSL https://opencode.ai/install | bash' },
   'nak':       { installSlug: 'nak',   configHint: null },
-  'stacks':    { installSlug: 'stacks', configHint: null },
   // grain — managed by Communities. /api/exec/install/grain dispatches
   // to installGrain() in src/lib/grain-installer.ts (downloads the
   // pinned tarball, sha256-verifies, drops the binary at
@@ -1835,19 +1836,14 @@ const SERVICE_DETAILS = {
     panel: { hash: '#config', label: 'Open Config → AI' },
   },
   'nak': {
-    summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Used by <em>seed</em>, <em>watchdog</em>, and the whitelist helpers.`,
-    summaryErr:  _ => '<code class="cmd-inline">nak</code> is the Go CLI for signing, publishing, and querying Nostr events. The seed and watchdog flows depend on it.',
+    summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Used by the <em>seed</em> command and ngit repo discovery.`,
+    summaryErr:  _ => '<code class="cmd-inline">nak</code> is the Go CLI for signing, publishing, and querying Nostr events. The CLI <code class="cmd-inline">seed</code> command and the ngit repo-discovery flow use it; everything else queries relays in-process.',
   },
   'watchdog': {
     summaryOk:   _ => 'In-Node heartbeat loop is firing every 5 minutes. Each heartbeat publishes a kind-1 event signed by the watchdog keypair to your local relay.',
     summaryWarn: _ => 'Last heartbeat is older than expected. The dashboard process may have been paused or the watchdog stopped manually — check the Logs panel.',
     summaryErr:  _ => 'Watchdog isn\'t running. Restart it from <code class="cmd-inline">/api/watchdog/start</code> or the Logs panel banner.',
     panel: { hash: '#logs', label: 'Open Logs → watchdog' },
-  },
-  'stacks': {
-    summaryOk:   s => `Installed: <code class="cmd-inline">${escapeHtml(s.value)}</code>. Scaffold a Nostr React app with <code class="cmd-inline">stacks mkstack &lt;name&gt;</code>.`,
-    summaryErr:  _ => 'Stacks is Soapbox\'s Nostr app scaffolding CLI (ships the mkstack React template). Optional — install adds the <code class="cmd-inline">stacks</code> command to <code class="cmd-inline">~/.cargo/bin</code>.',
-    panel: { hash: '#projects', label: 'Open Projects' },
   },
   // grain — installed once, run N times (one per community). Summary
   // explains why there's no row-level Start/Stop button: per-community
@@ -2512,12 +2508,13 @@ function buildStatusRow(s) {
   row.dataset.service = s.id;
 
   // Services get a colored dot (ok/warn/err). Binaries get ✓ (installed +
-  // configured), ✗ (not installed), or ! (installed but warn — today only
-  // ngit with a missing relay config). Glyph-vs-dot makes the at-a-glance
-  // "am I missing a tool" vs "is a daemon healthy" call out visually.
+  // configured), ✗ (not installed), ! (installed but warn — today only
+  // ngit with a missing relay config), or · (optional tool not installed
+  // — neutral, not a failure). Glyph-vs-dot makes the at-a-glance "am I
+  // missing a tool" vs "is a daemon healthy" call out visually.
   const indicator = s.kind === 'binary'
     ? `<span class="bin-indicator bin-indicator-${stateClass(s.state)}">${
-        s.state === 'ok' ? '✓' : s.state === 'warn' ? '!' : '✗'
+        s.state === 'ok' ? '✓' : s.state === 'warn' ? '!' : s.state === 'off' ? '·' : '✗'
       }</span>`
     : `<span class="dot ${stateClass(s.state)}"></span>`;
 
@@ -2534,6 +2531,9 @@ function buildStatusRow(s) {
   const details = document.createElement('div');
   details.className = 'status-details';
 
+  // `off` routes to summaryErr on purpose — that copy already reads
+  // "X isn't installed; here's what it's for", which is exactly the
+  // pitch an optional tool needs.
   const summaryFn = s.state === 'ok'   ? detail.summaryOk
                   : s.state === 'warn' ? detail.summaryWarn
                                        : detail.summaryErr;
@@ -2553,7 +2553,7 @@ function buildStatusRow(s) {
   // terminal for normal lifecycle ops. Install on err state is handled
   // below in the general err branch (the nvpn installer streams via
   // /api/setup/nvpn/install — different shape than the cargo-install
-  // SSE flow used for ngit/nak/stacks).
+  // SSE flow used for ngit/nak).
   if (s.id === 'vpn' && s.state !== 'err') {
     appendNvpnControls(ctaRow, s);
   }
@@ -2570,7 +2570,7 @@ function buildStatusRow(s) {
       runNvpnInstall();
     });
     ctaRow.appendChild(btn);
-  } else if (s.state === 'err' && cta.installSlug) {
+  } else if ((s.state === 'err' || s.state === 'off') && cta.installSlug) {
     const btn = document.createElement('button');
     btn.className = 'primary';
     btn.textContent = 'Install';
@@ -2606,7 +2606,7 @@ function buildStatusRow(s) {
   // into their own terminal don't have to dig for it. Also handles the
   // warn-state-with-configHint case for relay/watchdog (no installSlug
   // there, so the button branch above didn't fire).
-  if ((s.state === 'warn' || s.state === 'err') && cta.configHint) {
+  if ((s.state === 'warn' || s.state === 'err' || s.state === 'off') && cta.configHint) {
     const meta = document.createElement('span');
     meta.className = 'meta';
     const prefix = cta.installSlug ? 'or run' : 'run';
@@ -3125,7 +3125,7 @@ const ChatPanel = (() => {
   // Kept as a separate var so existing call sites (renderBadge, sendMsg,
   // PreviewPane.sync) can read project metadata without re-resolving from
   // SessionStore on every access.
-  let activeProject = null;         // { id, name, previewable?, stacksProject? } or null
+  let activeProject = null;         // { id, name, previewable? } or null
   let busy = false;
 
   function currentHistory() {
@@ -3329,7 +3329,7 @@ const ChatPanel = (() => {
         // Server allocates / re-uses the project's port (sticky), so the
         // PTY's `npm run dev -- --port N` and our iframe URL stay in lock-
         // step without the client having to ferry the number through.
-        window.NSTerminal.open('stacks-dev', { projectId: p.id });
+        window.NSTerminal.open('dev-server', { projectId: p.id });
         // Kick the iframe ~2.5s later — Vite's first paint typically lands
         // within 1–3s after `npm run dev`. The reload button is the manual
         // fallback if it's still warming up.
@@ -3407,9 +3407,8 @@ const ChatPanel = (() => {
       if (!split) return;
       const myToken = ++syncToken;
       // `previewable` is the package.json-has-dev-script gate (works for
-      // any Vite/Next/etc. project). Older callers may still set only
-      // `stacksProject`, so accept either as a back-compat fallback.
-      const applicable = !!(project && (project.previewable || project.stacksProject));
+      // any Vite/Next/etc. project).
+      const applicable = !!(project && project.previewable);
       if (!applicable) {
         currentUrl = null;
         currentProjectId = null;
@@ -4057,8 +4056,7 @@ const ChatPanel = (() => {
     await setActiveProject({
       id: p.id,
       name: p.name,
-      previewable:   !!p.previewable,
-      stacksProject: !!p.stacksProject,
+      previewable: !!p.previewable,
     });
   }
 
@@ -5987,7 +5985,7 @@ const ProjectsPanel = (() => {
   });
 
   // bootDashboard() activates the panel BEFORE NSTerminal.init() resolves,
-  // so the first render gates Stacks Dork/dev + Open in <terminalAi>
+  // so the first render gates dev-server + Open in <terminalAi>
   // buttons on isAvailable() === false. When init finishes, repaint so
   // those buttons appear without the user needing to switch tabs.
   document.addEventListener('terminal-available', () => {
@@ -6422,7 +6420,7 @@ const ProjectsPanel = (() => {
     }
 
     // WORK / session cluster — bottom-right of the card. New chat, the
-    // terminal-AI launcher, Stacks agent/dev, and the deploy verbs. Each
+    // terminal-AI launcher, dev server, and the deploy verb. Each
     // keeps its existing handler; only the placement moved.
     const workEl = card.querySelector('.pc-work-actions');
 
@@ -6462,36 +6460,17 @@ const ProjectsPanel = (() => {
       workEl.appendChild(deployBtn);
     }
 
-    // Stacks/MKStack-specific actions — Dork agent, Vite dev server,
-    // NostrDeploy publish. Only shown when the project has a stack.json
-    // (server-derived `stacksProject` flag). Each spawns into the
-    // terminal panel except deploy, which uses the streaming exec
-    // modal so the success URL stays visible after the run completes.
-    if (p.stacksProject && p.path && window.NSTerminal?.isAvailable?.()) {
-      const dorkBtn = iconBtn('dork', 'Open in Dork (Stacks agent)',
-        `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>`);
-      dorkBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        window.NSTerminal.open('stacks-agent', { projectId: p.id });
-      });
-      workEl.appendChild(dorkBtn);
-
-      const devBtn = iconBtn('stacks-dev', 'Run dev server (per-project port)',
+    // Dev-server launcher — any project with an `npm run dev` script
+    // (server-derived `previewable` flag). Spawns into the terminal
+    // panel on the project's sticky dev-server port.
+    if (p.previewable && p.path && window.NSTerminal?.isAvailable?.()) {
+      const devBtn = iconBtn('dev-server', 'Run dev server (per-project port)',
         `<svg viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg>`);
       devBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        window.NSTerminal.open('stacks-dev', { projectId: p.id });
+        window.NSTerminal.open('dev-server', { projectId: p.id });
       });
       workEl.appendChild(devBtn);
-    }
-    if (p.stacksProject && p.path) {
-      const stacksDeployBtn = iconBtn('stacks-deploy', 'Deploy to NostrDeploy',
-        `<svg viewBox="0 0 24 24"><path d="M4 12l8-8 8 8M12 4v16"/></svg>`);
-      stacksDeployBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        runStacksDeploy(p);
-      });
-      workEl.appendChild(stacksDeployBtn);
     }
 
     // Open-proposals badge (Phase 6). A persistent chip next to the
@@ -12712,8 +12691,7 @@ const ProjectsPanel = (() => {
 
   // Renders the per-project Environment editor. Two modes:
   //   - environment present: dev/prod tabs with relay+blossom list
-  //     editors, active-env toggle, and a Stacks divergence banner
-  //     when applicable.
+  //     editors and an active-env toggle.
   //   - environment absent: a single "Isolate to local infra" CTA
   //     that flips the project into dev mode against the running
   //     local relay (and Blossom in Phase C). New-local-project
@@ -12763,7 +12741,6 @@ const ProjectsPanel = (() => {
     }
 
     const activeBlockKey = env.active === 'dev' ? 'dev' : 'prod';
-    const stacksHint = renderStacksDivergenceHint(p, env);
     root.innerHTML = `
       <div class="env-header">
         <div class="env-active-row">
@@ -12775,7 +12752,6 @@ const ProjectsPanel = (() => {
           <button class="${env.active === 'prod' ? 'primary' : ''} env-flip-prod">use prod</button>
         </div>
       </div>
-      ${stacksHint}
       <div class="step-actions" style="margin-top:8px">
         <button class="env-promote-dryrun" title="Show what would be published to prod">Promote to prod (dry-run)…</button>
       </div>
@@ -12817,36 +12793,6 @@ const ProjectsPanel = (() => {
           b.hidden = (b.dataset.which !== which));
       });
     });
-  }
-
-  // Detect a divergence between the project's dev.relays and the local
-  // Stacks config's relay list (when the project is a Stacks project on
-  // macOS, where Stacks's config lives at
-  // ~/Library/Preferences/stacks/config.json). The dashboard already
-  // reads that config via GET /api/stacks/config for the AI provider
-  // section, but it doesn't surface relay info today; for v1 we only
-  // diff on the public flag (config exists vs. doesn't) and let the
-  // banner copy point users at `stacks configure` for the fix. Phase B+
-  // can extend this to a deep relay-list diff once we wire the config
-  // reader to return the relays field too.
-  function renderStacksDivergenceHint(p, env) {
-    if (!p.stacksProject) return '';
-    // Heuristic: a Stacks project whose dev block has only the local
-    // relay almost certainly has Dork pointing at a different relay
-    // list, since `stacks configure` defaults to public relays. We
-    // can't confirm without reading the Stacks config server-side, so
-    // the banner is a soft nudge rather than a hard claim.
-    const devOnlyLocal = env.dev.relays.length === 1 &&
-      /^ws:\/\/(localhost|127\.0\.0\.1)/.test(env.dev.relays[0]);
-    if (!devOnlyLocal) return '';
-    return `
-      <div class="pc-banner warn" style="margin-top:10px" hidden-not>
-        Stacks config may diverge — the Dork agent reads its own relay list from
-        <code>~/Library/Preferences/stacks/config.json</code>. If you want Dork
-        to see the same local relay, run <code>stacks configure</code> and point
-        it at <code>${escapeHtml(env.dev.relays[0])}</code>.
-      </div>
-    `;
   }
 
   // Paints one dev/prod block — the relay + blossom list editor pair.
@@ -13516,23 +13462,6 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
       if (state.view === 'detail' && state.projectId === p.id) render();
     });
   }
-  async function runStacksDeploy(p) {
-    const ok = await confirmDestructive({
-      title: `Deploy ${p.name} to NostrDeploy`,
-      description: 'Runs `npm run deploy` in this project — bundles, uploads to Blossom servers, publishes Nostr metadata. Returns a live URL.',
-      confirmLabel: 'Deploy',
-    });
-    if (!ok) return;
-    openExecModal({
-      title: `Stacks deploy · ${p.name}`,
-      subtitle: p.path || '',
-      endpoint: `/api/projects/${p.id}/stacks/deploy`,
-    }).then(r => {
-      if (r.ok) toast('Deploy complete', 'Look for the live URL in the log above', 'ok');
-      else      toast('Deploy failed', `exit ${r.code}`, 'err');
-    });
-  }
-
   async function runProjectDeploy(p, opts = {}) {
     // Native in-process pipeline: build → upload to Blossom → publish
     // kind:35128 manifest → refresh kind:30617 web tag. The endpoint
@@ -14012,7 +13941,7 @@ git commit -m "chore: drop legacy nostr-station artifacts"</pre>
     const BLANK_HINT =
       'Creates a folder with a minimal README. No git init — opt into ' +
       'version control when you\'re ready. Use any AI agent (Claude Code, ' +
-      'Dork, aider) or editor from there.';
+      'aider) or editor from there.';
     const updateStarterHint = () => {
       selectedStarter = starterSel.value;
       if (!selectedStarter) { starterHint.textContent = BLANK_HINT; return; }
@@ -17849,7 +17778,7 @@ const ConfigPanel = (() => {
     // Section order is now driven by usage frequency / conceptual grouping:
     //   1. Profile      — who you are
     //   2. Relay        — your station's relay + read-relay list
-    //   3. AI           — providers + Stacks (configure → use)
+    //   3. AI           — providers
     //   4. Git          — global git identity + ngit (signer/grasp)
     //   5. Templates    — rarely touched after first run
     //   6. Appearance   — purely cosmetic, pushed last
@@ -18084,26 +18013,6 @@ const ConfigPanel = (() => {
             Config file: <code>~/.nostr-station/ai-config.json</code>.
           </div>
 
-          <div class="cfg-subsection" id="cfg-stacks-section">
-            <h4>Stacks AI (Dork)</h4>
-            <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-              Stacks ships its own AI provider config (separate from the providers above) at
-              <code>~/Library/Preferences/stacks/config.json</code>. The Dork agent that runs inside
-              mkstack projects uses this. Provider list is decided by Stacks itself —
-              <code>stacks configure</code> shows the current options (Anthropic, OpenRouter,
-              Routstr, PayPerQ, etc.).
-            </div>
-            <div class="config-row" style="margin-bottom:10px">
-              <div class="k">Status</div>
-              <div class="v" id="cfg-stacks-status">checking…</div>
-            </div>
-            <div class="keyrow">
-              <button id="cfg-stacks-configure">Configure Stacks AI</button>
-              <span style="font-size:11px;color:var(--muted);align-self:center">
-                opens <code>stacks configure</code> in a terminal tab
-              </span>
-            </div>
-          </div>
         </div>
       </details>
 
@@ -18299,40 +18208,6 @@ const ConfigPanel = (() => {
     // Wire toggles
     $('cfg-auth').addEventListener('change', (e) => saveRelayFlag('auth', e.target.checked));
     $('cfg-dm-auth').addEventListener('change', (e) => saveRelayFlag('dmAuth', e.target.checked));
-
-    // Stacks AI → Configure — runs `stacks configure` in a terminal tab.
-    // Stacks's configure flow is interactive (provider picker + key entry
-    // + Lightning/Cashu options for Routstr/PayPerQ), so terminal-only.
-    $('cfg-stacks-configure')?.addEventListener('click', () => {
-      if (window.NSTerminal?.isAvailable?.()) {
-        window.NSTerminal.open('stacks-configure');
-      } else {
-        toast('Terminal unavailable',
-          window.NSTerminal?.getUnavailableReason?.() || 'Run from your shell: `stacks configure`',
-          'err');
-      }
-    });
-
-    // Stacks AI → status line. Reads ~/Library/Preferences/stacks/config.json
-    // server-side and shows configured provider ids (no keys leak through
-    // the API). Refreshable by re-rendering the panel — Stacks doesn't
-    // emit a change event when configure exits, so the user has to switch
-    // tabs and back, or we poll. For now, fetch on render is enough; if
-    // it becomes a friction point a one-shot post-terminal-close refresh
-    // would be the next step.
-    api('/api/stacks/config').then(r => {
-      const el = $('cfg-stacks-status');
-      if (!el) return;
-      if (r.configured) {
-        el.innerHTML = `<span style="color:var(--success)">✓ configured</span>` +
-          ` <span style="color:var(--text-dim);font-size:11px">— ${escapeHtml(r.providers.join(', '))}</span>`;
-      } else {
-        el.innerHTML = `<span style="color:var(--text-dim)">not configured yet</span>`;
-      }
-    }).catch(() => {
-      const el = $('cfg-stacks-status');
-      if (el) el.textContent = '—';
-    });
 
     // Copy button on the identity npub row — only rendered when an npub is
     // actually configured (guarded by the same branch in renderIdentityBody).
@@ -22760,12 +22635,13 @@ const SetupWizard = (() => {
   // required.
   async function renderNgit() {
     // Probe ngit binary presence via /api/status. The 'ngit' row's
-    // state is 'ok' when the binary is on PATH, 'err' otherwise.
+    // state is 'ok' when the binary is on PATH, 'off' (optional, not
+    // installed) otherwise — only ok/warn count as installed here.
     const probeNgitInstalled = async () => {
       try {
         const rows = await api('/api/status');
         const row  = (rows || []).find(r => r.id === 'ngit');
-        return row && row.state !== 'err';
+        return !!row && (row.state === 'ok' || row.state === 'warn');
       } catch { return false; }
     };
     let ngitInstalled = await probeNgitInstalled();
@@ -27632,7 +27508,7 @@ function bootDashboard(localhostExempt) {
     window.NSTerminal?.init?.().then(() => {
       // Tell any panel that gates buttons on NSTerminal availability to
       // re-render. activatePanel() runs BEFORE this init resolves, so
-      // panels (Projects in particular — Stacks Dork/dev buttons +
+      // panels (Projects in particular — dev-server button +
       // Open in Claude Code button) paint with isAvailable() returning
       // false. Without a re-render, those buttons stay hidden until the
       // user manually switches panels and back. Custom event keeps the

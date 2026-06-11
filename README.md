@@ -183,7 +183,7 @@ for it.
 
 The landing panel. At-a-glance overview cards (identity, projects, relay,
 AI) plus a collapsible service-health rollup: relay, watchdog, nostr-vpn,
-Communities, optional tools (ngit, nak, stacks, nsyte, grain). Each row
+Communities, optional tools (ngit, nak, nsyte, grain). Each row
 shows state (green / yellow / red) plus an Install / Start button when
 something's missing.
 
@@ -525,7 +525,7 @@ nostr-station add <tool> --yes        Install without prompting
 ```
 
 Available today: `ngit` (Nostr-native git), `nak` (event/relay CLI),
-`stacks` (Soapbox app scaffolder), `nsyte` (static-site publishing),
+`nsyte` (static-site publishing),
 `grain` (Go Nostr relay — installed automatically when you enable
 Communities). The wizard never asks about these — opt in when you
 need each one.

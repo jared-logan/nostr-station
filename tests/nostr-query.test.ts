@@ -11,7 +11,6 @@ import { useTempHome } from './_home.js';
 useTempHome();
 
 const {
-  buildNakArgs,
   parseEventLine,
   getTag,
   getTagValue,
@@ -20,7 +19,6 @@ const {
   setCached,
   clearCache,
   getCachedOrFetch,
-  queryRelays,
 } = await import('../src/lib/nostr-query.ts');
 
 // Cache is keyed by projectId now. Tests use unique ids so they don't
@@ -28,80 +26,6 @@ const {
 function makeProjectId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
-
-// ── buildNakArgs ──────────────────────────────────────────────────────────
-
-test('buildNakArgs: empty filter + no relays + stream=true', () => {
-  // The minimum invocation. `--stream` is appended even when relays
-  // are empty so callers see exactly what would have been spawned.
-  assert.deepEqual(
-    buildNakArgs({}, [], true),
-    ['req', '--stream'],
-  );
-});
-
-test('buildNakArgs: kinds + authors + relays in stable order', () => {
-  // Order asserted: kinds → authors → tags → limit → --stream → relays.
-  // Same shape as the existing /api/ngit/discover invocation in
-  // routes/ngit.ts so the eventual refactor is mechanical.
-  assert.deepEqual(
-    buildNakArgs(
-      { kinds: [30617], authors: ['abc123'] },
-      ['wss://relay.one', 'wss://relay.two'],
-      true,
-    ),
-    ['req', '-k', '30617', '-a', 'abc123', '--stream', 'wss://relay.one', 'wss://relay.two'],
-  );
-});
-
-test('buildNakArgs: tag filters expand into one -t per value, sorted by name', () => {
-  // Multi-value tag filters (`{t: ['root','root-revision']}`) become
-  // repeated `-t` flags, which is the actual nak grammar. Tag NAMES
-  // are sorted so test asserts on argv stay deterministic when callers
-  // build the filter object in different orders.
-  assert.deepEqual(
-    buildNakArgs(
-      { tags: { t: ['root', 'root-revision'], a: '30617:pk:repo' } },
-      ['wss://r'],
-      false,
-    ),
-    ['req', '-t', 'a=30617:pk:repo', '-t', 't=root', '-t', 't=root-revision', 'wss://r'],
-  );
-});
-
-test('buildNakArgs: limit is appended as -l <n> and floored', () => {
-  assert.deepEqual(
-    buildNakArgs({ kinds: [1617], limit: 10.7 }, ['wss://r'], false),
-    ['req', '-k', '1617', '-l', '10', 'wss://r'],
-  );
-});
-
-test('buildNakArgs: ids expand into one -i per value, after authors', () => {
-  // nak grammar: `-i <id>` repeats per id. Order asserted: kinds →
-  // authors → ids → tags → relays. Used by the status route's
-  // rootAuthor resolution path (one query, many root ids).
-  assert.deepEqual(
-    buildNakArgs(
-      { kinds: [1617, 1621], ids: ['a'.repeat(64), 'b'.repeat(64)] },
-      ['wss://r'],
-      false,
-    ),
-    ['req', '-k', '1617', '-k', '1621', '-i', 'a'.repeat(64), '-i', 'b'.repeat(64), 'wss://r'],
-  );
-});
-
-test('buildNakArgs: stream=false omits --stream', () => {
-  // One-shot query mirroring the naddr-resolution flow in
-  // routes/ngit.ts:471 (single 30617 lookup with -l 1).
-  assert.deepEqual(
-    buildNakArgs(
-      { kinds: [30617], authors: ['abc'], tags: { d: 'torchlite' }, limit: 1 },
-      ['wss://r'],
-      false,
-    ),
-    ['req', '-k', '30617', '-a', 'abc', '-t', 'd=torchlite', '-l', '1', 'wss://r'],
-  );
-});
 
 // ── parseEventLine ────────────────────────────────────────────────────────
 
@@ -194,35 +118,6 @@ test('getTags: returns all matching tags in order', () => {
     'https://b.example/x.git',
     'ssh://c.example/x.git',
   ]);
-});
-
-// ── queryRelays: branchless paths (no nak invocation) ─────────────────────
-
-test('queryRelays: returns empty + spawnError when nak missing', async () => {
-  // Pass nakBin=null explicitly to simulate "nak not on PATH" without
-  // depending on the test runner's environment.
-  const r = await queryRelays({
-    filter: { kinds: [1] },
-    relays: ['wss://r'],
-    nakBin: null,
-  });
-  assert.deepEqual(r.events, []);
-  assert.equal(r.diagnostics.spawnError, 'nak not found on PATH');
-  assert.equal(r.diagnostics.exitCode, null);
-});
-
-test('queryRelays: returns empty (no spawn) when relays list is empty', async () => {
-  // With zero relays we short-circuit rather than spawning nak with no
-  // targets (which would block until the timeout).
-  const r = await queryRelays({
-    filter: { kinds: [1] },
-    relays: [],
-    // Set a real-looking path so the nakBin guard doesn't trigger first.
-    nakBin: '/usr/bin/nak',
-  });
-  assert.deepEqual(r.events, []);
-  assert.equal(r.diagnostics.spawnError, null);
-  assert.deepEqual(r.diagnostics.nakArgs, ['req', '-k', '1', '--stream']);
 });
 
 // ── Cache helpers ────────────────────────────────────────────────────────

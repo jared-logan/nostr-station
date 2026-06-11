@@ -12,10 +12,13 @@ import { readGrainInstalledVersion } from '../lib/grain-installer.js';
 
 interface StatusProps { json: boolean; }
 
-// Three-state status, plus a stable `id` for dashboard UI mapping.
+// Status states, plus a stable `id` for dashboard UI mapping.
 // `ok` is retained for back-compat (status --json consumers); `state`
 // distinguishes installed-but-down (warn) from not-installed (err).
-export type ServiceState = 'ok' | 'warn' | 'err';
+// `off` marks an *optional* tool that simply isn't installed — neutral,
+// not an error: it renders muted instead of red and doesn't flip the
+// human-mode exit code.
+export type ServiceState = 'ok' | 'warn' | 'err' | 'off';
 
 // `kind` lets the dashboard group entries in both the sidebar Service Health
 // list and the Status panel — services (daemons / scheduled jobs with a
@@ -290,10 +293,6 @@ export function gatherStatus(): ServiceStatus[] {
   const nakPath   = findBin('nak');
   const nakV      = nakPath ? cmd(`${nakPath} --version 2>/dev/null`) : null;
 
-  const stacksPath = findBin('stacks');
-  const stacksBin  = stacksPath !== null;
-  const stacksV    = stacksPath ? cmd(`${stacksPath} --version 2>/dev/null`) : null;
-
   // grain ships without a --version flag (exits non-zero on unknown
   // args), so we can't reuse the `<bin> --version` probe the other
   // binaries share. Instead we read the marker file installGrain writes
@@ -303,30 +302,29 @@ export function gatherStatus(): ServiceStatus[] {
   // upgrade-detection wire-up), so we fall back to bare "installed"
   // when the binary exists without one. After the first marker-aware
   // install / upgrade, the row reads "grain X.Y.Z" — matches the
-  // ngit / nak / stacks "<bin> <version>" style consumers expect.
+  // ngit / nak "<bin> <version>" style consumers expect.
   const grainPath = findBin('grain');
   const grainBin  = grainPath !== null;
   const grainV    = grainBin ? readGrainInstalledVersion() : null;
   const grainValue = grainV
     ? `grain ${grainV}`
-    : grainBin ? 'installed' : 'not installed';
+    : grainBin ? 'installed' : 'not installed · optional';
 
   const claudeBin   = claudePath !== null;
   const opencodeBin = opencodePath !== null;
   const nakBin      = nakPath !== null;
 
-  // Three-state mapping:
+  // State mapping:
   //   ok   — running + configured
   //   warn — installed but not running/configured
-  //   err  — not installed
+  //   off  — optional tool, not installed (neutral — not a failure)
   const relayState:    ServiceState = relayUp ? 'ok' : 'warn';
   const blossomState:  ServiceState = blossomUp ? 'ok' : 'warn';
-  const ngitState:     ServiceState = ngitBin ? 'ok' : 'err';
-  const claudeState:   ServiceState = claudeBin ? 'ok' : 'err';
-  const opencodeState: ServiceState = opencodeBin ? 'ok' : 'err';
-  const nakState:      ServiceState = nakBin ? 'ok' : 'err';
-  const stacksState:   ServiceState = stacksBin ? 'ok' : 'err';
-  const grainState:    ServiceState = grainBin ? 'ok' : 'err';
+  const ngitState:     ServiceState = ngitBin ? 'ok' : 'off';
+  const claudeState:   ServiceState = claudeBin ? 'ok' : 'off';
+  const opencodeState: ServiceState = opencodeBin ? 'ok' : 'off';
+  const nakState:      ServiceState = nakBin ? 'ok' : 'off';
+  const grainState:    ServiceState = grainBin ? 'ok' : 'off';
 
   return [
     // Services — daemons or scheduled jobs with a runtime state.
@@ -335,11 +333,10 @@ export function gatherStatus(): ServiceStatus[] {
     { id: 'vpn',       label: 'nostr-vpn',   value: vpnRow.value,                                                                        ok: vpnRow.ok,    state: vpnRow.state,  kind: 'service' },
     { id: 'watchdog',  label: 'watchdog',    value: wdRow.value,                                                                         ok: wdRow.ok,     state: wdRow.state,   kind: 'service' },
     // Binaries — CLI tools; installed or not.
-    { id: 'ngit',      label: 'ngit',        value: ngitV ?? 'not installed',                                                                ok: !!ngitV,      state: ngitState,    kind: 'binary' },
-    { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed',                                                           ok: !!claudeV,    state: claudeState,   kind: 'binary', plugins: gatherClaudePlugins() },
-    { id: 'opencode',  label: 'opencode',    value: opencodeV ?? (opencodeBin ? 'installed' : 'not installed'),                              ok: opencodeBin,  state: opencodeState, kind: 'binary' },
-    { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed',                                                           ok: !!nakV,       state: nakState,      kind: 'binary' },
-    { id: 'stacks',    label: 'Stacks',      value: stacksV  ?? (stacksBin ? 'installed' : 'not installed'),                               ok: stacksBin,    state: stacksState,   kind: 'binary' },
+    { id: 'ngit',      label: 'ngit',        value: ngitV ?? 'not installed · optional',                                                      ok: !!ngitV,      state: ngitState,    kind: 'binary' },
+    { id: 'claude',    label: 'claude-code', value: claudeV  ?? 'not installed · optional',                                                 ok: !!claudeV,    state: claudeState,   kind: 'binary', plugins: gatherClaudePlugins() },
+    { id: 'opencode',  label: 'opencode',    value: opencodeV ?? (opencodeBin ? 'installed' : 'not installed · optional'),                    ok: opencodeBin,  state: opencodeState, kind: 'binary' },
+    { id: 'nak',       label: 'nak',         value: nakV     ?? 'not installed · optional',                                                 ok: !!nakV,       state: nakState,      kind: 'binary' },
     { id: 'grain',     label: 'grain',       value: grainValue,                                                                            ok: grainBin,     state: grainState,    kind: 'binary' },
   ];
 }
@@ -409,7 +406,9 @@ export const Status: React.FC<StatusProps> = ({ json }) => {
     if (json) {
       console.log(formatStatusJson(r));
       process.exit(0);
-    } else if (!r.every(x => x.ok)) {
+    } else if (r.some(x => !x.ok && x.state !== 'off')) {
+      // `off` rows are optional tools that aren't installed — that's a
+      // normal fresh-machine state, not a failure worth exiting 1 over.
       process.exitCode = 1;
     }
   }, []);
@@ -423,7 +422,7 @@ export const Status: React.FC<StatusProps> = ({ json }) => {
       {rows.map((r, i) => (
         <Box key={i}>
           <Box width={14}><Text color={P.muted}>{r.label}</Text></Box>
-          <Text color={r.ok ? P.success : P.error}>{r.value}</Text>
+          <Text color={r.state === 'off' ? P.muted : r.ok ? P.success : P.error}>{r.value}</Text>
         </Box>
       ))}
       <Text color={P.accentDim}>{'─────────────────────────────'}</Text>

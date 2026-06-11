@@ -179,8 +179,10 @@ test('gatherStatus: grain row is "not installed" when binary is absent', () => {
       const rows = gatherStatus();
       const grain = rows.find(r => r.id === 'grain');
       assert.ok(grain);
-      assert.equal(grain!.value, 'not installed');
+      assert.equal(grain!.value, 'not installed · optional');
       assert.equal(grain!.ok, false);
+      assert.equal(grain!.state, 'off',
+        'missing optional tools are off (neutral), not err');
     });
   } finally {
     homeWrap.restore();

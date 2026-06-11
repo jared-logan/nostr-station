@@ -93,7 +93,7 @@ const MAX_WS_PAYLOAD = 1024 * 1024;
 //
 // Port wildcard is intentional. Unlike the dashboard's gate which pins
 // to its own port, the relay must accept loopback Origins from ANY
-// port: scaffolded user apps (Stacks, mkstack, Vite previews) reach
+// port: scaffolded user apps (mkstack, Vite previews) reach
 // the relay via NOSTR_STATION_RELAY from their own dev-server ports
 // (typically 5173, 3000, 8080…). Locking to a single port would break
 // the whole "build apps locally against the relay" loop.
