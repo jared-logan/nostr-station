@@ -5,6 +5,56 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Removed: Stacks/Dork integration (dead on the happy path)
+
+Upstream mkstack (gitlab.com/soapbox-pub/mkstack) no longer ships a
+`stack.json` or a `deploy` npm script, and the `@getstacks/stacks` CLI
+hasn't been published since Dec 2024 — so every surface gated on the
+`stacksProject` flag (a `stack.json` stat) was unreachable for projects
+scaffolded by nostr-station, and the Dork agent had no working path
+end-to-end. The MKStack git-clone template is unaffected and stays.
+
+- **Removed** the "Open in Dork (Stacks agent)" and "Deploy to
+  NostrDeploy" project-card buttons, the Config panel's "Stacks AI
+  (Dork)" section, the Environment editor's Stacks-divergence banner,
+  and the `stacks-agent` / `stacks-configure` terminal recipes.
+- **Removed** `stacks` from the optional-tool registry
+  (`nostr-station add`), the CLI/dashboard status rows, and the docs.
+- **API changes:** `GET /api/stacks/config` and
+  `POST /api/projects/:id/stacks/deploy` are gone (the native
+  `nsite/deploy` pipeline is the publishing path); the `stacksProject`
+  flag is no longer emitted by `GET /api/projects` (use `previewable`);
+  the `stacks-dev` terminal key is renamed `dev-server`. `status --json`
+  no longer includes a `Stacks` key.
+- **Dev-server button now works for every project with a `dev` script**
+  — re-gated from `stacksProject` to the existing `previewable` flag, so
+  mkstack and shakespeare.diy clones get the launcher they were always
+  supposed to have.
+- The kind-31990 client-handler `about` copy drops "Stacks" — takes
+  effect on the next manual `publish-client-handler` run.
+
+### Status: optional tools no longer scream red
+
+- New `off` service state: optional binaries (ngit, nak, claude-code,
+  opencode, grain) that simply aren't installed render as a muted
+  `·` "not installed · optional" row instead of a red ✗ error, in both
+  `nostr-station status` and the dashboard sidebar/Status panel.
+  Install buttons still appear on `off` rows.
+- **`status` (human mode) exit code:** missing *optional* tools no
+  longer force exit 1; only failing services (relay, watchdog, vpn,
+  blossom) do. Scripts gating on `nostr-station status` see the new
+  semantics. `status --json` is unchanged (always exit 0, same schema).
+
+### Cleanup: nak fully out of the server's relay-query path
+
+- Removed the dead nak-subprocess `queryRelays()` / `buildNakArgs()`
+  from `nostr-query.ts` — every consumer has been on the in-process
+  WebSocket `queryRelaysDirect()` for a while. The diagnostics shape is
+  unchanged (subprocess-era fields stay, inert) so callers don't churn.
+- Fixed the dashboard's nak row copy: the watchdog never used nak (it
+  publishes in-process via nostr-tools). nak's real consumers are the
+  CLI `seed` command and ngit repo discovery.
+
 ### Never-dead-end git sync: truthful badges, auto-pull, diverged recovery
 
 - **The badge now tells the truth.** The per-card git-state badge was

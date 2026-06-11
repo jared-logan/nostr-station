@@ -2,11 +2,14 @@
 //
 // Contract:
 //   - `status --json`  → always exit 0, payload is the schema (CI smoke).
-//   - `status` (human) → exit 1 if any row's ok=false, else exit 0.
+//   - `status` (human) → exit 1 if any non-`off` row's ok=false, else
+//     exit 0. (`off` = optional tool not installed — a normal state
+//     that must NOT flip the exit code.)
 //
-// The test runner's environment has no relay running, no nvpn binary, no
-// ngit/nak/stacks installed → every probe returns failure → the human
-// invocation MUST exit 1. Easy to assert.
+// The test runner's environment has no relay running and no nvpn binary
+// → the relay/vpn/watchdog service probes return failure (warn states,
+// ok=false) → the human invocation MUST exit 1. Missing optional tools
+// (ngit/nak) alone would no longer trigger that.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

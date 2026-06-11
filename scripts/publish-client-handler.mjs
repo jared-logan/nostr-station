@@ -75,7 +75,7 @@ function buildTemplate() {
   const content = JSON.stringify({
     name:         'nostr-station',
     display_name: 'nostr-station',
-    about:        'Nostr-native dev environment — one-command relay, mesh VPN, ngit, AI assistant, Stacks.',
+    about:        'Nostr-native dev environment — one-command relay, mesh VPN, ngit, AI assistant.',
     website:      NSITE_URL,
     picture:      `${NSITE_URL}/nori.svg`,
   });

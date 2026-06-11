@@ -1,29 +1,20 @@
 /**
- * Shared Nostr query helpers — Phase 0 of the ngit-suite expansion.
+ * Shared Nostr query helpers.
  *
- * Three modules grew their own copies of the same nak-spawn-and-parse
- * loop (`routes/ngit.ts`, `sync.ts`, the proposals query). Each one
- * re-implemented:
- *   - `spawn('nak', […], { stdio: ['ignore', 'pipe', 'pipe'] })` — the
- *     `stdio[0] = 'ignore'` is mandatory; without it nak hangs on stdin
- *     EOF (project memory: project_nak_stdin_hang).
- *   - The line-buffered stdout reader (`buf += chunk; split('\n');
- *     pop`) that handles partial last-lines.
- *   - The 5–10 s wall-clock timer that bounds `--stream` (which never
- *     terminates on its own).
- *   - Diagnostics capture (`eventsSeen / parseFailures / stderrTail /
- *     spawnError / nakArgs / exitCode`) so empty-state UIs can show
- *     why a query returned nothing.
+ * `queryRelaysDirect()` is the one relay-query loop every server
+ * consumer composes: it opens a WebSocket per relay, fans a NIP-01 REQ
+ * out, dedupes by event id, and always resolves with diagnostics so
+ * empty-state UIs can show why a query returned nothing. It replaced
+ * an earlier implementation that shelled out to `nak req` per query —
+ * a process fork + binary load per call that stacked up badly on
+ * multi-query flows (project memory: project_nak_stdin_hang).
  *
- * The Phase 1+ ngit features (Code tab, patches, issues, status) all
- * need the same loop. Centralising it once means later phases just
- * compose `queryRelays(...)` calls and never re-derive the boilerplate.
- *
- * Pure helpers (`buildNakArgs`, `parseEventLine`, `getTag`/`getTags`)
- * are exported alongside the async query so they're trivially unit-
- * testable without a relay round-trip.
+ * Pure helpers (`parseEventLine`, `getTag`/`getTags`) are exported
+ * alongside the async query so they're trivially unit-testable without
+ * a relay round-trip. The per-project event cache at the bottom keeps
+ * slow-changing data (e.g. kind-30617 announcements) off the wire.
  */
-import { spawn, execFileSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -47,16 +38,16 @@ export interface RelayQueryFilter {
   kinds?:   number[];
   authors?: string[];                              // hex pubkeys
   /**
-   * Exact event ids (NIP-01 `ids` filter). nak takes them via repeated
-   * `-i <id>`. Use this when you already know the events you want —
-   * canonical example: resolving root patches by id to learn their
-   * authoring pubkey for an authorisation check.
+   * Exact event ids (NIP-01 `ids` filter). Use this when you already
+   * know the events you want — canonical example: resolving root
+   * patches by id to learn their authoring pubkey for an
+   * authorisation check.
    */
   ids?:     string[];
   /**
-   * NIP-01 tag filters. nak accepts repeated `-t key=value` flags, so
-   * either `{a: '30617:pk:id'}` or `{t: ['root', 'root-revision']}`
-   * works — the multi-value form expands into one flag per value.
+   * NIP-01 tag filters. Either `{a: '30617:pk:id'}` or
+   * `{t: ['root', 'root-revision']}` works — multi-value entries
+   * expand into a `#<name>` filter with one entry per value.
    */
   tags?:    Record<string, string | string[]>;
   limit?:   number;
@@ -65,12 +56,15 @@ export interface RelayQueryFilter {
 export interface RelayQueryDiagnostics {
   eventsSeen:    number;     // total events that parsed successfully (pre-dedupe)
   uniqueEvents:  number;     // events kept after dedupe by id
-  parseFailures: number;     // JSON parse failures on stdout lines
-  stderrTail:    string;     // last N bytes of stderr (capped)
-  spawnError:    string | null; // ENOENT etc. — nak missing from PATH
-  exitCode:      number | null; // null when killed by timeout / abort / acceptUntil
-  nakArgs:       string[];   // exact argv handed to spawn (debugging)
-  durationMs:    number;     // wall-clock spent inside queryRelays
+  parseFailures: number;     // JSON parse failures on relay frames
+  // The four fields below date from the retired nak-subprocess query
+  // path. queryRelaysDirect fills them with inert values; they're kept
+  // so the result shape stays stable for existing consumers.
+  stderrTail:    string;     // always '' (n/a for direct-WS)
+  spawnError:    string | null; // always null (n/a for direct-WS)
+  exitCode:      number | null; // always null (n/a for direct-WS)
+  nakArgs:       string[];   // always [] (n/a for direct-WS)
+  durationMs:    number;     // wall-clock spent inside the query
 }
 
 export interface RelayQueryResult {
@@ -96,47 +90,10 @@ export interface RelayQueryOptions {
    * "stop once we have one of each branch".
    */
   acceptUntil?:  (events: NostrEvent[]) => boolean;
-  /** Default 4_000 bytes. Keeps stderrTail bounded against chatty relays. */
-  stderrCap?:    number;
-  /**
-   * Override the resolved nak path. Tests pass an explicit path (or
-   * null to simulate "not installed") so they don't need nak on the
-   * runner. Production callers should leave this undefined.
-   */
-  nakBin?:       string | null;
   abortSignal?:  AbortSignal;
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────────────
-
-/**
- * Compose the argv for `nak req` from a structural filter. Order is
- * stable so tests can assert on it directly: kinds, authors, tag
- * filters (alphabetical by name, then in array order), `-l` limit,
- * `--stream` toggle, then relays.
- */
-export function buildNakArgs(
-  filter: RelayQueryFilter,
-  relays: string[],
-  stream: boolean,
-): string[] {
-  const args: string[] = ['req'];
-  for (const k of filter.kinds ?? []) args.push('-k', String(k));
-  for (const a of filter.authors ?? []) args.push('-a', a);
-  for (const i of filter.ids ?? []) args.push('-i', i);
-  const tagNames = Object.keys(filter.tags ?? {}).sort();
-  for (const name of tagNames) {
-    const raw = (filter.tags ?? {})[name];
-    const values = Array.isArray(raw) ? raw : [raw];
-    for (const v of values) args.push('-t', `${name}=${v}`);
-  }
-  if (typeof filter.limit === 'number' && filter.limit > 0) {
-    args.push('-l', String(Math.floor(filter.limit)));
-  }
-  if (stream) args.push('--stream');
-  for (const r of relays) args.push(r);
-  return args;
-}
 
 /**
  * Parse one stdout line into a NostrEvent. Returns null on:
@@ -186,121 +143,6 @@ export function getTags(event: NostrEvent, name: string): string[][] {
 // ── Async query ───────────────────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT_MS = 10_000;
-const DEFAULT_STDERR_CAP = 4_000;
-
-/**
- * Run a single `nak req` against the given relays and return all
- * events that match the filter. Always resolves — never rejects — so
- * callers don't need a try/catch around every query. Failure modes
- * surface in `diagnostics`:
- *   - `spawnError: 'nak not found on PATH'`           → nak missing
- *   - `spawnError: 'ENOENT', exitCode: null`          → spawn failed
- *   - `events: [], parseFailures > 0`                 → relays returned junk
- *   - `events: [], stderrTail: 'closed: AUTH ...'`    → relays rejected the query
- *
- * Empty `relays` resolves immediately with an empty result rather than
- * spawning nak with no targets (which would just block until the
- * timeout fires).
- */
-export async function queryRelays(opts: RelayQueryOptions): Promise<RelayQueryResult> {
-  const stream     = opts.stream ?? true;
-  const timeoutMs  = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const stderrCap  = opts.stderrCap ?? DEFAULT_STDERR_CAP;
-  const nakBin     = opts.nakBin === undefined ? findBin('nak') : opts.nakBin;
-  const args       = buildNakArgs(opts.filter, opts.relays, stream);
-  const startedAt  = Date.now();
-
-  const baseDiag: RelayQueryDiagnostics = {
-    eventsSeen:    0,
-    uniqueEvents:  0,
-    parseFailures: 0,
-    stderrTail:    '',
-    spawnError:    null,
-    exitCode:      null,
-    nakArgs:       args,
-    durationMs:    0,
-  };
-
-  if (!nakBin) {
-    return {
-      events: [],
-      diagnostics: { ...baseDiag, spawnError: 'nak not found on PATH', durationMs: Date.now() - startedAt },
-    };
-  }
-  if (opts.relays.length === 0) {
-    return {
-      events: [],
-      diagnostics: { ...baseDiag, durationMs: Date.now() - startedAt },
-    };
-  }
-
-  return new Promise<RelayQueryResult>((resolve) => {
-    // stdio[0] = 'ignore' is REQUIRED — without it nak hangs waiting
-    // for stdin EOF (project memory: project_nak_stdin_hang). Every
-    // existing nak-spawn site in the codebase honors this; centralising
-    // here means new callers can't forget it.
-    const child = spawn(nakBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const events: NostrEvent[] = [];
-    const seen   = new Set<string>();
-    const diag   = { ...baseDiag };
-    let buf      = '';
-    let settled  = false;
-
-    const finish = (exitCode: number | null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try { child.kill('SIGTERM'); } catch {}
-      diag.exitCode     = exitCode;
-      diag.uniqueEvents = events.length;
-      diag.durationMs   = Date.now() - startedAt;
-      resolve({ events, diagnostics: diag });
-    };
-
-    child.stdout.on('data', (chunk: Buffer) => {
-      if (settled) return;
-      buf += chunk.toString();
-      const lines = buf.split('\n');
-      buf = lines.pop() || '';
-      for (const line of lines) {
-        const ev = parseEventLine(line);
-        if (!ev) {
-          // Distinguish empty lines from real parse failures so the
-          // counter doesn't explode on the trailing blank line nak
-          // sometimes emits between events.
-          if (line.trim()) diag.parseFailures++;
-          continue;
-        }
-        diag.eventsSeen++;
-        if (seen.has(ev.id)) continue;
-        seen.add(ev.id);
-        events.push(ev);
-        if (opts.acceptUntil && opts.acceptUntil(events)) {
-          finish(null);
-          return;
-        }
-      }
-    });
-
-    child.stderr.on('data', (chunk: Buffer) => {
-      diag.stderrTail = (diag.stderrTail + chunk.toString()).slice(-stderrCap);
-    });
-
-    const timer = setTimeout(() => finish(null), timeoutMs);
-
-    child.on('error', (e) => {
-      diag.spawnError = String((e as any)?.message || e);
-      finish(null);
-    });
-    child.on('close', (code) => finish(code));
-
-    if (opts.abortSignal) {
-      const onAbort = () => finish(null);
-      if (opts.abortSignal.aborted) onAbort();
-      else opts.abortSignal.addEventListener('abort', onAbort, { once: true });
-    }
-  });
-}
 
 // ── Per-project event cache ───────────────────────────────────────────────
 //
@@ -464,30 +306,21 @@ export async function getCachedOrFetch<T>(
   return value;
 }
 
-// ── Direct-WS query (no nak dependency) ───────────────────────────────────
+// ── Direct-WS query ───────────────────────────────────────────────────────
 //
-// Drop-in alternative to queryRelays() that talks WebSocket directly to
-// each relay instead of shelling out to `nak req`. Same RelayQueryOptions
-// in, same RelayQueryResult out, so callers can swap one for the other
-// with no API change.
-//
-// Why it exists alongside the nak version:
+// Talks WebSocket directly to each relay — no subprocess. This replaced
+// an earlier `nak req` shell-out path:
 //   1. Identity sync and other multi-query flows issue 7+ relay queries
-//      per operation. Each nak spawn is a process fork + binary load +
+//      per operation. Each nak spawn was a process fork + binary load +
 //      stdin/stdout pipe orchestration; under a developer-laptop load
-//      this stacks up enough to surface as "feed is empty" when the
-//      probes time out (project memory: project_nak_stdin_hang has bit
-//      us repeatedly).
-//   2. nak might be installed but the binary on PATH might be older /
-//      newer than what we expect, or the relay subset might be one nak's
-//      version chokes on. Direct WS sidesteps all of that.
-//   3. Identity-config flow (routes/identity.ts:fetchKind0FromRelay)
-//      already uses direct WS and is the more-reliable path users
-//      consistently see working. This generalises that approach to
-//      arbitrary filters.
-//
-// Trade-off: no nak diagnostic features (stderr capture, exit codes).
-// Diagnostics here reduce to "did we see any events" + how many.
+//      that stacked up enough to surface as "feed is empty" when the
+//      probes timed out (project memory: project_nak_stdin_hang bit us
+//      repeatedly).
+//   2. It also removed the dependency on whichever nak version happens
+//      to be on PATH.
+// Diagnostics reduce to "did we see any events" + how many; the
+// subprocess-era fields on RelayQueryDiagnostics stay inert for shape
+// stability.
 export async function queryRelaysDirect(opts: RelayQueryOptions): Promise<RelayQueryResult> {
   const timeoutMs  = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const stream     = opts.stream ?? true;

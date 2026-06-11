@@ -15,7 +15,7 @@
  * server restart we re-allocate, which is fine because the PTYs that
  * hosted the dev servers died with the server anyway.
  *
- * "Running" tracking is bookkeeping-only: when a stacks-dev PTY starts
+ * "Running" tracking is bookkeeping-only: when a dev-server PTY starts
  * for project X we bind {projectId → sessionId}; when that PTY exits
  * (terminal closed, vite crashed, parent reaped), we release. We never
  * probe the port socket — if the user starts vite some other way (bare

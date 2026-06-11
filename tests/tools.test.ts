@@ -37,7 +37,7 @@ test('registry: known tools are present', () => {
   // cargo install path required Rust on the host, which install.sh
   // deliberately doesn't ship — so the prereq check rejected fresh
   // installs every time.
-  for (const id of ['stacks', 'nsyte']) {
+  for (const id of ['nsyte']) {
     assert.ok(getTool(id), `expected ${id} in TOOLS`);
   }
   assert.equal(getTool('nak'),  null, 'nak must be served by the dedicated installer');

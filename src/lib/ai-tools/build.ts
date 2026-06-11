@@ -8,8 +8,8 @@
 // Mirrors shakespeare.diy's BuildProjectTool, scaled to our setup:
 // they compile with esbuild-wasm in-browser; we run the project's
 // own build script via spawn (matching how the dashboard's existing
-// stacks/deploy + nsite/deploy endpoints already invoke `npm run`
-// for project-defined scripts).
+// nsite/deploy endpoint already invokes `npm run` for project-defined
+// scripts).
 //
 // Permission: 'gated'. The existing requiresApproval logic
 // auto-approves gated tools in auto-edit mode for everything except

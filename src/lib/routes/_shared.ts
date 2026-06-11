@@ -9,7 +9,7 @@
  *   - `readBody` — JSON-body slurper. Every route that reads request bodies
  *     uses it; the implementation is identical and trivial.
  *   - `streamExec` / `streamExecError` — SSE wrappers around child processes.
- *     Used by Projects (publish, ngit init/push, stacks deploy, exec) and
+ *     Used by Projects (publish, ngit init/push, exec) and
  *     in a follow-up step by the AI-chat surface and the install slug
  *     dispatcher in web-server.ts.
  *   - `CmdSpec` — the small payload shape `streamExec` accepts.

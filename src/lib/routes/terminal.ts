@@ -89,12 +89,12 @@ export async function handleTerminal(
       if (p.path) cwd = p.path;
       project = p;
     }
-    // Project-bound stacks-dev terminals get a sticky port from the
+    // Project-bound dev-server terminals get a sticky port from the
     // dev-server registry so the chat panel's preview iframe and the
     // spawned `npm run dev -- --port N` line up. Allocation is
     // idempotent — re-spawning the same project's dev server reuses
     // the port the previous PTY was bound to.
-    const port = (key === 'stacks-dev' && project)
+    const port = (key === 'dev-server' && project)
       ? allocateDevServerPort(project.id)
       : undefined;
     const r = await createTerminal({ key, cwd, project, port }, CLI_SPAWN);

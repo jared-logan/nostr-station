@@ -226,6 +226,8 @@ summary:focus-visible,
 .dot.ok   { background: var(--success); box-shadow: 0 0 6px rgba(61,220,132,0.5); }
 .dot.warn { background: var(--warn);    box-shadow: 0 0 6px rgba(255, 176, 32, 0.4); }
 .dot.err  { background: var(--error);   box-shadow: 0 0 6px rgba(255,90,90,0.4); }
+/* off — optional tool not installed: neutral/muted, deliberately no glow. */
+.dot.off  { background: var(--muted); }
 
 /* ── sidebar ──────────────────────────────────────────────────────────── */
 
@@ -475,6 +477,8 @@ summary:focus-visible,
 .bin-indicator-ok   { color: var(--success); }
 .bin-indicator-warn { color: var(--warn);    }
 .bin-indicator-err  { color: var(--error);   }
+/* off — optional tool not installed: muted dot glyph, not a red ✗. */
+.bin-indicator-off  { color: var(--muted);   }
 /* Larger glyph inside the Status panel's summary row — it's a primary
    status affordance there, not just a sidebar micro-signal. */
 .status-row-binary .bin-indicator { min-width: 14px; font-size: 14px; }
@@ -861,6 +865,8 @@ details.dashboard-health .dashboard-health-sub {
 .status-row.ok   { border-left-color: var(--success); }
 .status-row.warn { border-left-color: var(--warn); }
 .status-row.err  { border-left-color: var(--error); }
+/* off keeps the base muted border — optional tools shouldn't shout. */
+.status-row.off  { border-left-color: var(--muted); }
 .status-row:hover { border-color: var(--border-strong); }
 .status-row[open] { border-color: var(--border-strong); }
 
@@ -905,6 +911,7 @@ details.dashboard-health .dashboard-health-sub {
 }
 .status-row.err  .status-value { color: var(--error); }
 .status-row.warn .status-value { color: var(--warn); }
+.status-row.off  .status-value { color: var(--muted); }
 
 .status-row .status-details {
   padding: 4px 16px 14px;
@@ -1118,7 +1125,7 @@ details.dashboard-health .dashboard-health-sub {
 /* ── chat: side-by-side live preview ─────────────────────────────────── */
 
 /* Wraps chat + preview iframe. Drives visibility through data-preview:
-     hidden    — no project / non-stacks project; chat is full width
+     hidden    — no project / no dev script; chat is full width
      open      — preview pane visible
      collapsed — preview pane hidden but a small re-open chevron is shown
      full      — preview fills the panel; chat docks to a left pull-tab */
@@ -2756,7 +2763,7 @@ details.config-section .cfg-summary-meta {
 }
 
 /* Subsection inside a config-section (e.g. "Read relays" under Relay,
-   "NGIT" under Git, "Stacks AI" under AI). Compact divider + h4 header
+   "NGIT" under Git). Compact divider + h4 header
    keeps related-but-distinct settings visually grouped without a full
    second nested <details>. */
 .cfg-subsection {
